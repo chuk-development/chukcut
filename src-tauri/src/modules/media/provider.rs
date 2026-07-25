@@ -39,7 +39,13 @@ use crate::modules::render::{RenderContext, SourceFrame, SourceProvider, SourceR
 /// Where a material's pixels come from.
 #[derive(Debug, Clone)]
 enum MaterialSource {
-    Video { path: PathBuf },
+    Video {
+        path: PathBuf,
+        /// Display dimensions, i.e. with container rotation applied. Kept so
+        /// the decode resolution can be worked out before anything is opened —
+        /// see [`fitted_height`].
+        display: (u32, u32),
+    },
     Image { path: PathBuf },
     /// Text is rasterized rather than decoded. Not yet implemented; the
     /// provider returns nothing for these so the rest of the frame still
@@ -60,13 +66,55 @@ struct CachedTexture {
     frame: SourceFrame,
 }
 
+/// An open decoder plus the display height it was opened for.
+///
+/// The height matters because swscale can downscale during colour conversion,
+/// which is far cheaper than converting a full 4K frame and then throwing most
+/// of it away on the GPU. A preview at 540x960 that decodes at 1080x1920 pays
+/// four times the conversion cost and four times the upload bandwidth for
+/// pixels nobody will see.
+struct OpenDecoder {
+    decoder: VideoDecoder,
+    height: u32,
+}
+
+/// How tall this source needs to be decoded, given the area it will be drawn
+/// into.
+///
+/// `max_size` is the canvas, not the space this particular clip occupies. A
+/// 1920×1080 clip placed on a 540×960 vertical canvas is drawn as a 540×304
+/// letterboxed strip — so decoding it 960 pixels tall means pushing 1706×960
+/// through swscale to produce 540×304, five and a half times the pixels needed,
+/// every single frame. That was measured: it is what made playback of landscape
+/// footage on a vertical timeline drop 85 frames in a row.
+///
+/// The compositor fits a source into the canvas preserving aspect ratio, so the
+/// same fit is computed here. A clip scaled above 100% by its transform will be
+/// slightly soft as a result; that is a preview, and the export path asks for
+/// full resolution.
+fn fitted_height(display: (u32, u32), max_size: (u32, u32)) -> u32 {
+    let (source_w, source_h) = (display.0.max(1) as f32, display.1.max(1) as f32);
+    let (canvas_w, canvas_h) = (max_size.0.max(1) as f32, max_size.1.max(1) as f32);
+    let scale = (canvas_w / source_w).min(canvas_h / source_h);
+    // Never upscale during decode: enlarging is free on the GPU and expensive
+    // in swscale.
+    let scale = scale.min(1.0);
+    ((source_h * scale).round() as u32).max(2)
+}
+
+/// How much larger a request has to be before the decoder is reopened.
+///
+/// Reopening costs a seek, so a preview that nudges its proxy size by a few
+/// pixels must not trigger one; a jump from preview to export resolution must.
+const REOPEN_RATIO: f32 = 1.5;
+
 pub struct MediaSourceProvider {
     /// Material id → where its pixels live. Built once from a project snapshot.
     sources: HashMap<Id, MaterialSource>,
     /// One decoder per material. `VideoDecoder` is `Send` but not `Sync`, so
     /// the whole map sits behind a mutex; two threads seeking one demuxer
     /// would fight over its read position anyway.
-    decoders: Mutex<HashMap<Id, VideoDecoder>>,
+    decoders: Mutex<HashMap<Id, OpenDecoder>>,
     textures: Mutex<HashMap<Id, CachedTexture>>,
 }
 
@@ -76,10 +124,19 @@ impl MediaSourceProvider {
         let mut sources = HashMap::new();
 
         for video in &project.materials.videos {
+            // Rotation is a property of the container, and a 90°-rotated file
+            // is taller than it is wide once displayed. Getting this backwards
+            // would make the fit calculation pick the wrong axis.
+            let display = if video.rotation % 180 == 0 {
+                (video.width, video.height)
+            } else {
+                (video.height, video.width)
+            };
             sources.insert(
                 video.id.clone(),
                 MaterialSource::Video {
                     path: PathBuf::from(&video.path),
+                    display,
                 },
             );
         }
@@ -118,10 +175,15 @@ impl MediaSourceProvider {
         self.sources.is_empty()
     }
 
-    fn cached(&self, material_id: &str, source_time: Micros) -> Option<SourceFrame> {
+    /// A cached upload for this material, if it is both the right frame and
+    /// large enough. The size check is what stops an export reusing the
+    /// preview's proxy texture and silently producing a soft picture.
+    fn cached(&self, material_id: &str, source_time: Micros, want_height: u32) -> Option<SourceFrame> {
         let textures = self.textures.lock();
         let cached = textures.get(material_id)?;
-        ((cached.source_time - source_time).abs() <= FRAME_EPSILON).then(|| SourceFrame {
+        let close_enough = (cached.source_time - source_time).abs() <= FRAME_EPSILON;
+        let big_enough = cached.frame.height as f32 * REOPEN_RATIO >= want_height as f32;
+        (close_enough && big_enough).then(|| SourceFrame {
             texture: Arc::clone(&cached.frame.texture),
             view: Arc::clone(&cached.frame.view),
             width: cached.frame.width,
@@ -150,18 +212,51 @@ impl MediaSourceProvider {
         material_id: &str,
         path: &PathBuf,
         source_time: Micros,
+        want_height: u32,
     ) -> anyhow::Result<SourceFrame> {
         let mut decoders = self.decoders.lock();
-        let decoder = match decoders.get_mut(material_id) {
-            Some(decoder) => decoder,
+
+        // Reopen when the caller now wants meaningfully more resolution than
+        // the open decoder produces — going from a preview to an export, in
+        // practice. Shrinking is not worth a reopen: downscaling on the GPU is
+        // nearly free next to a seek.
+        let stale = decoders
+            .get(material_id)
+            .is_some_and(|open| want_height as f32 > open.height as f32 * REOPEN_RATIO);
+        if stale {
+            decoders.remove(material_id);
+        }
+
+        let open = match decoders.get_mut(material_id) {
+            Some(open) => open,
             None => {
-                let decoder = VideoDecoder::open(path)?;
-                decoders.entry(material_id.to_string()).or_insert(decoder)
+                let decoder = VideoDecoder::open_scaled(path, want_height)?;
+                let height = decoder.output_size().1;
+                decoders
+                    .entry(material_id.to_string())
+                    .or_insert(OpenDecoder { decoder, height })
             }
         };
 
-        let decoded = decoder.seek_and_decode(source_time)?;
+        let started = std::time::Instant::now();
+        let decoded = open.decoder.seek_and_decode(source_time)?;
+        let decode_micros = started.elapsed().as_micros();
+
+        let upload_started = std::time::Instant::now();
         let frame = upload_rgba(ctx, &decoded.data, decoded.width, decoded.height);
+        let upload_micros = upload_started.elapsed().as_micros();
+
+        // Per-frame, at debug: this is the line that tells you whether a stutter
+        // is decode, upload, or something further down the pipeline — and which
+        // file caused it, which matters the moment a timeline has more than one.
+        tracing::debug!(
+            file = %path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+            at_ms = source_time / 1000,
+            decoded = format_args!("{}x{}", decoded.width, decoded.height),
+            decode_ms = decode_micros as f64 / 1000.0,
+            upload_ms = upload_micros as f64 / 1000.0,
+            "decoded source frame"
+        );
         // Drop the decoder lock before touching the texture cache; the two are
         // independent and holding both invites a lock-order bug later.
         drop(decoders);
@@ -218,13 +313,21 @@ impl SourceProvider for MediaSourceProvider {
             return Ok(None);
         }
 
-        if let Some(cached) = self.cached(request.material_id, request.source_time) {
+        if let Some(cached) =
+            self.cached(request.material_id, request.source_time, request.max_size.1)
+        {
             return Ok(Some(cached));
         }
 
         match source {
-            MaterialSource::Video { path } => self
-                .video_frame(ctx, request.material_id, path, request.source_time)
+            MaterialSource::Video { path, display } => self
+                .video_frame(
+                    ctx,
+                    request.material_id,
+                    path,
+                    request.source_time,
+                    fitted_height(*display, request.max_size),
+                )
                 .map(Some),
             MaterialSource::Image { path } => self
                 .image_frame(ctx, request.material_id, path)

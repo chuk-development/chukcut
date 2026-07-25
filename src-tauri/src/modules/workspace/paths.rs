@@ -60,6 +60,16 @@ pub fn settings_file() -> PathBuf {
     config_root().join("settings.json")
 }
 
+/// The working copy of whatever is currently open.
+///
+/// Written after every edit and reloaded at startup, so closing the app — or a
+/// crash, or a rebuild during development — never costs the work in progress.
+/// This is not the user's saved project: it is a crash-recovery copy, and
+/// saving explicitly still writes wherever they chose.
+pub fn autosave_file() -> PathBuf {
+    config_root().join("autosave.chukcut")
+}
+
 pub fn recent_projects_file() -> PathBuf {
     config_root().join("recent.json")
 }

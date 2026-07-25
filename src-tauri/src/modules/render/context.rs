@@ -208,8 +208,11 @@ mod tests {
     use super::*;
 
     /// A context that cannot be created is not a test failure — CI has no GPU.
-    fn ctx() -> Option<RenderContext> {
-        RenderContext::try_new()
+    ///
+    /// The binary's shared device rather than a fresh one: see
+    /// `render::test_context`.
+    fn ctx() -> Option<std::sync::Arc<RenderContext>> {
+        super::super::test_context()
     }
 
     #[test]

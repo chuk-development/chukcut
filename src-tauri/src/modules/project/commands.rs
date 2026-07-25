@@ -114,11 +114,20 @@ fn is_still_image(format: &str) -> bool {
 /// duplicating it — that is the whole point of the pool being keyed by
 /// identity.
 #[tauri::command]
-pub fn project_import_media(
+pub async fn project_import_media(
     state: State<'_, Arc<AppState>>,
     path: String,
 ) -> Result<ImportedMaterial, String> {
-    let info = crate::modules::media::probe(&path).map_err(|e| e.to_string())?;
+    // Probing opens the container and runs FFmpeg's stream-info pass, which is
+    // milliseconds on a warm cache and noticeably longer on a large file over a
+    // network mount. A synchronous command would do that on the main thread and
+    // freeze the window for the duration, so it goes off-thread even though it
+    // is usually quick.
+    let probe_path = path.clone();
+    let info = tauri::async_runtime::spawn_blocking(move || crate::modules::media::probe(&probe_path))
+        .await
+        .map_err(|error| format!("the import task failed: {error}"))?
+        .map_err(|error| error.to_string())?;
 
     let name = std::path::Path::new(&path)
         .file_name()
@@ -189,6 +198,46 @@ pub fn project_import_media(
         }
 
         (Some(video), _) => {
+            // Adopt the first clip's shape.
+            //
+            // A new project defaults to 1080x1920 because this editor is for
+            // short-form video, but importing a landscape file into a vertical
+            // canvas and letterboxing it is almost never what anyone wanted —
+            // and it silently costs performance, since the clip is then drawn
+            // into a fraction of the frame. So the first video imported into an
+            // empty timeline sets the canvas, exactly as CapCut does.
+            //
+            // Only while the timeline is empty: once anything has been cut, the
+            // canvas is a decision the user has made and moving it under them
+            // would reframe their work.
+            if project.tracks.iter().all(|t| t.segments.is_empty()) {
+                let (w, h) = (video.display_width.max(2), video.display_height.max(2));
+                // Cap the long edge at 1080. Beyond that the preview and every
+                // render get expensive for detail no one is judging on a
+                // timeline, and the export can still be set higher.
+                let long = w.max(h) as f32;
+                let scale = if long > 1080.0 { 1080.0 / long } else { 1.0 };
+                let width = ((w as f32 * scale).round() as u32).max(2) & !1;
+                let height = ((h as f32 * scale).round() as u32).max(2) & !1;
+
+                if (project.canvas.width, project.canvas.height) != (width, height) {
+                    tracing::info!(
+                        from = format_args!("{}x{}", project.canvas.width, project.canvas.height),
+                        to = format_args!("{width}x{height}"),
+                        source = format_args!("{}x{}", video.display_width, video.display_height),
+                        "canvas adopted from the first imported clip"
+                    );
+                    project.canvas.width = width;
+                    project.canvas.height = height;
+                }
+
+                // Match the timeline to the source frame rate too, so a 24 fps
+                // film is not resampled to 30 for no reason.
+                if video.fps > 0.0 && (video.fps - project.fps).abs() > 0.01 {
+                    project.fps = video.fps;
+                }
+            }
+
             project.materials.videos.push(VideoMaterial {
                 id: id.clone(),
                 path: path.clone(),

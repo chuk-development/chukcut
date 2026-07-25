@@ -23,7 +23,7 @@
 //! rather than a tree walk.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use uuid::Uuid;
 
 /// Current on-disk schema version. Bump on any breaking change and add a
@@ -204,8 +204,15 @@ pub struct MaterialPool {
     /// Non-media parameter blocks referenced by segments (speed curves,
     /// transitions, effect instances). Kept as one map so adding a new kind
     /// does not change the schema.
+    ///
+    /// Ordered rather than hashed, because the whole point of saving a project
+    /// as indented JSON is that it can be read and diffed. A `HashMap` iterates
+    /// in an order that changes between processes, so every save of an
+    /// unchanged project rewrote this block into a different order and showed
+    /// up as a diff. Sorted keys cost nothing at this size and make a save
+    /// deterministic.
     #[serde(default)]
-    pub extras: HashMap<Id, serde_json::Value>,
+    pub extras: BTreeMap<Id, serde_json::Value>,
 }
 
 impl MaterialPool {

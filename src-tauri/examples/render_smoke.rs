@@ -142,10 +142,38 @@ fn main() -> anyhow::Result<()> {
     }
 
     println!(
-        "\n{samples} frames at {}x{} in {:.2}s",
+        "\n{samples} scattered frames at {}x{} in {:.2}s",
         size.0,
         size.1,
         started.elapsed().as_secs_f64()
+    );
+
+    // The number above is a *scrub* number: each sample jumps far enough to
+    // force a seek and a long decode-forward from the preceding keyframe. What
+    // decides whether playback is watchable is the sequential cost, where the
+    // decoder already holds the previous frame. Measure both, and at the proxy
+    // resolution the preview actually uses rather than at full canvas size.
+    let proxy = (size.0 * 960 / size.1.max(1), 960);
+    let proxy = (proxy.0.max(2) & !1, proxy.1);
+    let step = (1_000_000.0 / project.fps) as Micros;
+    let sequential = 30;
+
+    let started = std::time::Instant::now();
+    let mut worst = 0.0_f64;
+    for i in 0..sequential {
+        let frame_started = std::time::Instant::now();
+        let _ = compositor.render_frame(&project, i as Micros * step, proxy, &sources)?;
+        worst = worst.max(frame_started.elapsed().as_secs_f64() * 1000.0);
+    }
+    let elapsed = started.elapsed().as_secs_f64();
+
+    println!(
+        "{sequential} sequential frames at {}x{}: {:.1} ms mean, {:.1} ms worst, {:.1} fps",
+        proxy.0,
+        proxy.1,
+        elapsed * 1000.0 / sequential as f64,
+        worst,
+        sequential as f64 / elapsed
     );
     Ok(())
 }

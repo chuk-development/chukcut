@@ -144,6 +144,34 @@ impl FrameCache {
         Self::lookup(&slots, session, frame)
     }
 
+    /// The frame of `session` closest to `frame`, within `tolerance` frames.
+    ///
+    /// This exists because a frame request must never fail: WebKitGTK responds
+    /// to a stream of failed resource loads by killing its web process — an
+    /// actual crash, observed — so answering "not ready" with an error status
+    /// is not an option at video rates.
+    ///
+    /// The tolerance is the part that took a second attempt to get right. An
+    /// unbounded search returns *whatever is in the ring*, so a request for
+    /// frame 200 against a ring holding 170 answers with 170 and the picture
+    /// jumps thirty frames backwards. A neighbouring frame is indistinguishable
+    /// from a slightly late one; a frame a second old is a visible glitch, and
+    /// worse than simply leaving the previous picture up.
+    pub fn nearest(&self, session: u64, frame: i64, tolerance: i64) -> Option<(i64, Arc<[u8]>)> {
+        let slots = self.slots.lock();
+        if slots.session != session {
+            return None;
+        }
+        slots
+            .ring
+            .iter()
+            .flatten()
+            .filter(|cached| cached.session == session)
+            .filter(|cached| (cached.frame - frame).abs() <= tolerance)
+            .min_by_key(|cached| (cached.frame - frame).abs())
+            .map(|cached| (cached.frame, Arc::clone(&cached.bytes)))
+    }
+
     /// [`Self::get`], but wait up to `timeout` for the frame to be rendered.
     ///
     /// The protocol handler uses this so that "the frame is 8 ms away" reads as

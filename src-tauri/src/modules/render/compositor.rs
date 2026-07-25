@@ -689,9 +689,9 @@ mod tests {
     /// than fail — a red suite that means "this box has no GPU" trains people
     /// to ignore it.
     fn compositor() -> Option<Compositor> {
-        let ctx = RenderContext::try_new()?;
+        let ctx = crate::modules::render::test_context()?;
         Some(Compositor::with_config(
-            Arc::new(ctx),
+            ctx,
             CompositorConfig {
                 // Unorm rather than sRGB so the tests can assert on exact byte
                 // values without doing gamma maths.

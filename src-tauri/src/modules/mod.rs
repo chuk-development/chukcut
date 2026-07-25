@@ -6,6 +6,7 @@
 //! directly — it all comes through `#[tauri::command]` functions declared in
 //! these modules and registered in `lib.rs`.
 
+pub mod audio;
 pub mod effects;
 pub mod export;
 pub mod media;

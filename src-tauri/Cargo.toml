@@ -33,9 +33,29 @@ jpeg-encoder = "0.7.0"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 ffmpeg-next = "6.1"
+# Output device only. cpal is the one crate that is a thin, unopinionated
+# wrapper over the platform APIs (ALSA here) without dragging in a mixer,
+# a decoder or an event loop of its own — we have all three already. 0.18
+# rather than the older 0.15 because its `Stream` is `Send + Sync`, which is
+# what lets the device live in Tauri-managed state next to the preview server.
+cpal = "0.18"
 wgpu = "30.0.0"
 bytemuck = "1.25.2"
 futures = "0.3.33"
 pollster = "1.0.1"
 tauri-plugin-dialog = "2.7.2"
 
+
+# Development builds run the full pipeline — decode, JPEG encode, pixel work —
+# at video rates, and an unoptimized build of that is not merely slower, it is
+# unusable: `jpeg-encoder` needs ~130 ms per preview frame at opt-level 0 and
+# ~8 ms at 3, which is the difference between 5 fps and real-time playback.
+#
+# Dependencies are optimized fully because they are compiled once and rarely
+# change. Our own crate stays at opt-level 1, which keeps incremental rebuilds
+# quick while removing the worst of the debug overhead.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

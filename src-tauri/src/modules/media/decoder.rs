@@ -18,8 +18,8 @@
 //! millisecond. A decoder that is reopened per request pays the former every
 //! time, which is why playback built that way runs at a few frames per second.
 //!
-//! So this type owns its demuxer and codec context across calls, and keeps two
-//! pieces of state that make sequential reads cheap:
+//! So this type owns its demuxer and codec context across calls, and keeps
+//! three pieces of state that make sequential reads cheap and correct:
 //!
 //! - `position`, the timestamp of the last frame handed out. A request that
 //!   sits just ahead of it decodes forward instead of seeking, which is the
@@ -27,6 +27,19 @@
 //! - `pending`, the one frame we decoded past the target. Without it, a
 //!   sequential read would drop every frame it overshot on, and playback would
 //!   show every other frame.
+//! - `last`, the frame we handed out. It is still the visible one until the
+//!   playhead reaches `pending`, and it is the only copy we have — so without
+//!   it a playhead nudged forward by half a frame would be answered with the
+//!   overshoot, one frame early.
+//!
+//! ## Why a seek can need retrying
+//!
+//! `av_seek_frame` is only as accurate as the container's index, and MPEG-TS
+//! has none — it is searched by bisecting the byte stream and lands *after*
+//! the requested instant more often than not. Once the demuxer is past the
+//! frame, decoding forward can only get further away. So an overshoot is not
+//! believed: the seek is retried from progressively earlier, and in the last
+//! resort from the start of the file, which always works.
 
 use std::path::{Path, PathBuf};
 
@@ -55,9 +68,42 @@ pub struct DecodedFrame {
 ///
 /// Below this, decoding forward is cheaper than a seek plus a keyframe decode;
 /// above it, we would be decoding and throwing away more frames than the seek
-/// costs. Two seconds is roughly one GOP on the encoders people actually use,
-/// which makes this "skip forward within the current GOP, seek beyond it".
-const FORWARD_DECODE_WINDOW: Micros = 2_000_000;
+/// costs.
+///
+/// Half a second, not two. The larger window was chosen as "roughly one GOP",
+/// which is right for the cost of a *single* jump but wrong for what playback
+/// actually does when it falls behind: the pacer drops late frames and moves
+/// the cursor forward, and with a two-second window the decoder then honoured
+/// that jump by decoding every dropped frame anyway. Dropping thirty frames
+/// cost thirty decodes, so falling behind made the renderer fall further
+/// behind. Measured: playback frames taking 500–1200 ms against a 33 ms budget.
+///
+/// At half a second a normal sequential step still decodes forward, and a
+/// catch-up jump seeks instead — which is the whole point of dropping frames.
+const FORWARD_DECODE_WINDOW: Micros = 500_000;
+
+/// How far before the target a retried seek starts, quadrupling each attempt.
+///
+/// One second is well over a GOP on anything normally encoded, so the first
+/// retry almost always succeeds and the sequence terminates at the start of
+/// the file after a handful of steps.
+const SEEK_BACKOFF: Micros = 1_000_000;
+
+/// Whether a seek failed to put the requested frame within reach.
+///
+/// `av_seek_frame` is only as accurate as the container's index, and some
+/// containers have none. MPEG-TS is searched by bisecting the byte stream and
+/// routinely lands *after* the instant that was asked for; MP4 rounds the
+/// request into the stream's time base and can pick the keyframe after a frame
+/// that sits exactly on the boundary. Either way the demuxer is now past the
+/// frame, decoding forward can only get further away, and the answer would be
+/// a frame from the future — or, at the tail of a file, nothing at all.
+fn overshoots(found: &Option<(Micros, frame::Video)>, target: Micros) -> bool {
+    match found {
+        Some((pts, _)) => *pts > target,
+        None => true,
+    }
+}
 
 pub struct VideoDecoder {
     path: PathBuf,
@@ -91,19 +137,46 @@ pub struct VideoDecoder {
     /// A frame decoded past the last request, kept so a sequential read does
     /// not lose it.
     pending: Option<(Micros, frame::Video)>,
+    /// The frame last handed out, kept because it is still the visible one
+    /// until the playhead crosses `pending`'s timestamp. Without it, a request
+    /// that moves forward by less than a frame has nothing in hand but the
+    /// overshoot, and answering with that shows the picture one frame early.
+    last: Option<(Micros, frame::Video)>,
     /// Whether the demuxer has run out and the decoder has been told so.
     draining: bool,
 }
 
 /// # Safety
 ///
-/// `scaling::Context` holds a raw `*mut SwsContext`, which makes the whole
-/// decoder non-`Send` by inference. Moving one between threads is safe:
-/// FFmpeg's swscale and codec contexts are not safe to *use* concurrently, but
-/// they carry no thread affinity, and every method here takes `&mut self`, so
-/// the borrow checker already guarantees exclusive access wherever the decoder
-/// ends up. Callers that want to share one across threads must put it behind a
-/// lock — see `provider::MediaSourceProvider`, which does exactly that.
+/// Two separate reasons this type is not `Send` by inference, and both have to
+/// hold for this impl to be sound.
+///
+/// **The raw pointer.** `scaling::Context` holds a `*mut SwsContext`. FFmpeg's
+/// swscale and codec contexts are not safe to *use* concurrently, but they
+/// carry no thread affinity, so moving one is fine as long as use stays
+/// exclusive. Every method here takes `&mut self`, so the borrow checker
+/// guarantees that wherever the decoder ends up.
+///
+/// **The non-atomic refcounts, which are the subtler half.** `ffmpeg-next`
+/// 6.1 keeps `Rc` inside both halves of this struct: `format::context::Input`
+/// owns an `Rc<Destructor>`, and the codec context built from that input's
+/// stream parameters holds an `Rc<dyn Any>` clone of it as a keep-alive. So a
+/// single `VideoDecoder` owns two handles to one non-atomic refcount.
+///
+/// Moving that between threads is sound here because **both handles move
+/// together and none is left behind**: `open_inner` is the only constructor,
+/// nothing outside this struct retains a clone, and the struct is moved whole
+/// or not at all. What would be unsound is a clone staying on the original
+/// thread while another is used elsewhere, because the refcount updates would
+/// race.
+///
+/// That constraint is what makes `provider::MediaSourceProvider`'s mutex
+/// load-bearing rather than merely convenient. It is not there to prevent two
+/// threads decoding at once — `&mut self` already does that — it is there so
+/// that access from different threads is *ordered*, which is what keeps the
+/// non-atomic refcount operations from overlapping. Any future code that hands
+/// a decoder to a second thread must preserve both properties: move it whole,
+/// and serialise access.
 unsafe impl Send for VideoDecoder {}
 
 impl VideoDecoder {
@@ -178,6 +251,7 @@ impl VideoDecoder {
             rotation,
             position: None,
             pending: None,
+            last: None,
             draining: false,
         })
     }
@@ -218,26 +292,56 @@ impl VideoDecoder {
             seeked = true;
         }
 
-        let found = match self.decode_until(target) {
-            Ok(found) => Some(found),
-            // Decoding forward found nothing, which means we had already run to
-            // the end of the file — a playhead parked past the last frame, or a
-            // scrub that stopped there. Rewinding is the only way to get that
-            // frame back, and the last frame is the right thing to show.
-            Err(MediaError::NoFrameAt { .. }) if !seeked => None,
-            Err(other) => return Err(other),
-        };
+        let mut found = self.try_decode_until(target)?;
 
-        let (pts, frame) = match found {
-            Some(found) => found,
-            None => {
-                self.seek(target)?;
-                self.decode_until(target)?
-            }
-        };
+        // Nothing came back at all: the decoder had already run to the end of
+        // the file, which is where a playhead parked past the last frame leaves
+        // it. Rewinding is the only way to get that frame back, and the last
+        // frame is the right thing to show.
+        if found.is_none() && !seeked {
+            self.seek(target)?;
+            found = self.try_decode_until(target)?;
+        }
+
+        // Either the seek landed *past* the frame we wanted, or it found
+        // nothing at all. Both mean the same thing: the frame is behind where
+        // the demuxer now is, and no amount of decoding forward will reach it.
+        // Retry from progressively earlier, ending at the start of the file,
+        // which always works. See `overshoots` below for why this happens.
+        let mut from = target;
+        let mut back = SEEK_BACKOFF;
+        while from > 0 && overshoots(&found, target) {
+            from = target.saturating_sub(back).max(0);
+            back = back.saturating_mul(4);
+            self.seek(from)?;
+            found = self.try_decode_until(target)?;
+        }
+
+        let (pts, frame) = found.ok_or_else(|| MediaError::NoFrameAt {
+            path: self.path.clone(),
+            at: target,
+        })?;
 
         self.position = Some(pts);
-        self.convert(&frame, pts)
+        let converted = self.convert(&frame, pts);
+        // Hold on to what we handed out. It stays the visible frame until the
+        // playhead reaches the next one, and it is the only copy of it we have
+        // — the demuxer has already moved past.
+        self.last = Some((pts, frame));
+        converted
+    }
+
+    /// [`Self::decode_until`], with "there was nothing there" as a value rather
+    /// than an error.
+    fn try_decode_until(
+        &mut self,
+        target: Micros,
+    ) -> Result<Option<(Micros, frame::Video)>> {
+        match self.decode_until(target) {
+            Ok(found) => Ok(Some(found)),
+            Err(MediaError::NoFrameAt { .. }) => Ok(None),
+            Err(other) => Err(other),
+        }
     }
 
     fn needs_seek(&self, target: Micros) -> bool {
@@ -266,13 +370,23 @@ impl VideoDecoder {
         self.decoder.flush();
         self.position = None;
         self.pending = None;
+        self.last = None;
         self.draining = false;
         Ok(())
     }
 
     /// Decode forward until the frame covering `target` is in hand.
     fn decode_until(&mut self, target: Micros) -> Result<(Micros, frame::Video)> {
-        let mut chosen: Option<(Micros, frame::Video)> = None;
+        // Start from the frame already on screen when the request has not moved
+        // past it. A playhead nudged forward by half a frame is still inside
+        // the same frame, and at that point the only other thing in hand is
+        // `pending` — the frame we decoded *past* — so without this the answer
+        // would be one frame early. It is also the cheap answer to a repeated
+        // request for the same instant, which is what a paused preview does.
+        let mut chosen: Option<(Micros, frame::Video)> = match self.last.take() {
+            Some((pts, frame)) if pts <= target => Some((pts, frame)),
+            _ => None,
+        };
 
         loop {
             let Some((pts, decoded)) = self.next_frame()? else {

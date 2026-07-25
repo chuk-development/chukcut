@@ -49,6 +49,11 @@
   --timeline-ruler: oklch(0.205 0 0);
   --timeline-gridline: oklch(1 0 0 / 6%);
   --timeline-playhead: oklch(0.75 0.19 25);
+  /* Feedback lines drawn during a gesture. Both have to read as "this is where
+   * it lands" against every track colour, so neither borrows the playhead's
+   * red: a cut is not a seek and a snap is not a seek either. */
+  --timeline-razor: oklch(0.97 0 0);
+  --timeline-snap: oklch(0.87 0.17 95);
   --track-video: oklch(0.55 0.13 264);
   --track-audio: oklch(0.58 0.13 155);
   --track-text: oklch(0.62 0.14 85);
@@ -85,6 +90,8 @@
   --color-timeline-ruler: var(--timeline-ruler);
   --color-timeline-gridline: var(--timeline-gridline);
   --color-timeline-playhead: var(--timeline-playhead);
+  --color-timeline-razor: var(--timeline-razor);
+  --color-timeline-snap: var(--timeline-snap);
   --color-track-video: var(--track-video);
   --color-track-audio: var(--track-audio);
   --color-track-text: var(--track-text);

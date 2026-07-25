@@ -14,7 +14,8 @@
 pub mod modules;
 pub mod state;
 
-use modules::preview::{frame_protocol_async, PreviewServer, SCHEME};
+use modules::audio::{AudioEngine, FileAudioSource};
+use modules::preview::{frame_protocol_async, PreviewServer, DEFAULT_CAPACITY, SCHEME};
 use state::AppState;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -34,11 +35,23 @@ pub fn run() {
         }
     }
 
+    // Audio is the clock master: the device's played-sample count is the
+    // authority for the playhead, and video frames are matched to it. The
+    // engine is built first so the preview can read from it.
+    let audio = AudioEngine::new();
+    let preview = PreviewServer::with_time_source(DEFAULT_CAPACITY, audio.time_source());
+    preview.set_audio(std::sync::Arc::clone(&audio));
+
+    // Until this was registered the exporter mixed a valid but silent audio
+    // track, because no implementation of its `AudioSource` seam existed.
+    modules::export::job::register_audio_source(std::sync::Arc::new(FileAudioSource));
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::new())
-        .manage(PreviewServer::new())
+        .manage(audio)
+        .manage(preview)
         // Asynchronous rather than the blocking variant: a frame request can
         // wait briefly for a frame that is mid-render, and that wait must never
         // sit on a webview thread.
@@ -68,6 +81,9 @@ pub fn run() {
             modules::preview::commands::preview_pause,
             modules::preview::commands::preview_stop,
             modules::preview::commands::preview_state,
+            // audio
+            modules::audio::commands::audio_status,
+            modules::audio::commands::audio_set_volume,
             // export
             modules::export::commands::export_presets,
             modules::export::commands::export_start,
