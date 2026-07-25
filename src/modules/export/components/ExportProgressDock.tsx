@@ -36,7 +36,7 @@ export function ExportProgressDock() {
   if (jobs.length === 0) return null;
 
   return (
-    <div
+    <aside
       data-slot="export-dock"
       aria-label="Exports"
       className="pointer-events-none fixed bottom-3 right-3 z-40 flex w-[320px] flex-col gap-2"
@@ -44,7 +44,7 @@ export function ExportProgressDock() {
       {jobs.map((job) => (
         <ExportCard key={job.id} job={job} />
       ))}
-    </div>
+    </aside>
   );
 }
 
@@ -155,9 +155,7 @@ function ExportCard({ job }: { job: ExportJob }) {
         <p className="mt-1.5 text-[11px] leading-snug text-foreground/90">{job.message}</p>
       ) : null}
 
-      {revealError ? (
-        <p className="mt-1 text-[10px] text-muted-foreground">{revealError}</p>
-      ) : null}
+      {revealError ? <p className="mt-1 text-[10px] text-muted-foreground">{revealError}</p> : null}
     </section>
   );
 }

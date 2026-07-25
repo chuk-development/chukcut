@@ -154,19 +154,29 @@ export async function fetchFrame(base: string, frame: number): Promise<FrameResu
 }
 
 /**
- * Proxy resolution for a canvas, matching the table in the pipeline doc.
+ * Proxy resolution for a canvas. Mirrors `preview::session::proxy_size`.
  *
  * Only used to size the placeholder before a session exists — once one does,
  * `PreviewInfo.width/height` is authoritative, because Rust also clamps to what
- * the device can allocate.
+ * the device can allocate. It still has to agree with Rust: a placeholder at
+ * one resolution followed by a first frame at another is a visible jump, and
+ * the number in the player's header would be a lie until the session opened.
+ *
+ * Everything up to 1920 on the *long* edge previews natively, which is every
+ * 1080p project in either orientation. The trap this band exists to avoid is
+ * that a 1080x1920 vertical project measures 1920 here even though everyone
+ * calls it "1080p"; an earlier table capped it at 720 and the preview looked
+ * soft next to the source file.
  */
 export function proxyResolution(canvas: { width: number; height: number }): {
   width: number;
   height: number;
 } {
   const long = Math.max(canvas.width, canvas.height);
-  const cap = long <= 720 ? long : long <= 1080 ? 720 : long <= 2160 ? 960 : 1080;
-  const scale = cap / long;
+  if (long <= 1920) {
+    return { width: Math.max(2, canvas.width), height: Math.max(2, canvas.height) };
+  }
+  const scale = 1920 / long;
   return {
     width: Math.max(2, Math.round(canvas.width * scale)),
     height: Math.max(2, Math.round(canvas.height * scale)),

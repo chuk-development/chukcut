@@ -1,12 +1,13 @@
 import { AlertTriangleIcon, FileDownIcon, XIcon } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
-import { ExportDialog } from "@/app/components/ExportDialog";
 import { HeaderBar } from "@/app/components/HeaderBar";
 import { NewProjectDialog } from "@/app/components/NewProjectDialog";
 import { PanelDivider } from "@/app/components/PanelDivider";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { type FileDropEvent, listenForFileDrop } from "@/lib/fileDrop";
 import { clamp } from "@/lib/time";
+import { ExportDialog } from "@/modules/export/components/ExportDialog";
+import { ExportProgressDock } from "@/modules/export/components/ExportProgressDock";
 import { Inspector } from "@/modules/inspector/components/Inspector";
 import { MediaLibrary } from "@/modules/media/components/MediaLibrary";
 import { useMediaStore } from "@/modules/media/store";
@@ -67,10 +68,16 @@ export function App() {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
+      if (!(event.ctrlKey || event.metaKey)) return;
+      const key = event.key.toLowerCase();
+      if (key === "s") {
         // Let the header own saving; here we only stop the webview from
         // offering to save the page.
         event.preventDefault();
+      }
+      if (key === "e") {
+        event.preventDefault();
+        setExportOpen(true);
       }
     };
     window.addEventListener("keydown", onKeyDown);
@@ -211,6 +218,9 @@ export function App() {
 
         <NewProjectDialog open={newProjectOpen} onOpenChange={setNewProjectOpen} />
         <ExportDialog open={exportOpen} onOpenChange={setExportOpen} />
+        {/* Outside the dialog on purpose: an export outlives the dialog that
+            started it, and the editor stays usable while it runs. */}
+        <ExportProgressDock />
       </div>
     </TooltipProvider>
   );

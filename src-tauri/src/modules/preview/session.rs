@@ -21,14 +21,27 @@ use serde::{Deserialize, Serialize};
 
 use crate::modules::project::document::{Micros, Project};
 
-/// Quality for frames the user watches. 80 is the knee of the curve: a 960x540
-/// frame is ~120 KB, and the artefacts that appear below it are exactly the
-/// kind an editor would mistake for a problem with their footage.
-pub const DEFAULT_JPEG_QUALITY: u8 = 80;
+/// Quality for frames the user watches.
+///
+/// Around here is the knee of the curve: a 960x540 frame is ~120 KB, and the
+/// artefacts that appear much below it are exactly the kind an editor would
+/// mistake for a problem with their footage. A 1080x1920 frame at 88 is about
+/// 1 MB, which the custom protocol carries at 30 fps without noticing.
+pub const DEFAULT_JPEG_QUALITY: u8 = 88;
 
-/// Quality while dragging the playhead. Lower, because during a scrub the frame
-/// is on screen for one refresh and latency is the only thing that matters.
-pub const SCRUB_JPEG_QUALITY: u8 = 60;
+/// Quality for a frame rendered because the playhead moved — a scrub, a pause,
+/// a seek, or the first frame of a session.
+///
+/// **Higher** than the playback quality, not lower, and the earlier reasoning
+/// for the reverse was wrong. It assumed such a frame is on screen for one
+/// refresh, which is true only while the pointer is moving. The moment the user
+/// lets go, that exact frame is what they sit and look at — and at quality 60 a
+/// dark shot shows visible JPEG blocking, which reads as the editor having
+/// ruined the footage.
+///
+/// The cost is paid once per gesture rather than thirty times a second, so it
+/// is close to free.
+pub const SCRUB_JPEG_QUALITY: u8 = 94;
 
 /// Fallback when a project carries a nonsense frame rate.
 pub const FALLBACK_FPS: f64 = 30.0;
@@ -49,10 +62,8 @@ pub fn next_session_id() -> u64 {
 /// playback clock has to pay for on every single frame.
 pub fn proxy_long_edge(canvas_long_edge: u32) -> u32 {
     match canvas_long_edge {
-        0..=720 => canvas_long_edge,
-        721..=1080 => 720,
-        1081..=2160 => 960,
-        _ => 1080,
+        0..=1920 => canvas_long_edge,
+        _ => 1920,
     }
 }
 
@@ -96,7 +107,14 @@ pub struct PreviewOptions {
 #[derive(Debug, Clone)]
 pub struct PreviewSession {
     pub id: u64,
-    /// Proxy resolution, already clamped to what the device can allocate.
+    /// The resolution every frame is rendered at, playing or parked. Native
+    /// up to 1920 on the long edge.
+    ///
+    /// There used to be a second, smaller size for playback, because the JPEG
+    /// encode alone overran the frame budget at 1080x1920. It does not any
+    /// more — the encoder moved onto the GPU and a 1080x1920 frame costs about
+    /// 7 ms — so playback and stills render the same picture again. See
+    /// `docs/research/vaapi-jpeg-preview.md`.
     pub size: (u32, u32),
     pub quality: u8,
     pub scrub_quality: u8,
@@ -120,7 +138,9 @@ impl PreviewSession {
             id: next_session_id(),
             size,
             quality,
-            scrub_quality: SCRUB_JPEG_QUALITY.min(quality),
+            // Deliberately not clamped down to `quality`: a still frame is
+            // allowed to be better than a playback frame.
+            scrub_quality: SCRUB_JPEG_QUALITY,
             fps: sane_fps(project.fps),
             duration: project.duration(),
             project,
@@ -171,22 +191,27 @@ mod tests {
 
     #[test]
     fn proxy_resolution_follows_the_table() {
-        // The table is keyed on the *long* edge, not on the height: a 720p
-        // canvas is 1280 across, which is already past the native band.
-        assert_eq!(proxy_size((640, 480), None), (640, 480), "<= 720: native");
-        assert_eq!(proxy_size((720, 720), None), (720, 720), "<= 720: native");
-        assert_eq!(proxy_size((1080, 1080), None), (720, 720), "<= 1080: 720");
-        assert_eq!(proxy_size((1280, 720), None), (960, 540), "<= 2160: 960");
-        assert_eq!(proxy_size((1920, 1080), None), (960, 540), "<= 2160: 960");
-        assert_eq!(proxy_size((3840, 2160), None), (1080, 608), "> 2160: 1080");
-        assert_eq!(proxy_size((7680, 4320), None), (1080, 608), "> 2160: 1080");
+        // The table is keyed on the *long* edge, not on the height.
+        //
+        // Everything up to 1080 previews natively. That is the point of the
+        // band: a 1080p project must not look softer in the editor than the
+        // source file does in a player, because that is how the user finds out.
+        assert_eq!(proxy_size((640, 480), None), (640, 480), "native");
+        assert_eq!(proxy_size((1080, 1080), None), (1080, 1080), "native");
+        assert_eq!(proxy_size((1920, 1080), None), (1920, 1080), "1080p landscape is native");
+        assert_eq!(proxy_size((3840, 2160), None), (1920, 1080), "4K previews at 1080p");
+        assert_eq!(proxy_size((7680, 4320), None), (1920, 1080), "8K previews at 1080p");
     }
 
     #[test]
     fn portrait_canvases_cap_the_long_edge_too() {
-        // 9:16, the default canvas. The cap applies to height, not width.
-        assert_eq!(proxy_size((1080, 1920), None), (540, 960));
-        assert_eq!(proxy_size((2160, 3840), None), (608, 1080));
+        // 9:16, the default canvas. The cap applies to height, not width, so a
+        // 1080x1920 project is 1920 on its long edge and therefore *past* the
+        // native band even though it is "1080p" in ordinary speech.
+        // 1080x1920 is 1920 on its long edge, so it previews natively — the
+        // case the whole band exists for.
+        assert_eq!(proxy_size((1080, 1920), None), (1080, 1920));
+        assert_eq!(proxy_size((2160, 3840), None), (1080, 1920));
     }
 
     #[test]

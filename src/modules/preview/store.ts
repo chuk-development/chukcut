@@ -33,12 +33,18 @@ interface PreviewState {
   error: string | null;
 
   zoom: PreviewZoom;
+  /**
+   * Whether the *window* is fullscreen. Written after the window manager has
+   * agreed, never in anticipation of it — see `lib/fullscreen.ts`.
+   */
+  fullscreen: boolean;
 
   applyInfo: (info: PreviewInfo) => void;
   setFrame: (frame: number, playing: boolean) => void;
   setPlaying: (playing: boolean) => void;
   setError: (error: string | null) => void;
   setZoom: (zoom: PreviewZoom) => void;
+  setFullscreen: (fullscreen: boolean) => void;
   reset: () => void;
 }
 
@@ -53,6 +59,7 @@ export const usePreviewStore = create<PreviewState>((set) => ({
   playing: false,
   error: null,
   zoom: "fit",
+  fullscreen: false,
 
   applyInfo: (info) =>
     set({
@@ -71,5 +78,8 @@ export const usePreviewStore = create<PreviewState>((set) => ({
   setPlaying: (playing) => set({ playing }),
   setError: (error) => set({ error }),
   setZoom: (zoom) => set({ zoom }),
+  setFullscreen: (fullscreen) => set({ fullscreen }),
+  // Fullscreen deliberately survives: a session restart on every edit must not
+  // throw the user back into the panels mid-review.
   reset: () => set({ session: null, frameUrl: null, playing: false, frame: 0 }),
 }));

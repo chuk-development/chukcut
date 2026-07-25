@@ -469,6 +469,11 @@ pub struct ExportOutcome {
     pub duration: Micros,
     pub elapsed: Duration,
     pub cancelled: bool,
+    /// What the encoder side of each frame cost. Carried out of the job
+    /// because the `MediaWriter` that measured it is dropped before this
+    /// returns, and a benchmark that cannot see the breakdown can only report
+    /// that something got faster.
+    pub writer: super::encoder::WriterStats,
 }
 
 /// Render, encode and mux the whole timeline.
@@ -505,6 +510,8 @@ pub fn run_export(job: &ExportJob, sink: &dyn ProgressSink) -> Result<ExportOutc
             sink.send(tracker.snapshot(ExportStage::Finalizing, frames, Instant::now()));
             // `finish` is what flushes the encoders; the last second of video
             // is still inside libavcodec until it runs.
+            // Read before `finish`, which consumes the writer.
+            let writer_stats = writer.stats();
             writer.finish()?;
             let elapsed = tracker.elapsed(Instant::now());
             let mut done = tracker.snapshot(ExportStage::Done, frames, Instant::now());
@@ -518,6 +525,7 @@ pub fn run_export(job: &ExportJob, sink: &dyn ProgressSink) -> Result<ExportOutc
                 duration: settings.duration,
                 elapsed,
                 cancelled: false,
+                writer: writer_stats,
             })
         }
         Err(error) => {
@@ -540,6 +548,7 @@ pub fn run_export(job: &ExportJob, sink: &dyn ProgressSink) -> Result<ExportOutc
                     duration: settings.duration,
                     elapsed: tracker.elapsed(Instant::now()),
                     cancelled: true,
+                    writer: Default::default(),
                 })
             } else {
                 Err(error)
@@ -579,27 +588,108 @@ fn encode_all(
     let audio_rate = settings.audio.as_ref().map(|a| a.sample_rate).unwrap_or(0);
     let mut audio_cursor = 0usize;
 
-    walk_frames(fps, settings.total_frames, &job.cancel, |index, time| {
-        let rgba = job
-            .compositor
-            .render_frame(&job.project, time, size, job.sources.as_ref())
-            .map_err(|source| ExportError::Render {
-                frame: index,
-                source,
-            })?;
-        writer.write_video_frame(&rgba, index)?;
+    // Which colour conversion the frames take. NV12 on the GPU is worth about a
+    // third of a 1080p export frame — see `docs/research/zero-copy-encode.md` —
+    // but it is only useful when the encoder is fed NV12 in the first place,
+    // and it needs a compute pass that a very old device might not build. So:
+    // ask for it when it helps, and drop back to the RGBA path for the whole
+    // export the first time it does not work, rather than per frame.
+    let mut gpu_nv12 = writer.wants_nv12() && gpu_color_convert();
 
-        // Hand the muxer the audio that belongs *before* the next video frame,
-        // so the interleaving stays tight and a player never has to buffer
-        // seconds of one stream to find the other.
-        if !mixed.is_empty() {
-            let until = audio::frames_for(fps.frame_time(index + 1), audio_rate)
-                .min(mixed.len() / channels);
-            if until > audio_cursor {
-                writer.write_audio(&mixed[audio_cursor * channels..until * channels])?;
-                audio_cursor = until;
+    // And whether the frame can skip system memory entirely. This needs three
+    // things at once — a Vulkan device that exports DMA-BUF memory, a VAAPI
+    // driver that imports it, and an encoder with a surface pool — so it is
+    // established by trying and it degrades to the NV12-readback path above,
+    // which itself degrades to swscale. Three tiers, each a strict improvement
+    // on the one below, and an export happens on whichever the machine reaches.
+    let mut zero_copy = (gpu_nv12 && zero_copy_enabled())
+        .then(|| ZeroCopy::new(job, size))
+        .flatten();
+    if zero_copy.is_some() {
+        tracing::info!("exporting zero-copy: the encoder reads what the compositor wrote");
+    }
+
+    walk_frames(fps, settings.total_frames, &job.cancel, |index, time| {
+        if let Some(state) = zero_copy.as_mut() {
+            match state.frame(job, writer, size, index, time) {
+                Ok(()) => {
+                    on_frame_written(
+                        writer,
+                        &mixed,
+                        channels,
+                        audio_rate,
+                        fps,
+                        index,
+                        &mut audio_cursor,
+                    )?;
+                    let now = Instant::now();
+                    if tracker.should_emit(index, now) {
+                        sink.send(tracker.snapshot(ExportStage::Encoding, index + 1, now));
+                    }
+                    return Ok(());
+                }
+                Err(source) => {
+                    tracing::warn!(
+                        frame = index,
+                        error = %source,
+                        "the zero-copy path failed; falling back to a readback for the rest \
+                         of this export"
+                    );
+                    zero_copy = None;
+                }
             }
         }
+        if gpu_nv12 {
+            match job
+                .compositor
+                .render_nv12(&job.project, time, size, job.sources.as_ref())
+            {
+                Ok(nv12) => {
+                    let (y_stride, uv_stride) = (nv12.y_stride, nv12.uv_stride);
+                    let offset = nv12.uv_offset();
+                    writer.write_video_frame_nv12(
+                        &nv12.data[..offset],
+                        y_stride,
+                        &nv12.data[offset..],
+                        uv_stride,
+                        index,
+                    )?;
+                }
+                Err(source) => {
+                    // A source that genuinely failed will fail the same way on
+                    // the RGBA path a line below, and will be reported there
+                    // with the frame number attached. What is being caught here
+                    // is a device that cannot run the compute pass.
+                    tracing::warn!(
+                        frame = index,
+                        error = %source,
+                        "the GPU colour conversion failed; falling back to swscale for the \
+                         rest of this export"
+                    );
+                    gpu_nv12 = false;
+                }
+            }
+        }
+        if !gpu_nv12 {
+            let rgba = job
+                .compositor
+                .render_frame(&job.project, time, size, job.sources.as_ref())
+                .map_err(|source| ExportError::Render {
+                    frame: index,
+                    source,
+                })?;
+            writer.write_video_frame(&rgba, index)?;
+        }
+
+        on_frame_written(
+            writer,
+            &mixed,
+            channels,
+            audio_rate,
+            fps,
+            index,
+            &mut audio_cursor,
+        )?;
 
         let now = Instant::now();
         if tracker.should_emit(index, now) {
@@ -615,6 +705,128 @@ fn encode_all(
     }
 
     Ok(settings.total_frames)
+}
+
+/// Hand the muxer the audio that belongs *before* the next video frame.
+///
+/// Keeps the interleaving tight, so a player never has to buffer seconds of one
+/// stream to find the other. A function rather than a closure because all three
+/// video paths end here and duplicating it is how one of them ends up silent.
+#[allow(clippy::too_many_arguments)]
+fn on_frame_written(
+    writer: &mut MediaWriter,
+    mixed: &[f32],
+    channels: usize,
+    audio_rate: u32,
+    fps: Fps,
+    index: u64,
+    audio_cursor: &mut usize,
+) -> Result<()> {
+    if mixed.is_empty() {
+        return Ok(());
+    }
+    let until = audio::frames_for(fps.frame_time(index + 1), audio_rate).min(mixed.len() / channels);
+    if until > *audio_cursor {
+        writer.write_audio(&mixed[*audio_cursor * channels..until * channels])?;
+        *audio_cursor = until;
+    }
+    Ok(())
+}
+
+/// The zero-copy export path's state: a rotation of exported buffers and the
+/// surfaces currently mapped from them.
+///
+/// Linux and Vulkan only; [`Self::new`] answers `None` everywhere else and the
+/// caller falls back.
+#[cfg(target_os = "linux")]
+struct ZeroCopy {
+    ring: crate::modules::render::dmabuf::Nv12Ring,
+    layout: crate::modules::render::Nv12Layout,
+    /// The surface mapped from each ring slot, kept so its reference count can
+    /// be asked before that slot is written again. `None` for a slot that has
+    /// not been used yet.
+    held: Vec<Option<ffmpeg_next::util::frame::Video>>,
+    slot: usize,
+}
+
+#[cfg(target_os = "linux")]
+impl ZeroCopy {
+    fn new(job: &ExportJob, size: (u32, u32)) -> Option<Self> {
+        use crate::modules::render::dmabuf::{Nv12Ring, RING};
+        use crate::modules::render::Nv12Layout;
+
+        let layout = Nv12Layout::for_size(size.0, size.1);
+        let ring = Nv12Ring::new(job.compositor.context(), layout.total_bytes() as u64)?;
+        Some(Self {
+            ring,
+            layout,
+            held: (0..RING).map(|_| None).collect(),
+            slot: 0,
+        })
+    }
+
+    /// Composite frame `index` straight into an exported buffer and encode it.
+    fn frame(
+        &mut self,
+        job: &ExportJob,
+        writer: &mut MediaWriter,
+        size: (u32, u32),
+        index: u64,
+        time: Micros,
+    ) -> Result<()> {
+        use crate::modules::render::dmabuf::DRM_FORMAT_MOD_LINEAR;
+        use std::os::fd::AsFd;
+
+        // Refuse to overwrite memory the encoder is still reading. With
+        // sixteen slots against two B-frames this should never fire; if it
+        // does, saying so and falling back is the only honest option, because
+        // writing anyway produces a torn picture that nothing downstream would
+        // report.
+        if let Some(previous) = &self.held[self.slot] {
+            if super::hwframes::surface_is_shared(previous) {
+                return Err(ExportError::Settings(
+                    "the encoder is still holding every exported buffer".into(),
+                ));
+            }
+        }
+        // Dropped before the buffer is rewritten, not after: this releases our
+        // reference to the previous mapping.
+        self.held[self.slot] = None;
+
+        let slot = self.slot;
+        self.slot = (self.slot + 1) % self.ring.len();
+
+        let exported = self.ring.take();
+        job.compositor
+            .render_nv12_into(
+                &job.project,
+                time,
+                size,
+                job.sources.as_ref(),
+                exported.buffer(),
+            )
+            .map_err(|source| ExportError::Render {
+                frame: index,
+                source,
+            })?;
+
+        let surface = writer.write_video_frame_dmabuf(
+            &super::hwframes::Nv12Dmabuf {
+                fd: exported.fd().as_fd(),
+                size: self.layout.total_bytes(),
+                width: size.0,
+                height: size.1,
+                y_offset: 0,
+                y_stride: self.layout.y_stride,
+                uv_offset: self.layout.uv_offset(),
+                uv_stride: self.layout.uv_stride,
+                modifier: DRM_FORMAT_MOD_LINEAR,
+            },
+            index,
+        )?;
+        self.held[slot] = Some(surface);
+        Ok(())
+    }
 }
 
 /// Walk `0..total` at `fps`, checking `cancel` before every frame.
@@ -665,6 +877,36 @@ pub fn audio_source() -> Arc<dyn AudioSource> {
             Arc::new(SilentAudioSource)
         }
     }
+}
+
+/// Whether an export may convert RGBA to NV12 on the GPU.
+///
+/// A process-wide switch rather than a field on [`ExportJob`] because the only
+/// caller that wants it off is a benchmark measuring what the GPU conversion
+/// bought, and threading a flag through every construction site to serve one
+/// measurement is the wrong trade. Nothing in the app turns it off.
+static GPU_COLOUR_CONVERT: AtomicBool = AtomicBool::new(true);
+
+pub fn set_gpu_color_convert(enabled: bool) {
+    GPU_COLOUR_CONVERT.store(enabled, Ordering::Relaxed);
+}
+
+pub fn gpu_color_convert() -> bool {
+    GPU_COLOUR_CONVERT.load(Ordering::Relaxed)
+}
+
+/// Whether an export may hand the encoder the compositor's own memory.
+///
+/// The third tier, and off-switchable for the same reason as the second: the
+/// only way to know what a stage costs is to run the export without it.
+static ZERO_COPY: AtomicBool = AtomicBool::new(true);
+
+pub fn set_zero_copy(enabled: bool) {
+    ZERO_COPY.store(enabled, Ordering::Relaxed);
+}
+
+pub fn zero_copy_enabled() -> bool {
+    ZERO_COPY.load(Ordering::Relaxed)
 }
 
 /// Cancel flags for the jobs currently running, keyed by job id.

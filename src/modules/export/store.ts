@@ -27,7 +27,12 @@ import {
   exportStart,
   newProgressChannel,
 } from "@/modules/export/lib/api";
-import { applyProgress, type ExportJob, isTerminalStage, newJob } from "@/modules/export/lib/progress";
+import {
+  applyProgress,
+  type ExportJob,
+  isTerminalStage,
+  newJob,
+} from "@/modules/export/lib/progress";
 import { describeError } from "@/modules/project/store";
 
 interface ExportState {
@@ -112,16 +117,13 @@ export const useExportStore = create<ExportState>((set, get) => ({
     } catch (error) {
       set((state) => ({
         jobs: state.jobs.map((job) =>
-          job.id === jobId
-            ? { ...job, cancelling: false, message: describeError(error) }
-            : job,
+          job.id === jobId ? { ...job, cancelling: false, message: describeError(error) } : job,
         ),
       }));
     }
   },
 
-  dismiss: (jobId) =>
-    set((state) => ({ jobs: state.jobs.filter((job) => job.id !== jobId) })),
+  dismiss: (jobId) => set((state) => ({ jobs: state.jobs.filter((job) => job.id !== jobId) })),
 
   clearStartError: () => set({ startError: null }),
 

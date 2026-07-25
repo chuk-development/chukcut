@@ -5,6 +5,7 @@ import { clamp, MICROS_PER_SECOND } from "@/lib/time";
 import { useThumbnailStore } from "@/modules/media/lib/thumbnails";
 import { useMediaStore } from "@/modules/media/store";
 import { preview } from "@/modules/preview/lib/session";
+import { usePreviewStore } from "@/modules/preview/store";
 import { runEdit, useProjectStore } from "@/modules/project/store";
 import type { Id, Micros, TimeRange, Track } from "@/modules/project/types";
 import {
@@ -529,6 +530,11 @@ export function Timeline() {
         return;
       }
 
+      // Nothing here is on screen in fullscreen, and two of these keys are
+      // spoken for there: Escape leaves, and a razor toggle the user cannot see
+      // is a surprise waiting on the way back.
+      if (usePreviewStore.getState().fullscreen) return;
+
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
         event.preventDefault();
         void (event.shiftKey ? redo() : undo());
@@ -686,6 +692,17 @@ export function Timeline() {
   // Render
   // ---------------------------------------------------------------------
 
+  /**
+   * A project with lanes but nothing in them.
+   *
+   * Distinct from "no tracks": the lanes are there, striped and ready, and a
+   * first-time user has no way of knowing they are a drop target. The hint sits
+   * over the viewport rather than inside the scrolling content so it stays
+   * centred whatever the zoom is.
+   */
+  const hasClips = Boolean(project?.tracks.some((track) => track.segments.length > 0));
+  const empty = Boolean(project && project.tracks.length > 0 && !hasClips);
+
   const gridStyle = useMemo(() => {
     const secondPx = MICROS_PER_SECOND * zoom;
     const step = secondPx < 24 ? secondPx * 10 : secondPx;
@@ -712,6 +729,7 @@ export function Timeline() {
         canUndo={canUndo}
         canRedo={canRedo}
         hasSelection={selectedSegmentId !== null}
+        hasClips={hasClips}
         onZoom={setZoom}
         onZoomToFit={zoomToFit}
         onSetTool={setTool}
@@ -723,7 +741,7 @@ export function Timeline() {
         onDelete={handleDelete}
       />
 
-      <div className="flex min-h-0 flex-1">
+      <div className="relative flex min-h-0 flex-1">
         <div
           className="flex shrink-0 flex-col border-r border-border"
           style={{ width: TRACK_HEADER_WIDTH }}
@@ -759,9 +777,13 @@ export function Timeline() {
               viewportWidth={viewportWidth}
             />
 
-            {/* Scrub band: the whole ruler strip is a click target. */}
+            {/* Scrub band: the whole ruler strip is a click target. Out of the
+                tab order like the lane surfaces below it — there is no keyboard
+                equivalent of dragging, and a focus ring on an invisible strip
+                is a stop on the way to the controls that do have one. */}
             <button
               type="button"
+              tabIndex={-1}
               aria-label="Scrub"
               onPointerDown={scrub}
               className="absolute left-0 top-0 z-20 h-[26px] w-full cursor-ew-resize border-none bg-transparent p-0 outline-none"
@@ -894,6 +916,21 @@ export function Timeline() {
             <Playhead time={playhead} zoom={zoom} onGrab={scrub} />
           </div>
         </div>
+
+        {empty ? (
+          <div
+            className="pointer-events-none absolute bottom-0 right-0 grid place-items-center px-6 text-center"
+            style={{ left: TRACK_HEADER_WIDTH, top: RULER_HEIGHT }}
+          >
+            <div className="max-w-[320px]">
+              <p className="text-[12px] text-muted-foreground">Nothing on the timeline yet</p>
+              <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground/70">
+                Drag a clip from the media library onto a lane, or drop files straight from your
+                file manager.
+              </p>
+            </div>
+          </div>
+        ) : null}
       </div>
     </section>
   );

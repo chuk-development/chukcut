@@ -43,6 +43,11 @@
   --input: oklch(1 0 0 / 14%);
   --ring: oklch(0.62 0.19 264);
 
+  /* What surrounds the picture in fullscreen. Black rather than a panel grey on
+   * purpose: the whole point of fullscreen is judging the image, and a lifted
+   * surround pulls the perceived black level of the frame up with it. */
+  --preview-letterbox: oklch(0 0 0);
+
   /* Timeline-specific tokens. Track colors are keyed by media kind so a glance
    * at the timeline tells you what a lane holds. */
   --timeline-background: oklch(0.165 0 0);
@@ -85,6 +90,8 @@
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
+
+  --color-preview-letterbox: var(--preview-letterbox);
 
   --color-timeline-background: var(--timeline-background);
   --color-timeline-ruler: var(--timeline-ruler);
@@ -130,6 +137,18 @@
   [contenteditable] {
     -webkit-user-select: text;
     user-select: text;
+  }
+
+  /* Keyboard focus, as a floor rather than a rule.
+   *
+   * Controls that style their own focus set `outline-none` in the utilities
+   * layer, which wins over this; everything else — a plain <a>, a bare <button>
+   * someone adds in a hurry, a scroll container — gets a visible ring instead of
+   * the browser default, which on a dark panel is nearly invisible. Keyed to
+   * :focus-visible so a pointer click never paints one. */
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 1px;
   }
 
   /* Scrollbars: thin and unobtrusive, matching the panel palette. */

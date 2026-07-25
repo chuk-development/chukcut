@@ -26,16 +26,16 @@ import { formatTimecode } from "@/lib/time";
 import type { Container, HwEncoder } from "@/modules/export/lib/api";
 import {
   AUDIO_CODEC_LABELS,
+  buildRequest,
   CODEC_LABELS,
   CONTAINERS,
   crfRange,
-  buildRequest,
   defaultFileName,
-  exportBlockedReason,
   type ExportForm,
+  exportBlockedReason,
+  FRAME_RATES,
   formatFps,
   formFromPreset,
-  FRAME_RATES,
   resolveSettings,
   withExtension,
 } from "@/modules/export/lib/settings";
@@ -97,10 +97,7 @@ export function ExportDialog({ open, onOpenChange }: ExportDialogProps) {
   }, [open, options, form, project]);
 
   const hardware = useMemo(() => options?.hardware ?? [], [options]);
-  const resolved = useMemo(
-    () => (form ? resolveSettings(form, hardware) : null),
-    [form, hardware],
-  );
+  const resolved = useMemo(() => (form ? resolveSettings(form, hardware) : null), [form, hardware]);
 
   const duration = project ? projectDuration(project) : 0;
   const totalFrames =
@@ -111,15 +108,16 @@ export function ExportDialog({ open, onOpenChange }: ExportDialogProps) {
 
   const chooseLocation = useCallback(async () => {
     if (!resolved) return;
-    const separator = projectPath?.includes("\\") ? "\\" : "/";
-    const directory = projectPath
-      ? projectPath.slice(0, Math.max(projectPath.lastIndexOf("/"), projectPath.lastIndexOf("\\")))
-      : "";
-    const suggested = defaultFileName(project?.name, resolved.container);
+    // A saved project is the strongest hint there is: the same folder, the same
+    // stem, the container's extension. Its `.chukcut` path is one the webview
+    // already has, so nothing here invents a location.
+    const suggested = projectPath
+      ? withExtension(projectPath, resolved.container)
+      : defaultFileName(project?.name, resolved.container);
     const chosen = await saveFileDialog({
       title: "Export video",
       filters: [{ name: resolved.container.toUpperCase(), extensions: [resolved.container] }],
-      defaultPath: directory ? `${directory}${separator}${suggested}` : suggested,
+      defaultPath: suggested,
     });
     if (chosen) setForm((previous) => (previous ? { ...previous, outputPath: chosen } : previous));
   }, [project?.name, projectPath, resolved]);
@@ -176,7 +174,8 @@ export function ExportDialog({ open, onOpenChange }: ExportDialogProps) {
                   value={form.presetId}
                   onValueChange={(id) => {
                     const preset = options.presets.find((candidate) => candidate.id === id);
-                    if (preset) setForm((previous) => formFromPreset(preset, project, previous ?? {}));
+                    if (preset)
+                      setForm((previous) => formFromPreset(preset, project, previous ?? {}));
                   }}
                 >
                   <SelectTrigger aria-label="Preset">
@@ -233,7 +232,9 @@ export function ExportDialog({ open, onOpenChange }: ExportDialogProps) {
                 <Select
                   value={String(form.fps)}
                   onValueChange={(value) =>
-                    setForm((previous) => (previous ? { ...previous, fps: Number(value) } : previous))
+                    setForm((previous) =>
+                      previous ? { ...previous, fps: Number(value) } : previous,
+                    )
                   }
                 >
                   <SelectTrigger aria-label="Frame rate">
@@ -370,18 +371,22 @@ export function ExportDialog({ open, onOpenChange }: ExportDialogProps) {
               </Row>
 
               <Row label="Audio">
-                <label className="flex cursor-pointer items-center gap-2 text-[12px]">
+                <div className="flex items-center gap-2 text-[12px]">
                   <Switch
+                    id="export-include-audio"
                     checked={form.includeAudio}
                     onCheckedChange={(includeAudio) =>
                       setForm((previous) => (previous ? { ...previous, includeAudio } : previous))
                     }
                     aria-label="Include audio"
                   />
-                  <span className="text-muted-foreground">
+                  <label
+                    htmlFor="export-include-audio"
+                    className="cursor-pointer text-muted-foreground"
+                  >
                     {form.includeAudio ? "Include the mixed audio track" : "Video only, no audio"}
-                  </span>
-                </label>
+                  </label>
+                </div>
               </Row>
 
               <Row label="Save to">

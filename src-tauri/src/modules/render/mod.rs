@@ -56,13 +56,18 @@
 
 pub mod compositor;
 pub mod context;
+/// DMA-BUF export. Linux only: everything in it is a DRM concept.
+#[cfg(target_os = "linux")]
+pub mod dmabuf;
 pub mod error;
 pub mod layout;
+pub mod nv12;
 pub mod source;
 pub mod texture_pool;
 
-pub use compositor::{Compositor, CompositorConfig, Frame};
+pub use compositor::{Compositor, CompositorConfig, Frame, RenderStats};
 pub use context::RenderContext;
+pub use nv12::{Nv12Converter, Nv12Frame, Nv12Layout};
 pub use error::{RenderError, Result};
 pub use layout::{
     animated_transform, crop_uv, fit_size, place_quad, track_is_visible, visible_segments,

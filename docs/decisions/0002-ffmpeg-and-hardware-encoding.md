@@ -1,6 +1,9 @@
 # 0002 — Our own FFmpeg build, hardware encoding, and zero system dependencies
 
-Status: decided 2026-07-25. Not yet implemented.
+Status: decided 2026-07-25. **Step 1 implemented the same day** — VAAPI H.264
+and H.265 encode from the export path, on Linux. Steps 2 to 4 are open. What
+building step 1 taught us is at the bottom, under "What actually happened",
+and it revises one of the numbers above.
 
 ## The decision
 
@@ -112,3 +115,39 @@ Estimated at 6–12 days for the encode path, which is small next to the payoff.
 Shipping a GPL binary and calling it over a pipe. It is the easy answer, it
 would work, and it would cost us the decoder control that the preview is built
 on.
+
+## What actually happened, 2026-07-25
+
+Step 1 is done. `src-tauri/src/modules/export/hwframes.rs` is the safe wrapper —
+it came to about 250 lines including safety comments, which matches the survey's
+estimate — and `encoder.rs` takes the VAAPI path when `hwaccel` reports a device
+that works. The full numbers are in `docs/STATUS.md`.
+
+Three things the decision above got wrong or left out, recorded here rather than
+edited into the text, because a decision record that quietly agrees with itself
+afterwards is worth nothing.
+
+**The order-of-magnitude claim was about the wrong thing.** "Intel QSV on Raptor
+Lake is expected to reach roughly an order of magnitude more" is true of the
+*encoder* — measured 3–5× against x264 medium, and x264 medium is not the
+slowest thing we could have compared against — but the export as a whole got
+**1.5× faster**, at both aspect ratios. The encoder simply stopped being the
+bottleneck. An export that took four minutes now takes two and a half, not
+twenty-four seconds.
+
+Nothing in the licence argument depends on that, and the licence argument is the
+load-bearing half of this decision. But "an export that takes four minutes
+instead of forty" should not be repeated as a promise.
+
+**QSV is not the Intel path on Linux; VAAPI is.** The decision names QSV first
+for Intel. On this machine `h264_qsv` is in the FFmpeg build and cannot open a
+device at all — no oneVPL runtime — while VAAPI works. QSV on Linux is a layer
+over VAAPI in the first place. Keep the QSV branch for Windows and stop treating
+it as the Intel default.
+
+**The step ordering should change.** The decision ranks zero-copy second and
+hardware *decode* third. The measurements say decode and the CPU-side pixel
+shuffling are together most of what remains, so the honest ranking now is:
+RGBA→NV12 off the CPU, then hardware decode, then full zero-copy. The reasoning
+and the blockers are in `docs/research/zero-copy-encode.md`, which was written
+alongside this work.

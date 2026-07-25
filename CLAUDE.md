@@ -100,11 +100,24 @@ cd src-tauri && cargo check -j 4    # -j 4: full parallelism OOMs on 32 GB
   `ffmpeg_6_0` … `ffmpeg_8_1` cfg flags, and the crate supports FFmpeg 3.4
   upward. We are on `6.1` against system 6.1, which is fine, but a bump is not
   blocked by the system libraries. Verify with a build before relying on it.
-- **Hardware encode is reachable, contrary to an earlier note.**
-  `ffmpeg-sys-next` 6.1 already binds `hwcontext.h` and `hwcontext_drm.h`, and
-  `ffmpeg-next` re-exports them as `ffi`. `AVHWFramesContext`, `av_hwframe_*`
-  and `AV_PIX_FMT_DRM_PRIME` are callable today; only a safe wrapper is
-  missing. See `docs/research/rust-crate-survey.md`.
+- **Hardware encode is built, on VAAPI.** The safe wrapper over
+  `AVHWFramesContext` lives in `src-tauri/src/modules/export/hwframes.rs` and
+  `h264_vaapi`/`hevc_vaapi` work. Two things about it that will otherwise cost
+  you an afternoon: an encoder being present in the FFmpeg build says nothing
+  about whether the driver can drive it, and VAAPI's rate-control modes are the
+  driver's rather than FFmpeg's. Both are in `docs/STATUS.md` under "Traps".
+  What is *not* built is zero-copy — the composited frame is still read back to
+  the CPU and uploaded again; see `docs/research/zero-copy-encode.md`.
+- **Hardware decode is built, on VAAPI, and is deliberately not the default.**
+  `src-tauri/src/modules/media/hwdecode.rs` and `dmabuf.rs`; H.264, HEVC, VP9 and
+  AV1 all decode on this chip. It is off because it is *slower* than software
+  while the frame still has to arrive in system memory — the download out of a
+  tiled surface plus the swscale pass cost more than the decode — and only pays
+  once `render/` can import the surface as a texture. Measured both ways in
+  `docs/research/hardware-decode.md`, which also carries the patch `render/`
+  needs. Two things there that will otherwise cost you an afternoon:
+  `avcodec_find_decoder` returns a decoder that *cannot* drive the GPU for AV1,
+  and a decoder being in the build says nothing about the driver.
 - **Preview frames do not go through `invoke()`.** They are served over the
   `chukcut-frame://` protocol. Read `docs/architecture/preview-pipeline.md`
   before touching the preview path; the reasoning there is load-bearing.

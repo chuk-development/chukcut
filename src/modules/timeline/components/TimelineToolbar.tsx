@@ -28,6 +28,8 @@ interface TimelineToolbarProps {
   canUndo: boolean;
   canRedo: boolean;
   hasSelection: boolean;
+  /** Whether there is anything on the timeline at all. */
+  hasClips: boolean;
   onZoom: (zoom: number) => void;
   onZoomToFit: () => void;
   onSetTool: (tool: "select" | "razor") => void;
@@ -59,6 +61,7 @@ export function TimelineToolbar({
   canUndo,
   canRedo,
   hasSelection,
+  hasClips,
   onZoom,
   onZoomToFit,
   onSetTool,
@@ -113,7 +116,7 @@ export function TimelineToolbar({
       <Separator orientation="vertical" className="mx-1.5 h-4" />
 
       <IconTooltip label="Split at playhead" hint="C">
-        <Button size="icon" onClick={onSplit}>
+        <Button size="icon" onClick={onSplit} disabled={!hasClips}>
           <ScissorsIcon />
         </Button>
       </IconTooltip>
@@ -143,10 +146,12 @@ export function TimelineToolbar({
       </div>
 
       <div className="ml-auto flex items-center gap-1.5">
-        <Button size="sm" variant="ghost" onClick={onZoomToFit}>
-          Fit
-        </Button>
-        <IconTooltip label="Zoom out">
+        <IconTooltip label="Fit the whole timeline on screen">
+          <Button size="sm" variant="ghost" onClick={onZoomToFit}>
+            Fit
+          </Button>
+        </IconTooltip>
+        <IconTooltip label="Zoom out" hint="Ctrl+wheel">
           <Button size="icon-sm" onClick={() => onZoom(zoom / 1.6)}>
             <ZoomOutIcon />
           </Button>
@@ -160,7 +165,7 @@ export function TimelineToolbar({
           onValueChange={([value]) => onZoom(sliderToZoom(value))}
           aria-label="Timeline zoom"
         />
-        <IconTooltip label="Zoom in">
+        <IconTooltip label="Zoom in" hint="Ctrl+wheel">
           <Button size="icon-sm" onClick={() => onZoom(zoom * 1.6)}>
             <ZoomInIcon />
           </Button>

@@ -40,16 +40,68 @@
 //! frame, decoding forward can only get further away. So an overshoot is not
 //! believed: the seek is retried from progressively earlier, and in the last
 //! resort from the start of the file, which always works.
+//!
+//! ## Hardware decode, and why it changes nothing above
+//!
+//! With [`Acceleration::Auto`] this decoder attaches a VAAPI device and frames
+//! come back as GPU surfaces instead of planes in memory. Everything in this
+//! file about seeking, overshoot, `pending` and `last` is unchanged by that,
+//! because none of it is about where the pixels live — `av_seek_frame` is the
+//! demuxer's, and the demuxer does not know a hardware decoder is downstream.
+//! That is worth stating because hardware decoders have a reputation for
+//! seeking differently; the reputation is about decoders that do their own
+//! demuxing, and this one does not. `tests/decode.rs` runs the entire seek
+//! suite against both paths for exactly this reason.
+//!
+//! What *does* change is what comes out, and there are two ways to take it:
+//!
+//! - [`Self::seek_and_decode`] downloads the surface with
+//!   `av_hwframe_transfer_data` and converts it to RGBA, so its result is
+//!   byte-for-byte the same shape as the software path's. Correct, and it
+//!   still pays a full-frame copy out of GPU memory.
+//! - [`Self::seek_and_map`] hands back the surface's DMA-BUF descriptors
+//!   instead, so the frame can become a texture without ever being in system
+//!   memory. See [`super::dmabuf`].
+//!
+//! Hardware is not the default for every entry point. `open_scaled` asks
+//! swscale to downscale during colour conversion, which is most of the point of
+//! a thumbnail strip, and a hardware decode that produces a full-resolution
+//! surface and then downloads it entirely to make a 80-pixel-tall picture is
+//! slower than software, not faster. So a caller that wants hardware asks for
+//! it.
 
 use std::path::{Path, PathBuf};
 
-use ffmpeg_next as ffmpeg;
 use ffmpeg::software::scaling;
 use ffmpeg::util::frame;
+use ffmpeg_next as ffmpeg;
 
+use super::dmabuf::DmabufFrame;
+use super::hwdecode::{self, HwCodec, VaapiDevice};
 use super::probe::normalize_rotation;
 use super::{ensure_initialized, micros_to_ts, ts_to_micros, MediaError, Result};
 use crate::modules::project::Micros;
+
+/// Which decoder a caller wants behind the file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Acceleration {
+    /// libavcodec on the CPU. Always available, always correct, ~9 ms per
+    /// 1080p frame on this machine.
+    #[default]
+    Software,
+    /// VAAPI when this machine has probed as able to decode the file's codec,
+    /// software otherwise. The failure is silent by design: a file that will
+    /// not hardware-decode must still open.
+    Auto,
+    /// VAAPI or nothing. For tests and for a caller that would rather know.
+    Vaapi,
+}
+
+impl Acceleration {
+    fn wants_hardware(self) -> bool {
+        matches!(self, Acceleration::Auto | Acceleration::Vaapi)
+    }
+}
 
 /// One frame, ready for the renderer or a JPEG encoder.
 pub struct DecodedFrame {
@@ -131,6 +183,21 @@ pub struct VideoDecoder {
     scaled_height: u32,
     rotation: i32,
 
+    /// What the caller asked for. [`Self::acceleration`] reports what was
+    /// actually obtained, which can be less.
+    requested: Acceleration,
+    /// The VAAPI device this decoder's codec context is attached to, held so it
+    /// outlives the context. `None` on the software path.
+    hardware: Option<VaapiDevice>,
+    /// Whether frames are in fact coming back as GPU surfaces. Set from the
+    /// first decoded frame rather than from the request, because libavcodec is
+    /// entitled to fall back to software behind our back — see
+    /// `hwdecode::select_vaapi` — and reporting the request would be a lie.
+    hardware_frames: bool,
+    /// Reusable destination for `av_hwframe_transfer_data`, so downloading a
+    /// 1080p surface does not allocate three megabytes per frame.
+    download: Option<frame::Video>,
+
     /// Timestamp of the last frame handed out, or `None` before the first
     /// decode and immediately after a seek.
     position: Option<Micros>,
@@ -177,12 +244,28 @@ pub struct VideoDecoder {
 /// non-atomic refcount operations from overlapping. Any future code that hands
 /// a decoder to a second thread must preserve both properties: move it whole,
 /// and serialise access.
+///
+/// **The VAAPI device, which adds nothing to the argument.** `VaapiDevice` is
+/// already `Send + Sync` in its own right — libavutil refcounts an
+/// `AVBufferRef` atomically — and it is documented there. It is named here only
+/// so the next reader does not have to go and check. The *VADisplay* behind it
+/// is shared across decoders and is driven under the same serialisation as
+/// everything else above.
 unsafe impl Send for VideoDecoder {}
 
 impl VideoDecoder {
-    /// Open `path` and decode at the file's native resolution.
+    /// Open `path` and decode at the file's native resolution, in software.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        Self::open_inner(path.as_ref(), None)
+        Self::open_inner(path.as_ref(), None, Acceleration::Software)
+    }
+
+    /// Open `path` at native resolution with a chosen decoder.
+    ///
+    /// [`Acceleration::Auto`] is the one to reach for in production: it uses
+    /// the GPU where this machine has proved it can, and opens the file either
+    /// way.
+    pub fn open_with(path: impl AsRef<Path>, acceleration: Acceleration) -> Result<Self> {
+        Self::open_inner(path.as_ref(), None, acceleration)
     }
 
     /// Open `path` and have swscale downscale to `target_height` display pixels
@@ -194,10 +277,28 @@ impl VideoDecoder {
     /// The height is a *display* height, so a rotated portrait video scaled to
     /// 80 comes out 80 tall after rotation, not 80 wide.
     pub fn open_scaled(path: impl AsRef<Path>, target_height: u32) -> Result<Self> {
-        Self::open_inner(path.as_ref(), Some(target_height.max(1)))
+        Self::open_inner(path.as_ref(), Some(target_height.max(1)), Acceleration::Software)
     }
 
-    fn open_inner(path: &Path, target_display_height: Option<u32>) -> Result<Self> {
+    /// [`Self::open_scaled`] with a chosen decoder.
+    ///
+    /// Worth knowing before choosing hardware here: the surface comes back at
+    /// the file's full resolution whatever `target_height` says, so a scaled
+    /// hardware decode downloads every pixel and then throws most of them
+    /// away. It wins at export resolution and loses at thumbnail resolution.
+    pub fn open_scaled_with(
+        path: impl AsRef<Path>,
+        target_height: u32,
+        acceleration: Acceleration,
+    ) -> Result<Self> {
+        Self::open_inner(path.as_ref(), Some(target_height.max(1)), acceleration)
+    }
+
+    fn open_inner(
+        path: &Path,
+        target_display_height: Option<u32>,
+        acceleration: Acceleration,
+    ) -> Result<Self> {
         ensure_initialized();
 
         let input = ffmpeg::format::input(&path).map_err(|source| MediaError::Open {
@@ -214,21 +315,39 @@ impl VideoDecoder {
         let start_ts = normalize_start(stream.start_time());
         let rotation = container_rotation(&stream);
         let parameters = stream.parameters();
-        let codec_name = parameters.id().name().to_string();
+        let codec_id = parameters.id();
+        let codec_name = codec_id.name().to_string();
 
-        let context = ffmpeg::codec::context::Context::from_parameters(parameters).map_err(
+        let mut context = ffmpeg::codec::context::Context::from_parameters(parameters).map_err(
             |source| MediaError::Decode {
                 path: path.to_path_buf(),
                 source,
             },
         )?;
-        let decoder = context
-            .decoder()
-            .video()
-            .map_err(|_| MediaError::NoDecoder {
-                path: path.to_path_buf(),
-                codec: codec_name,
-            })?;
+
+        // Attach the GPU *before* opening. `get_format` is consulted on the
+        // first packet, but `hw_device_ctx` has to be in place by then and
+        // libavcodec reads it during `avcodec_open2` to decide what to offer.
+        let hardware = attach_hardware(&mut context, codec_id, acceleration, path)?;
+
+        // Which decoder, not just which codec. On the hardware path this is
+        // deliberately *not* `avcodec_find_decoder` — see
+        // `hwdecode::hardware_decoder` for the AV1 case that makes the
+        // difference between hardware and a very convincing impression of it.
+        let decoder = match hardware
+            .as_ref()
+            .and_then(|_| hwdecode::hardware_decoder(codec_id))
+        {
+            Some(chosen) => context
+                .decoder()
+                .open_as(chosen)
+                .and_then(|opened| opened.video()),
+            None => context.decoder().video(),
+        }
+        .map_err(|_| MediaError::NoDecoder {
+            path: path.to_path_buf(),
+            codec: codec_name,
+        })?;
 
         let src_width = decoder.width().max(1);
         let src_height = decoder.height().max(1);
@@ -249,6 +368,10 @@ impl VideoDecoder {
             scaled_width,
             scaled_height,
             rotation,
+            requested: acceleration,
+            hardware,
+            hardware_frames: false,
+            download: None,
             position: None,
             pending: None,
             last: None,
@@ -277,6 +400,39 @@ impl VideoDecoder {
         rotated_size(self.scaled_width, self.scaled_height, self.rotation)
     }
 
+    /// What this decoder is actually doing, which can be less than was asked
+    /// for.
+    ///
+    /// Before the first frame it reports the request; after it, the truth. The
+    /// two differ when libavcodec accepted the VAAPI device, failed to
+    /// initialise the accelerator for this particular stream — a profile the
+    /// chip does not have, a bit depth it will not do — and quietly carried on
+    /// in software. Nothing else in the codebase can observe that, so this is
+    /// the only place it can be reported honestly.
+    pub fn acceleration(&self) -> Acceleration {
+        match (self.position, self.hardware_frames) {
+            (None, _) => self.requested,
+            (Some(_), true) => Acceleration::Vaapi,
+            (Some(_), false) => Acceleration::Software,
+        }
+    }
+
+    /// Whether frames are coming back as GPU surfaces, i.e. whether
+    /// [`Self::seek_and_map`] can do anything.
+    pub fn is_hardware(&self) -> bool {
+        self.hardware_frames
+    }
+
+    /// The render node this decoder is attached to, for a log line or a
+    /// diagnostics panel. `None` on the software path.
+    ///
+    /// This is also what keeps the device field alive and honest: the device
+    /// exists to outlive the codec context that references it, and a field
+    /// nothing can observe is a field somebody eventually deletes.
+    pub fn device_node(&self) -> Option<&str> {
+        self.hardware.as_ref().map(VaapiDevice::node)
+    }
+
     /// The frame visible at `micros`, i.e. the last frame whose presentation
     /// timestamp is at or before it.
     ///
@@ -284,6 +440,55 @@ impl VideoDecoder {
     /// ahead of it to be worth a keyframe decode; a request that walks forward
     /// a frame at a time never touches the demuxer's seek path.
     pub fn seek_and_decode(&mut self, micros: Micros) -> Result<DecodedFrame> {
+        let pts = self.locate(micros)?;
+        // Take the frame back out rather than borrowing it, because converting
+        // needs `&mut self` for the scaler and the download buffer. It goes
+        // straight back: it is still the visible frame until the playhead
+        // reaches `pending`, and it is the only copy we have.
+        let (_, frame) = self.last.take().expect("locate leaves a frame in hand");
+        let converted = self.convert(&frame, pts);
+        self.last = Some((pts, frame));
+        converted
+    }
+
+    /// The frame visible at `micros`, as DMA-BUF handles onto the GPU surface
+    /// it was decoded into.
+    ///
+    /// Same frame [`Self::seek_and_decode`] would return, and the same seek
+    /// policy reaches it; the difference is that the pixels are never copied
+    /// out of GPU memory. Errors when this decoder is not producing hardware
+    /// frames, because silently returning a downloaded-and-re-uploaded frame
+    /// would hide the exact thing a caller reaching for this wants to know.
+    ///
+    /// The returned value pins the decoder's surface until it is dropped, so a
+    /// caller holding one per cached texture must expect the surface pool to be
+    /// that much smaller — see `hwdecode::EXTRA_HW_FRAMES`.
+    pub fn seek_and_map(&mut self, micros: Micros) -> Result<MappedFrame> {
+        let pts = self.locate(micros)?;
+        let (_, frame) = self.last.take().expect("locate leaves a frame in hand");
+        let mapped = if hwdecode::is_hardware_frame(&frame) {
+            DmabufFrame::map(&frame).map(|dmabuf| MappedFrame {
+                dmabuf,
+                pts,
+                rotation: self.rotation,
+            })
+        } else {
+            Err(MediaError::NoHardware(format!(
+                "{} is decoding in software, so there is no GPU surface to export",
+                self.path.display()
+            )))
+        };
+        self.last = Some((pts, frame));
+        mapped
+    }
+
+    /// Decode until the frame covering `micros` is in `self.last`, and return
+    /// its timestamp.
+    ///
+    /// Split out of [`Self::seek_and_decode`] so the DMA-BUF path reaches the
+    /// same frame by the same route. Every retry rule this file documents lives
+    /// here, and there is deliberately only one copy of it.
+    fn locate(&mut self, micros: Micros) -> Result<Micros> {
         let target = micros.max(0);
 
         let mut seeked = false;
@@ -322,13 +527,17 @@ impl VideoDecoder {
             at: target,
         })?;
 
+        // The first frame settles which path we are actually on. libavcodec is
+        // allowed to have dropped back to software inside `get_format` without
+        // telling anyone, and this is where that becomes observable.
+        self.hardware_frames = hwdecode::is_hardware_frame(&frame);
+
         self.position = Some(pts);
-        let converted = self.convert(&frame, pts);
         // Hold on to what we handed out. It stays the visible frame until the
         // playhead reaches the next one, and it is the only copy of it we have
         // — the demuxer has already moved past.
         self.last = Some((pts, frame));
-        converted
+        Ok(pts)
     }
 
     /// [`Self::decode_until`], with "there was nothing there" as a value rather
@@ -556,7 +765,40 @@ impl VideoDecoder {
         Ok(())
     }
 
+    /// Turn whatever the decoder produced into tightly packed RGBA.
+    ///
+    /// A hardware surface is downloaded first. That copy is the price of this
+    /// entry point and it is why [`Self::seek_and_map`] exists — but it is also
+    /// what makes the hardware path's *output* identical in shape to the
+    /// software path's, which is what lets one test suite cover both.
     fn convert(&mut self, decoded: &frame::Video, pts: Micros) -> Result<DecodedFrame> {
+        if hwdecode::is_hardware_frame(decoded) {
+            // Take the scratch buffer out of `self` for the duration: the
+            // conversion below needs `&mut self` for the scaler, which it
+            // cannot have while `self.download` is borrowed. It goes back
+            // whichever way the conversion ends, so a failed frame does not
+            // cost the next one an allocation.
+            let mut scratch = match self.download.take() {
+                // Reusing the buffer only works while it is the right shape. A
+                // concatenated recording that changes resolution mid-file
+                // would otherwise get `EINVAL` from libavutil and read as a
+                // corrupt stream.
+                Some(frame)
+                    if frame.width() == decoded.width() && frame.height() == decoded.height() =>
+                {
+                    frame
+                }
+                _ => frame::Video::empty(),
+            };
+            let downloaded = hwdecode::transfer_to_software(decoded, &mut scratch);
+            let converted = downloaded.and_then(|()| self.convert_software(&scratch, pts));
+            self.download = Some(scratch);
+            return converted;
+        }
+        self.convert_software(decoded, pts)
+    }
+
+    fn convert_software(&mut self, decoded: &frame::Video, pts: Micros) -> Result<DecodedFrame> {
         self.ensure_scaler(decoded)?;
 
         let path = self.path.clone();
@@ -590,6 +832,97 @@ impl VideoDecoder {
             height,
             pts,
         })
+    }
+}
+
+/// A decoded frame that is still on the GPU.
+///
+/// The counterpart of [`DecodedFrame`], for the path that does not copy. Note
+/// what is *not* here: rotation has not been applied, because rotating means
+/// touching pixels and the entire point is not to. The caller gets the angle
+/// and applies it where it is free — in the compositor's transform, which is
+/// already doing a matrix multiply per vertex.
+pub struct MappedFrame {
+    pub dmabuf: DmabufFrame,
+    /// Presentation timestamp of the frame actually returned, exactly as
+    /// [`DecodedFrame::pts`].
+    pub pts: Micros,
+    /// Display rotation in degrees clockwise, **not** applied.
+    pub rotation: i32,
+}
+
+impl MappedFrame {
+    /// Size of the picture as decoded, before rotation.
+    pub fn coded_size(&self) -> (u32, u32) {
+        self.dmabuf.size()
+    }
+
+    /// Size the picture should be shown at, i.e. with rotation applied.
+    pub fn display_size(&self) -> (u32, u32) {
+        let (w, h) = self.dmabuf.size();
+        rotated_size(w, h, self.rotation)
+    }
+}
+
+impl std::fmt::Debug for MappedFrame {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MappedFrame")
+            .field("pts", &self.pts)
+            .field("rotation", &self.rotation)
+            .field("dmabuf", &self.dmabuf)
+            .finish()
+    }
+}
+
+/// Point a codec context at the GPU, if that is what the caller wants and this
+/// machine can do it.
+///
+/// Returns the device to be held for the decoder's lifetime, or `None` for the
+/// software path. Only [`Acceleration::Vaapi`] turns "no hardware" into an
+/// error; `Auto` logs the reason once per file at debug and carries on, because
+/// **a file that will not hardware-decode must still open** and the alternative
+/// is an import that fails on a machine where nothing is wrong.
+fn attach_hardware(
+    context: &mut ffmpeg::codec::context::Context,
+    codec_id: ffmpeg::codec::Id,
+    acceleration: Acceleration,
+    path: &Path,
+) -> Result<Option<VaapiDevice>> {
+    if !acceleration.wants_hardware() {
+        return Ok(None);
+    }
+
+    let refuse = |reason: String| -> Result<Option<VaapiDevice>> {
+        if acceleration == Acceleration::Vaapi {
+            Err(MediaError::NoHardware(reason))
+        } else {
+            tracing::debug!(file = %path.display(), reason, "decoding in software");
+            Ok(None)
+        }
+    };
+
+    let Some(codec) = HwCodec::from_id(codec_id) else {
+        return refuse(format!(
+            "{} is not one of the codecs this build hardware-decodes",
+            codec_id.name()
+        ));
+    };
+    // The probe, not the FFmpeg build. `docs/STATUS.md` records why: a codec
+    // being present says nothing about whether the driver can drive it, in
+    // either direction.
+    if !hwdecode::supports(codec) {
+        return refuse(format!(
+            "this machine does not hardware-decode {}",
+            codec.label()
+        ));
+    }
+    let Some(device) = VaapiDevice::shared() else {
+        return refuse("no VAAPI device on this machine".into());
+    };
+
+    match device.attach_to_decoder(context) {
+        Ok(()) => Ok(Some(device)),
+        Err(error) => refuse(error.to_string()),
     }
 }
 

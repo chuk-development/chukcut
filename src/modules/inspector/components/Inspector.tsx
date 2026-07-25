@@ -1,4 +1,9 @@
-import { FlipHorizontalIcon, FlipVerticalIcon, RotateCcwIcon } from "lucide-react";
+import {
+  FlipHorizontalIcon,
+  FlipVerticalIcon,
+  RotateCcwIcon,
+  SlidersHorizontalIcon,
+} from "lucide-react";
 import { useCallback } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -109,8 +114,12 @@ export function Inspector() {
       </header>
 
       {!project ? (
-        <div className="grid flex-1 place-items-center px-6 text-center text-[12px] text-muted-foreground">
-          No project open
+        <div className="flex h-full flex-col items-center justify-center gap-1.5 px-6 text-center">
+          <SlidersHorizontalIcon className="size-5 text-muted-foreground/50" />
+          <p className="text-[12px] text-muted-foreground">No project open</p>
+          <p className="max-w-[220px] text-[11px] leading-relaxed text-muted-foreground/70">
+            Clip properties show up here once a project is loaded.
+          </p>
         </div>
       ) : !segment || !found ? (
         <ScrollArea className="flex-1">

@@ -34,7 +34,7 @@ use chukcut_lib::modules::project::document::{
 use chukcut_lib::modules::render::RenderContext;
 
 /// Bump when any generator below changes so stale fixtures are not reused.
-const FIXTURE_VERSION: &str = "v1";
+const FIXTURE_VERSION: &str = "v2";
 
 // ---------------------------------------------------------------------------
 // Skipping
@@ -114,6 +114,11 @@ pub struct Media {
     pub counter_with_audio: PathBuf,
     /// The counter at 30 fps for the first second and 15 fps afterwards.
     pub counter_vfr: PathBuf,
+    /// The same counter content in MPEG-4 Part 2, which this codebase does not
+    /// hardware-decode. The fixture exists so the automatic fallback has
+    /// something real to fall back *from*: a file whose codec the GPU path
+    /// refuses must still open and still decode correctly.
+    pub counter_mpeg4: PathBuf,
 
     /// 320x240: top-left red, top-right green, bottom-left blue,
     /// bottom-right white. One second at 30 fps.
@@ -178,6 +183,7 @@ fn build_media() -> Result<Media, String> {
         counter_late_start: dir.join("counter_late_start.ts"),
         counter_with_audio: dir.join("counter_audio.mp4"),
         counter_vfr: dir.join("counter_vfr.mp4"),
+        counter_mpeg4: dir.join("counter_mpeg4.mp4"),
         quadrants: dir.join("quadrants.mp4"),
         quadrants_rot90: dir.join("quadrants_rot90.mp4"),
         quadrants_rot270: dir.join("quadrants_rot270.mp4"),
@@ -252,6 +258,23 @@ fn build_media() -> Result<Media, String> {
             "libx264",
             "-crf",
             "10",
+            "-g",
+            "30",
+            path(out),
+        ])
+    })?;
+
+    once(&media.counter_mpeg4, |out| {
+        // Deliberately a codec no modern iGPU decodes. `-q:v 2` keeps the
+        // counter stripes clean enough to read back, which MPEG-4 at a default
+        // quantiser does not.
+        ffmpeg(&[
+            "-i",
+            path(&media.counter),
+            "-c:v",
+            "mpeg4",
+            "-q:v",
+            "2",
             "-g",
             "30",
             path(out),

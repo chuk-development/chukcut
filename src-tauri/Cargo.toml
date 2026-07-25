@@ -29,7 +29,14 @@ parking_lot = "0.12.5"
 rayon = "1.12.0"
 glam = "0.33.2"
 image = "0.25.10"
+# `media/thumbnails.rs` still uses this; the preview does not. It was replaced
+# there because it needed ~63 ms for a 1080x1920 frame against a 33 ms budget.
 jpeg-encoder = "0.7.0"
+# libjpeg-turbo, for the preview's software JPEG path — 3-4x faster than
+# `jpeg-encoder` on the same frame because it is SIMD rather than portable
+# Rust. Built from source by `turbojpeg-sys` (cmake + nasm) since Ubuntu ships
+# the runtime without a pkg-config file; that costs about a minute, once.
+turbojpeg = "1"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 ffmpeg-next = "6.1"
@@ -44,6 +51,21 @@ bytemuck = "1.25.2"
 futures = "0.3.33"
 pollster = "1.0.1"
 tauri-plugin-dialog = "2.7.2"
+
+# The escape hatch under wgpu, for the one thing WebGPU has no concept of:
+# allocating a buffer whose memory can be exported as a DMA-BUF file descriptor,
+# so the VAAPI encoder can read what the compositor wrote instead of being handed
+# a copy. See `docs/research/zero-copy-encode.md` and `modules/render/dmabuf.rs`.
+#
+# Both are pinned to exactly what wgpu 30 links, and `cargo tree` should be
+# checked after any wgpu bump: a *second* `ash` in the graph would compile and
+# would hand us entry points for a different `VkDevice`, which is a class of bug
+# that shows up as a driver crash rather than a type error. Linux only — DMA-BUF
+# is a DRM concept and nothing here is reachable on another platform.
+[target.'cfg(target_os = "linux")'.dependencies]
+wgpu-hal = { version = "30.0.0", features = ["vulkan"] }
+ash = "0.38"
+libc = "0.2"
 
 
 # Development builds run the full pipeline — decode, JPEG encode, pixel work —

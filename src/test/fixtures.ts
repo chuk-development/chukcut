@@ -7,6 +7,12 @@
  * below only fill in the parts a test does not care about.
  */
 
+import type {
+  ExportOptions,
+  ExportPreset,
+  ExportProgress,
+  HwEncoder,
+} from "@/modules/export/lib/api";
 import type { PreviewInfo } from "@/modules/preview/lib/api";
 import type {
   ImportedMaterial,
@@ -126,6 +132,108 @@ export function makePreviewInfo(overrides: Partial<PreviewInfo> = {}): PreviewIn
     frame: 0,
     playing: false,
     frameUrl: "chukcut-frame://preview/1",
+    ...overrides,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Export
+//
+// Written out rather than built, for the same reason as the document above:
+// these are the bytes `export_presets` answers with, and a builder that spread a
+// partial could hide `total_frames` turning into `totalFrames`.
+// ---------------------------------------------------------------------------
+
+export const YOUTUBE_1080P: ExportPreset = {
+  id: "youtube_1080p",
+  label: "YouTube 1080p",
+  description: "1920x1080, H.264, high quality upload",
+  width: 1920,
+  height: 1080,
+  fps: { num: 30, den: 1 },
+  video_codec: "h264",
+  quality: { kind: "crf", value: 20 },
+  audio_codec: "aac",
+  audio_bitrate: 384_000,
+  sample_rate: 48_000,
+  container: "mp4",
+};
+
+export const YOUTUBE_4K: ExportPreset = {
+  id: "youtube_4k",
+  label: "YouTube 4K",
+  description: "3840x2160, H.265, high quality upload",
+  width: 3840,
+  height: 2160,
+  fps: { num: 30, den: 1 },
+  video_codec: "h265",
+  quality: { kind: "crf", value: 22 },
+  audio_codec: "aac",
+  audio_bitrate: 384_000,
+  sample_rate: 48_000,
+  container: "mp4",
+};
+
+/** The escape hatch. Rust fills width/height/fps in from the open project. */
+export const CUSTOM_PRESET: ExportPreset = {
+  id: "custom",
+  label: "Custom",
+  description: "Project canvas and frame rate",
+  width: 1080,
+  height: 1920,
+  fps: { num: 30, den: 1 },
+  video_codec: "h264",
+  quality: { kind: "crf", value: 20 },
+  audio_codec: "aac",
+  audio_bitrate: 192_000,
+  sample_rate: 48_000,
+  container: "mp4",
+};
+
+export const NVENC_H264: HwEncoder = {
+  id: "nvenc_h264",
+  accel: "nvenc",
+  codec: "h264",
+  encoder_name: "h264_nvenc",
+  label: "H.264 (NVIDIA NVENC)",
+  available: true,
+  usable: true,
+  note: null,
+};
+
+/** Present in the build and backed by a device, but not drivable yet. */
+export const VAAPI_H264: HwEncoder = {
+  id: "vaapi_h264",
+  accel: "vaapi",
+  codec: "h264",
+  encoder_name: "h264_vaapi",
+  label: "H.264 (VAAPI)",
+  available: true,
+  usable: false,
+  note: "VAAPI encoding needs a hardware frame pool, which is not wired up yet",
+};
+
+export function makeExportOptions(overrides: Partial<ExportOptions> = {}): ExportOptions {
+  return {
+    presets: [YOUTUBE_1080P, YOUTUBE_4K, CUSTOM_PRESET],
+    hardware: [],
+    default_preset_id: "custom",
+    ...overrides,
+  };
+}
+
+export function makeProgress(overrides: Partial<ExportProgress> = {}): ExportProgress {
+  return {
+    job_id: "job-1",
+    stage: "encoding",
+    frame: 0,
+    total_frames: 900,
+    fraction: 0,
+    fps: 0,
+    elapsed_seconds: 0,
+    remaining_seconds: null,
+    output_path: null,
+    message: null,
     ...overrides,
   };
 }

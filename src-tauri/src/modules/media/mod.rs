@@ -39,12 +39,17 @@ use ffmpeg_next as ffmpeg;
 
 pub mod commands;
 pub mod decoder;
+pub mod dmabuf;
+pub mod hwdecode;
 pub mod probe;
 pub mod provider;
 pub mod thumbnails;
+
 pub mod waveform;
 
-pub use decoder::{DecodedFrame, VideoDecoder};
+pub use decoder::{Acceleration, DecodedFrame, VideoDecoder};
+pub use dmabuf::DmabufFrame;
+pub use hwdecode::{HwCodec, HwDecodeSupport};
 pub use provider::MediaSourceProvider;
 pub use probe::{probe, AudioStreamInfo, MediaInfo, VideoStreamInfo};
 pub use thumbnails::thumbnail_strip;
@@ -86,6 +91,22 @@ pub enum MediaError {
     Write {
         path: PathBuf,
         source: std::io::Error,
+    },
+
+    /// The GPU cannot be used for this, and software is the answer.
+    ///
+    /// Carries no path because it is a property of the *machine*, not of a
+    /// file: no render node, a driver that will not initialise, a codec this
+    /// chip does not decode. Every caller's response is the same — fall back —
+    /// so the string exists to be logged once, not shown per file.
+    #[error("hardware decode is unavailable: {0}")]
+    NoHardware(String),
+
+    /// A libav call on the hardware path failed.
+    #[error("{what}: {source}")]
+    Hardware {
+        what: String,
+        source: ffmpeg::Error,
     },
 
     #[error("{0}")]

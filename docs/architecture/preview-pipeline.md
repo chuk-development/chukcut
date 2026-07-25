@@ -22,11 +22,17 @@ at any resolution.
 
 **1. `invoke()` with encoded frames.** Dead on arrival, see above.
 
-**2. Custom URI scheme serving compressed frames.** Rust renders at proxy
-resolution, encodes JPEG, and serves bytes over a registered protocol. The
-webview fetches them like images. At 960×540 quality 80 a frame is ~120 KB, so
-30 fps is ~3.6 MB/s — trivial. Encode cost with the pure-Rust `jpeg-encoder`
-crate is ~2–4 ms per frame on one core, and it parallelizes across frames.
+**2. Custom URI scheme serving compressed frames.** Rust renders, encodes JPEG,
+and serves bytes over a registered protocol. The webview fetches them like
+images. At 960×540 quality 80 a frame is ~120 KB, so 30 fps is ~3.6 MB/s —
+trivial.
+
+The encode cost was the one thing this option could have died on, and the
+estimate here was wrong for a while: `jpeg-encoder` is ~2–4 ms at 960×540 but
+**31 ms at 1080×1920**, against a 33 ms budget. That is why the preview ran
+reduced for a while. It is now ~6 ms on the iGPU's fixed-function JPEG encoder,
+with libjpeg-turbo at ~10 ms as the fallback. See
+`docs/research/vaapi-jpeg-preview.md`.
 
 **3. Hole punching.** A native wgpu surface positioned underneath a transparent
 region of the webview. This is what CapCut Desktop does and it gives full
@@ -60,7 +66,8 @@ into a texture either way. Switching later replaces the sink, not the renderer.
    render graph ──────► RGBA texture (proxy res)
         │
         ▼
-   readback to CPU ──► jpeg-encoder ──► frame cache (ring buffer)
+   readback to CPU ──► JPEG encode ──► frame cache (ring buffer)
+                  (VAAPI, else libjpeg-turbo)
                                               │
         chukcut-frame://preview/<session>/<n> │
                                               ▼
@@ -101,14 +108,19 @@ because humans forgive a dropped frame and never forgive a stutter in audio.
 ## Proxy resolution
 
 Chosen from the canvas so the aspect ratio matches exactly, capped on the long
-edge:
+edge at 1920. Anything at or below that previews natively, which covers every
+project this editor is actually for.
 
 | Canvas long edge | Preview long edge |
 |---|---|
-| ≤ 720 | native |
-| ≤ 1080 | 720 |
-| ≤ 2160 | 960 |
-| > 2160 | 1080 |
+| ≤ 1920 | native |
+| > 1920 | 1920 |
 
-The user can override it; a "full quality preview" toggle just raises the cap
+The cap used to be far lower, and there used to be a *second*, smaller size used
+only while playing. Both existed because the JPEG encode did not fit in the
+frame budget at native resolution. It does now — see
+`docs/research/vaapi-jpeg-preview.md` — so playback and stills are the same
+picture again.
+
+The user can override the cap; a "full quality preview" toggle just raises it
 and accepts the frame rate hit.

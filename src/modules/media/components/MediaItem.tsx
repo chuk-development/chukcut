@@ -54,7 +54,7 @@ export function MediaItem({ item, onRemove }: MediaItemProps) {
           event.dataTransfer.setData("text/plain", item.path);
           event.dataTransfer.effectAllowed = "copy";
         }}
-        className="relative block aspect-video w-full cursor-grab overflow-hidden rounded-sm border border-border bg-surface p-0 outline-none transition-colors group-hover:border-primary/70 active:cursor-grabbing"
+        className="relative block aspect-video w-full cursor-grab overflow-hidden rounded-sm border border-border bg-surface p-0 outline-none transition-colors group-hover:border-primary/70 focus-visible:border-primary focus-visible:ring-[2px] focus-visible:ring-ring/60 active:cursor-grabbing"
       >
         {poster ? (
           <span
@@ -81,7 +81,10 @@ export function MediaItem({ item, onRemove }: MediaItemProps) {
         variant="secondary"
         aria-label={`Remove ${item.name}`}
         onClick={() => onRemove(item.id)}
-        className="absolute right-1 top-1 opacity-0 transition-opacity group-hover:opacity-100"
+        // Hover alone would make this unreachable without a mouse: the button is
+        // in the tab order whether it is painted or not, so it also appears when
+        // anything inside the tile takes focus.
+        className="absolute right-1 top-1 opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100 focus-visible:opacity-100"
       >
         <XIcon />
       </Button>

@@ -22,6 +22,20 @@ pub struct TextureKey {
     pub height: u32,
     pub format: wgpu::TextureFormat,
     pub usage: wgpu::TextureUsages,
+    /// A second format the texture's memory may be viewed as.
+    ///
+    /// Part of the key because it is part of the `TextureDescriptor`: a texture
+    /// created without it cannot later be viewed as anything else, and handing
+    /// one out to a caller that wants the reinterpretation fails validation at
+    /// view creation rather than here.
+    ///
+    /// It exists for exactly one reason. The compositor renders to
+    /// `Rgba8UnormSrgb`, and `textureLoad` on an sRGB texture returns
+    /// *linearised* floats — so a shader reading the target back would see
+    /// different numbers than the CPU readback path does. Viewing the same
+    /// memory as `Rgba8Unorm` gives the shader the stored bytes, which is what
+    /// the RGBA→NV12 pass has to convert if it is to agree with swscale.
+    pub view_format: Option<wgpu::TextureFormat>,
 }
 
 impl TextureKey {
@@ -36,7 +50,18 @@ impl TextureKey {
             height,
             format,
             usage,
+            view_format: None,
         }
+    }
+
+    /// Also allow this texture to be viewed as `format`.
+    ///
+    /// A no-op when it is the texture's own format: wgpu rejects a redundant
+    /// entry in `view_formats` on some backends and it would split the pool
+    /// into two buckets holding interchangeable textures.
+    pub fn viewable_as(mut self, format: wgpu::TextureFormat) -> Self {
+        self.view_format = (format != self.format).then_some(format);
+        self
     }
 
     /// Bytes this texture occupies, ignoring driver padding and mips. Good
@@ -84,6 +109,22 @@ impl PooledTexture {
 
     pub fn format(&self) -> wgpu::TextureFormat {
         self.key.format
+    }
+
+    /// A view reinterpreting this texture's bytes as `format`.
+    ///
+    /// Only legal for the format the key was built with — see
+    /// [`TextureKey::viewable_as`]. `None` rather than a panic so a caller can
+    /// fall back to the path that does not need the reinterpretation.
+    pub fn view_as(&self, format: wgpu::TextureFormat) -> Option<wgpu::TextureView> {
+        if format != self.key.format && self.key.view_format != Some(format) {
+            return None;
+        }
+        Some(self.texture.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("chukcut reinterpreted view"),
+            format: Some(format),
+            ..Default::default()
+        }))
     }
 }
 
@@ -184,7 +225,7 @@ impl TexturePool {
             dimension: wgpu::TextureDimension::D2,
             format: key.format,
             usage: key.usage,
-            view_formats: &[],
+            view_formats: key.view_format.as_slice(),
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         PooledTexture { texture, view, key }

@@ -45,7 +45,7 @@ use super::clock::{
     frame_at, frame_interval, frame_time, pace, MonotonicSource, Pacing, PlaybackClock, TimeSource,
     DEFAULT_READ_AHEAD,
 };
-use super::encoder::encode_jpeg;
+use super::encoder::encode_preview_jpeg;
 use super::error::{PreviewError, Result};
 use super::session::{PreviewOptions, PreviewSession};
 use crate::modules::audio::AudioEngine;
@@ -785,8 +785,13 @@ fn render_one(shared: &Arc<Shared>, ctx: &Arc<RenderContext>, compositor: &Compo
     } else {
         session.quality
     };
-    // The proxy size comes from the canvas, which the device may not be able to
-    // allocate on a very restricted adapter.
+    // One resolution, whatever the frame is for.
+    //
+    // Playback used to render smaller than a parked frame, because at 1080x1920
+    // the JPEG encode alone overran the 33 ms budget. With the encode on the
+    // GPU it is about 7 ms and runs on another thread besides, so the reason is
+    // gone and playback is as sharp as the project is. What is left in the
+    // budget is compositing and decoding.
     let size = ctx.clamp_size(session.size);
     let sources = Arc::clone(&*shared.sources.read());
 
@@ -825,8 +830,8 @@ fn render_one(shared: &Arc<Shared>, ctx: &Arc<RenderContext>, compositor: &Compo
         let scrub = job.scrub;
         move || {
             let encode_started = std::time::Instant::now();
-            let bytes = match encode_jpeg(&rgba, size.0, size.1, quality) {
-                Ok(bytes) => bytes,
+            let (bytes, backend) = match encode_preview_jpeg(&rgba, size.0, size.1, quality) {
+                Ok(encoded) => encoded,
                 Err(error) => {
                     shared.emit_error_once(error.to_string());
                     return;
@@ -849,6 +854,7 @@ fn render_one(shared: &Arc<Shared>, ctx: &Arc<RenderContext>, compositor: &Compo
                 budget_ms = frame_interval(fps) as f64 / 1000.0,
                 over_budget = slowest_ms > frame_interval(fps) as f64 / 1000.0,
                 bytes = bytes.len(),
+                encoder = backend.label(),
                 "preview frame ready"
             );
 
@@ -1310,8 +1316,11 @@ mod tests {
             1_000_000,
             false,
         );
-        assert_eq!(info.width, 960, "1080p canvas previews at a 960 long edge");
-        assert_eq!(info.height, 540);
+        // Native, because the proxy table stops reducing anything at or below
+        // a 1920 long edge. This assertion previously expected 960x540 and was
+        // left behind when the table changed.
+        assert_eq!(info.width, 1920, "a 1080p canvas previews natively");
+        assert_eq!(info.height, 1080);
         assert_eq!(info.frame, 30);
 
         // Opening the device happens on the render thread and can take longer

@@ -75,6 +75,18 @@ fn request(path: &std::path::Path, overrides: Option<ExportOverrides>, audio: bo
     }
 }
 
+/// The first hardware encoder this machine can actually drive.
+///
+/// `hwaccel::detect` answers by opening the device and encoding a frame, so a
+/// `usable` entry here means the driver really works — which is exactly the
+/// condition under which the tests below are worth running. On CI, and on any
+/// machine without a GPU, this is `None` and they skip.
+fn usable_hardware() -> Option<chukcut_lib::modules::export::HwEncoder> {
+    chukcut_lib::modules::export::hwaccel::detect()
+        .into_iter()
+        .find(|encoder| encoder.usable)
+}
+
 /// Everything an export produced: the file, what ffprobe says about it, and
 /// every progress message the job sent.
 struct Exported {
@@ -249,6 +261,84 @@ fn the_last_frame_of_the_timeline_is_in_the_file() {
             "frame {n} of the export is not frame {n} of the source"
         );
     }
+    let _ = std::fs::remove_file(&result.path);
+}
+
+// ---------------------------------------------------------------------------
+// The tail, on the GPU
+// ---------------------------------------------------------------------------
+
+/// The hardware path has its own encoder, its own pixel format and its own
+/// frame pool, and none of that is allowed to change what comes out.
+///
+/// This is the same check as `the_last_frame_of_the_timeline_is_in_the_file`,
+/// deliberately: a truncated tail is *the* classic hardware-encode bug, because
+/// people write a second flush for the hardware path and get it subtly wrong.
+/// The frames are counted by decoding, and then read for their content, so a
+/// green picture or a one-frame offset fails here rather than after an upload.
+#[test]
+fn a_hardware_export_is_not_truncated_and_holds_the_right_frames() {
+    let Some(hardware) = usable_hardware() else {
+        eprintln!("skipping: no usable hardware encoder on this machine");
+        return;
+    };
+    let Some(project) = counter_project(2_000_000, 30.0) else {
+        eprintln!("skipping: no media fixtures");
+        return;
+    };
+
+    let path = scratch("tail_hardware.mp4");
+    let mut req = request(&path, None, false);
+    req.hardware = Some(hardware.id.clone());
+    let result = exported!(&project, req);
+
+    assert_eq!(result.expected_frames, 60);
+    assert_eq!(
+        result.probe.decoded_frames, 60,
+        "{}: a truncated tail on the hardware path — the last GOP never left the encoder",
+        hardware.id
+    );
+
+    // The counter clip writes its own frame index into its pixels, so this is
+    // the check that the *right* sixty frames came out. A hardware path that
+    // uploaded into the wrong surface, or that lost a frame's PTS on the way
+    // through `av_hwframe_transfer_data`, fails here and only here.
+    let mut decoder = VideoDecoder::open(&result.path).expect("open the hardware export");
+    for n in [0u64, 1, 29, 30, 59] {
+        let at = (n as f64 * 1_000_000.0 / 30.0).round() as i64 + 16_000;
+        let frame = decoder.seek_and_decode(at).expect("decode the hardware export");
+        assert_eq!(
+            read_counter_rgba(&frame.data, frame.width, frame.height),
+            Some(n),
+            "{}: frame {n} of the hardware export is not frame {n} of the source",
+            hardware.id
+        );
+    }
+    let _ = std::fs::remove_file(&result.path);
+}
+
+/// A hardware export has to be a normal file: same size, same rate, same codec
+/// family, an audio track when one was asked for.
+#[test]
+fn a_hardware_export_is_shaped_like_a_software_one() {
+    let Some(hardware) = usable_hardware() else {
+        eprintln!("skipping: no usable hardware encoder on this machine");
+        return;
+    };
+    let Some(project) = counter_project(1_000_000, 30.0) else {
+        eprintln!("skipping: no media fixtures");
+        return;
+    };
+
+    let path = scratch("shape_hardware.mp4");
+    let mut req = request(&path, None, true);
+    req.hardware = Some(hardware.id.clone());
+    let result = exported!(&project, req);
+
+    assert_eq!((result.probe.width, result.probe.height), (320, 240));
+    assert_eq!(result.probe.decoded_frames, 30);
+    assert_eq!(result.probe.avg_frame_rate, (30, 1));
+    assert!(result.probe.has_audio, "no audio stream in the hardware file");
     let _ = std::fs::remove_file(&result.path);
 }
 

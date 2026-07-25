@@ -32,7 +32,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-use super::decoder::VideoDecoder;
+use super::decoder::{Acceleration, VideoDecoder};
 use crate::modules::project::{Id, MaterialKind, Micros, Project};
 use crate::modules::render::{RenderContext, SourceFrame, SourceProvider, SourceRequest};
 
@@ -107,6 +107,60 @@ fn fitted_height(display: (u32, u32), max_size: (u32, u32)) -> u32 {
 /// Reopening costs a seek, so a preview that nudges its proxy size by a few
 /// pixels must not trigger one; a jump from preview to export resolution must.
 const REOPEN_RATIO: f32 = 1.5;
+
+/// Which decoder this provider opens, and why it is still the CPU.
+///
+/// This is the one place in the codebase where hardware decode is turned on or
+/// off, and it is deliberately off. The reason is measured, not cautious —
+/// `docs/research/hardware-decode.md` has the table:
+///
+/// | 1920×1080 H.264, per frame | |
+/// |---|---:|
+/// | software decode → RGBA | ~27 ms |
+/// | **hardware** decode → RGBA | ~37 ms |
+/// | hardware decode → DMA-BUF | **1.7 ms** |
+///
+/// The middle row is what this provider would get today, because
+/// [`upload_rgba`] below is what the compositor is fed, and reaching RGBA from a
+/// VA surface means `av_hwframe_transfer_data` out of tiled GPU memory followed
+/// by an swscale pass. Both of those are more expensive than decoding the frame
+/// was. Turning hardware on here would make the preview *slower* and would look
+/// like a regression in the one number the user can see.
+///
+/// The bottom row is the whole prize and it is not reachable from this file:
+/// it needs `render/` to import the decoded surface as a texture, which is a
+/// change this module is not allowed to make and which the research note
+/// carries as a patch. **When that lands, flip this constant.** Until then the
+/// environment variable exists so the change can be measured without a rebuild.
+const DEFAULT_ACCELERATION: Acceleration = Acceleration::Software;
+
+/// Read `CHUKCUT_DECODE` once, falling back to [`DEFAULT_ACCELERATION`].
+///
+/// `software`, `auto` or `vaapi`. An unrecognised value is a typo rather than a
+/// request, and silently ignoring it would leave somebody measuring the default
+/// and believing they measured hardware — so it is logged.
+fn acceleration() -> Acceleration {
+    static CHOSEN: std::sync::OnceLock<Acceleration> = std::sync::OnceLock::new();
+    *CHOSEN.get_or_init(|| {
+        let chosen = match std::env::var("CHUKCUT_DECODE").as_deref() {
+            Ok("software") => Acceleration::Software,
+            Ok("auto") => Acceleration::Auto,
+            Ok("vaapi") => Acceleration::Vaapi,
+            Ok(other) => {
+                tracing::warn!(
+                    value = other,
+                    "CHUKCUT_DECODE must be software, auto or vaapi; using the default"
+                );
+                DEFAULT_ACCELERATION
+            }
+            Err(_) => DEFAULT_ACCELERATION,
+        };
+        if chosen != DEFAULT_ACCELERATION {
+            tracing::info!(?chosen, "decode acceleration overridden by CHUKCUT_DECODE");
+        }
+        chosen
+    })
+}
 
 pub struct MediaSourceProvider {
     /// Material id → where its pixels live. Built once from a project snapshot.
@@ -230,7 +284,8 @@ impl MediaSourceProvider {
         let open = match decoders.get_mut(material_id) {
             Some(open) => open,
             None => {
-                let decoder = VideoDecoder::open_scaled(path, want_height)?;
+                let decoder =
+                    VideoDecoder::open_scaled_with(path, want_height, acceleration())?;
                 let height = decoder.output_size().1;
                 decoders
                     .entry(material_id.to_string())
@@ -255,6 +310,11 @@ impl MediaSourceProvider {
             decoded = format_args!("{}x{}", decoded.width, decoded.height),
             decode_ms = decode_micros as f64 / 1000.0,
             upload_ms = upload_micros as f64 / 1000.0,
+            // Which decoder actually ran, not which one was asked for. Without
+            // this a session where the hardware quietly refused looks identical
+            // in the log to one where it worked, and the only symptom is the
+            // millisecond count.
+            path = ?open.decoder.acceleration(),
             "decoded source frame"
         );
         // Drop the decoder lock before touching the texture cache; the two are

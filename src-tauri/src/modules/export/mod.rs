@@ -31,6 +31,10 @@
 //!   except [`presets`].
 //! - **Muxing and encoding.** One output container, one video stream, at most
 //!   one audio stream, through `ffmpeg-next`.
+//! - **Hardware encoding.** Which encoders this machine has and whether they
+//!   work ([`hwaccel`]), and the libavutil frame pool the ones that need it
+//!   draw surfaces from ([`hwframes`]). Software stays the default; hardware is
+//!   something the user chooses, for the reasons at the top of [`hwaccel`].
 //! - **The audio mix.** Per-segment and per-track gain, speed, and the sum into
 //!   one stereo bed at the output sample rate.
 //! - **Job lifecycle.** A thread per export, an atomic cancel flag checked
@@ -51,14 +55,17 @@ pub mod audio;
 pub mod commands;
 pub mod encoder;
 pub mod hwaccel;
+pub mod hwframes;
 pub mod job;
 pub mod presets;
 
 pub use audio::{mix_timeline, AudioMixer, AudioRequest, AudioSource, SilentAudioSource};
-pub use encoder::{AudioStreamSpec, MediaWriter, VideoStreamSpec};
-pub use hwaccel::{HwAccel, HwEncoder};
+pub use encoder::{AudioStreamSpec, MediaWriter, VideoStreamSpec, WriterStats};
+pub use hwaccel::{HwAccel, HwEncoder, RateControl};
+pub use hwframes::{HwDeviceContext, HwFramesContext};
 pub use job::{
-    export_options, register_audio_source, resolve_settings, run_export, walk_frames, ExportJob,
+    export_options, gpu_color_convert, register_audio_source, resolve_settings, run_export,
+    set_gpu_color_convert, set_zero_copy, walk_frames, zero_copy_enabled, ExportJob,
     ExportOptions, ExportOutcome, ExportOverrides, ExportProgress, ExportRequest, ExportSettings,
     ExportStage, FnSink, ProgressSink,
 };

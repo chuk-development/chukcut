@@ -45,8 +45,13 @@
 //!   monotonic today and the audio device later, because audio position is the
 //!   authority for the playhead. Late frames are dropped rather than shown
 //!   late; time is never stretched to let the renderer catch up.
-//! - **JPEG encoding.** The compositor already hands back sRGB-encoded bytes,
-//!   so [`encoder::encode_jpeg`] is a pure re-encode with no colour conversion.
+//! - **JPEG encoding.** On the GPU where the machine has a VAAPI JPEG
+//!   entrypoint ([`vaapi`]), on libjpeg-turbo everywhere else. The compositor
+//!   already hands back sRGB-encoded bytes, so the software path is a pure
+//!   re-encode with no colour conversion; the hardware path converts to
+//!   full-range NV12 because that is what the encoder eats.
+//!   [`encoder::encode_preview_jpeg`] picks, and falls back without telling
+//!   the caller.
 //!
 //! ## What it deliberately does not own
 //!
@@ -72,13 +77,16 @@ pub mod encoder;
 pub mod error;
 pub mod server;
 pub mod session;
+pub mod vaapi;
 
 pub use cache::{CachedFrame, FrameCache, Lookup, DEFAULT_CAPACITY};
 pub use clock::{
     frame_at, frame_interval, frame_time, is_late, pace, ManualSource, MonotonicSource, Pacing,
     PlaybackClock, TimeSource, DEFAULT_READ_AHEAD,
 };
-pub use encoder::encode_jpeg;
+pub use encoder::{
+    encode_jpeg, encode_preview_jpeg, hardware_available, Backend, BACKEND_ENV,
+};
 pub use error::{PreviewError, Result};
 pub use server::{
     frame_protocol, frame_protocol_async, frame_url, parse_frame_uri, PreviewEvent, PreviewInfo,

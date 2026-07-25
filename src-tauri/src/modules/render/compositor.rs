@@ -13,13 +13,16 @@
 //! what source-over compositing is and anything more elaborate would only be
 //! there for effects we have not built yet.
 
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 
 use parking_lot::Mutex;
 
 use super::context::RenderContext;
 use super::error::{RenderError, Result};
 use super::layout::{self, QuadPlacement};
+use super::nv12::{Nv12Converter, Nv12Frame, READ_FORMAT};
 use super::source::{SourceFrame, SourceProvider, SourceRequest};
 use super::texture_pool::{PooledTexture, TextureKey, TexturePool, DEFAULT_BUDGET_BYTES};
 use crate::modules::project::document::{MaterialKind, Micros, Project};
@@ -28,6 +31,10 @@ use crate::modules::project::document::{MaterialKind, Micros, Project};
 const COPY_ALIGN: u32 = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
 
 /// Usage every render target needs: drawn into, then read back.
+///
+/// `TEXTURE_BINDING` is not for the composite pass — a target is never one of
+/// its own inputs — but for what happens afterwards: the RGBA→NV12 compute pass
+/// samples it, and a preview that ever presents to a surface would too.
 const TARGET_USAGE: wgpu::TextureUsages = wgpu::TextureUsages::RENDER_ATTACHMENT
     .union(wgpu::TextureUsages::COPY_SRC)
     .union(wgpu::TextureUsages::TEXTURE_BINDING);
@@ -109,6 +116,97 @@ impl Default for CompositorConfig {
     }
 }
 
+/// Where the time in a composited frame went, summed over every render.
+///
+/// This exists because `docs/research/zero-copy-encode.md` had to guess at the
+/// readback's share of the frame budget and guessed wrong in both directions.
+/// It is the number that sizes the whole zero-copy project, so it is measured
+/// permanently rather than by a one-off patch that gets reverted.
+///
+/// Everything is nanoseconds of wall clock on the calling thread. Three
+/// `Instant::now()` pairs per frame cost tens of nanoseconds against a frame
+/// that costs tens of milliseconds, so this is always on — a counter nobody
+/// switches on is a counter nobody reads.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RenderStats {
+    pub frames: u64,
+    /// [`Compositor::collect_draws`]: asking the [`SourceProvider`] for each
+    /// visible segment. On the export path this is where decoding happens.
+    pub sources_ns: u64,
+    /// Writing uniforms, building bind groups, recording and submitting the
+    /// composite pass. Submission is not execution: the GPU work this queues is
+    /// waited for in `readback_wait_ns`.
+    pub composite_ns: u64,
+    /// The whole of `read_back`, which is `readback_wait_ns` plus
+    /// `readback_unpad_ns` plus the cost of recording the copy.
+    pub readback_ns: u64,
+    /// Blocked in `device.poll` waiting for the GPU to finish compositing *and*
+    /// copying the target into a mappable buffer. This is the pipeline stall
+    /// the zero-copy work is trying to delete.
+    pub readback_wait_ns: u64,
+    /// Copying the mapped rows into a `Vec`, stripping the 256-byte row
+    /// padding. Pure CPU memory bandwidth.
+    pub readback_unpad_ns: u64,
+    /// The RGBA→NV12 compute pass and its readback, when that path is used.
+    /// Disjoint from `readback_ns`: a frame does one or the other.
+    pub nv12_ns: u64,
+}
+
+impl RenderStats {
+    /// Mean nanoseconds per frame for one field, or 0 with no frames.
+    pub fn per_frame(&self, total_ns: u64) -> f64 {
+        if self.frames == 0 {
+            0.0
+        } else {
+            total_ns as f64 / self.frames as f64
+        }
+    }
+}
+
+/// The atomic form of [`RenderStats`], so `render_frame` can stay `&self`.
+#[derive(Default)]
+struct StatCounters {
+    frames: AtomicU64,
+    sources_ns: AtomicU64,
+    composite_ns: AtomicU64,
+    readback_ns: AtomicU64,
+    readback_wait_ns: AtomicU64,
+    readback_unpad_ns: AtomicU64,
+    nv12_ns: AtomicU64,
+}
+
+impl StatCounters {
+    fn snapshot(&self) -> RenderStats {
+        RenderStats {
+            frames: self.frames.load(Ordering::Relaxed),
+            sources_ns: self.sources_ns.load(Ordering::Relaxed),
+            composite_ns: self.composite_ns.load(Ordering::Relaxed),
+            readback_ns: self.readback_ns.load(Ordering::Relaxed),
+            readback_wait_ns: self.readback_wait_ns.load(Ordering::Relaxed),
+            readback_unpad_ns: self.readback_unpad_ns.load(Ordering::Relaxed),
+            nv12_ns: self.nv12_ns.load(Ordering::Relaxed),
+        }
+    }
+
+    fn reset(&self) {
+        for counter in [
+            &self.frames,
+            &self.sources_ns,
+            &self.composite_ns,
+            &self.readback_ns,
+            &self.readback_wait_ns,
+            &self.readback_unpad_ns,
+            &self.nv12_ns,
+        ] {
+            counter.store(0, Ordering::Relaxed);
+        }
+    }
+}
+
+fn add(counter: &AtomicU64, since: Instant) {
+    counter.fetch_add(since.elapsed().as_nanos() as u64, Ordering::Relaxed);
+}
+
 /// One frame's worth of pixels.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Frame {
@@ -154,6 +252,13 @@ pub struct Compositor {
     /// Stride between uniform blocks, satisfying the device's dynamic-offset
     /// alignment.
     uniform_stride: u32,
+    stats: StatCounters,
+    /// The RGBA→NV12 compute pass, built on first use.
+    ///
+    /// Lazy because the preview never wants it and building it costs a shader
+    /// compile: a machine that only ever previews should not pay for the
+    /// export path's pipeline.
+    nv12: OnceLock<Option<Nv12Converter>>,
 }
 
 /// A reusable GPU buffer that only ever grows.
@@ -337,7 +442,19 @@ impl Compositor {
             uniforms: Mutex::new(Scratch::default()),
             readback: Mutex::new(Scratch::default()),
             uniform_stride: uniform_stride as u32,
+            stats: StatCounters::default(),
+            nv12: OnceLock::new(),
         }
+    }
+
+    /// What every frame rendered so far cost, broken down by phase.
+    pub fn stats(&self) -> RenderStats {
+        self.stats.snapshot()
+    }
+
+    /// Zero the counters, so a benchmark can exclude its warm-up.
+    pub fn reset_stats(&self) {
+        self.stats.reset();
     }
 
     pub fn context(&self) -> &Arc<RenderContext> {
@@ -369,6 +486,96 @@ impl Compositor {
         sources: &dyn SourceProvider,
     ) -> Result<Vec<u8>> {
         Ok(self.render(project, time, size, sources)?.data)
+    }
+
+    /// The key every render target is acquired with.
+    ///
+    /// Always asks for the non-sRGB view format, whether or not this render
+    /// will use it. Making it conditional would split the pool into two buckets
+    /// of otherwise interchangeable textures, and the flag costs nothing on a
+    /// texture nobody reinterprets.
+    fn target_key(&self, size: (u32, u32)) -> TextureKey {
+        TextureKey::new(size.0, size.1, self.config.format, TARGET_USAGE)
+            .viewable_as(READ_FORMAT)
+    }
+
+    /// Composite at `time` and hand back NV12 rather than RGBA.
+    ///
+    /// This is the export path's entry point. It differs from
+    /// [`Self::render_frame`] in what crosses the bus: 1.5 bytes per pixel
+    /// instead of 4, with the colour conversion done by a compute pass instead
+    /// of by swscale on the CPU. The result is what a VAAPI or QSV frame pool
+    /// wants uploaded into it.
+    ///
+    /// Errors the same way `render_frame` does; a caller that wants to keep
+    /// exporting on a device where the compute pass will not build should fall
+    /// back to `render_frame` plus swscale.
+    pub fn render_nv12(
+        &self,
+        project: &Project,
+        time: Micros,
+        size: (u32, u32),
+        sources: &dyn SourceProvider,
+    ) -> Result<Nv12Frame> {
+        let converter = self.nv12_converter().ok_or_else(|| {
+            RenderError::Readback("this device has no RGBA to NV12 compute pass".into())
+        })?;
+        let target = self.render_to_texture(project, time, size, sources)?;
+
+        let started = Instant::now();
+        let before_wait = converter.wait_ns.load(Ordering::Relaxed);
+        let frame = converter.convert(&self.ctx, &target);
+        let waited = converter.wait_ns.load(Ordering::Relaxed) - before_wait;
+        add(&self.stats.nv12_ns, started);
+        self.stats
+            .readback_wait_ns
+            .fetch_add(waited, Ordering::Relaxed);
+
+        self.pool.release(target);
+        frame
+    }
+
+    /// Composite at `time` and write NV12 straight into `destination`.
+    ///
+    /// The zero-copy entry point. `destination` is expected to be the wgpu
+    /// handle of a buffer whose memory was exported as a DMA-BUF (see
+    /// [`super::dmabuf`]), so what this writes is what a hardware encoder reads
+    /// and nothing comes back to system memory at all.
+    ///
+    /// Returns once the GPU has finished, which is the synchronisation the
+    /// importer on the other side depends on.
+    pub fn render_nv12_into(
+        &self,
+        project: &Project,
+        time: Micros,
+        size: (u32, u32),
+        sources: &dyn SourceProvider,
+        destination: &wgpu::Buffer,
+    ) -> Result<()> {
+        let converter = self.nv12_converter().ok_or_else(|| {
+            RenderError::Readback("this device has no RGBA to NV12 compute pass".into())
+        })?;
+        let target = self.render_to_texture(project, time, size, sources)?;
+
+        let started = Instant::now();
+        let before_wait = converter.wait_ns.load(Ordering::Relaxed);
+        let result = converter.convert_into(&self.ctx, &target, destination);
+        let waited = converter.wait_ns.load(Ordering::Relaxed) - before_wait;
+        add(&self.stats.nv12_ns, started);
+        self.stats
+            .readback_wait_ns
+            .fetch_add(waited, Ordering::Relaxed);
+
+        self.pool.release(target);
+        result.map(|_| ())
+    }
+
+    /// The compute converter, built once. `None` on a device where it will not
+    /// build, which is a reason to fall back rather than to fail.
+    fn nv12_converter(&self) -> Option<&Nv12Converter> {
+        self.nv12
+            .get_or_init(|| Some(Nv12Converter::new(&self.ctx)))
+            .as_ref()
     }
 
     /// [`Self::render_frame`], but keeping the dimensions attached.
@@ -404,11 +611,12 @@ impl Compositor {
     ) -> Result<PooledTexture> {
         self.ctx.check_size(size)?;
 
+        let sourced = Instant::now();
         let draws = self.collect_draws(project, time, size, sources)?;
-        let target = self.pool.acquire(
-            self.ctx.device(),
-            TextureKey::new(size.0, size.1, self.config.format, TARGET_USAGE),
-        );
+        add(&self.stats.sources_ns, sourced);
+
+        let composited = Instant::now();
+        let target = self.pool.acquire(self.ctx.device(), self.target_key(size));
 
         let device = self.ctx.device();
         let mut uniforms = self.uniforms.lock();
@@ -501,6 +709,8 @@ impl Compositor {
         }
         self.ctx.queue().submit(Some(encoder.finish()));
         drop(uniforms);
+        add(&self.stats.composite_ns, composited);
+        self.stats.frames.fetch_add(1, Ordering::Relaxed);
 
         Ok(target)
     }
@@ -585,6 +795,13 @@ impl Compositor {
     /// has to be stripped. Skipping this is the classic "why is my frame
     /// sheared diagonally" bug.
     fn read_back(&self, target: &PooledTexture) -> Result<Vec<u8>> {
+        let started = Instant::now();
+        let result = self.read_back_inner(target);
+        add(&self.stats.readback_ns, started);
+        result
+    }
+
+    fn read_back_inner(&self, target: &PooledTexture) -> Result<Vec<u8>> {
         let (width, height) = (target.width(), target.height());
         let bytes_per_pixel = target
             .format()
@@ -634,15 +851,18 @@ impl Compositor {
         slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = tx.send(result);
         });
+        let waited = Instant::now();
         device
             .poll(wgpu::PollType::wait_indefinitely())
             .map_err(|e| RenderError::Readback(e.to_string()))?;
         rx.recv()
             .map_err(|_| RenderError::Readback("map callback never fired".into()))?
             .map_err(|e| RenderError::Readback(e.to_string()))?;
+        add(&self.stats.readback_wait_ns, waited);
 
         // Unmap unconditionally: a buffer left mapped cannot be mapped again,
         // and this one is reused for every subsequent frame.
+        let unpadded_at = Instant::now();
         let copied = {
             let result = slice.get_mapped_range();
             match result {
@@ -658,6 +878,7 @@ impl Compositor {
             }
         };
         buffer.unmap();
+        add(&self.stats.readback_unpad_ns, unpadded_at);
 
         copied
     }

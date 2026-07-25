@@ -78,17 +78,23 @@ describe("fetching a frame", () => {
 });
 
 describe("choosing a proxy resolution", () => {
-  it("follows the table in the pipeline doc", () => {
+  it("agrees with `proxy_size` on the Rust side", () => {
+    // Anything up to 1920 on the long edge is native. This has to match, or the
+    // placeholder is one size and the first frame another.
     expect(proxyResolution({ width: 640, height: 360 })).toEqual({ width: 640, height: 360 });
-    expect(proxyResolution({ width: 1080, height: 1080 })).toEqual({ width: 720, height: 720 });
-    expect(proxyResolution({ width: 1920, height: 1080 })).toEqual({ width: 960, height: 540 });
-    expect(proxyResolution({ width: 3840, height: 2160 })).toEqual({ width: 1080, height: 608 });
+    expect(proxyResolution({ width: 1080, height: 1080 })).toEqual({ width: 1080, height: 1080 });
+    expect(proxyResolution({ width: 1920, height: 1080 })).toEqual({ width: 1920, height: 1080 });
+    // 4K previews at 1080p.
+    expect(proxyResolution({ width: 3840, height: 2160 })).toEqual({ width: 1920, height: 1080 });
+    expect(proxyResolution({ width: 7680, height: 4320 })).toEqual({ width: 1920, height: 1080 });
   });
 
   it("caps the long edge whichever way round the canvas is", () => {
-    // A vertical editor's whole point: 1080×1920 must proxy like 1920×1080 does.
-    expect(proxyResolution({ width: 1080, height: 1920 })).toEqual({ width: 540, height: 960 });
-    expect(proxyResolution({ width: 1920, height: 1080 })).toEqual({ width: 960, height: 540 });
+    // A vertical editor's whole point: 1080×1920 is 1920 on its long edge and
+    // therefore native, exactly like 1920×1080. Capping it at 720 is what made
+    // the preview look soft next to the source file.
+    expect(proxyResolution({ width: 1080, height: 1920 })).toEqual({ width: 1080, height: 1920 });
+    expect(proxyResolution({ width: 2160, height: 3840 })).toEqual({ width: 1080, height: 1920 });
   });
 
   it("keeps the aspect ratio within a rounding error", () => {

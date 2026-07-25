@@ -1,4 +1,11 @@
-import { AlertTriangleIcon, FolderOpenIcon, ImportIcon, MusicIcon, TypeIcon } from "lucide-react";
+import {
+  AlertTriangleIcon,
+  FolderOpenIcon,
+  ImportIcon,
+  Loader2Icon,
+  MusicIcon,
+  TypeIcon,
+} from "lucide-react";
 import { useCallback, useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -10,12 +17,44 @@ import { useMediaStore } from "@/modules/media/store";
 import { describeError } from "@/modules/project/store";
 import type { ImportedMaterial } from "@/modules/project/types";
 
-function EmptyState({ message, hint }: { message: string; hint?: string }) {
+function EmptyState({
+  message,
+  hint,
+  icon: Icon = FolderOpenIcon,
+}: {
+  message: string;
+  hint?: string;
+  icon?: typeof FolderOpenIcon;
+}) {
   return (
     <div className="flex h-full flex-col items-center justify-center gap-1.5 px-6 text-center">
-      <FolderOpenIcon className="size-5 text-muted-foreground/50" />
+      <Icon className="size-5 text-muted-foreground/50" />
       <p className="text-[12px] text-muted-foreground">{message}</p>
-      {hint ? <p className="max-w-[220px] text-[11px] text-muted-foreground/70">{hint}</p> : null}
+      {hint ? (
+        <p className="max-w-[220px] text-[11px] leading-relaxed text-muted-foreground/70">{hint}</p>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * Tiles the shape of the ones that are coming.
+ *
+ * A probe of a long file takes a moment, and a panel that stays empty for it
+ * reads as an import that silently did nothing.
+ */
+function ImportingGrid() {
+  return (
+    <div
+      className="grid grid-cols-[repeat(auto-fill,minmax(104px,1fr))] gap-2 p-2.5"
+      aria-hidden="true"
+    >
+      {[0, 1, 2].map((slot) => (
+        <div key={slot} className="flex flex-col gap-1">
+          <div className="aspect-video w-full animate-pulse rounded-sm bg-surface" />
+          <div className="h-2 w-3/4 animate-pulse rounded-sm bg-surface" />
+        </div>
+      ))}
     </div>
   );
 }
@@ -74,8 +113,14 @@ export function MediaLibrary() {
         </div>
 
         <div className="flex h-8 shrink-0 items-center gap-2 border-b border-border px-2.5">
-          <Button variant="default" size="sm" onClick={handleImport} disabled={importing}>
-            <ImportIcon />
+          <Button
+            variant="default"
+            size="sm"
+            onClick={handleImport}
+            disabled={importing}
+            aria-busy={importing}
+          >
+            {importing ? <Loader2Icon className="animate-spin" /> : <ImportIcon />}
             {importing ? "Importing…" : "Import"}
           </Button>
           <span className="text-[11px] text-muted-foreground">
@@ -99,10 +144,14 @@ export function MediaLibrary() {
 
         <TabsContent value="media">
           {items.length === 0 ? (
-            <EmptyState
-              message="No media imported"
-              hint="Click Import, or drag video and audio files straight from your file manager onto this panel."
-            />
+            importing ? (
+              <ImportingGrid />
+            ) : (
+              <EmptyState
+                message="No media imported"
+                hint="Click Import, or drag video and audio files straight from your file manager onto this panel."
+              />
+            )
           ) : (
             <Grid items={items} onRemove={remove} />
           )}
@@ -110,21 +159,22 @@ export function MediaLibrary() {
 
         <TabsContent value="audio">
           {audio.length === 0 ? (
-            <EmptyState message="No audio imported" />
+            <EmptyState
+              icon={MusicIcon}
+              message="No audio imported"
+              hint="Music and voice-over files show up here as well as in Media."
+            />
           ) : (
             <Grid items={audio} onRemove={remove} />
           )}
         </TabsContent>
 
         <TabsContent value="text">
-          <div className="flex h-full flex-col items-center justify-center gap-1.5 px-6 text-center">
-            <TypeIcon className="size-5 text-muted-foreground/50" />
-            <p className="text-[12px] text-muted-foreground">Titles arrive with the text module</p>
-            <p className="flex items-center gap-1 text-[11px] text-muted-foreground/70">
-              <MusicIcon className="size-3" />
-              Phase 2 on the roadmap
-            </p>
-          </div>
+          <EmptyState
+            icon={TypeIcon}
+            message="Titles arrive with the text module"
+            hint="Phase 2 on the roadmap."
+          />
         </TabsContent>
       </Tabs>
     </section>

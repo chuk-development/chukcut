@@ -2,6 +2,7 @@ import {
   ChevronDownIcon,
   FilePlus2Icon,
   FolderOpenIcon,
+  Loader2Icon,
   Redo2Icon,
   SaveIcon,
   ScissorsLineDashedIcon,
@@ -22,6 +23,7 @@ import {
 import { Separator } from "@/components/ui/separator";
 import { IconTooltip } from "@/components/ui/tooltip";
 import { openFileDialog, PROJECT_FILTERS, saveFileDialog } from "@/lib/dialog";
+import { runningJobs, useExportStore } from "@/modules/export/store";
 import { projectOpen, projectSave } from "@/modules/project/lib/api";
 import { describeError, useProjectStore } from "@/modules/project/store";
 import { redo, undo } from "@/modules/timeline/lib/edits";
@@ -42,7 +44,10 @@ export function HeaderBar({ onNewProject, onExport }: HeaderBarProps) {
   const loadProject = useProjectStore((s) => s.loadProject);
   const markSaved = useProjectStore((s) => s.markSaved);
   const setError = useProjectStore((s) => s.setError);
+  const exportJobs = useExportStore((s) => s.jobs);
   const [busy, setBusy] = useState(false);
+
+  const exporting = runningJobs(exportJobs).length;
 
   const open = useCallback(async () => {
     try {
@@ -118,6 +123,7 @@ export function HeaderBar({ onNewProject, onExport }: HeaderBarProps) {
           <DropdownMenuItem onSelect={onExport}>
             <UploadIcon />
             Export…
+            <DropdownMenuShortcut>Ctrl+E</DropdownMenuShortcut>
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
@@ -152,14 +158,21 @@ export function HeaderBar({ onNewProject, onExport }: HeaderBarProps) {
         ) : null}
       </div>
 
-      <Button size="sm" onClick={() => void save(false)} disabled={busy || !project}>
-        <SaveIcon />
-        Save
-      </Button>
-      <Button variant="default" size="sm" onClick={onExport} disabled={!project}>
-        <UploadIcon />
-        Export
-      </Button>
+      <IconTooltip label={dirty ? "Save changes" : "Saved"} hint="Ctrl+S">
+        <Button size="sm" onClick={() => void save(false)} disabled={busy || !project}>
+          {busy ? <Loader2Icon className="animate-spin" /> : <SaveIcon />}
+          {busy ? "Saving…" : "Save"}
+        </Button>
+      </IconTooltip>
+      <IconTooltip
+        label={exporting > 0 ? `Export — ${exporting} running` : "Export the timeline to a file"}
+        hint="Ctrl+E"
+      >
+        <Button variant="default" size="sm" onClick={onExport} disabled={!project}>
+          {exporting > 0 ? <Loader2Icon className="animate-spin" /> : <UploadIcon />}
+          Export
+        </Button>
+      </IconTooltip>
     </header>
   );
 }

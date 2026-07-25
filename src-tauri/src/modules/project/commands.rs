@@ -212,11 +212,37 @@ pub async fn project_import_media(
             // would reframe their work.
             if project.tracks.iter().all(|t| t.segments.is_empty()) {
                 let (w, h) = (video.display_width.max(2), video.display_height.max(2));
-                // Cap the long edge at 1080. Beyond that the preview and every
-                // render get expensive for detail no one is judging on a
-                // timeline, and the export can still be set higher.
+
+                // Take the clip's *shape*, not its resolution.
+                //
+                // An earlier version adopted the source dimensions directly,
+                // which meant importing a 670x672 download made the whole
+                // project — preview and export alike — 670x672. That is not
+                // what someone means by "I want 1080p": they mean the project
+                // is 1080p and the clip sits in it.
+                //
+                // So the short edge targets 1080, which yields 1920x1080 for
+                // 16:9, 1080x1920 for 9:16 and 1080x1080 for square — the three
+                // shapes people actually deliver. The long edge is then capped
+                // at 1920 so an extreme aspect ratio cannot produce an enormous
+                // canvas.
+                //
+                // Upscaling a small source adds no detail, and it is still
+                // right: the project resolution is a delivery decision, and a
+                // low-resolution clip on a 1080p timeline is a normal thing to
+                // have. The user can change it either way.
+                const TARGET_SHORT_EDGE: f32 = 1080.0;
+                const MAX_LONG_EDGE: f32 = 1920.0;
+
+                let short = w.min(h) as f32;
                 let long = w.max(h) as f32;
-                let scale = if long > 1080.0 { 1080.0 / long } else { 1.0 };
+                let mut scale = TARGET_SHORT_EDGE / short;
+                if long * scale > MAX_LONG_EDGE {
+                    scale = MAX_LONG_EDGE / long;
+                }
+
+                // Even dimensions, because every 4:2:0 encoder requires them
+                // and an odd canvas turns into an encoder error at export time.
                 let width = ((w as f32 * scale).round() as u32).max(2) & !1;
                 let height = ((h as f32 * scale).round() as u32).max(2) & !1;
 

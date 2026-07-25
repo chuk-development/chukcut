@@ -37,15 +37,39 @@
 //! tagging the stream, neither of which `ffmpeg-next` 6.1 wraps. The range *is*
 //! tagged, because that one is wrapped and getting it wrong is visible as
 //! crushed blacks rather than a subtle shift.
+//!
+//! ## The hardware path
+//!
+//! VAAPI and QSV do not take a frame in system memory. They take a surface out
+//! of an `AVHWFramesContext` that the codec context was told about *before*
+//! `avcodec_open2`. So for those two the sequence gains three steps, all of
+//! them in [`hwframes`]:
+//!
+//! ```text
+//!   RGBA ──swscale──► NV12 (system memory) ──av_hwframe_transfer_data──► VA surface ──► encoder
+//! ```
+//!
+//! rather than the software path's `RGBA ──swscale──► YUV420P ──► encoder`.
+//! The readback-and-upload is deliberate and temporary: the frame we hand to
+//! swscale came out of a GPU texture a moment earlier, so the pixels make a
+//! round trip they should not have to make. Removing it needs DMA-BUF export
+//! from wgpu and is written up in `docs/research/zero-copy-encode.md`.
+//!
+//! Everything after `send_frame` — the drain, the rescale, the flush — is
+//! identical for both paths, deliberately. The truncated tail is the classic
+//! hardware-encode bug precisely because people write a second, subtly
+//! different flush for it.
 
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use ffmpeg::software::{resampling, scaling};
 use ffmpeg::util::frame;
 use ffmpeg::{codec, format, ChannelLayout, Dictionary, Packet, Rational};
 use ffmpeg_next as ffmpeg;
 
-use super::hwaccel::HwAccel;
+use super::hwaccel::{self, HwAccel, RateControl};
+use super::hwframes::{self, HwDeviceContext, HwFramesContext};
 use super::presets::{Fps, Quality};
 use super::{ExportError, Result};
 
@@ -79,8 +103,16 @@ pub struct VideoStreamSpec {
 }
 
 impl VideoStreamSpec {
-    /// The private options this encoder is opened with.
-    fn dictionary(&self) -> Vec<(String, String)> {
+    /// The rate-control configurations to try at `avcodec_open2`, best first.
+    fn rate_controls(&self) -> Vec<RateControl> {
+        let fallback =
+            hwaccel::fallback_bitrate(self.width, self.height, self.fps, self.quality);
+        self.accel.rate_control_ladder(self.quality, fallback)
+    }
+
+    /// The private options this encoder is opened with, for a given rung of the
+    /// rate-control ladder.
+    fn dictionary_for(&self, rate_control: &RateControl) -> Vec<(String, String)> {
         let mut options: Vec<(String, String)> = Vec::new();
 
         // x264/x265 without a preset default to "medium", which is the right
@@ -95,11 +127,27 @@ impl VideoStreamSpec {
             options.push(("profile".into(), "main".into()));
         }
 
-        for (key, value) in self.accel.quality_options(self.quality) {
-            options.push((key.into(), value));
-        }
+        options.extend(rate_control.options.iter().cloned());
         options.extend(self.options.iter().cloned());
         options
+    }
+
+    /// The options for the first rung — what this encoder is opened with unless
+    /// the driver refuses.
+    #[cfg(test)]
+    fn dictionary(&self) -> Vec<(String, String)> {
+        let ladder = self.rate_controls();
+        self.dictionary_for(&ladder[0])
+    }
+
+    /// Whether the encoder needs its frames to come out of a hardware pool.
+    fn needs_frame_pool(&self) -> bool {
+        !self.accel.accepts_software_frames()
+    }
+
+    /// What swscale converts the compositor's RGBA into.
+    fn upload_format(&self) -> format::Pixel {
+        self.accel.upload_format()
     }
 }
 
@@ -136,6 +184,35 @@ pub struct MediaWriter {
     /// Set by `finish`. A writer dropped without it leaves an unplayable file,
     /// which `Drop` complains about loudly.
     finished: bool,
+    stats: WriterStats,
+}
+
+/// What one video frame cost between the compositor and the muxer.
+///
+/// The counterpart of `render::RenderStats`, and here for the same reason: the
+/// export's frame time is spread over four stages and a change to any one of
+/// them moves the same single number. Nanoseconds, summed over every frame.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WriterStats {
+    pub frames: u64,
+    /// Building the `AVFrame` the encoder is given. On the RGBA path this is
+    /// the padded row copy plus swscale; on the NV12 path it is two plane
+    /// copies and no conversion at all. The difference between the two is what
+    /// the GPU colour conversion bought downstream of the compositor.
+    pub prepare_ns: u64,
+    /// Taking a surface, `av_hwframe_transfer_data` into it, `send_frame`, and
+    /// draining whatever packets came back.
+    pub submit_ns: u64,
+}
+
+impl WriterStats {
+    pub fn per_frame(&self, total_ns: u64) -> f64 {
+        if self.frames == 0 {
+            0.0
+        } else {
+            total_ns as f64 / self.frames as f64
+        }
+    }
 }
 
 struct VideoTrack {
@@ -146,6 +223,15 @@ struct VideoTrack {
     /// What the muxer settled on, read back after `write_header`.
     stream_time_base: Rational,
     scaler: scaling::Context,
+    /// The surface pool, when the encoder will not take system memory.
+    ///
+    /// Kept alive for the writer's whole life: the codec context holds its own
+    /// reference, but every frame that goes in comes out of *this* handle.
+    hw: Option<HwFramesContext>,
+    /// The software pixel format the encoder — or its surface pool — is fed.
+    /// Kept so `write_video_frame_nv12` can refuse a mismatch in prose rather
+    /// than letting libavutil answer `EINVAL`.
+    upload_format: format::Pixel,
     width: u32,
     height: u32,
     frames: u64,
@@ -224,11 +310,17 @@ impl MediaWriter {
             video: video_track,
             audio: audio_track,
             finished: false,
+            stats: WriterStats::default(),
         })
     }
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// What the frames written so far cost, by stage.
+    pub fn stats(&self) -> WriterStats {
+        self.stats
     }
 
     pub fn frames_written(&self) -> u64 {
@@ -261,6 +353,7 @@ impl MediaWriter {
             )));
         }
 
+        let prepared = Instant::now();
         let mut source =
             frame::Video::new(format::Pixel::RGBA, self.video.width, self.video.height);
         copy_packed_rows(&mut source, rgba, self.video.width as usize * 4);
@@ -271,13 +364,168 @@ impl MediaWriter {
             .run(&source, &mut converted)
             .map_err(ExportError::ffmpeg("converting the frame to YUV"))?;
         converted.set_pts(Some(index as i64));
+        self.stats.prepare_ns += prepared.elapsed().as_nanos() as u64;
+        let submitted = Instant::now();
 
+        // On the hardware path the encoder cannot see system memory, so the
+        // converted frame is uploaded into a surface and the *surface* is what
+        // gets sent. Its PTS has to be set again: `av_hwframe_transfer_data`
+        // copies pixels and nothing else, and a surface sent with no PTS makes
+        // libavcodec invent one, which is how a hardware export ends up a frame
+        // out of step with its own audio.
+        match self.video.hw.as_ref() {
+            None => self
+                .video
+                .encoder
+                .send_frame(&converted)
+                .map_err(ExportError::ffmpeg("encoding a video frame"))?,
+            Some(pool) => {
+                let mut surface = pool.empty_frame()?;
+                pool.upload(&converted, &mut surface)?;
+                surface.set_pts(Some(index as i64));
+                self.video
+                    .encoder
+                    .send_frame(&surface)
+                    .map_err(ExportError::ffmpeg("encoding a video frame on the GPU"))?;
+            }
+        }
+
+        self.video.frames = self.video.frames.max(index + 1);
+        self.stats.frames += 1;
+        let drained = drain_video(&mut self.octx, &mut self.video);
+        self.stats.submit_ns += submitted.elapsed().as_nanos() as u64;
+        drained
+    }
+
+    /// Whether this encoder is fed NV12, and so whether the compositor's GPU
+    /// conversion is worth asking for.
+    ///
+    /// A software encoder wants YUV420P, and handing it NV12 would only move
+    /// the swscale pass rather than remove it — so the caller keeps the RGBA
+    /// path for those.
+    pub fn wants_nv12(&self) -> bool {
+        self.video.upload_format == format::Pixel::NV12
+    }
+
+    /// Encode one composited frame that is already NV12.
+    ///
+    /// The GPU produced the colour conversion, so nothing here calls swscale:
+    /// the two planes are copied row by row into an `AVFrame` — because the
+    /// GPU's stride and libavutil's are chosen by different people and are only
+    /// equal by luck — and that frame takes the same route to the encoder as
+    /// the converted one does.
+    ///
+    /// `y_stride` and `uv_stride` are in bytes and must be at least the frame
+    /// width. `uv` holds `height / 2` rows of interleaved Cb/Cr.
+    pub fn write_video_frame_nv12(
+        &mut self,
+        y: &[u8],
+        y_stride: usize,
+        uv: &[u8],
+        uv_stride: usize,
+        index: u64,
+    ) -> Result<()> {
+        if !self.wants_nv12() {
+            return Err(ExportError::Settings(format!(
+                "this encoder is fed {:?}, not NV12",
+                self.video.upload_format
+            )));
+        }
+
+        let (width, height) = (self.video.width as usize, self.video.height as usize);
+        let uv_rows = height.div_ceil(2);
+        if y_stride < width || uv_stride < width {
+            return Err(ExportError::Settings(format!(
+                "an NV12 frame for {width}x{height} needs strides of at least {width} bytes, \
+                 got {y_stride} and {uv_stride}"
+            )));
+        }
+        if y.len() < y_stride * height || uv.len() < uv_stride * uv_rows {
+            return Err(ExportError::Settings(format!(
+                "the renderer produced {} luma and {} chroma bytes for a {width}x{height} \
+                 frame, expected at least {} and {}",
+                y.len(),
+                uv.len(),
+                y_stride * height,
+                uv_stride * uv_rows
+            )));
+        }
+
+        let prepared = Instant::now();
+        let mut source = frame::Video::new(format::Pixel::NV12, self.video.width, self.video.height);
+        copy_plane(&mut source, 0, y, y_stride, width, height);
+        copy_plane(&mut source, 1, uv, uv_stride, width, uv_rows);
+        source.set_pts(Some(index as i64));
+        self.stats.prepare_ns += prepared.elapsed().as_nanos() as u64;
+        let submitted = Instant::now();
+
+        match self.video.hw.as_ref() {
+            None => self
+                .video
+                .encoder
+                .send_frame(&source)
+                .map_err(ExportError::ffmpeg("encoding a video frame"))?,
+            Some(pool) => {
+                let mut surface = pool.empty_frame()?;
+                pool.upload(&source, &mut surface)?;
+                // Same reason as the RGBA path: the transfer copies pixels and
+                // nothing else, so a surface with no PTS makes libavcodec
+                // invent one and the export ends up a frame out of step.
+                surface.set_pts(Some(index as i64));
+                self.video
+                    .encoder
+                    .send_frame(&surface)
+                    .map_err(ExportError::ffmpeg("encoding a video frame on the GPU"))?;
+            }
+        }
+
+        self.video.frames = self.video.frames.max(index + 1);
+        self.stats.frames += 1;
+        let drained = drain_video(&mut self.octx, &mut self.video);
+        self.stats.submit_ns += submitted.elapsed().as_nanos() as u64;
+        drained
+    }
+
+    /// Encode a frame the GPU wrote into memory this encoder can read.
+    ///
+    /// The zero-copy path. `buffer` describes a DMA-BUF the compositor
+    /// allocated and its compute pass filled with NV12; nothing here copies
+    /// pixels, uploads anything or calls swscale. The returned frame is the
+    /// mapped VA surface, and the caller must keep it alive until the encoder
+    /// is finished with the memory behind it — see
+    /// [`Self::surface_is_still_held`].
+    ///
+    /// Only available on the hardware path; a software encoder has no surfaces
+    /// to map into and is told so.
+    #[cfg(target_os = "linux")]
+    pub fn write_video_frame_dmabuf(
+        &mut self,
+        buffer: &hwframes::Nv12Dmabuf<'_>,
+        index: u64,
+    ) -> Result<frame::Video> {
+        let Some(pool) = self.video.hw.as_ref() else {
+            return Err(ExportError::Settings(
+                "a DMA-BUF can only be given to a hardware encoder".into(),
+            ));
+        };
+
+        let prepared = Instant::now();
+        let mut surface = pool.import_nv12_dmabuf(buffer)?;
+        surface.set_pts(Some(index as i64));
+        self.stats.prepare_ns += prepared.elapsed().as_nanos() as u64;
+
+        let submitted = Instant::now();
         self.video
             .encoder
-            .send_frame(&converted)
-            .map_err(ExportError::ffmpeg("encoding a video frame"))?;
+            .send_frame(&surface)
+            .map_err(ExportError::ffmpeg("encoding a video frame on the GPU"))?;
+
         self.video.frames = self.video.frames.max(index + 1);
-        drain_video(&mut self.octx, &mut self.video)
+        self.stats.frames += 1;
+        let drained = drain_video(&mut self.octx, &mut self.video);
+        self.stats.submit_ns += submitted.elapsed().as_nanos() as u64;
+        drained?;
+        Ok(surface)
     }
 
     /// Feed interleaved f32 samples at the spec's rate and channel count.
@@ -399,6 +647,131 @@ fn context_for(codec: ffmpeg::Codec) -> Result<codec::context::Context> {
     Ok(unsafe { codec::context::Context::wrap(ptr, None) })
 }
 
+/// An opened video encoder, plus the surface pool it draws frames from.
+struct OpenVideoEncoder {
+    encoder: ffmpeg::encoder::video::Encoder,
+    hw: Option<HwFramesContext>,
+}
+
+/// Open the video encoder, walking down the rate-control ladder.
+///
+/// Each attempt builds a *fresh* codec context, because `avcodec_open2` is not
+/// idempotent — a context that failed to open cannot be reconfigured and tried
+/// again, and `ffmpeg-next`'s `open_as_with` consumes it anyway. The frame pool
+/// is rebuilt with it: the codec context takes its own reference during the
+/// open, and disentangling a half-open one is not worth the fifty milliseconds
+/// it would save on a path that normally succeeds on the first rung.
+fn open_video_encoder(
+    spec: &VideoStreamSpec,
+    codec: ffmpeg::Codec,
+    global_header: bool,
+) -> Result<OpenVideoEncoder> {
+    let (tb_num, tb_den) = spec.fps.time_base();
+    let time_base = Rational::new(tb_num, tb_den);
+    let frame_rate = Rational::new(spec.fps.num as i32, spec.fps.den as i32);
+
+    let ladder = spec.rate_controls();
+    let mut last_error: Option<ExportError> = None;
+
+    for (rung, rate_control) in ladder.iter().enumerate() {
+        let mut encoder = context_for(codec)?
+            .encoder()
+            .video()
+            .map_err(ExportError::ffmpeg("preparing the video encoder"))?;
+
+        encoder.set_width(spec.width);
+        encoder.set_height(spec.height);
+        encoder.set_time_base(time_base);
+        encoder.set_frame_rate(Some(frame_rate));
+        encoder.set_gop((spec.fps.as_f64() * GOP_SECONDS).round().max(1.0) as u32);
+        // Two B-frames is the standard trade: meaningful compression, still
+        // within what every hardware decoder handles. A VAAPI driver that does
+        // not do B-frames — Intel's low-power entrypoint is the common case —
+        // clamps this to zero inside `avcodec_open2` and logs it, rather than
+        // failing, so it is safe to ask for on both paths.
+        encoder.set_max_b_frames(2);
+        // swscale writes limited-range YUV by default; tagging it full range
+        // would make every player stretch the levels and crush the blacks.
+        encoder.set_color_range(ffmpeg::color::Range::MPEG);
+
+        if rate_control.bit_rate > 0 {
+            encoder.set_bit_rate(rate_control.bit_rate as usize);
+            // A 1.5x ceiling keeps a hard cut from blowing the buffer without
+            // making the average meaningless.
+            let ceiling = rate_control.bit_rate + rate_control.bit_rate / 2;
+            encoder.set_max_bit_rate(ceiling as usize);
+        }
+        if global_header {
+            encoder.set_flags(codec::Flags::GLOBAL_HEADER);
+        }
+
+        // The pixel format the *encoder* sees. On the hardware path that is the
+        // opaque surface format, not the pixels: `AV_PIX_FMT_VAAPI` says "look
+        // in hw_frames_ctx for what these really are".
+        let pool = if spec.needs_frame_pool() {
+            let Some((device_kind, surface_format)) = spec.accel.frame_pool() else {
+                return Err(ExportError::Settings(format!(
+                    "{} needs a hardware frame pool and does not say which",
+                    spec.accel.label()
+                )));
+            };
+            encoder.set_format(surface_format);
+            let device = HwDeviceContext::open(device_kind, Some(hwframes::DEFAULT_RENDER_NODE))?;
+            let pool = device.frames(
+                surface_format,
+                spec.upload_format(),
+                spec.width,
+                spec.height,
+            )?;
+            pool.attach_to_encoder(&mut encoder)?;
+            Some(pool)
+        } else {
+            encoder.set_format(spec.upload_format());
+            None
+        };
+
+        let mut options = Dictionary::new();
+        for (key, value) in spec.dictionary_for(rate_control) {
+            options.set(&key, &value);
+        }
+
+        match encoder.open_as_with(codec, options) {
+            Ok(opened) => {
+                if rung > 0 {
+                    tracing::info!(
+                        encoder = %spec.encoder_name,
+                        "this driver refused the requested rate control; using {}",
+                        rate_control.label
+                    );
+                }
+                return Ok(OpenVideoEncoder { encoder: opened, hw: pool });
+            }
+            Err(source) => {
+                tracing::debug!(
+                    encoder = %spec.encoder_name,
+                    rate_control = rate_control.label,
+                    %source,
+                    "rate-control rung refused"
+                );
+                last_error = Some(ExportError::Ffmpeg {
+                    what: format!(
+                        "cannot open the {} encoder with {}",
+                        spec.encoder_name, rate_control.label
+                    ),
+                    source,
+                });
+            }
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| {
+        ExportError::Settings(format!(
+            "cannot open the {} encoder: no rate-control mode to try",
+            spec.encoder_name
+        ))
+    }))
+}
+
 fn add_video(
     octx: &mut format::context::Output,
     spec: &VideoStreamSpec,
@@ -421,45 +794,8 @@ fn add_video(
         ost.set_avg_frame_rate(frame_rate);
     }
 
-    let mut encoder = context_for(codec)?
-        .encoder()
-        .video()
-        .map_err(ExportError::ffmpeg("preparing the video encoder"))?;
-
-    encoder.set_width(spec.width);
-    encoder.set_height(spec.height);
-    encoder.set_format(format::Pixel::YUV420P);
-    encoder.set_time_base(time_base);
-    encoder.set_frame_rate(Some(frame_rate));
-    encoder.set_gop((spec.fps.as_f64() * GOP_SECONDS).round().max(1.0) as u32);
-    // Two B-frames is the standard trade: meaningful compression, still within
-    // what every hardware decoder handles.
-    encoder.set_max_b_frames(2);
-    // swscale writes limited-range YUV by default; tagging it full range would
-    // make every player stretch the levels and crush the blacks.
-    encoder.set_color_range(ffmpeg::color::Range::MPEG);
-
-    if let Quality::Bitrate(bits) = spec.quality {
-        encoder.set_bit_rate(bits as usize);
-        // A 1.5x ceiling keeps a hard cut from blowing the buffer without
-        // making the average meaningless.
-        encoder.set_max_bit_rate((bits + bits / 2) as usize);
-    }
-    if global_header {
-        encoder.set_flags(codec::Flags::GLOBAL_HEADER);
-    }
-
-    let mut options = Dictionary::new();
-    for (key, value) in spec.dictionary() {
-        options.set(&key, &value);
-    }
-
-    let opened = encoder
-        .open_as_with(codec, options)
-        .map_err(ExportError::ffmpeg(format!(
-            "cannot open the {} encoder",
-            spec.encoder_name
-        )))?;
+    let OpenVideoEncoder { encoder: opened, hw } =
+        open_video_encoder(spec, codec, global_header)?;
 
     // The stream's parameters have to describe the *opened* encoder: before
     // `open` there is no extradata, and a header written without it produces a
@@ -472,7 +808,7 @@ fn add_video(
         format::Pixel::RGBA,
         spec.width,
         spec.height,
-        format::Pixel::YUV420P,
+        spec.upload_format(),
         spec.width,
         spec.height,
         // Input and output are the same size, so this is a colour conversion,
@@ -488,10 +824,109 @@ fn add_video(
         time_base,
         stream_time_base: time_base,
         scaler,
+        hw,
+        upload_format: spec.upload_format(),
         width: spec.width,
         height: spec.height,
         frames: 0,
     })
+}
+
+/// Open `encoder_name`, encode one frame with it, and flush.
+///
+/// The only honest answer to "does this hardware encoder work". Everything
+/// cheaper — the encoder being in the build, a device node existing — is a
+/// proxy that is wrong in both directions on real machines. 320×240 rather than
+/// something smaller because several VAAPI drivers refuse a surface below
+/// 176×144 and the alignment rules are per-vendor; this size is safe
+/// everywhere and costs a few milliseconds.
+///
+/// Deliberately writes no file: a probe that needs a writable directory is a
+/// probe that fails on a locked-down machine for the wrong reason.
+pub fn trial_encode(encoder_name: &str, accel: HwAccel) -> Result<()> {
+    crate::modules::media::ensure_initialized();
+
+    let spec = VideoStreamSpec {
+        width: 320,
+        height: 240,
+        fps: Fps::THIRTY,
+        encoder_name: encoder_name.to_string(),
+        accel,
+        quality: Quality::Crf(28),
+        options: Vec::new(),
+    };
+    let codec = ffmpeg::encoder::find_by_name(encoder_name)
+        .ok_or_else(|| ExportError::NoEncoder(encoder_name.to_string()))?;
+
+    let OpenVideoEncoder { mut encoder, hw } = open_video_encoder(&spec, codec, false)?;
+
+    // Mid-grey rather than the zeroed buffer `frame::Video::new` hands back:
+    // an all-zero NV12 frame is legal but is also what a broken upload
+    // produces, and a probe that passes on a black frame would pass on a path
+    // that silently uploads nothing.
+    let mut software = frame::Video::new(spec.upload_format(), spec.width, spec.height);
+    fill_flat_grey(&mut software, spec.upload_format());
+    software.set_pts(Some(0));
+
+    match hw.as_ref() {
+        None => encoder
+            .send_frame(&software)
+            .map_err(ExportError::ffmpeg("encoding the test frame"))?,
+        Some(pool) => {
+            let mut surface = pool.empty_frame()?;
+            pool.upload(&software, &mut surface)?;
+            surface.set_pts(Some(0));
+            encoder
+                .send_frame(&surface)
+                .map_err(ExportError::ffmpeg("encoding the test frame on the GPU"))?;
+        }
+    }
+
+    encoder
+        .send_eof()
+        .map_err(ExportError::ffmpeg("flushing the test encoder"))?;
+
+    // The same flush discipline the real path has, and for the same reason: a
+    // driver that accepts a frame and produces no packet is broken, and this is
+    // the only place we find out cheaply.
+    let mut packet = Packet::empty();
+    let mut packets = 0usize;
+    loop {
+        match encoder.receive_packet(&mut packet) {
+            Ok(()) => packets += 1,
+            Err(ffmpeg::Error::Other { errno }) if errno == ffmpeg::error::EAGAIN => break,
+            Err(ffmpeg::Error::Eof) => break,
+            Err(source) => {
+                return Err(ExportError::Ffmpeg {
+                    what: "reading the test packet back".into(),
+                    source,
+                })
+            }
+        }
+    }
+
+    if packets == 0 {
+        return Err(ExportError::Settings(
+            "the encoder accepted a frame and produced no data".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Paint a flat mid-grey into a freshly allocated planar or semi-planar frame.
+fn fill_flat_grey(frame: &mut frame::Video, pixel: format::Pixel) {
+    let planes = match pixel {
+        // NV12: one luma plane, one interleaved chroma plane. 128 in both is
+        // neutral grey.
+        format::Pixel::NV12 => vec![(0usize, 128u8), (1, 128)],
+        // YUV420P: luma, then two chroma planes.
+        _ => vec![(0usize, 128u8), (1, 128), (2, 128)],
+    };
+    for (plane, value) in planes {
+        if plane < frame.planes() {
+            frame.data_mut(plane).fill(value);
+        }
+    }
 }
 
 fn add_audio(
@@ -580,6 +1015,30 @@ fn add_audio(
 // ---------------------------------------------------------------------------
 // Frame and packet plumbing
 // ---------------------------------------------------------------------------
+
+/// Copy `rows` rows of `row_bytes` from `source` into plane `plane`.
+///
+/// Two strides, both of which are somebody else's decision: the GPU picked
+/// `source_stride` to keep its writes word-aligned and libavutil picked the
+/// frame's to suit whatever SIMD the encoder uses. They are equal on most sizes
+/// and a sheared picture on the rest, which is why this is a loop and not a
+/// single `copy_from_slice`.
+fn copy_plane(
+    target: &mut frame::Video,
+    plane: usize,
+    source: &[u8],
+    source_stride: usize,
+    row_bytes: usize,
+    rows: usize,
+) {
+    let stride = target.stride(plane);
+    let data = target.data_mut(plane);
+    for y in 0..rows {
+        let src = y * source_stride;
+        let dst = y * stride;
+        data[dst..dst + row_bytes].copy_from_slice(&source[src..src + row_bytes]);
+    }
+}
 
 /// Copy tightly packed rows into a frame whose rows are padded.
 fn copy_packed_rows(target: &mut frame::Video, packed: &[u8], row_bytes: usize) {
@@ -811,8 +1270,8 @@ mod tests {
         let options = spec.dictionary();
         let last_preset = options
             .iter()
-            .filter(|(k, _)| k == "preset")
-            .last()
+            .rev()
+            .find(|(k, _)| k == "preset")
             .cloned()
             .unwrap();
         assert_eq!(last_preset.1, "veryfast");
@@ -830,6 +1289,126 @@ mod tests {
             options: Vec::new(),
         };
         assert!(!spec.dictionary().iter().any(|(k, _)| k == "crf"));
+    }
+
+    fn spec(accel: HwAccel, encoder_name: &str, quality: Quality) -> VideoStreamSpec {
+        VideoStreamSpec {
+            width: 1920,
+            height: 1080,
+            fps: Fps::THIRTY,
+            encoder_name: encoder_name.into(),
+            accel,
+            quality,
+            options: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn the_hardware_path_negotiates_nv12_and_a_pool_and_the_software_path_does_not() {
+        let hardware = spec(HwAccel::Vaapi, "h264_vaapi", Quality::Crf(23));
+        assert!(hardware.needs_frame_pool());
+        // What swscale targets and what the pool's sw_format is: the same
+        // thing, and they have to stay the same thing or the upload fails.
+        assert_eq!(hardware.upload_format(), format::Pixel::NV12);
+
+        let software = spec(HwAccel::Software, "libx264", Quality::Crf(23));
+        assert!(!software.needs_frame_pool());
+        assert_eq!(software.upload_format(), format::Pixel::YUV420P);
+
+        // NVENC is hardware and still takes system memory, which is the whole
+        // reason `needs_frame_pool` is not "is this hardware".
+        let nvenc = spec(HwAccel::Nvenc, "h264_nvenc", Quality::Crf(23));
+        assert!(!nvenc.needs_frame_pool());
+        assert_eq!(nvenc.upload_format(), format::Pixel::YUV420P);
+    }
+
+    #[test]
+    fn a_vaapi_spec_asks_for_constant_quality_first_and_has_somewhere_to_fall_back_to() {
+        let spec = spec(HwAccel::Vaapi, "h264_vaapi", Quality::Crf(23));
+        let ladder = spec.rate_controls();
+
+        let first = spec.dictionary_for(&ladder[0]);
+        assert!(first.contains(&("rc_mode".into(), "CQP".into())));
+        assert!(first.contains(&("qp".into(), "23".into())));
+        // x264's preset must not leak onto a VAAPI encoder: `preset` there is a
+        // different option with different values and libavcodec rejects it.
+        assert!(!first.iter().any(|(k, _)| k == "preset"));
+
+        assert!(ladder.len() > 1, "no fallback for a driver without CQP");
+        assert!(ladder[1..].iter().all(|rung| rung.bit_rate > 0));
+    }
+
+    #[test]
+    fn caller_options_still_win_on_the_hardware_path() {
+        // The escape hatch has to survive the ladder: a caller that knows this
+        // driver wants low-power mode must be able to say so.
+        let mut spec = spec(HwAccel::Vaapi, "h264_vaapi", Quality::Crf(23));
+        spec.options = vec![("rc_mode".into(), "VBR".into())];
+        let ladder = spec.rate_controls();
+        let options = spec.dictionary_for(&ladder[0]);
+        let last = options
+            .iter()
+            .rev()
+            .find(|(k, _)| k == "rc_mode")
+            .cloned()
+            .unwrap();
+        assert_eq!(last.1, "VBR");
+    }
+
+    #[test]
+    fn a_hardware_bitrate_request_sets_a_bitrate_and_names_no_mode() {
+        let spec = spec(HwAccel::Vaapi, "h264_vaapi", Quality::Bitrate(12_000_000));
+        let ladder = spec.rate_controls();
+        assert_eq!(ladder.len(), 1);
+        assert_eq!(ladder[0].bit_rate, 12_000_000);
+        assert!(spec.dictionary_for(&ladder[0]).is_empty());
+    }
+
+    #[test]
+    fn a_hardware_frame_carries_the_same_pts_as_a_software_one() {
+        // The upload copies pixels and nothing else, so the hardware path sets
+        // the PTS a second time. Both paths derive it from the frame index in
+        // the encoder's 1/fps time base, which is what makes the two files line
+        // up frame for frame — and what the audio interleave depends on.
+        let stream = Rational::new(1, 90_000);
+        for index in [0i64, 1, 59, 60, 1_000] {
+            let software = rescale(index, tb(Fps::THIRTY), stream);
+            let hardware = rescale(index, tb(Fps::THIRTY), stream);
+            assert_eq!(software, hardware);
+            assert_eq!(software, index * 3_000);
+        }
+    }
+
+    #[test]
+    fn a_trial_encode_of_a_missing_encoder_is_an_error_and_not_a_panic() {
+        let error = trial_encode("definitely_not_an_encoder", HwAccel::Software).unwrap_err();
+        assert!(matches!(error, ExportError::NoEncoder(_)), "{error}");
+    }
+
+    #[test]
+    fn a_trial_encode_of_the_software_encoder_produces_a_packet() {
+        // Not GPU-guarded: libx264 is in every build we ship, and this is the
+        // test that the probe machinery itself works, independent of hardware.
+        if !super::super::hwaccel::encoder_exists("libx264") {
+            return;
+        }
+        trial_encode("libx264", HwAccel::Software).expect("a software trial encode");
+    }
+
+    #[test]
+    fn the_grey_test_frame_is_grey_in_both_layouts() {
+        // A probe that passed on an all-zero frame would pass on a path that
+        // silently uploads nothing, so `fill_flat_grey` has to actually write.
+        for pixel in [format::Pixel::NV12, format::Pixel::YUV420P] {
+            let mut frame = frame::Video::new(pixel, 64, 64);
+            fill_flat_grey(&mut frame, pixel);
+            for plane in 0..frame.planes() {
+                assert!(
+                    frame.data(plane).iter().all(|&byte| byte == 128),
+                    "{pixel:?} plane {plane} was not filled"
+                );
+            }
+        }
     }
 
     #[test]

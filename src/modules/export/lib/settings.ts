@@ -262,10 +262,16 @@ export function withExtension(path: string, extension: string): string {
   return `${path.slice(0, slash + 1)}${stem}.${extension}`;
 }
 
-/** The file name to offer in the save dialog, with the container's extension. */
+/**
+ * The file name to offer in the save dialog.
+ *
+ * Only `.chukcut` is stripped, not any trailing dotted word: a project called
+ * "Holiday.v2" is named that on purpose, and turning it into "Holiday.mp4"
+ * would quietly drop the part the user was using to tell two cuts apart.
+ */
 export function defaultFileName(projectName: string | undefined, container: Container): string {
   const base = (projectName ?? "Untitled").trim() || "Untitled";
-  return `${base.replace(/\.[a-z0-9]{2,4}$/i, "")}.${container}`;
+  return `${base.replace(/\.chukcut$/i, "")}.${container}`;
 }
 
 /**
