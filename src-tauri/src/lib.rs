@@ -37,6 +37,17 @@ pub fn run() {
             modules::timeline::commands::timeline_split,
             modules::timeline::commands::timeline_undo,
             modules::timeline::commands::timeline_redo,
+            // media
+            modules::media::commands::media_probe,
+            modules::media::commands::media_thumbnails,
+            modules::media::commands::media_waveform,
+            // workspace
+            modules::workspace::commands::workspace_settings_get,
+            modules::workspace::commands::workspace_settings_set,
+            modules::workspace::commands::workspace_recent_list,
+            modules::workspace::commands::workspace_recent_record,
+            modules::workspace::commands::workspace_cache_size,
+            modules::workspace::commands::workspace_cache_clear,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

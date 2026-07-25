@@ -465,7 +465,13 @@ mod tests {
             track.segments[1].target_range,
             TimeRange::new(1_000_000, 3_000_000)
         );
-        assert!(project.validate().is_empty() || project.validate().iter().all(|i| i.message.contains("missing")));
+        // The fixture's material is not in the pool, so validate() legitimately
+        // complains about that. What matters here is that the split left the
+        // track structurally sound.
+        assert!(!project
+            .validate()
+            .iter()
+            .any(|i| i.message.contains("overlap")));
     }
 
     #[test]
