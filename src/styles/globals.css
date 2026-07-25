@@ -1,0 +1,146 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+/*
+ * Design tokens.
+ *
+ * The editor is dark-first: the light theme exists so the app does not look
+ * broken if someone forces it, but every surface is tuned for dark. Values are
+ * OKLCH so that lightness steps stay perceptually even when we darken panels.
+ */
+:root {
+  --radius: 0.5rem;
+
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+
+  /* Panel = the chrome around the work surfaces (sidebar, inspector, header). */
+  --panel: oklch(0.185 0 0);
+  --panel-foreground: oklch(0.92 0 0);
+  /* Surface = an inset area inside a panel (media tile, list row). */
+  --surface: oklch(0.225 0 0);
+  --surface-foreground: oklch(0.92 0 0);
+
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.225 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+
+  --primary: oklch(0.62 0.19 264);
+  --primary-foreground: oklch(0.99 0 0);
+  --secondary: oklch(0.27 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.27 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --accent: oklch(0.3 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.62 0.21 25);
+  --destructive-foreground: oklch(0.985 0 0);
+
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 14%);
+  --ring: oklch(0.62 0.19 264);
+
+  /* Timeline-specific tokens. Track colors are keyed by media kind so a glance
+   * at the timeline tells you what a lane holds. */
+  --timeline-background: oklch(0.165 0 0);
+  --timeline-ruler: oklch(0.205 0 0);
+  --timeline-gridline: oklch(1 0 0 / 6%);
+  --timeline-playhead: oklch(0.75 0.19 25);
+  --track-video: oklch(0.55 0.13 264);
+  --track-audio: oklch(0.58 0.13 155);
+  --track-text: oklch(0.62 0.14 85);
+  --track-sticker: oklch(0.58 0.15 320);
+  --track-effect: oklch(0.6 0.14 200);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-panel: var(--panel);
+  --color-panel-foreground: var(--panel-foreground);
+  --color-surface: var(--surface);
+  --color-surface-foreground: var(--surface-foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --color-timeline-background: var(--timeline-background);
+  --color-timeline-ruler: var(--timeline-ruler);
+  --color-timeline-gridline: var(--timeline-gridline);
+  --color-timeline-playhead: var(--timeline-playhead);
+  --color-track-video: var(--track-video);
+  --color-track-audio: var(--track-audio);
+  --color-track-text: var(--track-text);
+  --color-track-sticker: var(--track-sticker);
+  --color-track-effect: var(--track-effect);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  html,
+  body,
+  #root {
+    @apply h-full;
+  }
+
+  body {
+    @apply bg-background text-foreground overscroll-none;
+    font-synthesis-weight: none;
+    text-rendering: optimizeLegibility;
+    /* The editor is a desktop app, not a document: text selection and native
+     * drag on chrome elements gets in the way of timeline dragging. */
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  input,
+  textarea,
+  [contenteditable] {
+    -webkit-user-select: text;
+    user-select: text;
+  }
+
+  /* Scrollbars: thin and unobtrusive, matching the panel palette. */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--muted);
+    border-radius: 9999px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--muted-foreground);
+    background-clip: content-box;
+  }
+}

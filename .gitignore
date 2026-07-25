@@ -1,0 +1,15 @@
+# Build output
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
+
+# Editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Local env
+.env
+.env.local
