@@ -5,10 +5,16 @@
 //! `generate_handler!` block below. If a command is not in that list, the
 //! webview cannot call it. That is the whole security model — the renderer has
 //! no file system, no process spawn, and no GPU of its own.
+//!
+//! The one exception is deliberate and documented: preview frames leave over
+//! the `chukcut-frame://` URI scheme registered here, because pushing video at
+//! frame rate through `invoke()` does not work at any resolution. See
+//! `docs/architecture/preview-pipeline.md`.
 
 pub mod modules;
 pub mod state;
 
+use modules::preview::{frame_protocol_async, PreviewServer, SCHEME};
 use state::AppState;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -20,10 +26,23 @@ pub fn run() {
         )
         .init();
 
+    // Frames left over from a previous run describe a document that no longer
+    // exists, so the cache starts empty every time.
+    if let Err(error) = std::fs::remove_dir_all(modules::workspace::paths::cache_root().join("preview")) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!(%error, "could not clear the preview cache");
+        }
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::new())
+        .manage(PreviewServer::new())
+        // Asynchronous rather than the blocking variant: a frame request can
+        // wait briefly for a frame that is mid-render, and that wait must never
+        // sit on a webview thread.
+        .register_asynchronous_uri_scheme_protocol(SCHEME, frame_protocol_async)
         .invoke_handler(tauri::generate_handler![
             // project
             modules::project::commands::project_new,
@@ -42,6 +61,17 @@ pub fn run() {
             modules::media::commands::media_probe,
             modules::media::commands::media_thumbnails,
             modules::media::commands::media_waveform,
+            // preview
+            modules::preview::commands::preview_start,
+            modules::preview::commands::preview_seek,
+            modules::preview::commands::preview_play,
+            modules::preview::commands::preview_pause,
+            modules::preview::commands::preview_stop,
+            modules::preview::commands::preview_state,
+            // export
+            modules::export::commands::export_presets,
+            modules::export::commands::export_start,
+            modules::export::commands::export_cancel,
             // workspace
             modules::workspace::commands::workspace_settings_get,
             modules::workspace::commands::workspace_settings_set,
