@@ -29,6 +29,7 @@ pub fn run() {
             modules::project::commands::project_new,
             modules::project::commands::project_open,
             modules::project::commands::project_save,
+            modules::project::commands::project_import_media,
             modules::project::commands::project_get,
             modules::project::commands::project_validate,
             modules::project::commands::project_path,

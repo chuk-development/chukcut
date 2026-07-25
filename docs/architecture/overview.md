@@ -10,17 +10,26 @@ produced a timeline that could not export, because every button, panel and drag
 interaction had to be drawn by hand and each iteration cost a compile. The
 work went into re-implementing widgets instead of into editing video.
 
-Web UI plus native engine is not a compromise, it is what the thing we are
-cloning actually does:
+That is the real reason, and it is sufficient on its own. The UI is the part of
+an editor that has to be rebuilt fifty times before it feels right, so it
+belongs in the toolchain with the fastest iteration loop.
 
-- **CapCut Desktop** is a Qt6 shell with Chromium (CEF) embedded for panels,
-  driving a native C++ engine (`VECreator.dll`, `videoeditor.dll`) that talks
-  GLES through ANGLE.
+An earlier draft of this document also claimed CapCut Desktop does the same
+thing. It does not, and the claim has been removed rather than softened. A
+full inventory of the Windows build (`docs/research/ui-inventory.md`) found
+**2,007 QML files inside `VECreator.dll`** — the editor is entirely native Qt
+Quick. Chromium and Lynx are present, but they render the commerce and account
+surfaces around the editor, never the timeline. Every CEF `.pak` in the install
+is stock Chromium, unpatched.
+
+What does hold:
+
 - **CapCut Web** is a TypeScript UI driving the same engine compiled to WASM
-  (`vesdk-lvapi.wasm`) plus `libffmpeg.wasm`.
-
-Both put the interface in a browser and the video in native code. We do the
-same, with Tauri instead of CEF and Rust instead of C++.
+  (`vesdk-lvapi.wasm` plus `libffmpeg.wasm`). So the engine/UI split across a
+  language boundary is proven at their scale, even if the desktop client draws
+  its own widgets.
+- ByteDance can afford to hand-build two thousand QML files. We cannot. That
+  asymmetry is the argument, not an appeal to their example.
 
 ## The two processes
 

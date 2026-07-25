@@ -29,11 +29,19 @@ Installed under `%LOCALAPPDATA%\CapCut\Apps\<version>\`.
 
 ### The two conclusions that matter
 
-**1. The UI is a browser.** Qt provides the window and the native widgets;
-Chromium renders the panels; Lynx runs JavaScript views. ByteDance did not
-build this UI natively, and they have more engineers than we will ever have.
-This is the direct justification for
-[`overview.md`](../architecture/overview.md)'s process split.
+**1. ~~The UI is a browser.~~ Wrong — corrected below.** The presence of a
+218 MB `libcef.dll` and a Lynx runtime alongside Qt led to the conclusion that
+Chromium rendered the editor panels. A later full inventory
+([`ui-inventory.md`](ui-inventory.md)) disproved it: the editor is **2,007 QML
+files embedded in `VECreator.dll`**, entirely native Qt Quick, on a 136-component
+Qt design system. CEF and Lynx render the commerce and account surfaces that
+surround the editor and nothing inside it — every CEF `.pak` is stock Chromium
+with no ByteDance strings at all.
+
+The lesson is worth keeping visible: a library inventory tells you what is
+*linked*, not what is *used*. The corrected reasoning for chukcut's own process
+split is in [`overview.md`](../architecture/overview.md), and it no longer rests
+on this.
 
 **2. The engine speaks GLES, not D3D.** `VEAngle/libGLESv2.dll` means the
 renderer targets OpenGL ES and ANGLE translates to Direct3D 11 on Windows. It

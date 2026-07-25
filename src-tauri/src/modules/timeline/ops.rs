@@ -66,11 +66,48 @@ pub enum EditCommand {
         before: f32,
         after: f32,
     },
+    /// Mute, lock, hide and track volume in one variant.
+    ///
+    /// These four travel together because the UI toggles them from the same
+    /// row of controls, and because a variant per flag would quadruple the
+    /// enum for no gain — the payload is four bytes either way.
+    SetTrackFlags {
+        track_id: String,
+        before: TrackFlags,
+        after: TrackFlags,
+    },
     /// Several commands that undo as one unit, applied in order.
     Composite {
         label: String,
         commands: Vec<EditCommand>,
     },
+}
+
+/// The per-track switches, snapshotted together.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct TrackFlags {
+    pub muted: bool,
+    pub locked: bool,
+    pub hidden: bool,
+    pub volume: f32,
+}
+
+impl TrackFlags {
+    pub fn of(track: &Track) -> Self {
+        Self {
+            muted: track.muted,
+            locked: track.locked,
+            hidden: track.hidden,
+            volume: track.volume,
+        }
+    }
+
+    fn apply_to(&self, track: &mut Track) {
+        track.muted = self.muted;
+        track.locked = self.locked;
+        track.hidden = self.hidden;
+        track.volume = self.volume.clamp(0.0, 4.0);
+    }
 }
 
 pub type EditResult = Result<(), String>;
@@ -88,6 +125,7 @@ impl EditCommand {
             EditCommand::SetTransform { .. } => "Transform clip".into(),
             EditCommand::SetSpeed { .. } => "Change speed".into(),
             EditCommand::SetVolume { .. } => "Change volume".into(),
+            EditCommand::SetTrackFlags { .. } => "Change track".into(),
             EditCommand::Composite { label, .. } => label.clone(),
         }
     }
@@ -243,6 +281,16 @@ impl EditCommand {
                 Ok(())
             }
 
+            EditCommand::SetTrackFlags {
+                track_id, after, ..
+            } => {
+                let track = project
+                    .track_mut(track_id)
+                    .ok_or_else(|| format!("unknown track {track_id}"))?;
+                after.apply_to(track);
+                Ok(())
+            }
+
             EditCommand::Composite { commands, .. } => {
                 for (i, cmd) in commands.iter().enumerate() {
                     if let Err(e) = cmd.apply(project) {
@@ -338,6 +386,15 @@ impl EditCommand {
                 after,
             } => EditCommand::SetVolume {
                 segment_id: segment_id.clone(),
+                before: *after,
+                after: *before,
+            },
+            EditCommand::SetTrackFlags {
+                track_id,
+                before,
+                after,
+            } => EditCommand::SetTrackFlags {
+                track_id: track_id.clone(),
                 before: *after,
                 after: *before,
             },
