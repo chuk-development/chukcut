@@ -74,8 +74,8 @@ pub use layout::{
     QuadPlacement,
 };
 pub use source::{
-    EmptySourceProvider, SolidColorProvider, SolidSource, SourceFrame, SourceProvider,
-    SourceRequest,
+    EmptySourceProvider, FrameGuard, SolidColorProvider, SolidSource, SourceFrame, SourceProvider,
+    SourceRequest, YuvMatrix, YuvRange,
 };
 pub use texture_pool::{PoolStats, PooledTexture, TextureKey, TexturePool};
 

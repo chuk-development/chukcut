@@ -16,7 +16,9 @@ let ipc: IpcHarness;
 
 beforeEach(() => {
   ipc = installIpc();
-  ipc.handle("media_thumbnails", []);
+  // Answers with a job id and never sends a terminal batch: these tests are
+  // about the library, not about what ends up on a tile.
+  ipc.handle("media_thumbnails", "job-1");
   ipc.handle("project_get", makeProject());
 });
 

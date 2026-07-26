@@ -62,11 +62,27 @@ bug), and its audio is **not** silent.
   **1.5×, not the order of magnitude the decision document projected**, because
   the encoder stopped being the bottleneck and nothing else moved. Numbers and
   the reason are under "Hardware export, measured" below.
-- **`media/waveform.rs` fails on files with a channel count but no channel
-  layout** (plain PCM WAV, typically). FFmpeg 6 replaced the layout bitmask with
-  `AVChannelLayout` and `ffmpeg-next` still configures swresample through the
-  legacy API. The fix exists in `audio/decode.rs::name_the_layout` and needs
-  transplanting.
+- **Waveforms and thumbnails are done and stream; nothing here is known rough.**
+  Recorded because the next person will otherwise re-derive the two traps:
+  a file with a channel *count* and no channel *layout* (plain PCM WAV, and
+  therefore most of what gets dropped on an audio lane) decodes to frames whose
+  `AVChannelLayout` is `AV_CHANNEL_ORDER_UNSPEC`, and `ffmpeg-next` 6.1 still
+  configures swresample through the legacy mask API, so **every such frame is
+  rejected with "Input changed"**. `waveform.rs::name_the_layout` relabels the
+  frame; the same eight lines are in `audio/decode.rs`, which met it first.
+  `tests/media_data.rs` builds the WAV by hand rather than with `ffmpeg`,
+  because an `ffmpeg`-written file may carry a mask and then proves nothing.
+  Second: a peak-only waveform draws a solid block for anything compressed, so
+  the envelope carries signed min/max **and** RMS per bucket.
+  Third, and the one that will bite anything else that caches derived data:
+  **size plus mtime is not a file identity.** The kernel stamps mtime at clock
+  tick granularity, so a file rewritten in place without changing length keeps
+  its key and serves stale thumbnails forever — a unit test writes `one` then
+  `two` and both writes land in the same tick. `thumbnails.rs::fingerprint` now
+  folds in 8 KB from each end of the file as well, which costs nothing against a
+  decode and catches every container whose header or trailer moves. Both the
+  thumbnail and waveform caches share that one function on purpose, so a single
+  edit invalidates everything derived from a file at once.
 
 ## Hardware export, measured
 
@@ -140,6 +156,45 @@ piece of work: **"move it to the GPU" is not the optimisation. "Stop copying it"
 is.**
 
 **Both of the first two are now done.** See the next section.
+
+## Proxy media, measured
+
+`src-tauri/src/modules/proxy/`, decision 0003. Measured 2026-07-26 on the
+Raptor Lake machine. **The machine was at load ~29 while these ran**, so every
+absolute figure is roughly twice what a quiet machine gives — a quiet run of the
+first row measured 40.9 ms. The ratios are what the numbers are for.
+
+Decode of one frame to RGBA at preview size, single-threaded, which is what
+`media::provider` pays (`ffmpeg -threads 1 -i F -vf scale=-2:1080,format=rgba -f
+null -`, 240 frames):
+
+| | per frame |
+|---|---:|
+| 4K H.264 source → 1080-tall RGBA | 84–98 ms |
+| 4K HEVC source → 1080-tall RGBA | 116–136 ms |
+| **720p all-intra proxy → RGBA** (`libx264 -tune fastdecode`) | **7.9–12.4 ms** |
+| 720p all-intra proxy → RGBA (`h264_vaapi`) | 15.3–18.8 ms |
+
+So a proxy is worth **8–11×** against 4K H.264 and **10–15×** against 4K HEVC,
+which is the difference between a timeline that plays and one that does not.
+
+Three things there that are not obvious and are worth not rediscovering:
+
+- **How the proxy was encoded changes how expensive it is to decode, by 50%.**
+  Same content, same 1280×720, four encoders: `libx264 -crf 23 -g 1` 18.1 ms,
+  the same plus `-tune fastdecode` 12.4–15.8 ms, `h264_vaapi -qp 23 -g 1`
+  23.0–26.5 ms, and the same plus `-coder cavlc` 18.1–19.5 ms. `fastdecode` and
+  `cavlc` are the same trade — CABAC and the deblocking filter off — and both
+  are now set. The hardware encoder's *default* output was the most expensive
+  proxy of the four.
+- **Hardware encoding buys almost nothing here.** The whole 4K→720p transcode
+  took 11.33 s in software and 10.40 s on VAAPI: **8%**, because decoding the 4K
+  source and scaling it dominate. Same conclusion as the export, one section up.
+  The hardware path is still the default because it is what the user waits on,
+  and `CHUKCUT_PROXY_ENCODER=software` takes the other side without a rebuild.
+- **FFmpeg guesses the muxer from the output filename**, so an atomic write to
+  `proxy.mp4.part` fails inside `format::output` with a bare `EINVAL` and no
+  hint. The partial file is `.partial-proxy.mp4` — a prefix, not a suffix.
 
 ## The export's frame path, measured stage by stage
 
@@ -294,33 +349,171 @@ Two things about the hardware path that are not obvious and cost time to find:
 Found by the integration suite. Each is real and reproducible; none has a red
 test left behind, so `cargo test` is green despite them.
 
-- **A project containing a NaN or infinite float saves, then cannot be
-  reopened.** `serde_json` writes `null` and loading fails with "invalid type:
-  null, expected f32". Verified for `Transform::opacity` and `Project::fps`.
-  This is silent data loss: a save that reports success and a file that will
-  never open again. Fix by rejecting non-finite values at the edit-command
-  boundary.
-- **`schema_version` gates nothing.** `project_open` is a bare `from_str`, and
-  there is no `migrate.rs`. A file claiming version 99 loads silently, which
-  `architecture/project-format.md` explicitly forbids.
-- **`SetSpeed` breaks the document's own invariant.** `project-format.md` states
-  `source_range.duration = target_range.duration × speed`; the command changes
-  the speed without adjusting either range. `split_at` then computes the wrong
-  cut for a sped-up clip.
-- **`validate()` has gaps** the fuzzer would otherwise have exploited: no check
-  for a negative `target_range.start`, no `source_range` sanity, no duplicate
-  segment ids.
-- **`RemoveTrack` removes by index without checking the track matches**, so a
-  stale index deletes the wrong lane.
 - **The app opens two GPU devices** — the preview's render loop and the export's
   lazily-initialised compositor. Given that concurrent Vulkan instances were
   observed crashing this driver during testing, these should be collapsed into
   one shared context.
 
+## The document layer's defects, fixed
+
+The five defects this section used to list are fixed, each with a test that
+fails without the fix. What is worth carrying forward is *why* they were
+invisible, because the same blind spots will produce the next ones.
+
+- **A non-finite float is silent data loss, and only the save path can see
+  it.** `serde_json` cannot write a NaN or an infinity — it writes `null` — so
+  a project that took one saved successfully and then failed to load forever
+  after with "invalid type: null, expected f32". Nothing in memory is wrong,
+  which is why every in-memory assertion passed. Non-finite values are now
+  refused at the edit-command boundary (`timeline/ops.rs::check_finite`), are
+  errors in `validate()`, and `project/migrate.rs::repair_non_finite` opens the
+  files that already have them: a `null` at a key is dropped so the field's
+  documented default applies — an opacity comes back at 1.0, not 0.0 — and the
+  user is told which values were reset. **Every float in the document now
+  carries a `serde` default**, which is what makes that repair possible.
+- **`schema_version` now gates loading.** `project/migrate.rs` is the only
+  place allowed to turn bytes into a `Project`. A newer format is refused with
+  a sentence naming both versions and what to do; an older one walks the (still
+  empty) `STEPS` ladder. Adding version 2 is a bump and one table entry.
+- **`SetSpeed` moves the source range with the speed.** The invariant
+  `source_range.duration = target_range.duration × speed` is what `split_at`,
+  the mixer and the exporter all read; the command used to change only the
+  factor, so a sped-up clip cut in the wrong place. The clip keeps its position
+  and length on the timeline and its source range changes, which is the
+  direction the rest of the codebase already assumed (`audio/mixer.rs`,
+  `export/audio.rs` both derive the source span from the speed). Every command
+  that writes a source duration now writes
+  `document::source_duration_for(target, speed)` — one function, so undo stays
+  byte-exact instead of drifting a microsecond per edit.
+- **`validate()` covers what the fuzzer would have found**: negative
+  `target_range.start`, source-range sanity, duplicate segment *and* track ids,
+  non-finite values, the speed invariant, and keyframe tracks (sorted, unique
+  times, no empty track). `edit_fuzz.rs` asserts those invariants
+  independently of `validate()` after every one of its thousands of commands,
+  because a fuzzer that only asks the checker whether the checker is happy
+  tests nothing when the checker stops looking.
+- **`RemoveTrack` checks the lane it names is at the index it names.** A stale
+  index used to delete a different lane and report success. `AddTrack` now
+  refuses an out-of-range index for the same reason rather than clamping: a
+  clamped insert produces a delete that cannot undo it.
+- **Autosave exists.** `project/autosave.rs` writes the open document to
+  `workspace::paths::autosave_file()` after every edit, import, save and undo,
+  and `project_get` restores it on the first call after launch. It is not an
+  undo step, and it is not the user's file — the path they last saved to is
+  remembered in a sibling `autosave.path` so a restored session still knows
+  where Ctrl+S goes. Writes go to one background thread through a single-slot
+  mailbox, so a burst of edits costs one write, the newest wins, and no edit
+  waits on the disk.
+
+The same pass added the four keyframe commands the editing UI sends —
+`AddKeyframe`, `RemoveKeyframe`, `MoveKeyframe`, `SetKeyframeEasing`. Two
+things about them are load-bearing and not obvious:
+
+- **A `KeyframeTrack` exists exactly while the property is animated.** The last
+  keyframe of a property takes the track with it, because both sides read "is
+  animated" as "a track exists". That makes undo harder, not easier, which is
+  why `AnimatableProperty` is now `Ord` and a segment's tracks are kept in its
+  declaration order: re-creating a dropped track has to put it back where it
+  was, or undo rewrites the file.
+- **A keyframe past the end of its clip is legal.** Trimming a tail produces
+  them, the document keeps them so that undoing the trim brings the animation
+  back, and refusing them would make the undo of an ordinary delete fail. The
+  only positional rule is that a time is not negative; `validate()` reports the
+  rest as a warning.
+
+Two things found along the way that were worse than the list said:
+
+- **Trimming was as capable of breaking the speed invariant as `SetSpeed`
+  was**, and the fuzzer generates trims eighteen times more often. A trim that
+  scales one range and not the other is now refused with a message naming the
+  arithmetic, and the frontend already computes it correctly
+  (`Timeline.tsx` multiplies the drag delta by the speed), so nothing that
+  works today starts failing.
+- **`split_at` truncated where it should have rounded**, so cutting a clip at
+  an odd speed lost up to a microsecond of source at every cut, compounding
+  with each split.
+
+## Text rasterisation, measured
+
+Measured 2026-07-26, `cargo run --release --example text_bench`. The engine is
+`src-tauri/src/modules/text/`: parley + fontique + harfrust + skrifa for
+shaping, zeno for scan conversion, everything above that ours. Full working, the
+traps, and the things it cannot do are in `docs/research/text-rendering.md`.
+
+**The machine was at load 40 on 12 cores while several agents built**, and the
+scheduler dominates: the same case measured 4.7 ms and 15.1 ms minutes apart.
+The benchmark reports the **minimum of 25 runs**, which is the closest thing to
+an uncontended number available here. Treat these as an upper bound and
+re-measure on a quiet machine before quoting them.
+
+| Milliseconds, minimum of 25 | 1920×1080 | 1080×1920 |
+|---|---:|---:|
+| Short title, 26 glyphs | **5.8** | 6.5 |
+| Short title + 4 px outline | 19.9 | 20.9 |
+| Short title + outline + shadow + background box | 29.3 | 32.7 |
+| Paragraph, 196 glyphs | 39.1 | 25.9 |
+| **Any of them, warm cache** | **0.0005** | 0.0005 |
+
+Three things worth carrying forward:
+
+- **Shaping is 0.1 ms and is not the problem.** All of parley, harfrust and
+  fontique — bidi, ligatures, Arabic joining, CJK line breaking — costs 0.1 ms
+  for the title and 0.2 ms for the 196-glyph paragraph, at every size. Every
+  other millisecond above is our own rasterisation.
+- **The cache is the whole story for playback.** A title does not change between
+  frames, so a warm frame costs a hash and an `Arc` clone. The cold cost is paid
+  once per edit, and 30 ms of that is not felt in an editor.
+- **The outline costs four times the text.** Scan-converting the stroke is what
+  an outlined title spends its time on, and both obvious levers were the wrong
+  way round: `kurbo::stroke` — which `rust-crate-survey.md` §4 recommends — was
+  **1.8× slower** than letting zeno stroke during scan conversion, and
+  `Join::Miter` was **4× slower** than `Join::Round` (54–62 ms against 15 ms).
+  The next idea is to dilate the fill mask rather than to stroke faster.
+
 ## Not built yet
 
-Text and titles, transitions, keyframe editing in the UI, audio waveforms on
-the timeline, proxy media for 4K, and the CapCut effect runtime (Phase 3).
+Keyframe editing in the UI, and audio waveforms on the timeline.
+
+**Text rasterisation is built and titles are not** — `modules/text/` turns a
+`TextMaterial` into an RGBA layer with system font fallback, real shaping
+(ligatures, kerning, CJK, Arabic, Hebrew, colour emoji), outline, drop shadow
+and background box, measured above and covered by 30 tests. What is missing is
+the twenty lines in `media/provider.rs` that call it: `MaterialSource::Text`
+still answers `Ok(None)`, so a text segment composites as nothing. That module
+was owned by other work while this landed, so the exact patch is at the bottom
+of `docs/research/text-rendering.md` rather than left half-applied. There is
+also no UI yet for creating or editing a title.
+
+**Transitions are built except for the compositor** —
+`src-tauri/src/modules/transitions/`, and the data model, edit commands,
+validation and five WGSL shaders are all in and tested. What is missing is the
+thirty lines in `render/compositor.rs` that draw a transition instead of a
+single quad; that module was owned by other work while this landed, so the exact
+patch is written out at the bottom of `docs/architecture/transitions.md` rather
+than left half-applied. Until it is applied a transition is stored, undone,
+retimed and validated correctly and renders as nothing — the cut plays as a hard
+cut.
+
+Two things in that document are worth reading before touching either
+`project/document.rs` or `render/`: a transition is centred on the cut and
+**neither clip moves** (overlap would break the no-overlap track invariant and
+shift the whole timeline on every duration change), and it hangs off the
+**incoming** clip rather than the outgoing one, which is the opposite of CapCut
+and reduces the cost of splitting a clip under a transition to one line in
+`split_at`.
+
+**Proxy media is built** — `src-tauri/src/modules/proxy/`, decision 0003 — but
+two seams outside that module are still open and it does nothing until they are
+closed: `media/provider.rs` needs the `from_project_for_preview` constructor
+(the exact patch is in the decision document), and `preview/commands.rs` needs
+to fold `proxy::ProxyQueue::shared().generation()` into the fingerprint its
+provider cache is keyed on, or a proxy finishing will not be picked up until the
+next edit.
+
+The effect runtime is partly built — see "The effect runtime (Phase 3),
+measured" above. It loads packages, compiles their shaders and runs their Lua,
+and it cannot open a package that ships its assets in the binary encoding,
+which is nearly all of them.
 
 ## Traps that have already cost time
 
@@ -379,6 +572,49 @@ the timeline, proxy media for 4K, and the CapCut effect runtime (Phase 3).
   target and the QP is ignored, which is how a hardware export comes out at a
   bitrate nobody asked for. The ladder's first rung deliberately leaves it zero.
 
+## The effect runtime (Phase 3), measured
+
+Built 2026-07-26. `src-tauri/src/modules/effects/`, written up in
+`docs/research/effect-runtime.md`.
+
+**An effect authored in their format renders.** 45 tests in
+`modules/effects/`, including a two-pass chain on the real GPU that samples
+`share://input.texture`, ping-pongs through a `.rt` target, and has its uniforms
+driven from a Lua script through the `Amaz` API. The fixture is
+`modules/effects/fixtures/tint/` and it was written here.
+
+**The shader pipeline works, and it was supposed to be the risk.**
+`rust-crate-survey.md` §6b said naga's GLSL frontend rejects every shader in
+the corpus and proposed a four-step replacement. That pipeline — our ES1→450
+rewriter, then glslang, then `spirv-webgpu-transform`, then naga spv-in —
+compiles **24 of 24** real corpus shaders to validated WGSL, including a
+`sampler2D` passed as a function parameter and `gl_FragData[]` multi-output
+shaders. The survey's estimate of "an afternoon" for the conformance run was
+right.
+
+**What actually blocks a downloaded effect is the binary asset container.**
+Structural assets (`.xshader`, `.material`, `.rt`, `.scene`, `.mesh`) ship in
+two interchangeable encodings and only the YAML twin is read here. That twin is
+about **2% of shipped assets** — 4 of 263 `.material`, 4 of 213 `.xshader`. So
+an effect authored in the format renders (there is one in
+`modules/effects/fixtures/tint/`, and a test that produces pixels from it), and
+every package in the surveyed cache is refused at its first `.xshader` with a
+message saying exactly why. Decoding that container is the next piece of work
+and it has an oracle for every field, which is the strongest position to do it
+from.
+
+Traps found building it, both of which produce a *compile error* rather than a
+wrong picture — which is the redeeming property of this whole approach:
+
+- **`sample` is an ordinary identifier in GLSL ES 1.0 and a keyword in 450
+  core.** A Sobel filter in the corpus declares `vec3 sample;`. There is a
+  family of these: `layout`, `buffer`, `shared`, `uint`, `smooth`, `centroid`.
+- **A shader may overload a builtin, and renaming it breaks the builtin's
+  callers.** `LumiGrain` defines its own `float mix(float, float, float)` and
+  calls the builtin `mix(vec3, vec3, float)` in the same file. The reserved-word
+  rename therefore has to skip declarations followed by `(`: a function
+  overloads, only a variable shadows.
+
 ## Prior work, and what it is good for
 
 - `~/git/x/capcut-renderer` — 18k lines of Rust reverse-engineering CapCut's
@@ -421,5 +657,10 @@ worth reading before making an architectural decision:
   conclusion is that the encoder is no longer where the time goes.
 - `draft-format.md` — a full specification of CapCut's project format, with
   units and coordinate conventions established by evidence.
+- `effect-runtime.md` — what happened when the effect format was actually run:
+  the shader pipeline's conformance result on real shaders, the two GLSL
+  dialect traps, the corrections to the crate survey's §6b, and the exact
+  compositor patch the effect chain needs. Read it before touching
+  `modules/effects/` or before estimating Phase 3.
 - `effect-package-format.md`, `engine-symbols.md`, `ui-inventory.md` — how
   CapCut is built.

@@ -13,7 +13,9 @@
 //!
 //! See `docs/architecture/project-format.md`.
 
+pub mod autosave;
 pub mod commands;
 pub mod document;
+pub mod migrate;
 
 pub use document::*;

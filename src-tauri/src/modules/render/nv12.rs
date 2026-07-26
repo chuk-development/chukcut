@@ -167,7 +167,16 @@ impl Nv12Converter {
         let device = ctx.device();
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("chukcut nv12 shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/nv12.wgsl").into()),
+            // `yuv.wgsl` carries both colour conversions and no entry point, so
+            // it is prepended rather than imported — WGSL has no `#include`
+            // and naga drops whatever the module does not reach.
+            source: wgpu::ShaderSource::Wgsl(
+                concat!(
+                    include_str!("shaders/yuv.wgsl"),
+                    include_str!("shaders/nv12.wgsl")
+                )
+                .into(),
+            ),
         });
 
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {

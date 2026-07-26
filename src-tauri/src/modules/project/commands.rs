@@ -2,6 +2,7 @@
 
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::State;
 
@@ -50,18 +51,30 @@ pub fn project_new(
     *state.project.write() = Some(project.clone());
     *state.project_path.write() = None;
     state.history.write().clear();
+    // A new project has never been saved anywhere, which is exactly the case
+    // where losing it to a restart hurts most.
+    super::autosave::schedule(&project, None);
     Ok(project)
 }
 
 #[tauri::command]
 pub fn project_open(state: State<'_, Arc<AppState>>, path: String) -> Result<Project, String> {
     let raw = fs::read_to_string(&path).map_err(|e| format!("cannot read {path}: {e}"))?;
-    let project: Project =
-        serde_json::from_str(&raw).map_err(|e| format!("cannot parse {path}: {e}"))?;
 
+    // Never a bare `from_str`. `migrate::load` is what gates `schema_version`
+    // — a file from a newer build is refused rather than half-understood — and
+    // what repairs a file whose floats were written as `null`.
+    let loaded = super::migrate::load(&raw).map_err(|e| format!("cannot open {path}: {e}"))?;
+    for warning in &loaded.warnings {
+        tracing::warn!(%path, "{warning}");
+    }
+    let project = loaded.project;
+
+    let path = PathBuf::from(path);
     *state.project.write() = Some(project.clone());
-    *state.project_path.write() = Some(PathBuf::from(path));
+    *state.project_path.write() = Some(path.clone());
     state.history.write().clear();
+    super::autosave::schedule(&project, Some(path));
     Ok(project)
 }
 
@@ -76,8 +89,12 @@ pub fn project_save(state: State<'_, Arc<AppState>>, path: Option<String>) -> Re
             .ok_or("project has never been saved; a path is required")?,
     };
 
-    state.with_project(|project| write_project(&target, project))??;
+    let project = state.project.read().clone().ok_or("no project is open")?;
+    write_project(&target, &project)?;
     *state.project_path.write() = Some(target.clone());
+    // The working copy follows the save, so that a restart after "Save as"
+    // restores the session pointing at the new file rather than the old one.
+    super::autosave::schedule(&project, Some(target.clone()));
     Ok(target.to_string_lossy().to_string())
 }
 
@@ -177,7 +194,7 @@ pub async fn project_import_media(
 
     let id = new_id();
 
-    match (&info.video, &info.audio) {
+    let imported = match (&info.video, &info.audio) {
         (Some(video), _) if is_still_image(&info.format) => {
             project.materials.images.push(ImageMaterial {
                 id: id.clone(),
@@ -309,12 +326,68 @@ pub async fn project_import_media(
         }
 
         (None, None) => Err(format!("{name} contains no video or audio stream")),
+    }?;
+
+    // The material pool is document state like any other, and an import that a
+    // restart forgets means relinking every clip that referenced it.
+    drop(guard);
+    if let Some(project) = state.project.read().clone() {
+        let origin = state.project_path.read().clone();
+        super::autosave::schedule(&project, origin);
     }
+    Ok(imported)
 }
+
+/// Whether the working copy has already had its one chance to be restored.
+///
+/// Restoring is a *startup* act. Once the app is running, "no project is open"
+/// is a state the user chose, and quietly reopening yesterday's session under
+/// them would be worse than losing it.
+static WORKING_COPY_CONSIDERED: AtomicBool = AtomicBool::new(false);
 
 #[tauri::command]
 pub fn project_get(state: State<'_, Arc<AppState>>) -> Result<Option<Project>, String> {
-    Ok(state.project.read().clone())
+    if let Some(open) = state.project.read().clone() {
+        return Ok(Some(open));
+    }
+    // Nothing open and nothing has asked yet: this is the first call after
+    // launch, and the working copy is what the last session left behind.
+    if WORKING_COPY_CONSIDERED.swap(true, Ordering::SeqCst) {
+        return Ok(None);
+    }
+    Ok(restore_working_copy(&state))
+}
+
+/// Load the autosaved document into the app, if there is one.
+///
+/// Failures are logged rather than returned: the app must start even when the
+/// working copy is unreadable, and a user who is told "chukcut cannot start,
+/// autosave.chukcut is corrupt" has been given a problem instead of an editor.
+fn restore_working_copy(state: &AppState) -> Option<Project> {
+    let restored = match super::autosave::read_from(&super::autosave::file()) {
+        Ok(restored) => restored?,
+        Err(error) => {
+            tracing::warn!(%error, "the working copy could not be restored");
+            return None;
+        }
+    };
+    for warning in &restored.warnings {
+        tracing::warn!("restoring the working copy: {warning}");
+    }
+    tracing::info!(
+        name = %restored.project.name,
+        tracks = restored.project.tracks.len(),
+        origin = ?restored.path,
+        "restored the working copy left by the last session"
+    );
+
+    let project = restored.project;
+    *state.project.write() = Some(project.clone());
+    *state.project_path.write() = restored.path;
+    // The restored document is where the user was, not something they did.
+    // Undo must not walk back into a session that is over.
+    state.history.write().clear();
+    Some(project)
 }
 
 #[tauri::command]

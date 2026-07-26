@@ -20,6 +20,13 @@ export const MAX_ZOOM = 4e-3;
 
 export type TimelineTool = "select" | "razor";
 
+/** What the razor would cut, given where the pointer is. */
+export interface RazorTarget {
+  trackId: Id;
+  segmentId: Id;
+  at: Micros;
+}
+
 interface TimelineState {
   /** Pixels per microsecond. */
   zoom: number;
@@ -29,6 +36,15 @@ interface TimelineState {
   selectedSegmentId: Id | null;
   tool: TimelineTool;
   snapping: boolean;
+  /**
+   * Where the razor is hovering.
+   *
+   * In the store rather than in the timeline component for one reason, and it
+   * is a performance one: this changes on every pointer move across the lanes,
+   * and holding it as component state re-rendered the entire timeline — every
+   * lane, every clip — to move a one-pixel line. Only the guides subscribe.
+   */
+  razorTarget: RazorTarget | null;
 
   setZoom: (zoom: number) => void;
   zoomBy: (factor: number) => void;
@@ -37,6 +53,7 @@ interface TimelineState {
   select: (segmentId: Id | null) => void;
   setTool: (tool: TimelineTool) => void;
   toggleSnapping: () => void;
+  setRazorTarget: (target: RazorTarget | null) => void;
 }
 
 export const useTimelineStore = create<TimelineState>((set, get) => ({
@@ -46,14 +63,33 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
   selectedSegmentId: null,
   tool: "select",
   snapping: true,
+  razorTarget: null,
 
   setZoom: (zoom) => set({ zoom: clamp(zoom, MIN_ZOOM, MAX_ZOOM) }),
   zoomBy: (factor) => set({ zoom: clamp(get().zoom * factor, MIN_ZOOM, MAX_ZOOM) }),
   setScrollX: (scrollX) => set({ scrollX }),
   setPlayhead: (playhead) => set({ playhead: Math.max(0, Math.round(playhead)) }),
   select: (selectedSegmentId) => set({ selectedSegmentId }),
-  setTool: (tool) => set({ tool }),
+  setTool: (tool) => set({ tool, razorTarget: tool === "razor" ? get().razorTarget : null }),
   toggleSnapping: () => set({ snapping: !get().snapping }),
+
+  setRazorTarget: (target) => {
+    // A pointer move that lands on the same microsecond of the same clip must
+    // not publish a new object: subscribers compare by identity, and the razor
+    // is driven by a stream of moves most of which change nothing.
+    const current = get().razorTarget;
+    if (current === target) return;
+    if (
+      current &&
+      target &&
+      current.trackId === target.trackId &&
+      current.segmentId === target.segmentId &&
+      current.at === target.at
+    ) {
+      return;
+    }
+    set({ razorTarget: target });
+  },
 }));
 
 /** Width of the track-header gutter. Shared by the ruler so ticks line up. */

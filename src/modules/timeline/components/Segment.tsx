@@ -1,5 +1,6 @@
-import { CopyIcon, ScissorsIcon, Trash2Icon } from "lucide-react";
+import { CopyIcon, LockIcon, ScissorsIcon, Trash2Icon, VolumeXIcon } from "lucide-react";
 import type React from "react";
+import { memo, useEffect } from "react";
 
 import {
   ContextMenu,
@@ -11,8 +12,11 @@ import {
 } from "@/components/ui/context-menu";
 import { formatDuration } from "@/lib/time";
 import { cn } from "@/lib/utils";
-import { frameAt } from "@/modules/media/lib/thumbnails";
-import type { Micros, Segment as SegmentModel, TrackKind } from "@/modules/project/types";
+import { useThumbnailStore } from "@/modules/media/lib/thumbnails";
+import type { Id, Micros, Segment as SegmentModel, TrackKind } from "@/modules/project/types";
+import { rangeEnd } from "@/modules/project/types";
+import { Filmstrip } from "@/modules/timeline/components/Filmstrip";
+import { Waveform } from "@/modules/timeline/components/Waveform";
 
 /** Clip colour is keyed by lane kind so a glance tells you what a lane holds. */
 const KIND_STYLE: Record<TrackKind, string> = {
@@ -31,77 +35,49 @@ const KIND_BAR: Record<TrackKind, string> = {
   effect: "bg-track-effect",
 };
 
-/** Height of the strip inside a lane, after the clip's own padding and title bar. */
-const TILE_INSET = 6;
-const MIN_TILE_WIDTH = 20;
-
-interface Tile {
-  key: number;
-  left: number;
-  width: number;
-  url: string;
-}
+/** The clip's own top and bottom inset, added up: how much shorter it is than its lane. */
+const CLIP_INSET = 6;
+/** The band the label sits in. The waveform starts below it. */
+const LABEL_BAND = 15;
+/** The slim waveform along the bottom of a video clip. */
+const STRIP_WAVEFORM_HEIGHT = 16;
+/** A clip narrower than this has no room for a name that is not a single letter. */
+const MIN_LABEL_WIDTH = 34;
+/** Under a millisecond of material left is the source's edge — less than a frame at any rate. */
+const LIMIT_EPSILON = 1_000;
 
 /**
- * Lay frames across a clip body.
+ * How many times each clip has painted, keyed by segment id.
  *
- * Only tiles intersecting the visible window are produced. A ten-minute clip at
- * frame-level zoom is a hundred thousand pixels wide, and putting a div per
- * tile in the DOM for all of it would cost more than the decode did.
+ * A counter in the component rather than a test double, because the thing worth
+ * proving — that dragging one clip does not repaint the other forty-nine — can
+ * only be observed from inside `React.memo`. One `Map.set` per paint, which is
+ * orders below the cost of the paint it is counting.
+ *
+ * `Timeline.paint.test.tsx` is the reason it exists.
  */
-function filmstripTiles(
-  segment: SegmentModel,
-  filmstrip: Filmstrip,
-  start: Micros,
-  duration: Micros,
-  zoom: number,
-  laneHeight: number,
-  viewport: { from: Micros; to: Micros },
-): Tile[] {
-  if (filmstrip.urls.length === 0 || duration <= 0) return [];
-
-  const width = duration * zoom;
-  const tileHeight = Math.max(1, laneHeight - TILE_INSET);
-  const tileWidth = Math.max(MIN_TILE_WIDTH, Math.round(tileHeight * filmstrip.aspect));
-  const count = Math.ceil(width / tileWidth);
-
-  // Clamp to what is on screen, in tile indices.
-  const firstVisible = Math.max(0, Math.floor(((viewport.from - start) * zoom) / tileWidth));
-  const lastVisible = Math.min(count - 1, Math.ceil(((viewport.to - start) * zoom) / tileWidth));
-  if (lastVisible < firstVisible) return [];
-
-  // Speed makes the source advance faster than the timeline does.
-  const speed = segment.speed > 0 ? segment.speed : 1;
-
-  const tiles: Tile[] = [];
-  for (let index = firstVisible; index <= lastVisible; index++) {
-    const left = index * tileWidth;
-    const sourceTime = segment.source_range.start + (left / zoom) * speed;
-    tiles.push({
-      key: index,
-      left,
-      width: Math.min(tileWidth, width - left),
-      url: frameAt(filmstrip.urls, sourceTime, filmstrip.materialDuration),
-    });
-  }
-  return tiles;
-}
+export const clipPaintCount = new Map<Id, number>();
 
 export type SegmentGesture = "move" | "trim-start" | "trim-end";
 
 /**
- * Everything needed to tile a clip body with frames from its source.
+ * What a clip needs to know about the file behind it.
  *
- * The strip spans the whole material and is indexed by source time, so a clip
- * that has been trimmed or split shows the frames it actually contains rather
- * than restarting from the file's first frame.
+ * Handed down as one object, built once per document by the timeline, so that
+ * every clip's props stay reference-stable across a pointer move — the whole
+ * memoisation below depends on it.
  */
-export interface Filmstrip {
-  urls: string[];
-  /** Display aspect ratio, for tile width. */
+export interface ClipMaterial {
+  /** The file the caches are keyed by. Null for material with no file, i.e. text. */
+  path: string | null;
+  /** Display aspect ratio, for filmstrip tile width. */
   aspect: number;
-  /** Length of the whole source file, which the strip spans. */
-  materialDuration: Micros;
+  /** Full length of the source. Zero when there is none: stills and titles stretch. */
+  duration: Micros;
+  /** The file carries sound worth drawing. */
+  hasAudio: boolean;
+  /** The file is nothing but sound, so the waveform is the clip rather than a band on it. */
+  audioOnly: boolean;
 }
 
 interface SegmentProps {
@@ -110,6 +86,8 @@ interface SegmentProps {
   label: string;
   selected: boolean;
   locked: boolean;
+  /** The lane or the clip is silent. */
+  muted: boolean;
   /** The razor tool is active: this clip is something to cut, not to drag. */
   razor: boolean;
   zoom: number;
@@ -119,9 +97,9 @@ interface SegmentProps {
   ghosted: boolean;
   /** Lane height in pixels, which sets how tall a filmstrip tile is. */
   laneHeight: number;
-  /** Absent until the strip has been decoded; the clip shows flat colour meanwhile. */
-  filmstrip: Filmstrip | null;
-  /** Visible time window, so only the tiles on screen are put in the DOM. */
+  /** The file behind the clip. Null when the material is not in the pool. */
+  material: ClipMaterial | null;
+  /** Visible time window, so only the pixels on screen are drawn. */
   viewport: { from: Micros; to: Micros };
   onGesture: (event: React.PointerEvent, gesture: SegmentGesture, segmentId: string) => void;
   onSelect: (segmentId: string) => void;
@@ -130,18 +108,19 @@ interface SegmentProps {
   onDelete: (segmentId: string) => void;
 }
 
-export function Segment({
+function ClipBody({
   segment,
   kind,
   label,
   selected,
   locked,
+  muted,
   razor,
   zoom,
   preview,
   ghosted,
   laneHeight,
-  filmstrip,
+  material,
   viewport,
   onGesture,
   onSelect,
@@ -149,22 +128,68 @@ export function Segment({
   onDuplicate,
   onDelete,
 }: SegmentProps) {
+  clipPaintCount.set(segment.id, (clipPaintCount.get(segment.id) ?? 0) + 1);
+
   const start = preview ? preview.start : segment.target_range.start;
   const duration = preview ? preview.duration : segment.target_range.duration;
   const width = Math.max(2, duration * zoom);
-  const tiles = filmstrip
-    ? filmstripTiles(segment, filmstrip, start, duration, zoom, laneHeight, viewport)
-    : [];
+  const height = Math.max(1, laneHeight - CLIP_INSET);
+
+  // The slice of this clip that is on screen, in pixels from its left edge.
+  // Every layer below draws into that slice and nothing outside it, so a clip
+  // ten thousand pixels wide costs what one that fits costs.
+  const fromPx = Math.max(0, Math.floor((viewport.from - start) * zoom));
+  const toPx = Math.min(width, Math.ceil((viewport.to - start) * zoom));
+  const visibleWidth = Math.max(0, toPx - fromPx);
+  const onScreen = visibleWidth > 0;
+
+  // Trimmed to the material's own limit: there is nothing left to pull out on
+  // that side and the handle will simply refuse to move. Saying so is the
+  // difference between a boundary and a bug.
+  const hasLimits = material !== null && material.duration > 0;
+  const atSourceHead = hasLimits && segment.source_range.start <= LIMIT_EPSILON;
+  const atSourceTail =
+    hasLimits && material.duration - rangeEnd(segment.source_range) <= LIMIT_EPSILON;
+
+  // The lane decides the layout, not only the material: a video dropped onto an
+  // audio lane is there to be heard, so it gets the full waveform rather than a
+  // filmstrip with a band under it.
+  const soundOnly = kind === "audio" || material?.audioOnly === true;
+  const showsFilmstrip = onScreen && material?.path != null && !soundOnly;
+
+  // The clip is what wants a filmstrip, not the filmstrip layer: scrolling past
+  // a clip must not cancel a decode that is halfway done, whereas deleting the
+  // clip should. Held here, released when the clip goes.
+  const stripPath = material?.path && !soundOnly ? material.path : null;
+  const retainStrip = useThumbnailStore((state) => state.retain);
+  const releaseStrip = useThumbnailStore((state) => state.release);
+  useEffect(() => {
+    if (!stripPath) return;
+    retainStrip(stripPath);
+    return () => releaseStrip(stripPath);
+  }, [stripPath, retainStrip, releaseStrip]);
+
+  const showsWaveform = onScreen && material?.path != null && material.hasAudio;
+  const waveformHeight = soundOnly
+    ? Math.max(1, height - LABEL_BAND)
+    : Math.min(STRIP_WAVEFORM_HEIGHT, Math.max(0, height - LABEL_BAND));
 
   return (
     <ContextMenu>
       <ContextMenuTrigger asChild>
         <div
           data-slot="segment"
+          data-selected={selected || undefined}
+          data-locked={locked || undefined}
+          data-muted={muted || undefined}
           className={cn(
             "group absolute top-[3px] bottom-[3px] overflow-hidden rounded-[3px] border text-left",
             KIND_STYLE[kind],
-            selected && "border-foreground ring-1 ring-foreground/70",
+            // Selection is a ring *and* a light border: over a filmstrip a
+            // border alone disappears into whatever frame happens to be under it.
+            selected
+              ? "border-timeline-clip-selected ring-1 ring-timeline-clip-selected/80"
+              : "hover:border-foreground/40",
             ghosted && "opacity-40",
             preview && "z-10 shadow-lg",
           )}
@@ -173,21 +198,53 @@ export function Segment({
           {/* Filmstrip under everything else. Tiles are backgrounds rather than
               <img> so a cache path that fails to load degrades to the flat clip
               colour instead of a broken-image glyph. */}
-          {tiles.length > 0 ? (
-            <span className="pointer-events-none absolute inset-x-0 bottom-0 top-[2px] overflow-hidden">
-              {tiles.map((tile) => (
-                <span
-                  key={tile.key}
-                  className="absolute inset-y-0 bg-cover bg-center"
-                  style={{
-                    left: tile.left,
-                    width: tile.width,
-                    backgroundImage: `url("${tile.url}")`,
-                  }}
-                />
-              ))}
-              <span className="absolute inset-x-0 top-0 h-[17px] bg-gradient-to-b from-black/70 to-transparent" />
-            </span>
+          {showsFilmstrip && material?.path ? (
+            <Filmstrip
+              segment={segment}
+              path={material.path}
+              aspect={material.aspect}
+              materialDuration={material.duration}
+              zoom={zoom}
+              clipWidth={width}
+              fromPx={fromPx}
+              visibleWidth={visibleWidth}
+              height={height}
+            />
+          ) : null}
+
+          {showsWaveform && material?.path && waveformHeight > 0 ? (
+            <Waveform
+              path={material.path}
+              materialDuration={material.duration}
+              sourceStart={segment.source_range.start}
+              speed={segment.speed}
+              zoom={zoom}
+              fromPx={fromPx}
+              widthPx={visibleWidth}
+              height={waveformHeight}
+              topPx={soundOnly ? LABEL_BAND : height - waveformHeight}
+              variant={soundOnly ? "full" : "strip"}
+              muted={muted}
+            />
+          ) : null}
+
+          {/* Hover as a fill rather than a border change: it has to read the
+              same over a bright frame as over flat colour, and it costs nothing
+              — no state, no render, just CSS. */}
+          <span className="pointer-events-none absolute inset-0 bg-timeline-clip-hover opacity-0 transition-opacity group-hover:opacity-100" />
+
+          {/* A locked clip is hatched rather than merely dimmed: dimming is what
+              a clip being dragged to another lane does, and the two must not
+              look alike. */}
+          {locked ? (
+            <span
+              aria-hidden
+              className="pointer-events-none absolute inset-0 opacity-40"
+              style={{
+                backgroundImage:
+                  "repeating-linear-gradient(45deg, var(--timeline-clip-missing) 0 3px, transparent 3px 8px)",
+              }}
+            />
           ) : null}
 
           {/* The clip body is the drag surface. It is a sibling of the trim
@@ -197,6 +254,7 @@ export function Segment({
             type="button"
             aria-label={label}
             aria-pressed={selected}
+            title={label}
             onPointerDown={(event) => {
               if (event.button !== 0) return;
               // Under the razor a click is a cut, not a selection: selecting
@@ -222,16 +280,55 @@ export function Segment({
             className={cn("pointer-events-none absolute inset-x-0 top-0 h-[2px]", KIND_BAR[kind])}
           />
 
-          <span className="pointer-events-none flex h-full min-w-0 items-start gap-1.5 px-1.5 pt-[5px]">
-            <span className="truncate text-[11px] font-medium leading-none text-foreground/90">
-              {label}
-            </span>
+          {/* The scrim under the label is unconditional. A filename is
+              unreadable over a bright frame and equally unreadable over a pale
+              waveform, and the band is fifteen pixels of a fifty-pixel clip
+              either way. */}
+          <span
+            aria-hidden
+            className="pointer-events-none absolute inset-x-0 top-0 bg-gradient-to-b from-timeline-clip-scrim to-transparent"
+            style={{ height: LABEL_BAND + 4 }}
+          />
+
+          <span className="pointer-events-none absolute inset-x-0 top-0 flex min-w-0 items-start gap-1.5 px-1.5 pt-[5px]">
+            {width >= MIN_LABEL_WIDTH ? (
+              <span className="truncate text-[11px] font-medium leading-none text-foreground/90">
+                {label}
+              </span>
+            ) : null}
             {width > 110 ? (
               <span className="shrink-0 text-[10px] leading-none text-foreground/45">
                 {formatDuration(duration)}
               </span>
             ) : null}
+            <span className="ml-auto flex shrink-0 items-center gap-1">
+              {muted && width >= 52 ? (
+                <VolumeXIcon className="size-3 text-foreground/70" aria-label="Silent" />
+              ) : null}
+              {locked && width >= 52 ? (
+                <LockIcon className="size-3 text-foreground/70" aria-label="Locked" />
+              ) : null}
+            </span>
           </span>
+
+          {/* Source limits, drawn on the edge that cannot move so the marker
+              travels with the edge it describes. */}
+          {atSourceHead && width > 12 ? (
+            <span
+              data-slot="source-limit"
+              data-edge="start"
+              title="The start of the source file: this edge cannot be pulled out further"
+              className="pointer-events-none absolute inset-y-0 left-0 w-[2px] bg-timeline-clip-limit/80"
+            />
+          ) : null}
+          {atSourceTail && width > 12 ? (
+            <span
+              data-slot="source-limit"
+              data-edge="end"
+              title="The end of the source file: this edge cannot be pulled out further"
+              className="pointer-events-none absolute inset-y-0 right-0 w-[2px] bg-timeline-clip-limit/80"
+            />
+          ) : null}
 
           {/* Trim handles. Wide enough to hit, invisible until the clip
               matters, and gone under the razor — they would otherwise swallow
@@ -291,3 +388,16 @@ export function Segment({
     </ContextMenu>
   );
 }
+
+/**
+ * Memoised, and the memo is load-bearing rather than a precaution.
+ *
+ * Every pointer move during a drag sets state on the timeline, which re-renders
+ * it, which re-creates the element for every clip on it. Without this, the
+ * fiftieth clip recomputes its tiles and its waveform columns forty times a
+ * second because a clip it has nothing to do with is moving. With it, the props
+ * of every clip but the dragged one are reference-identical and the work stops
+ * at the comparison — `Timeline.paint.test.tsx` fails if any of the props above
+ * stops being stable.
+ */
+export const Segment = memo(ClipBody);

@@ -1,0 +1,76 @@
+%YAML 1.1
+--- !XShader &1
+name: tint/xshader
+renderQueue: 3090
+passes:
+  - __class: Pass
+    name: Desaturate
+    shaders:
+      __class: Map
+      gles2: [{localId: 4}, {localId: 5}]
+    angleBinaryPrograms: {__class: Map}
+    semantics:
+      __class: Map
+      attPosition: {__class: VertexAttribType, value: POSITION}
+      attUV: {__class: VertexAttribType, value: USER_DEFINE1}
+    renderTexture: {localId: 1, path: rt/desaturateRT.rt}
+    clearColor: {r: 0, g: 0, b: 0, a: 0}
+    clearDepth: 1
+    clearType: {__class: CameraClearType, value: COLOR}
+    renderState:
+      __class: RenderState
+      depthstencil:
+        depthTestEnable: false
+        depthWriteEnable: false
+        stencilTestEnable: false
+      colorBlend:
+        blendConstants: {x: 0, y: 0, z: 0, w: 0}
+        attachments:
+          - blendEnable: false
+            srcColorBlendFactor: {__class: BlendFactor, value: ONE}
+            dstColorBlendFactor: {__class: BlendFactor, value: ZERO}
+            srcAlphaBlendFactor: {__class: BlendFactor, value: ONE}
+            dstAlphaBlendFactor: {__class: BlendFactor, value: ZERO}
+            colorWriteMask: 15
+            ColorBlendOp: {__class: BlendOp, value: ADD}
+            AlphaBlendOp: {__class: BlendOp, value: ADD}
+    useFBOTexture: false
+    useCameraRT: false
+    isFullScreenShading: false
+    macrosMap: {__class: Map}
+    preprocess: false
+    passType: {__class: PassType, value: NORMAL}
+    lightMode: {__class: LightMode, value: NONE}
+  - __class: Pass
+    name: Tint
+    shaders:
+      __class: Map
+      gles2: [{localId: 4}, {localId: 6}]
+    semantics:
+      __class: Map
+      attPosition: {__class: VertexAttribType, value: POSITION}
+      attUV: {__class: VertexAttribType, value: USER_DEFINE1}
+    clearColor: {r: 0, g: 0, b: 0, a: 0}
+    clearType: {__class: CameraClearType, value: COLOR}
+    renderState:
+      __class: RenderState
+      depthstencil:
+        depthTestEnable: false
+        depthWriteEnable: false
+      colorBlend:
+        attachments:
+          - blendEnable: false
+            srcColorBlendFactor: {__class: BlendFactor, value: ONE}
+            dstColorBlendFactor: {__class: BlendFactor, value: ZERO}
+            srcAlphaBlendFactor: {__class: BlendFactor, value: ONE}
+            dstAlphaBlendFactor: {__class: BlendFactor, value: ZERO}
+    passType: {__class: PassType, value: NORMAL}
+--- !Shader &4
+type: {__class: ShaderType, value: VERTEX}
+sourcePath: xshader/tint.vert
+--- !Shader &5
+type: {__class: ShaderType, value: FRAGMENT}
+sourcePath: xshader/desaturate.frag
+--- !Shader &6
+type: {__class: ShaderType, value: FRAGMENT}
+sourcePath: xshader/tint.frag

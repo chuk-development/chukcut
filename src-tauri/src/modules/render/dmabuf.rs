@@ -528,3 +528,96 @@ mod tests {
         staging.unmap();
     }
 }
+
+// ---------------------------------------------------------------------------
+// The import direction
+// ---------------------------------------------------------------------------
+//
+// Everything above exports a buffer *to* the encoder. This is the mirror: it
+// takes a plane of a hardware-decoded video surface and makes it a texture the
+// compositor can sample, with no copy through system memory.
+//
+// Why it matters is measured, not assumed. Reaching RGBA from a VA surface
+// costs 26.9 ms at 1080p because the surface is tiled, so the transfer is a
+// detiling pass and swscale still has to convert afterwards. Mapped straight
+// across it is 1.70 ms. See `docs/research/hardware-decode.md`.
+//
+// Transplanted from that note, which verified it against real decoded frames:
+// the reconstructed picture matched the software decoder to a mean channel
+// difference of 0.32, against 41.88 for a deliberately chroma-swapped control.
+
+use crate::modules::media::dmabuf::Plane;
+
+/// Import one plane of a decoded video surface as a texture.
+///
+/// `None` when this device cannot import DMA-BUF, when the plane carries no
+/// usable modifier, or when the driver refuses the layout — all of which mean
+/// "use the copying path", not "fail".
+pub fn import_plane(ctx: &RenderContext, plane: &Plane) -> Option<wgpu::Texture> {
+    if !ctx.can_import_dmabuf() || !plane.is_importable() {
+        return None;
+    }
+    let format = match plane.fourcc_name().as_str() {
+        // NV12 exported with SEPARATE_LAYERS: luma is a single-channel plane…
+        "R8  " => wgpu::TextureFormat::R8Unorm,
+        // …and chroma is interleaved U and V at half resolution, which is
+        // exactly a two-channel texture of half the size.
+        "GR88" => wgpu::TextureFormat::Rg8Unorm,
+        "AR24" | "XR24" => wgpu::TextureFormat::Bgra8Unorm,
+        "AB24" | "XB24" => wgpu::TextureFormat::Rgba8Unorm,
+        other => {
+            tracing::debug!(fourcc = other, "no wgpu format for this DRM fourcc");
+            return None;
+        }
+    };
+    let fd = plane.dup_fd().ok()?;
+    let size = wgpu::Extent3d {
+        width: plane.width,
+        height: plane.height,
+        depth_or_array_layers: 1,
+    };
+    let hal_descriptor = wgpu_hal::TextureDescriptor {
+        label: Some("decoded video plane"),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUses::RESOURCE | wgpu::TextureUses::COPY_SRC,
+        memory_flags: wgpu_hal::MemoryFlags::empty(),
+        view_formats: Vec::new(),
+    };
+
+    // SAFETY: `texture_from_dmabuf_fd` requires a descriptor that describes the
+    // buffer truthfully and takes ownership of the descriptor. Both hold: the
+    // modifier, offset and pitch come straight from the driver's own
+    // `AVDRMFrameDescriptor`, and `fd` is a duplicate made for this call —
+    // libavutil keeps and closes its own. On failure wgpu-hal closes the
+    // duplicate itself, which is why there is no cleanup here.
+    let hal_texture = unsafe {
+        let hal = ctx.device().as_hal::<wgpu_hal::api::Vulkan>()?;
+        hal.texture_from_dmabuf_fd(fd, &hal_descriptor, plane.modifier, plane.pitch, plane.offset)
+            .ok()?
+    };
+
+    // SAFETY: the wgpu descriptor agrees with the hal one field for field. The
+    // initial state is `RESOURCE` and not `UNINITIALIZED`, which matters: the
+    // texture already holds the decoded picture, and telling wgpu it is
+    // uninitialised invites it to clear the frame before anything samples it.
+    Some(unsafe {
+        ctx.device().create_texture_from_hal::<wgpu_hal::api::Vulkan>(
+            hal_texture,
+            &wgpu::TextureDescriptor {
+                label: Some("decoded video plane"),
+                size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            },
+            wgpu::TextureUses::RESOURCE,
+        )
+    })
+}

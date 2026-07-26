@@ -1,10 +1,11 @@
 import { FileVideoIcon, ImageIcon, MusicIcon, XIcon } from "lucide-react";
+import { useEffect } from "react";
 
 import { Button } from "@/components/ui/button";
 import { MEDIA_DRAG_MIME } from "@/lib/dnd";
 import { formatDuration } from "@/lib/time";
 import { cn } from "@/lib/utils";
-import { useThumbnailStore } from "@/modules/media/lib/thumbnails";
+import { stripPoster, useThumbnailStore } from "@/modules/media/lib/thumbnails";
 import type { ImportedMaterial, MaterialKind } from "@/modules/project/types";
 
 const KIND_ICON: Record<MaterialKind, typeof FileVideoIcon> = {
@@ -28,9 +29,20 @@ interface MediaItemProps {
 
 export function MediaItem({ item, onRemove }: MediaItemProps) {
   const Icon = KIND_ICON[item.kind];
-  // Middle of the strip: the first frame of a video is usually black or a slate.
-  const strip = useThumbnailStore((s) => s.strips[item.path]);
-  const poster = strip && strip.length > 0 ? strip[Math.floor(strip.length / 2)] : null;
+  // Whatever has decoded nearest the middle: the first frame of a video is
+  // usually black or a slate, and while a strip is still streaming the middle
+  // tile is often the one that has not landed yet.
+  const poster = stripPoster(useThumbnailStore((s) => s.strips[item.path]));
+
+  // The tile is a reason to keep decoding; switching to the Audio tab, or
+  // removing the row, is a reason to stop.
+  const retain = useThumbnailStore((s) => s.retain);
+  const release = useThumbnailStore((s) => s.release);
+  useEffect(() => {
+    if (item.kind === "audio") return;
+    retain(item.path);
+    return () => release(item.path);
+  }, [item.path, item.kind, retain, release]);
 
   const resolution =
     item.width > 0 && item.height > 0

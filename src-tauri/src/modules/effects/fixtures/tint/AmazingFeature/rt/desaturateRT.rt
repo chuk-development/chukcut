@@ -1,0 +1,18 @@
+%YAML 1.1
+--- !ScreenRenderTexture &1
+name: desaturateRT
+width: 1080
+height: 1920
+depth: 1
+internalFormat: {__class: InternalFormat, value: RGBA8}
+dataType: {__class: DataType, value: U8norm}
+enableMipmap: false
+filterMin: {__class: FilterMode, value: LINEAR}
+filterMag: {__class: FilterMode, value: LINEAR}
+wrapModeS: {__class: WrapMode, value: CLAMP}
+wrapModeT: {__class: WrapMode, value: CLAMP}
+maxAnisotropy: 1
+shared: true
+colorFormat: {__class: PixelFormat, value: RGBA8Unorm}
+pecentX: 1
+pecentY: 1

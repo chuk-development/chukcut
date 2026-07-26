@@ -32,9 +32,11 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-use super::decoder::{Acceleration, VideoDecoder};
+use ffmpeg_next as ffmpeg;
+
+use super::decoder::{Acceleration, MappedFrame, VideoDecoder};
 use crate::modules::project::{Id, MaterialKind, Micros, Project};
-use crate::modules::render::{RenderContext, SourceFrame, SourceProvider, SourceRequest};
+use crate::modules::render::{self, RenderContext, SourceFrame, SourceProvider, SourceRequest};
 
 /// Where a material's pixels come from.
 #[derive(Debug, Clone)]
@@ -108,73 +110,116 @@ fn fitted_height(display: (u32, u32), max_size: (u32, u32)) -> u32 {
 /// pixels must not trigger one; a jump from preview to export resolution must.
 const REOPEN_RATIO: f32 = 1.5;
 
-/// Which decoder this provider opens, and why it is still the CPU.
+/// Which decoder this provider opens.
 ///
 /// This is the one place in the codebase where hardware decode is turned on or
-/// off, and it is deliberately off. The reason is measured, not cautious —
-/// `docs/research/hardware-decode.md` has the table:
+/// off, and it is now **on**, conditionally. The reason is measured, and so was
+/// the reason it used to be off — `docs/research/hardware-decode.md` has the
+/// table:
 ///
 /// | 1920×1080 H.264, per frame | |
 /// |---|---:|
 /// | software decode → RGBA | ~27 ms |
-/// | **hardware** decode → RGBA | ~37 ms |
-/// | hardware decode → DMA-BUF | **1.7 ms** |
+/// | hardware decode → RGBA | ~37 ms |
+/// | **hardware decode → DMA-BUF** | **1.7 ms** |
 ///
-/// The middle row is what this provider would get today, because
-/// [`upload_rgba`] below is what the compositor is fed, and reaching RGBA from a
-/// VA surface means `av_hwframe_transfer_data` out of tiled GPU memory followed
-/// by an swscale pass. Both of those are more expensive than decoding the frame
-/// was. Turning hardware on here would make the preview *slower* and would look
-/// like a regression in the one number the user can see.
+/// The middle row was what this provider got while [`upload_rgba`] was the only
+/// way to feed the compositor: reaching RGBA from a VA surface means
+/// `av_hwframe_transfer_data` out of tiled GPU memory followed by an swscale
+/// pass, and both cost more than the decode did. Hardware was genuinely slower
+/// and turning it on would have looked like a regression.
 ///
-/// The bottom row is the whole prize and it is not reachable from this file:
-/// it needs `render/` to import the decoded surface as a texture, which is a
-/// change this module is not allowed to make and which the research note
-/// carries as a patch. **When that lands, flip this constant.** Until then the
-/// environment variable exists so the change can be measured without a rebuild.
-const DEFAULT_ACCELERATION: Acceleration = Acceleration::Software;
+/// [`import_mapped`] below is the bottom row. It hands the compositor the
+/// decoder's own surface as two textures, so nothing is copied and nothing is
+/// converted on the CPU.
+///
+/// **The condition matters.** That path needs
+/// [`RenderContext::can_import_dmabuf`], which is a Vulkan device with
+/// `VK_EXT_external_memory_dma_buf`. On a GL fallback, an old driver, or
+/// anything not Linux, asking for hardware would put us back on the middle row
+/// — worse than where we started. So [`acceleration`] asks the device first.
+const DEFAULT_ACCELERATION: Acceleration = Acceleration::Auto;
 
-/// Read `CHUKCUT_DECODE` once, falling back to [`DEFAULT_ACCELERATION`].
+/// What to use when the GPU cannot take a decoded surface directly.
+const NO_IMPORT_ACCELERATION: Acceleration = Acceleration::Software;
+
+/// `CHUKCUT_DECODE`, parsed once. `None` when it is unset or nonsense.
 ///
 /// `software`, `auto` or `vaapi`. An unrecognised value is a typo rather than a
 /// request, and silently ignoring it would leave somebody measuring the default
 /// and believing they measured hardware — so it is logged.
-fn acceleration() -> Acceleration {
-    static CHOSEN: std::sync::OnceLock<Acceleration> = std::sync::OnceLock::new();
+fn acceleration_override() -> Option<Acceleration> {
+    static CHOSEN: std::sync::OnceLock<Option<Acceleration>> = std::sync::OnceLock::new();
     *CHOSEN.get_or_init(|| {
         let chosen = match std::env::var("CHUKCUT_DECODE").as_deref() {
-            Ok("software") => Acceleration::Software,
-            Ok("auto") => Acceleration::Auto,
-            Ok("vaapi") => Acceleration::Vaapi,
+            Ok("software") => Some(Acceleration::Software),
+            Ok("auto") => Some(Acceleration::Auto),
+            Ok("vaapi") => Some(Acceleration::Vaapi),
             Ok(other) => {
                 tracing::warn!(
                     value = other,
                     "CHUKCUT_DECODE must be software, auto or vaapi; using the default"
                 );
-                DEFAULT_ACCELERATION
+                None
             }
-            Err(_) => DEFAULT_ACCELERATION,
+            Err(_) => None,
         };
-        if chosen != DEFAULT_ACCELERATION {
+        if let Some(chosen) = chosen {
             tracing::info!(?chosen, "decode acceleration overridden by CHUKCUT_DECODE");
         }
         chosen
     })
 }
 
+/// Which decoder to open, given what this GPU can accept.
+///
+/// The environment wins outright, including over the device check: somebody
+/// measuring `CHUKCUT_DECODE=vaapi` on a machine that cannot import wants to see
+/// the slow number, not a silent substitution.
+fn acceleration(ctx: &RenderContext) -> Acceleration {
+    if let Some(forced) = acceleration_override() {
+        return forced;
+    }
+    if ctx.can_import_dmabuf() {
+        DEFAULT_ACCELERATION
+    } else {
+        NO_IMPORT_ACCELERATION
+    }
+}
+
 pub struct MediaSourceProvider {
     /// Material id → where its pixels live. Built once from a project snapshot.
     sources: HashMap<Id, MaterialSource>,
+    /// Overrides [`acceleration`] for this provider only.
+    ///
+    /// The application never sets it: the environment and the device decide,
+    /// once per process. It exists because comparing the two decode paths
+    /// against each other has to happen *inside* one process — two runs of the
+    /// same benchmark differ by more than the two paths do, as
+    /// `docs/STATUS.md` keeps having to point out — and the process-wide choice
+    /// cannot be changed twice.
+    forced: Option<Acceleration>,
+    /// Cached uploads and imports, keyed by material.
+    ///
+    /// Declared before `decoders` so it is dropped first: a mapped frame in
+    /// here is a hold on one of that decoder's surfaces. See [`Self::clear`].
+    textures: Mutex<HashMap<Id, CachedTexture>>,
     /// One decoder per material. `VideoDecoder` is `Send` but not `Sync`, so
     /// the whole map sits behind a mutex; two threads seeking one demuxer
     /// would fight over its read position anyway.
     decoders: Mutex<HashMap<Id, OpenDecoder>>,
-    textures: Mutex<HashMap<Id, CachedTexture>>,
 }
 
 impl MediaSourceProvider {
     /// Snapshot the material pool of `project`.
     pub fn from_project(project: &Project) -> Self {
+        Self::from_project_with(project, None)
+    }
+
+    /// [`Self::from_project`], with the decoder chosen rather than inferred.
+    ///
+    /// For benchmarks and for the pixel comparison. Production wants `None`.
+    pub fn from_project_with(project: &Project, forced: Option<Acceleration>) -> Self {
         let mut sources = HashMap::new();
 
         for video in &project.materials.videos {
@@ -208,6 +253,7 @@ impl MediaSourceProvider {
 
         Self {
             sources,
+            forced,
             decoders: Mutex::new(HashMap::new()),
             textures: Mutex::new(HashMap::new()),
         }
@@ -216,8 +262,13 @@ impl MediaSourceProvider {
     /// Drop every cached decoder and texture. Called when a render session
     /// ends, so a finished export does not pin a gigabyte of GPU memory.
     pub fn clear(&self) {
-        self.decoders.lock().clear();
+        // Textures first. On the mapped path a cached frame pins one of the
+        // decoder's VA surfaces, and although libavutil's refcounting makes
+        // either order safe — the surface holds the frames context, which holds
+        // the device — releasing the holds before the thing they are holds on
+        // is the order that stays obviously correct if any of that changes.
         self.textures.lock().clear();
+        self.decoders.lock().clear();
     }
 
     /// Number of materials this provider can serve, for diagnostics.
@@ -237,12 +288,7 @@ impl MediaSourceProvider {
         let cached = textures.get(material_id)?;
         let close_enough = (cached.source_time - source_time).abs() <= FRAME_EPSILON;
         let big_enough = cached.frame.height as f32 * REOPEN_RATIO >= want_height as f32;
-        (close_enough && big_enough).then(|| SourceFrame {
-            texture: Arc::clone(&cached.frame.texture),
-            view: Arc::clone(&cached.frame.view),
-            width: cached.frame.width,
-            height: cached.frame.height,
-        })
+        (close_enough && big_enough).then(|| cached.frame.clone())
     }
 
     fn store(&self, material_id: &str, source_time: Micros, frame: &SourceFrame) {
@@ -250,12 +296,7 @@ impl MediaSourceProvider {
             material_id.to_string(),
             CachedTexture {
                 source_time,
-                frame: SourceFrame {
-                    texture: Arc::clone(&frame.texture),
-                    view: Arc::clone(&frame.view),
-                    width: frame.width,
-                    height: frame.height,
-                },
+                frame: frame.clone(),
             },
         );
     }
@@ -284,14 +325,71 @@ impl MediaSourceProvider {
         let open = match decoders.get_mut(material_id) {
             Some(open) => open,
             None => {
-                let decoder =
-                    VideoDecoder::open_scaled_with(path, want_height, acceleration())?;
+                let wanted = self.forced.unwrap_or_else(|| acceleration(ctx));
+                let decoder = VideoDecoder::open_scaled_with(path, want_height, wanted)?;
                 let height = decoder.output_size().1;
                 decoders
                     .entry(material_id.to_string())
                     .or_insert(OpenDecoder { decoder, height })
             }
         };
+
+        // The mapped path first, when the decoder is actually on the GPU. Each
+        // mapped frame pins a VA surface out of a fixed pool, so the *previous*
+        // frame for this material is released before the next one is asked for
+        // — otherwise every material holds two surfaces at the moment of
+        // greatest pressure and a busy timeline exhausts the pool. Nothing is
+        // lost by dropping it: `cached` has already missed.
+        //
+        // The condition is `acceleration()` rather than `is_hardware()`, and
+        // the difference is one frame per file that is easy to miss.
+        // `is_hardware` is only true once a frame has actually come back as a
+        // surface, so on the very first request it is false even for a decoder
+        // that is about to produce nothing but surfaces — and that first frame
+        // would then be downloaded, converted, uploaded and *cached*, so the
+        // next request for the same instant is answered from the copy. Before
+        // the first frame `acceleration()` reports what was asked for, which is
+        // exactly the "might be hardware" this needs; after it, it reports the
+        // truth. `seek_and_map` refuses cheaply when the answer turns out to be
+        // no, leaving the frame decoded and in hand for the fall-through.
+        if !matches!(open.decoder.acceleration(), Acceleration::Software) {
+            self.textures.lock().remove(material_id);
+            let started = std::time::Instant::now();
+            match open.decoder.seek_and_map(source_time) {
+                Ok(mapped) => {
+                    let decode_micros = started.elapsed().as_micros();
+                    let import_started = std::time::Instant::now();
+                    if let Some(frame) = import_mapped(ctx, mapped) {
+                        tracing::debug!(
+                            file = %file_name(path),
+                            at_ms = source_time / 1000,
+                            decoded = format_args!("{}x{}", frame.width, frame.height),
+                            decode_ms = decode_micros as f64 / 1000.0,
+                            import_ms = import_started.elapsed().as_micros() as f64 / 1000.0,
+                            path = ?open.decoder.acceleration(),
+                            "mapped source frame",
+                        );
+                        drop(decoders);
+                        self.store(material_id, source_time, &frame);
+                        return Ok(frame);
+                    }
+                    // The surface came back in a layout this driver will not
+                    // import. Not an error: fall through and copy it, which is
+                    // slower and always works.
+                    tracing::debug!(
+                        file = %file_name(path),
+                        "the decoded surface could not be imported; copying it instead"
+                    );
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        file = %file_name(path),
+                        %error,
+                        "cannot export the decoded surface; copying it instead"
+                    );
+                }
+            }
+        }
 
         let started = std::time::Instant::now();
         let decoded = open.decoder.seek_and_decode(source_time)?;
@@ -305,7 +403,7 @@ impl MediaSourceProvider {
         // is decode, upload, or something further down the pipeline — and which
         // file caused it, which matters the moment a timeline has more than one.
         tracing::debug!(
-            file = %path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+            file = %file_name(path),
             at_ms = source_time / 1000,
             decoded = format_args!("{}x{}", decoded.width, decoded.height),
             decode_ms = decode_micros as f64 / 1000.0,
@@ -334,12 +432,7 @@ impl MediaSourceProvider {
         // A still never changes, so any cached upload is valid regardless of
         // the requested time.
         if let Some(cached) = self.textures.lock().get(material_id) {
-            return Ok(SourceFrame {
-                texture: Arc::clone(&cached.frame.texture),
-                view: Arc::clone(&cached.frame.view),
-                width: cached.frame.width,
-                height: cached.frame.height,
-            });
+            return Ok(cached.frame.clone());
         }
 
         let image = image::open(path)?.to_rgba8();
@@ -394,6 +487,126 @@ impl SourceProvider for MediaSourceProvider {
                 .map(Some),
             MaterialSource::Text => Ok(None),
         }
+    }
+}
+
+/// A file's own name, for a log line.
+fn file_name(path: &PathBuf) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default()
+}
+
+/// A mapped surface, kept alive for as long as the textures imported from it.
+///
+/// The textures are Vulkan images over memory the *decoder* owns. The
+/// `MappedFrame` holds the `AVFrame` that holds the VA surface, so while it is
+/// alive the decoder cannot recycle that surface and write the next picture
+/// into it. Drop it early and the symptom is not a crash — it is an occasional
+/// wrong frame under motion, which reads as a decoder bug and is hunted for in
+/// the wrong module.
+struct PinnedSurface(#[allow(dead_code)] MappedFrame);
+
+/// # Safety
+///
+/// `MappedFrame` is already `Send` — `media::dmabuf` argues that case, and it
+/// is the same argument `export::hwframes` makes: libavutil refcounts an
+/// `AVFrame` atomically and the buffer carries no thread affinity.
+///
+/// `Sync` needs one thing more, and it holds here because this wrapper exposes
+/// *nothing*. It is a keep-alive: no method reads the frame, no `&self` escapes,
+/// and the only operation anything performs on it is `Drop`, which `&mut self`
+/// makes exclusive. A shared reference to it therefore permits no operation at
+/// all, which is trivially thread-safe.
+///
+/// The reason it is needed is that [`SourceFrame`] is cached behind a mutex and
+/// handed to whichever thread renders, and `SourceProvider` is `Sync`.
+unsafe impl Sync for PinnedSurface {}
+
+/// Turn a mapped decoder surface into a [`SourceFrame`] the compositor can draw.
+///
+/// `None` whenever this is not going to work — a driver that will not import
+/// the layout, a surface that came back as something other than the two NV12
+/// planes, a device without the extension. Every one of those means "copy it
+/// instead", not "fail": the software path is always there and is what the
+/// caller falls back to.
+///
+/// Nothing here touches a pixel. The two `wgpu::Texture`s are views onto the
+/// memory the decoder wrote, which is the entire point — 1.7 ms against 26.9,
+/// per `docs/research/hardware-decode.md`.
+///
+/// Linux only, because DMA-BUF is a DRM concept and `render::dmabuf` is
+/// compiled nowhere else. Everything above this is portable; the decoder simply
+/// never reports hardware frames on a platform where it cannot open VAAPI.
+#[cfg(target_os = "linux")]
+fn import_mapped(ctx: &RenderContext, mapped: MappedFrame) -> Option<SourceFrame> {
+    let planes = mapped.dmabuf.planes();
+    // Two layers over one buffer is what iHD exports for NV12 with
+    // `SEPARATE_LAYERS`. Anything else — a packed BGRA from a VPP pass, a
+    // three-plane YUV420 — would need its own case in the shader, and showing
+    // the luma plane alone is a plausible-looking greyscale picture, which is
+    // the worst way to be wrong.
+    if planes.len() != 2 {
+        tracing::debug!(
+            planes = planes.len(),
+            "a decoded surface has to arrive as two NV12 planes to be imported"
+        );
+        return None;
+    }
+
+    let luma = render::dmabuf::import_plane(ctx, &planes[0])?;
+    let chroma = render::dmabuf::import_plane(ctx, &planes[1])?;
+
+    // Rotation is deliberately not applied: applying it means touching pixels,
+    // which is the thing being avoided. The compositor folds the angle into the
+    // matrix it computes per quad anyway.
+    let turns = mapped.rotation.rem_euclid(360) / 90;
+    let matrix = yuv_matrix(mapped.color_space);
+    let range = yuv_range(mapped.color_range);
+
+    Some(SourceFrame::from_planes(
+        Arc::new(luma),
+        Arc::new(chroma),
+        matrix,
+        range,
+        turns as u32,
+        Some(Arc::new(PinnedSurface(mapped)) as render::FrameGuard),
+    ))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn import_mapped(_ctx: &RenderContext, _mapped: MappedFrame) -> Option<SourceFrame> {
+    None
+}
+
+/// FFmpeg's colour space to the three matrices a shader can apply.
+///
+/// Everything that is BT.601 by another name collapses onto `Bt601`: SMPTE
+/// 170M, BT.470BG and FCC differ in primaries and transfer, not in the luma
+/// weights the conversion uses. Anything genuinely unhandled falls back to
+/// BT.709 and says so, because the alternative is refusing to draw a frame over
+/// a colour tag.
+fn yuv_matrix(space: ffmpeg::color::Space) -> render::YuvMatrix {
+    use ffmpeg::color::Space;
+    match space {
+        Space::BT470BG | Space::SMPTE170M | Space::FCC | Space::SMPTE240M => {
+            render::YuvMatrix::Bt601
+        }
+        Space::BT2020NCL | Space::BT2020CL => render::YuvMatrix::Bt2020,
+        Space::BT709 => render::YuvMatrix::Bt709,
+        other => {
+            tracing::debug!(?other, "unhandled colour matrix; treating it as BT.709");
+            render::YuvMatrix::Bt709
+        }
+    }
+}
+
+fn yuv_range(range: ffmpeg::color::Range) -> render::YuvRange {
+    match range {
+        ffmpeg::color::Range::JPEG => render::YuvRange::Full,
+        // `Unspecified` included: limited is what a camera writes and what
+        // every decoder assumes when nothing says otherwise.
+        _ => render::YuvRange::Limited,
     }
 }
 

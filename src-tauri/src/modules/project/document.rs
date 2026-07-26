@@ -23,7 +23,7 @@
 //! rather than a tree walk.
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use uuid::Uuid;
 
 /// Current on-disk schema version. Bump on any breaking change and add a
@@ -90,6 +90,12 @@ pub struct Project {
     pub canvas: CanvasConfig,
     /// Timeline frame rate. Individual clips keep their own rate; this is the
     /// rate the timeline is rendered and exported at.
+    ///
+    /// Defaulted like every other float in the document so that a file which
+    /// lost the value — see `migrate::repair_non_finite`, which drops a key
+    /// `serde_json` wrote as `null` because the number was NaN — still opens
+    /// with something sane rather than not at all.
+    #[serde(default = "default_fps")]
     pub fps: f64,
 
     pub materials: MaterialPool,
@@ -169,6 +175,7 @@ pub struct CanvasConfig {
     pub width: u32,
     pub height: u32,
     /// Solid background behind everything, as linear RGBA 0..1.
+    #[serde(default = "opaque_black")]
     pub background: [f32; 4],
 }
 
@@ -201,6 +208,14 @@ pub struct MaterialPool {
     pub images: Vec<ImageMaterial>,
     #[serde(default)]
     pub texts: Vec<TextMaterial>,
+    /// Transitions, referenced from the `extras` list of the segment they are
+    /// the entrance to. See [`TransitionMaterial`].
+    ///
+    /// A typed category rather than a JSON blob in `extras` below, because both
+    /// `validate()` and the renderer read these fields on every frame and
+    /// neither should be parsing `serde_json::Value` to do it.
+    #[serde(default)]
+    pub transitions: Vec<TransitionMaterial>,
     /// Non-media parameter blocks referenced by segments (speed curves,
     /// transitions, effect instances). Kept as one map so adding a new kind
     /// does not change the schema.
@@ -232,7 +247,30 @@ impl MaterialPool {
         self.texts.iter().find(|m| m.id == id)
     }
 
+    pub fn transition(&self, id: &str) -> Option<&TransitionMaterial> {
+        self.transitions.iter().find(|m| m.id == id)
+    }
+
+    pub fn transition_mut(&mut self, id: &str) -> Option<&mut TransitionMaterial> {
+        self.transitions.iter_mut().find(|m| m.id == id)
+    }
+
+    /// The transition `segment` is entered through, if it has one.
+    ///
+    /// `Segment::extras` carries no type tag — the kind of an id is whichever
+    /// pool category it resolves in — so this is the resolution step for the
+    /// transition category. A segment with more than one transition id is
+    /// malformed and `validate()` reports it; this returns the first, because
+    /// rendering *a* transition beats rendering none.
+    pub fn transition_of(&self, segment: &Segment) -> Option<&TransitionMaterial> {
+        segment.extras.iter().find_map(|id| self.transition(id))
+    }
+
     /// Which kind a material id belongs to, without the caller guessing.
+    ///
+    /// Transitions are absent on purpose: a [`MaterialKind`] is something that
+    /// can be *placed* on a track, and a transition cannot be. A caller that
+    /// wants one asks [`Self::transition`].
     pub fn kind_of(&self, id: &str) -> Option<MaterialKind> {
         if self.video(id).is_some() {
             Some(MaterialKind::Video)
@@ -267,6 +305,7 @@ pub struct VideoMaterial {
     pub height: u32,
     /// Full duration of the source file.
     pub duration: Micros,
+    #[serde(default = "default_fps")]
     pub fps: f64,
     /// Whether the file carries an audio stream we can pull from.
     #[serde(default)]
@@ -298,7 +337,9 @@ pub struct TextMaterial {
     pub id: Id,
     pub content: String,
     pub font_family: String,
+    #[serde(default = "default_font_size")]
     pub font_size: f32,
+    #[serde(default = "opaque_white")]
     pub color: [f32; 4],
     #[serde(default)]
     pub bold: bool,
@@ -328,9 +369,179 @@ pub enum TextAlign {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct TextShadow {
+    #[serde(default = "opaque_black")]
     pub color: [f32; 4],
+    #[serde(default = "origin")]
     pub offset: [f32; 2],
+    #[serde(default = "zero")]
     pub blur: f32,
+}
+
+// ---------------------------------------------------------------------------
+// Transitions
+// ---------------------------------------------------------------------------
+
+/// What a transition does between two clips.
+///
+/// One variant per shader entry point in
+/// `modules/transitions/shaders/transition.wgsl`. Direction is deliberately
+/// *not* baked into the variant — a left wipe and a right wipe are the same
+/// shader with a different uniform, and four variants apiece would quadruple
+/// this enum, the pipeline cache and the UI list for no gain.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransitionKind {
+    /// Straight crossfade.
+    #[default]
+    Dissolve,
+    /// Out to a colour, then in from it. The colour covers the whole canvas.
+    DipToColor,
+    /// A hard, optionally softened, edge sweeping across the frame.
+    Wipe,
+    /// Both clips travel together; the incoming one pushes the outgoing one off.
+    Slide,
+    /// The outgoing clip pushes towards the viewer as the incoming one settles
+    /// back, crossfaded.
+    Zoom,
+}
+
+/// Which way a directional transition travels across the frame.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransitionDirection {
+    Left,
+    #[default]
+    Right,
+    Up,
+    Down,
+}
+
+impl TransitionDirection {
+    /// The value the shader's `switch` matches on. Kept next to the enum so the
+    /// two orderings cannot drift apart unnoticed.
+    pub fn shader_index(self) -> u32 {
+        match self {
+            TransitionDirection::Left => 0,
+            TransitionDirection::Right => 1,
+            TransitionDirection::Up => 2,
+            TransitionDirection::Down => 3,
+        }
+    }
+}
+
+/// The length a transition gets when the user has not said otherwise.
+pub const DEFAULT_TRANSITION_DURATION: Micros = 500_000;
+
+/// The parameters of one transition, living in the material pool.
+///
+/// ## Why a material and not an entity of its own
+///
+/// The obvious alternative is a `Vec<Transition>` on `Track`, each row naming
+/// the two segments it joins. It was rejected: a side table that names segments
+/// is a *second* place segment ids appear, so every structural edit — remove,
+/// move, split, ripple — has to remember to fix it up, and the one that forgets
+/// leaves a row pointing at a segment that no longer exists. Hanging the
+/// reference on the segment means a segment carries its transition with it
+/// through every edit for free, and `RemoveSegment` — which already snapshots
+/// the whole `Segment` — undoes the removal of both without knowing that
+/// transitions exist at all.
+///
+/// So this is a material, referenced by id from a segment, exactly like every
+/// other parameter block in the pool. The *parameters* live here rather than
+/// inline on the segment for the same reason a video's do: the pool is where
+/// things that can be enumerated and shared live, and it keeps the segment
+/// schema fixed.
+///
+/// ## Why the incoming clip owns it, not the outgoing one
+///
+/// CapCut hangs its transition off the **left** (outgoing) segment. We hang it
+/// off the **right** (incoming) one, and the reason is splitting. `split_at`
+/// trims the original in place and inserts a fresh clone for the remainder.
+/// With left-ownership, splitting the outgoing clip leaves the transition on
+/// the half that no longer touches the cut, so the split composite grows an
+/// extra command to move it. With right-ownership the clone is by construction
+/// a clip whose left edge is a brand new cut with nothing on it, so the whole
+/// fix is one unconditional line in `split_at`, and splitting the *outgoing*
+/// clip needs nothing at all because the transition sits on a segment the split
+/// never touched.
+///
+/// Read the ownership as a preposition: a transition describes how its segment
+/// is *entered*.
+///
+/// ## Where the id is stored
+///
+/// In `Segment::extras`, which is a list of material ids with no type tag; the
+/// kind is whichever pool category the id resolves in. That trick is CapCut's
+/// (see `docs/research/draft-format.md`) and its payoff is visible here —
+/// adding transitions to this format changed no existing segment, no existing
+/// constructor and no existing test. The cost is that a corrupted id silently
+/// drops the transition, which is exactly what `validate()` is made to catch.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TransitionMaterial {
+    pub id: Id,
+    pub kind: TransitionKind,
+    /// Total length of the effect.
+    ///
+    /// A transition is **centred on the cut**: it runs from `cut - duration/2`
+    /// to `cut + duration/2` and neither clip moves. The alternative — the two
+    /// clips genuinely overlapping in time, CapCut's `is_overlap` — is not
+    /// available to us, because "segments within a track never overlap" is an
+    /// invariant the whole editing model rests on, and honouring the overlap
+    /// would mean shortening the timeline and shifting everything downstream
+    /// every time a transition's length changed.
+    ///
+    /// Centring instead means each clip contributes frames from *beyond* its
+    /// trimmed boundary for half the duration: the outgoing clip is read past
+    /// its out point and the incoming one before its in point, out of the
+    /// handles the trim left behind. Where there is no handle the borrowed
+    /// frame freezes at the boundary, which is what an editor does when it
+    /// says "insufficient media".
+    ///
+    /// The start is deliberately *not* stored. It is derived from the cut,
+    /// which is `incoming.target_range.start`, so trimming or moving either
+    /// clip carries the transition along and there is no second copy of the
+    /// truth to fall out of date.
+    pub duration: Micros,
+    /// Applied to the progress before the shader sees it. `Easing::Hold` is a
+    /// legitimate choice: it holds the outgoing clip and cuts at the far edge.
+    #[serde(default)]
+    pub easing: Easing,
+    /// Wipe and slide only.
+    #[serde(default)]
+    pub direction: TransitionDirection,
+    /// Dip only. Linear RGBA.
+    #[serde(default = "opaque_black")]
+    pub color: [f32; 4],
+    /// Wipe only: width of the softened edge as a fraction of the frame.
+    #[serde(default = "default_softness")]
+    pub softness: f32,
+    /// Zoom only: extra scale the push adds. `0.35` reaches 1.35x.
+    #[serde(default = "default_zoom")]
+    pub zoom: f32,
+}
+
+fn default_softness() -> f32 {
+    0.04
+}
+
+fn default_zoom() -> f32 {
+    0.35
+}
+
+impl TransitionMaterial {
+    /// A transition of `kind` with every other parameter at its default.
+    pub fn new(kind: TransitionKind, duration: Micros) -> Self {
+        Self {
+            id: new_id(),
+            kind,
+            duration,
+            easing: Easing::EaseInOut,
+            direction: TransitionDirection::default(),
+            color: opaque_black(),
+            softness: default_softness(),
+            zoom: default_zoom(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -369,6 +580,42 @@ pub struct Track {
 
 fn one() -> f32 {
     1.0
+}
+
+// Every float in the document has a `serde` default, including the ones that
+// are not optional in the schema. That is not an invitation to write partial
+// files: it is what makes a *damaged* file recoverable. `serde_json` cannot
+// write a NaN or an infinity — it emits `null` — so a project that once held
+// one comes back with a null where a number belongs, and without a default the
+// whole file refuses to open. `migrate::repair_non_finite` drops those keys and
+// these functions decide what the document reads instead.
+
+fn zero() -> f32 {
+    0.0
+}
+
+fn default_fps() -> f64 {
+    30.0
+}
+
+fn default_font_size() -> f32 {
+    48.0
+}
+
+fn origin() -> [f32; 2] {
+    [0.0, 0.0]
+}
+
+fn unit_scale() -> [f32; 2] {
+    [1.0, 1.0]
+}
+
+fn opaque_black() -> [f32; 4] {
+    [0.0, 0.0, 0.0, 1.0]
+}
+
+fn opaque_white() -> [f32; 4] {
+    [1.0, 1.0, 1.0, 1.0]
 }
 
 impl Track {
@@ -429,7 +676,82 @@ pub struct Segment {
     pub keyframes: Vec<KeyframeTrack>,
 }
 
+/// The widest a segment's stored source duration may sit from the one its
+/// speed implies, in microseconds.
+///
+/// The two cannot be related exactly. Durations are whole microseconds and the
+/// factor between them is an `f32`, so every operation that derives one from
+/// the other rounds; splitting compounds it, because both halves are derived
+/// from the same whole. Two microseconds plus one per unit of speed covers
+/// that and is still five orders of magnitude tighter than the error this
+/// invariant exists to catch — a speed change that forgot to move a range is
+/// wrong by a *factor* of the speed, which on a one-second clip is hundreds of
+/// thousands of microseconds.
+pub fn speed_slack(speed: f32) -> Micros {
+    if !speed.is_finite() {
+        return 0;
+    }
+    2 + speed.abs().ceil().min(1e6) as Micros
+}
+
+/// How much source a stretch of timeline consumes at `speed`.
+///
+/// `docs/architecture/project-format.md`:
+/// `source_range.duration = target_range.duration × speed`. This is the one
+/// function allowed to compute it. Every command that writes a source duration
+/// writes *this* number, which is what makes undo exact: two commands that
+/// rounded differently would leave the document a microsecond away from where
+/// it started.
+pub fn source_duration_for(target_duration: Micros, speed: f32) -> Micros {
+    if !speed.is_finite() {
+        return target_duration;
+    }
+    (target_duration as f64 * speed as f64).round() as Micros
+}
+
 impl Segment {
+    /// The source duration this segment's timeline duration and speed imply.
+    pub fn implied_source_duration(&self) -> Micros {
+        if !self.speed.is_finite() {
+            return self.source_range.duration;
+        }
+        source_duration_for(self.target_range.duration, self.speed)
+    }
+
+    /// Whether the two ranges agree about the speed between them.
+    pub fn speed_invariant_holds(&self) -> bool {
+        let implied = self.implied_source_duration();
+        (self.source_range.duration - implied).abs() <= speed_slack(self.speed)
+    }
+
+    /// The first float on this segment that is not a finite number, by name.
+    ///
+    /// Non-finite values are refused at the edit boundary because they cannot
+    /// be written back: `serde_json` has no NaN or infinity and emits `null`,
+    /// which is a save that reports success and a file that never reopens.
+    pub fn non_finite_field(&self) -> Option<&'static str> {
+        if !self.speed.is_finite() {
+            return Some("speed");
+        }
+        if !self.volume.is_finite() {
+            return Some("volume");
+        }
+        if let Some(field) = self.transform.non_finite_field() {
+            return Some(field);
+        }
+        if let Some(field) = self.crop.as_ref().and_then(Crop::non_finite_field) {
+            return Some(field);
+        }
+        if self
+            .keyframes
+            .iter()
+            .any(|t| t.keyframes.iter().any(|k| !k.value.is_finite()))
+        {
+            return Some("keyframe value");
+        }
+        None
+    }
+
     /// Map a timeline instant to a position inside the source material,
     /// accounting for `speed`. Returns `None` when `time` is outside the
     /// segment.
@@ -450,13 +772,39 @@ impl Segment {
 /// project from 9:16 to 16:9 keeps clips where the user put them.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Transform {
+    #[serde(default = "origin")]
     pub position: [f32; 2],
+    #[serde(default = "unit_scale")]
     pub scale: [f32; 2],
     /// Degrees, clockwise.
+    #[serde(default = "zero")]
     pub rotation: f32,
+    #[serde(default = "one")]
     pub opacity: f32,
+    #[serde(default)]
     pub flip_h: bool,
+    #[serde(default)]
     pub flip_v: bool,
+}
+
+impl Transform {
+    /// The first field that is not a finite number, by the name a user would
+    /// recognise. `None` means every value is usable.
+    pub fn non_finite_field(&self) -> Option<&'static str> {
+        if !self.position.iter().all(|v| v.is_finite()) {
+            return Some("position");
+        }
+        if !self.scale.iter().all(|v| v.is_finite()) {
+            return Some("scale");
+        }
+        if !self.rotation.is_finite() {
+            return Some("rotation");
+        }
+        if !self.opacity.is_finite() {
+            return Some("opacity");
+        }
+        None
+    }
 }
 
 impl Default for Transform {
@@ -475,10 +823,31 @@ impl Default for Transform {
 /// Source-space crop, as fractions of the source dimensions.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Crop {
+    #[serde(default = "zero")]
     pub left: f32,
+    #[serde(default = "zero")]
     pub top: f32,
+    #[serde(default = "one")]
     pub right: f32,
+    #[serde(default = "one")]
     pub bottom: f32,
+}
+
+impl Crop {
+    /// The first field that is not a finite number, by name.
+    pub fn non_finite_field(&self) -> Option<&'static str> {
+        for (name, value) in [
+            ("crop left", self.left),
+            ("crop top", self.top),
+            ("crop right", self.right),
+            ("crop bottom", self.bottom),
+        ] {
+            if !value.is_finite() {
+                return Some(name);
+            }
+        }
+        None
+    }
 }
 
 impl Default for Crop {
@@ -498,7 +867,14 @@ impl Default for Crop {
 
 /// An animatable property. Adding a variant is how a new property becomes
 /// keyframable; the renderer matches on this when sampling.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+///
+/// Ordered, and the order is the declaration order below. Nothing renders
+/// differently for it — it is what lets a segment keep its `KeyframeTrack`s in
+/// a canonical order, so that removing the last keyframe of a property and
+/// undoing it puts the track back exactly where it was rather than at the end.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum AnimatableProperty {
     PositionX,
@@ -551,6 +927,7 @@ impl KeyframeTrack {
 pub struct Keyframe {
     /// Relative to the segment start.
     pub time: Micros,
+    #[serde(default = "zero")]
     pub value: f32,
     #[serde(default)]
     pub easing: Easing,
@@ -612,35 +989,195 @@ impl Project {
     /// and is a bug on our side.
     pub fn validate(&self) -> Vec<ValidationIssue> {
         let mut issues = Vec::new();
+        // Warnings raised inside the walk below, kept apart only because the
+        // error sink borrows `issues` for the length of the loop.
+        let mut outside: Vec<ValidationIssue> = Vec::new();
+        let mut error = |message: String, subject_id: Option<Id>| {
+            issues.push(ValidationIssue {
+                severity: Severity::Error,
+                message,
+                subject_id,
+            });
+        };
+
+        // A non-finite number cannot be written to JSON — `serde_json` emits
+        // `null` and the file never opens again — so one in the document means
+        // an edit let it through and the next save is silent data loss.
+        if !self.fps.is_finite() || self.fps <= 0.0 {
+            error(
+                format!("project frame rate is not a positive number: {}", self.fps),
+                None,
+            );
+        }
+        if !self.canvas.background.iter().all(|c| c.is_finite()) {
+            error("canvas background is not a finite colour".into(), None);
+        }
+
+        // Ids are the document's only cross-references — `segment_mut` and
+        // `track_mut` both return the *first* match — so a duplicate makes one
+        // of the two unreachable and every edit aimed at it silently hits the
+        // other.
+        let mut seen_tracks: HashSet<&str> = HashSet::new();
+        let mut seen_segments: HashSet<&str> = HashSet::new();
 
         for track in &self.tracks {
+            if !seen_tracks.insert(track.id.as_str()) {
+                error(
+                    format!("two tracks share the id {}", track.id),
+                    Some(track.id.clone()),
+                );
+            }
+            if !track.volume.is_finite() {
+                error(
+                    "track volume is not a finite number".into(),
+                    Some(track.id.clone()),
+                );
+            }
+
             let mut prev_end = Micros::MIN;
             for seg in &track.segments {
+                if !seen_segments.insert(seg.id.as_str()) {
+                    error(
+                        format!("two segments share the id {}", seg.id),
+                        Some(seg.id.clone()),
+                    );
+                }
                 if seg.target_range.duration <= 0 {
-                    issues.push(ValidationIssue {
-                        severity: Severity::Error,
-                        message: "segment has non-positive duration".into(),
-                        subject_id: Some(seg.id.clone()),
-                    });
+                    error(
+                        "segment has non-positive duration".into(),
+                        Some(seg.id.clone()),
+                    );
+                }
+                if seg.target_range.start < 0 {
+                    error(
+                        format!(
+                            "segment starts before the timeline, at {} µs",
+                            seg.target_range.start
+                        ),
+                        Some(seg.id.clone()),
+                    );
                 }
                 if seg.target_range.start < prev_end {
-                    issues.push(ValidationIssue {
-                        severity: Severity::Error,
-                        message: "segments overlap or are unsorted".into(),
-                        subject_id: Some(seg.id.clone()),
-                    });
+                    error(
+                        "segments overlap or are unsorted".into(),
+                        Some(seg.id.clone()),
+                    );
                 }
                 prev_end = seg.target_range.end();
 
+                if seg.source_range.start < 0 {
+                    error(
+                        format!(
+                            "segment reads from before the start of its material, at {} µs",
+                            seg.source_range.start
+                        ),
+                        Some(seg.id.clone()),
+                    );
+                }
+                if seg.source_range.duration <= 0 {
+                    error(
+                        "segment has a non-positive source duration".into(),
+                        Some(seg.id.clone()),
+                    );
+                }
+
                 if self.materials.kind_of(&seg.material_id).is_none() {
-                    issues.push(ValidationIssue {
-                        severity: Severity::Error,
-                        message: format!("segment references unknown material {}", seg.material_id),
-                        subject_id: Some(seg.id.clone()),
-                    });
+                    error(
+                        format!("segment references unknown material {}", seg.material_id),
+                        Some(seg.id.clone()),
+                    );
+                }
+
+                if let Some(field) = seg.non_finite_field() {
+                    error(
+                        format!("segment {field} is not a finite number"),
+                        Some(seg.id.clone()),
+                    );
+                } else if seg.speed <= 0.0 {
+                    error(
+                        format!("segment speed is not positive: {}", seg.speed),
+                        Some(seg.id.clone()),
+                    );
+                } else if !seg.speed_invariant_holds() {
+                    // The two ranges are the document's own definition of what
+                    // a speed change means; when they disagree, `split_at`
+                    // cuts the source in the wrong place and the exporter and
+                    // the mixer read a different piece of the file than the
+                    // preview showed.
+                    error(
+                        format!(
+                            "segment source duration {} µs does not match its timeline duration \
+                             {} µs at {}x speed (expected {} µs)",
+                            seg.source_range.duration,
+                            seg.target_range.duration,
+                            seg.speed,
+                            seg.implied_source_duration()
+                        ),
+                        Some(seg.id.clone()),
+                    );
+                }
+
+                // Keyframes. The sampler walks a track with `partition_point`,
+                // so unsorted or duplicated times do not merely look wrong,
+                // they read the wrong pair of neighbours; and "this property
+                // is animated" is "a track exists for it" on both sides of the
+                // IPC boundary, so an emptied track left behind shows a
+                // property as animated when it is not.
+                let mut animated: HashSet<AnimatableProperty> = HashSet::new();
+                for keys in &seg.keyframes {
+                    if !animated.insert(keys.property) {
+                        error(
+                            format!("two keyframe tracks animate {:?}", keys.property),
+                            Some(seg.id.clone()),
+                        );
+                    }
+                    if keys.keyframes.is_empty() {
+                        error(
+                            format!("{:?} is marked as animated with no keyframes", keys.property),
+                            Some(seg.id.clone()),
+                        );
+                    }
+                    let mut previous: Option<Micros> = None;
+                    for key in &keys.keyframes {
+                        match previous {
+                            Some(p) if key.time < p => error(
+                                format!("{:?} keyframes are out of order", keys.property),
+                                Some(seg.id.clone()),
+                            ),
+                            Some(p) if key.time == p => error(
+                                format!(
+                                    "two {:?} keyframes share the time {} µs",
+                                    keys.property, key.time
+                                ),
+                                Some(seg.id.clone()),
+                            ),
+                            _ => {}
+                        }
+                        previous = Some(key.time);
+
+                        // Not an error. Trimming a clip's tail legitimately
+                        // leaves keyframes beyond the new end, and the document
+                        // keeps them on purpose so that undoing the trim brings
+                        // the animation back — `project-format.md`: "trim its
+                        // head and the animation stays attached to the frames
+                        // it was authored against". The user is told because
+                        // part of what they authored is no longer playing.
+                        if key.time < 0 || key.time > seg.target_range.duration {
+                            outside.push(ValidationIssue {
+                                severity: Severity::Warning,
+                                message: format!(
+                                    "a {:?} keyframe at {} µs is outside the clip and will not play",
+                                    keys.property, key.time
+                                ),
+                                subject_id: Some(seg.id.clone()),
+                            });
+                        }
+                    }
                 }
             }
         }
+
+        issues.extend(outside);
 
         for m in &self.materials.videos {
             if !std::path::Path::new(&m.path).exists() {
@@ -651,6 +1188,11 @@ impl Project {
                 });
             }
         }
+
+        // A transition is the one thing in this document whose correctness
+        // depends on two segments at once, so its checks live with the module
+        // that knows the rule rather than being restated here.
+        issues.extend(crate::modules::transitions::validate::issues(self));
 
         issues
     }

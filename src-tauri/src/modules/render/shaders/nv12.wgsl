@@ -45,19 +45,9 @@ fn texel(x: u32, y: u32) -> vec3<f32> {
     return textureLoad(src, vec2<i32>(i32(cx), i32(cy)), 0).rgb;
 }
 
-// BT.601, limited range — what swscale produces by default for an untagged RGB
-// source, and what `encoder.rs` tags the stream as with `color_range: MPEG`.
-// The coefficients are the ones in the standard; the 219/224 scales are the
-// limited-range excursions.
-fn luma(c: vec3<f32>) -> f32 {
-    return 16.0 + 219.0 * (0.299 * c.r + 0.587 * c.g + 0.114 * c.b);
-}
-
-fn chroma(c: vec3<f32>) -> vec2<f32> {
-    let cb = -0.168736 * c.r - 0.331264 * c.g + 0.5 * c.b;
-    let cr = 0.5 * c.r - 0.418688 * c.g - 0.081312 * c.b;
-    return vec2<f32>(128.0 + 224.0 * cb, 128.0 + 224.0 * cr);
-}
+// `luma` and `chroma` — the RGB→YUV half of this — live in `yuv.wgsl`, which is
+// prepended to this file at build time. They are there rather than here so the
+// inverse the compositor needs sits beside them; see the header of that file.
 
 fn byte(v: f32) -> u32 {
     return u32(clamp(round(v), 0.0, 255.0));

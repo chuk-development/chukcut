@@ -112,4 +112,6 @@ itself. Blunt, but it makes desync bugs structurally impossible.
 2. `docs/architecture/ipc-contract.md` — how the two halves talk
 3. `docs/architecture/timeline-editing.md` — how mutations work
 4. `docs/architecture/preview-pipeline.md` — the one genuinely hard problem
-5. `docs/ROADMAP.md` — what is built, what is next
+5. `docs/architecture/transitions.md` — the effect between two clips, and the
+   compositor change it is still waiting on
+6. `docs/ROADMAP.md` — what is built, what is next

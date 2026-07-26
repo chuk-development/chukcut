@@ -71,6 +71,28 @@ channel.onmessage = (p) => setProgress(p);
 await invoke("export_start", { request, onProgress: channel });
 ```
 
+**A streaming command returns a job id, not the work.** Both channel commands
+follow the same shape, and it is worth copying rather than inventing a third:
+
+```ts
+const onBatch = new Channel<ThumbnailBatch>();
+onBatch.onmessage = (batch) => place(batch.tiles);      // tiles carry their own index
+const jobId = await invoke<string>("media_thumbnails", { path, count, height, onBatch });
+// …and when the component unmounts:
+await invoke("media_thumbnails_cancel", { jobId });
+```
+
+Two rules that fall out of this and are not optional:
+
+- **Every job sends exactly one terminal message**, with `complete: true`, and
+  it is the last one. Failures arrive *there*, in `error`, not as a rejected
+  promise — the call resolved long before the work did. A frontend that only
+  handles the promise will never see a decode failure.
+- **A batch that cannot be delivered stops the job.** Dropping the channel is
+  therefore a legitimate way to cancel, and the explicit `_cancel` command
+  exists for the case where the caller wants the work to stop while the channel
+  is still alive.
+
 ## 3. Custom protocol — `chukcut-frame://`
 
 Bulk binary that would choke on JSON. Currently: preview frames. Registered in

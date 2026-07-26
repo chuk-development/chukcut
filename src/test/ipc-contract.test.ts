@@ -17,7 +17,12 @@
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { mediaThumbnails } from "@/modules/media/lib/api";
+import {
+  mediaThumbnails,
+  mediaThumbnailsCancel,
+  mediaWaveform,
+  type ThumbnailBatch,
+} from "@/modules/media/lib/api";
 import {
   newPreviewChannel,
   type PreviewEvent,
@@ -425,17 +430,133 @@ describe("the media and project commands", () => {
     expect(ipc.lastCall("project_import_media")).toEqual({ path: "/media/a.mp4" });
   });
 
-  it("turns the thumbnail cache's file paths into URLs the webview can load", async () => {
-    ipc.handle("media_thumbnails", ["/cache/a-0.jpg", "/cache/a-1.jpg"]);
+  it("hands Rust a channel and takes back a job id, not a strip", async () => {
+    ipc.handle("media_thumbnails", "job-7");
 
-    const urls = await mediaThumbnails("/media/a.mp4", 12, 72);
+    const jobId = await mediaThumbnails("/media/a.mp4", 12, 72, () => {});
 
     expect(ipc.lastCall("media_thumbnails")).toEqual({
       path: "/media/a.mp4",
       count: 12,
       height: 72,
+      // The channel collapses to its marker on the wire; Rust receives it on
+      // the `on_batch` parameter.
+      onBatch: expect.stringMatching(/^__CHANNEL__:/),
     });
+    // The command answers as soon as the arguments are sane — long before a
+    // single frame has been decoded.
+    expect(jobId).toBe("job-7");
+  });
+
+  it("reads a batch's tiles, each at its own index, as URLs the webview can load", async () => {
+    ipc.handle("media_thumbnails", "job-7");
+
+    const batches: ThumbnailBatch[] = [];
+    await mediaThumbnails("/media/a.mp4", 12, 72, (batch) => batches.push(batch));
+    // Workers finish out of order, so a batch is whole tiles rather than a run.
+    ipc.channel("media_thumbnails").emit({
+      job_id: "job-7",
+      total: 12,
+      produced: 2,
+      tiles: [
+        { index: 6, at: 3_000_000, path: "/cache/a-6.jpg" },
+        { index: 1, at: 500_000, path: "/cache/a-1.jpg" },
+      ],
+      complete: false,
+      cancelled: false,
+      error: null,
+    });
+
+    expect(batches).toHaveLength(1);
+    expect(batches[0].produced).toBe(2);
+    expect(batches[0].complete).toBe(false);
+    expect(batches[0].tiles.map((tile) => tile.index)).toEqual([6, 1]);
+    expect(batches[0].tiles.map((tile) => tile.at)).toEqual([3_000_000, 500_000]);
     // A bare filesystem path in an <img src> loads nothing.
-    for (const url of urls) expect(url).toMatch(/^asset:\/\//);
+    for (const tile of batches[0].tiles) expect(tile.url).toMatch(/^asset:\/\//);
+  });
+
+  it("carries a decode failure in the terminal batch, where the promise cannot", async () => {
+    ipc.handle("media_thumbnails", "job-7");
+
+    const batches: ThumbnailBatch[] = [];
+    // Resolved, and resolved successfully: the command was fine, the decode
+    // was not. A caller that only awaits this never learns anything went wrong.
+    await mediaThumbnails("/media/a.mp4", 12, 72, (batch) => batches.push(batch));
+    ipc.channel("media_thumbnails").emit({
+      job_id: "job-7",
+      total: 12,
+      produced: 0,
+      tiles: [],
+      complete: true,
+      cancelled: false,
+      error: "/media/a.mp4 has no video stream",
+    });
+
+    expect(batches).toHaveLength(1);
+    expect(batches[0].complete).toBe(true);
+    expect(batches[0].error).toBe("/media/a.mp4 has no video stream");
+  });
+
+  it("tells a cancellation apart from a failure", async () => {
+    ipc.handle("media_thumbnails", "job-7");
+
+    const batches: ThumbnailBatch[] = [];
+    await mediaThumbnails("/media/a.mp4", 12, 72, (batch) => batches.push(batch));
+    ipc.channel("media_thumbnails").emit({
+      job_id: "job-7",
+      total: 12,
+      produced: 4,
+      tiles: [],
+      complete: true,
+      cancelled: true,
+      error: null,
+    });
+
+    // The user's own doing. Reporting it as a failure would put a message in
+    // front of them about a race they started.
+    expect(batches[0].cancelled).toBe(true);
+    expect(batches[0].error).toBeNull();
+  });
+
+  it("cancels by job id, and a job that already finished is not an error", async () => {
+    ipc.handle("media_thumbnails_cancel", false);
+
+    await expect(mediaThumbnailsCancel("job-7")).resolves.toBe(false);
+
+    expect(ipc.lastCall("media_thumbnails_cancel")).toEqual({ jobId: "job-7" });
+  });
+
+  it("reads a waveform's extremes and its RMS, and the bucket count it was given", async () => {
+    ipc.handle("media_waveform", {
+      buckets: 3,
+      duration: 8_000_000,
+      min: [-0.5, -1, 0],
+      max: [0.5, 1, 0],
+      rms: [0.2, 0.7, 0],
+    });
+
+    const data = await mediaWaveform("/media/a.mp4", 2048);
+
+    expect(ipc.lastCall("media_waveform")).toEqual({ path: "/media/a.mp4", buckets: 2048 });
+    expect(data.buckets).toBe(3);
+    expect(data.duration).toBe(8_000_000);
+    expect(Array.from(data.max)).toEqual([0.5, 1, 0]);
+    // Float32, so 0.2 does not survive as 0.2 — the arrays are typed because
+    // sixteen thousand buckets per material is what the fine end of the zoom
+    // asks for, and the precision that costs is well under a pixel.
+    expect(Array.from(data.rms ?? [])).toEqual([expect.closeTo(0.2, 5), expect.closeTo(0.7, 5), 0]);
+  });
+
+  it("reads the old bare-peaks answer as an envelope with no body", async () => {
+    // Rust before the rework answered with normalized peaks and nothing else.
+    // Deriving an RMS from a peak would paint a body nobody measured.
+    ipc.handle("media_waveform", [0.5, 1]);
+
+    const data = await mediaWaveform("/media/a.mp4", 512);
+
+    expect(Array.from(data.min)).toEqual([-0.5, -1]);
+    expect(Array.from(data.max)).toEqual([0.5, 1]);
+    expect(data.rms).toBeNull();
   });
 });

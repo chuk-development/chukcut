@@ -35,13 +35,67 @@ pub struct SourceRequest<'a> {
     pub max_size: (u32, u32),
 }
 
+/// Which set of luma weights turns this material's YUV back into RGB.
+///
+/// Taken from the file rather than assumed. The two common answers differ by
+/// enough to matter — BT.601 read as BT.709 shifts saturated reds and greens by
+/// ten code values or so — and the difference is a consistent tint rather than
+/// an obvious fault, so nobody catches it until a delivery is rejected. SD
+/// material is usually BT.601 and HD usually BT.709, but "usually" is not a
+/// decoder.
+///
+/// The discriminants are what the fragment shader switches on; `yuv.wgsl`
+/// spells the same numbers and a test asserts they still agree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u32)]
+pub enum YuvMatrix {
+    Bt601 = 0,
+    #[default]
+    Bt709 = 1,
+    Bt2020 = 2,
+}
+
+/// Whether luma occupies 16..235 or 0..255.
+///
+/// Limited is the default for everything a camera writes; full turns up in
+/// screen recordings and in anything that has been through JPEG. Reading full
+/// as limited crushes the ends of the ramp, reading limited as full leaves grey
+/// blacks — the failure `docs/research/vaapi-jpeg-preview.md` records from the
+/// encode side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u32)]
+pub enum YuvRange {
+    #[default]
+    Limited = 0,
+    Full = 1,
+}
+
+/// Something that has to stay alive for as long as the textures do.
+///
+/// The mapped-decode path imports a texture over memory the *decoder* owns: a
+/// VA surface out of a fixed pool, which the decoder will happily recycle and
+/// overwrite the moment nothing references the frame it came from. The
+/// reference is an `AVFrame` held by `media::dmabuf::DmabufFrame`, which the
+/// compositor has no business knowing about — so it travels as an opaque
+/// keep-alive that is dropped with the last clone of the [`SourceFrame`].
+///
+/// Losing this is not a crash. It is the previous frame's picture appearing
+/// intermittently under motion, which reads as a decoder bug.
+pub type FrameGuard = Arc<dyn std::any::Any + Send + Sync>;
+
 /// One material's appearance at one instant, as a texture the compositor can
 /// bind.
 ///
-/// The texture must carry [`wgpu::TextureUsages::TEXTURE_BINDING`], be
-/// `D2` with a single mip and sample count 1, and be filterable — in practice
-/// an `Rgba8Unorm` or `Rgba8UnormSrgb` upload. Alpha is straight, not
-/// premultiplied; the blend state matches.
+/// Two shapes, and the compositor branches on which:
+///
+/// - **RGBA**, the ordinary case. One filterable `Rgba8Unorm` or
+///   `Rgba8UnormSrgb` texture, alpha straight rather than premultiplied.
+///   [`Self::from_texture`] builds this and nothing else changed for it.
+/// - **Two-plane YUV**, what a hardware decoder produces. `texture` is the
+///   `R8Unorm` luma plane, [`Self::chroma`] the half-size `Rg8Unorm` chroma
+///   plane, and [`Self::matrix`]/[`Self::range`] say how to combine them. Both
+///   are usually imported straight out of the decoder's memory, which is the
+///   whole reason this case exists.
 ///
 /// Everything is `Arc` because providers cache: the same decoded frame is
 /// normally handed to several consecutive renders.
@@ -49,16 +103,37 @@ pub struct SourceRequest<'a> {
 pub struct SourceFrame {
     pub texture: Arc<wgpu::Texture>,
     pub view: Arc<wgpu::TextureView>,
-    /// Pixel size of `texture`. This — not the material's declared dimensions —
-    /// is what the compositor fits into the canvas, so a provider that hands
-    /// back an upright texture for a 90°-rotated file gets the right aspect
-    /// without the compositor knowing about container rotation.
+    /// Pixel size of the picture *as displayed*, i.e. with any container
+    /// rotation applied. This — not the material's declared dimensions, and not
+    /// necessarily `texture`'s size — is what the compositor fits into the
+    /// canvas.
+    ///
+    /// On the RGBA path the decoder has already rotated the pixels, so this is
+    /// the texture's own size. On the mapped path nothing has been rotated and
+    /// this is the texture's size with the axes exchanged; see [`Self::turns`].
     pub width: u32,
     pub height: u32,
+    /// The interleaved CbCr plane, at half resolution in both axes. `Some`
+    /// makes this a YUV frame.
+    pub chroma: Option<Arc<wgpu::Texture>>,
+    pub chroma_view: Option<Arc<wgpu::TextureView>>,
+    /// How to convert, when `chroma` is `Some`. Meaningless otherwise.
+    pub matrix: YuvMatrix,
+    pub range: YuvRange,
+    /// Clockwise quarter turns the compositor must apply, because the pixels
+    /// have not been. Always 0 on the RGBA path — the decoder rotates there,
+    /// since it is already copying every pixel and one more pass is cheap
+    /// relative to being wrong everywhere downstream.
+    pub turns: u32,
+    /// Whatever must outlive the textures. See [`FrameGuard`].
+    pub guard: Option<FrameGuard>,
 }
 
 impl SourceFrame {
     /// Wrap a texture, creating the default view.
+    ///
+    /// This is the RGBA case and it means what it always meant: one texture,
+    /// already the right way up, sampled directly.
     pub fn from_texture(texture: Arc<wgpu::Texture>) -> Self {
         let view = Arc::new(texture.create_view(&wgpu::TextureViewDescriptor::default()));
         let (width, height) = (texture.width(), texture.height());
@@ -67,7 +142,55 @@ impl SourceFrame {
             view,
             width,
             height,
+            chroma: None,
+            chroma_view: None,
+            matrix: YuvMatrix::default(),
+            range: YuvRange::default(),
+            turns: 0,
+            guard: None,
         }
+    }
+
+    /// Wrap the two planes of an NV12 surface.
+    ///
+    /// `turns` is the display rotation in clockwise quarter turns, *not*
+    /// applied to the pixels; the reported [`Self::size`] is post-rotation
+    /// because that is what the compositor fits, while the textures stay as
+    /// they were decoded.
+    pub fn from_planes(
+        luma: Arc<wgpu::Texture>,
+        chroma: Arc<wgpu::Texture>,
+        matrix: YuvMatrix,
+        range: YuvRange,
+        turns: u32,
+        guard: Option<FrameGuard>,
+    ) -> Self {
+        let view = Arc::new(luma.create_view(&wgpu::TextureViewDescriptor::default()));
+        let chroma_view = Arc::new(chroma.create_view(&wgpu::TextureViewDescriptor::default()));
+        let (coded_w, coded_h) = (luma.width(), luma.height());
+        let turns = turns % 4;
+        let (width, height) = if turns % 2 == 1 {
+            (coded_h, coded_w)
+        } else {
+            (coded_w, coded_h)
+        };
+        Self {
+            texture: luma,
+            view,
+            width,
+            height,
+            chroma: Some(chroma),
+            chroma_view: Some(chroma_view),
+            matrix,
+            range,
+            turns,
+            guard,
+        }
+    }
+
+    /// Whether the compositor has to convert rather than sample directly.
+    pub fn is_planar(&self) -> bool {
+        self.chroma_view.is_some()
     }
 
     pub fn size(&self) -> (u32, u32) {
@@ -81,6 +204,8 @@ impl std::fmt::Debug for SourceFrame {
             .field("width", &self.width)
             .field("height", &self.height)
             .field("format", &self.texture.format())
+            .field("planar", &self.is_planar())
+            .field("turns", &self.turns)
             .finish()
     }
 }
@@ -294,5 +419,82 @@ impl SourceProvider for SolidColorProvider {
             .write()
             .insert(request.material_id.to_string(), frame.clone());
         Ok(Some(frame))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shader switches on raw numbers; Rust switches on names. If the two
+    /// ever disagree, every hardware-decoded frame is converted with the wrong
+    /// matrix and the only symptom is a slight tint.
+    #[test]
+    fn the_shader_and_rust_agree_on_the_colour_selectors() {
+        let wgsl = include_str!("shaders/yuv.wgsl");
+        for (name, value) in [
+            ("MATRIX_BT601", YuvMatrix::Bt601 as u32),
+            ("MATRIX_BT709", YuvMatrix::Bt709 as u32),
+            ("MATRIX_BT2020", YuvMatrix::Bt2020 as u32),
+            ("RANGE_LIMITED", YuvRange::Limited as u32),
+            ("RANGE_FULL", YuvRange::Full as u32),
+        ] {
+            let declaration = format!("const {name}: u32 = {value}u;");
+            assert!(
+                wgsl.contains(&declaration),
+                "yuv.wgsl does not declare `{declaration}`"
+            );
+        }
+    }
+
+    /// A sideways source reports the size it will be *shown* at, because that
+    /// is what the compositor fits into the canvas. Reporting the coded size
+    /// would letterbox a portrait clip as though it were landscape.
+    #[test]
+    fn a_quarter_turned_source_reports_its_display_size() {
+        let Some(ctx) = crate::modules::render::test_context() else {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        };
+        let plane = |width, height, format| {
+            Arc::new(ctx.device().create_texture(&wgpu::TextureDescriptor {
+                label: None,
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            }))
+        };
+        let luma = plane(1920, 1080, wgpu::TextureFormat::R8Unorm);
+        let chroma = plane(960, 540, wgpu::TextureFormat::Rg8Unorm);
+
+        let upright = SourceFrame::from_planes(
+            Arc::clone(&luma),
+            Arc::clone(&chroma),
+            YuvMatrix::Bt709,
+            YuvRange::Limited,
+            0,
+            None,
+        );
+        assert_eq!(upright.size(), (1920, 1080));
+        assert!(upright.is_planar());
+
+        let sideways = SourceFrame::from_planes(
+            luma,
+            chroma,
+            YuvMatrix::Bt709,
+            YuvRange::Limited,
+            1,
+            None,
+        );
+        assert_eq!(sideways.size(), (1080, 1920));
+        assert_eq!(sideways.texture.width(), 1920, "the pixels were not moved");
     }
 }

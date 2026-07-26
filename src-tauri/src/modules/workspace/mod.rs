@@ -10,7 +10,9 @@
 //! instead of a risk assessment.
 
 pub mod commands;
+pub mod hardware;
 pub mod paths;
 pub mod settings;
 
+pub use hardware::{HardwareCodec, HardwareReport};
 pub use settings::{RecentProject, RecentProjects, Settings};

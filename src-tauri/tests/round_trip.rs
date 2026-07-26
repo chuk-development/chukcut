@@ -16,10 +16,12 @@
 mod support;
 
 use chukcut_lib::modules::project::document::{
-    AnimatableProperty, AudioMaterial, CanvasConfig, Crop, Easing, ImageMaterial, Keyframe,
-    KeyframeTrack, MaterialKind, Micros, Project, Segment, TextAlign, TextMaterial, TextShadow,
-    TimeRange, Track, TrackKind, Transform, VideoMaterial, SCHEMA_VERSION,
+    source_duration_for, AnimatableProperty, AudioMaterial, CanvasConfig, Crop, Easing,
+    ImageMaterial, Keyframe, KeyframeTrack, MaterialKind, Micros, Project, Segment, Severity,
+    TextAlign, TextMaterial, TextShadow, TimeRange, Track, TrackKind, Transform, VideoMaterial,
+    SCHEMA_VERSION,
 };
+use chukcut_lib::modules::project::migrate;
 
 use support::{canonical, Lcg};
 
@@ -127,14 +129,21 @@ fn full_document() -> Project {
         let mut at: Micros = track_index as Micros * 250_000;
         for segment_index in 0..10 {
             let duration = 1_000_000 + (segment_index as Micros % 3) * 250_000;
+            let speed = 0.5 + segment_index as f32 * 0.25;
             let mut segment = Segment {
                 id: format!("segment-{track_index}-{segment_index}"),
                 material_id: material_ids[(track_index + segment_index) % material_ids.len()]
                     .to_string(),
                 target_range: TimeRange::new(at, duration),
-                source_range: TimeRange::new(segment_index as Micros * 500_000, duration),
+                // The document's own invariant: a segment running at 2x reads
+                // twice as much source as it occupies timeline. A fixture that
+                // ignored it would be a fixture `validate()` rejects.
+                source_range: TimeRange::new(
+                    segment_index as Micros * 500_000,
+                    source_duration_for(duration, speed),
+                ),
                 render_index: track_index as i32,
-                speed: 0.5 + segment_index as f32 * 0.25,
+                speed,
                 volume: rng.unit() * 2.0,
                 transform: Transform {
                     position: [rng.unit() - 0.5, rng.unit() - 0.5],
@@ -396,10 +405,108 @@ fn a_saved_document_is_structurally_valid_when_it_is_read_back() {
     let errors: Vec<String> = reloaded
         .validate()
         .into_iter()
-        .filter(|i| i.severity == chukcut_lib::modules::project::document::Severity::Error)
+        .filter(|i| i.severity == Severity::Error)
         .map(|i| i.message)
         .collect();
     assert!(errors.is_empty(), "validation errors after a round trip: {errors:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Files this build did not write
+// ---------------------------------------------------------------------------
+
+/// Load the way the app does, rather than with a bare `from_str`.
+fn open(json: &str) -> Result<migrate::Loaded, String> {
+    migrate::load(json)
+}
+
+#[test]
+fn a_project_containing_a_non_finite_number_can_still_be_reopened() {
+    // The defect this pins is the worst kind: the save reports success, the
+    // file is written, and it never opens again. `serde_json` cannot express a
+    // NaN or an infinity and writes `null`, which then fails to deserialize
+    // with "invalid type: null, expected f32". Both values below were verified
+    // to do it.
+    let mut damaged = full_document();
+    damaged.fps = f64::INFINITY;
+    damaged
+        .segment_mut("segment-1-1")
+        .expect("the fixture has this segment")
+        .transform
+        .opacity = f32::NAN;
+    damaged.tracks[2].volume = f32::NEG_INFINITY;
+
+    let raw = save(&damaged);
+    assert!(
+        raw.contains("null"),
+        "serde_json writes a non-finite float as null"
+    );
+    assert!(
+        serde_json::from_str::<Project>(&raw).is_err(),
+        "and a bare parse of that file is exactly what lost the user's work"
+    );
+
+    let loaded = open(&raw).expect("the load path opens it anyway");
+    assert_eq!(loaded.project.fps, 30.0, "a documented default, not zero");
+    assert_eq!(
+        loaded
+            .project
+            .segment("segment-1-1")
+            .expect("segment")
+            .1
+            .transform
+            .opacity,
+        1.0,
+        "an opacity that came back as zero would be a clip the user cannot see"
+    );
+    assert_eq!(loaded.project.tracks[2].volume, 1.0);
+
+    // The user is told, rather than the repair happening behind their back.
+    assert_eq!(loaded.warnings.len(), 1, "{:?}", loaded.warnings);
+    for field in ["fps", "opacity", "volume"] {
+        assert!(
+            loaded.warnings[0].contains(field),
+            "the warning names {field}: {:?}",
+            loaded.warnings
+        );
+    }
+
+    // And what came back is a document that saves and reopens like any other,
+    // which is the property the damaged file had lost for good.
+    let again = open(&save(&loaded.project)).expect("the repaired project reopens");
+    assert!(again.warnings.is_empty());
+    assert_eq!(canonical(&again.project), canonical(&loaded.project));
+}
+
+#[test]
+fn a_project_from_a_newer_build_is_refused_with_a_sentence_a_user_can_act_on() {
+    // `project-format.md`: "Never silently accept an unknown version — a
+    // project the app half-understands is worse than one it refuses." Loading
+    // it would mean saving it back with everything the newer format added
+    // quietly deleted.
+    let mut future = full_document();
+    future.schema_version = SCHEMA_VERSION + 1;
+
+    let error = open(&save(&future)).expect_err("a newer format must not load");
+    assert!(error.contains("newer version of chukcut"), "{error}");
+    assert!(error.contains("Update chukcut"), "{error}");
+    assert!(
+        error.contains(&(SCHEMA_VERSION + 1).to_string())
+            && error.contains(&SCHEMA_VERSION.to_string()),
+        "the message names both versions: {error}"
+    );
+
+    // The current version still loads, so the gate is a gate and not a wall.
+    let current = open(&save(&full_document())).expect("this build's own files load");
+    assert!(current.warnings.is_empty());
+}
+
+#[test]
+fn a_file_that_does_not_declare_a_version_is_not_taken_for_a_project() {
+    let mut value: serde_json::Value = serde_json::from_str(&save(&full_document())).unwrap();
+    value.as_object_mut().unwrap().remove("schema_version");
+    let error = open(&value.to_string()).expect_err("no version, no load");
+    assert!(error.contains("schema_version"), "{error}");
 }
 
 #[test]

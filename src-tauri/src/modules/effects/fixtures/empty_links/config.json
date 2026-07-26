@@ -1,0 +1,8 @@
+{
+    "effect": {
+        "Link": [],
+        "model_names": {"alg_model": ["a_model_we_do_not_have"]}
+    },
+    "name": "chukcut_model_only",
+    "version": "14.1.0"
+}

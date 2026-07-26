@@ -1,0 +1,25 @@
+%YAML 1.1
+--- !Material &1
+name: tint_material
+guid: {a: 3, b: 3}
+xshader: {localId: 1, path: xshader/tint.xshader}
+properties:
+  __class: PropertySheet
+  name: tint_propertySheet
+  floatmap: {__class: Map, u_intensity: 0.8, u_time: 0.0, u_speed: 2.0}
+  vec2map: {__class: Map}
+  vec3map: {__class: Map, u_tint: {x: 1.0, y: 0.55, z: 0.3}}
+  vec4map: {__class: Map}
+  mat4map: {__class: Map}
+  intmap: {__class: Map}
+  texmap:
+    __class: Map
+    inputImageTexture: {localId: 1, path: "share://input.texture"}
+    desaturatedTexture: {localId: 1, path: rt/desaturateRT.rt}
+renderQueue: 3090
+enabledMacros:
+  __class: Map
+  AE_AreaLightNum: !<str> 0
+  AE_DirLightNum: !<str> 0
+mshaderPath: ""
+instanceCount: 0

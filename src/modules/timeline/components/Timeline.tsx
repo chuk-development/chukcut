@@ -2,7 +2,6 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 
 import { MEDIA_DRAG_MIME } from "@/lib/dnd";
 import { clamp, MICROS_PER_SECOND } from "@/lib/time";
-import { useThumbnailStore } from "@/modules/media/lib/thumbnails";
 import { useMediaStore } from "@/modules/media/store";
 import { preview } from "@/modules/preview/lib/session";
 import { usePreviewStore } from "@/modules/preview/store";
@@ -10,19 +9,14 @@ import { runEdit, useProjectStore } from "@/modules/project/store";
 import type { Id, Micros, TimeRange, Track } from "@/modules/project/types";
 import {
   findSegment,
-  materialAspect,
   materialDuration,
-  materialPath,
   projectDuration,
   rangeEnd,
   segmentLabel,
 } from "@/modules/project/types";
 import { Playhead } from "@/modules/timeline/components/Playhead";
-import {
-  type Filmstrip,
-  Segment,
-  type SegmentGesture,
-} from "@/modules/timeline/components/Segment";
+import { RazorGuide } from "@/modules/timeline/components/RazorGuide";
+import { Segment, type SegmentGesture } from "@/modules/timeline/components/Segment";
 import { TimelineToolbar } from "@/modules/timeline/components/TimelineToolbar";
 import { TimeRuler } from "@/modules/timeline/components/TimeRuler";
 import { TrackHeader, TrackLane } from "@/modules/timeline/components/Track";
@@ -39,6 +33,7 @@ import {
   toggleTrackFlag,
   undo,
 } from "@/modules/timeline/lib/edits";
+import { buildMaterialIndex } from "@/modules/timeline/lib/materials";
 import { freeSpan, nearestFreeStart } from "@/modules/timeline/lib/placement";
 import {
   buildSnapContext,
@@ -50,6 +45,7 @@ import {
 import {
   MAX_ZOOM,
   MIN_ZOOM,
+  type RazorTarget,
   RULER_HEIGHT,
   TRACK_HEADER_WIDTH,
   trackHeight,
@@ -60,6 +56,18 @@ import {
 const MIN_VISIBLE_SPAN = 20 * MICROS_PER_SECOND;
 /** Room past the last clip to drag into. */
 const TRAILING_PX = 480;
+/**
+ * How far past the edges of the screen clips keep drawing, and how coarsely the
+ * window moves.
+ *
+ * A scroll publishes a new pixel offset on every wheel tick, and the visible
+ * window is a prop on every clip — so an un-quantised window means fifty clips
+ * recompute their tiles and their waveform columns for a two-pixel scroll. With
+ * the window snapped to a grid it changes once per grid step, and the overscan
+ * is what stops the edges being empty in between.
+ */
+const VIEWPORT_QUANTUM = 256;
+const VIEWPORT_OVERSCAN = 512;
 
 type DragState =
   | {
@@ -85,13 +93,6 @@ type DragState =
     }
   | null;
 
-/** What the razor would cut, given where the pointer is. */
-interface RazorTarget {
-  trackId: Id;
-  segmentId: Id;
-  at: Micros;
-}
-
 export function Timeline() {
   const project = useProjectStore((s) => s.project);
   const canUndo = useProjectStore((s) => s.canUndo);
@@ -110,6 +111,10 @@ export function Timeline() {
   const select = useTimelineStore((s) => s.select);
   const setTool = useTimelineStore((s) => s.setTool);
   const toggleSnapping = useTimelineStore((s) => s.toggleSnapping);
+  // Deliberately not subscribed to `razorTarget`: it moves with the pointer,
+  // and reading it here would re-render every lane to move a one-pixel line.
+  // `RazorGuide` subscribes to it instead.
+  const setRazorTarget = useTimelineStore((s) => s.setRazorTarget);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const headerScrollRef = useRef<HTMLDivElement>(null);
@@ -117,7 +122,6 @@ export function Timeline() {
   const pendingScrollRef = useRef<number | null>(null);
   const [viewportWidth, setViewportWidth] = useState(0);
   const [drag, setDrag] = useState<DragState>(null);
-  const [razorTarget, setRazorTarget] = useState<RazorTarget | null>(null);
 
   const fps = project?.fps ?? 30;
   const duration = project ? projectDuration(project) : 0;
@@ -292,13 +296,15 @@ export function Timeline() {
       if (useTimelineStore.getState().tool !== "razor") return;
       setRazorTarget(razorTargetAt(event.clientX, event.clientY, event.altKey));
     },
-    [razorTargetAt],
+    [razorTargetAt, setRazorTarget],
   );
+
+  const clearRazor = useCallback(() => setRazorTarget(null), [setRazorTarget]);
 
   // The cut line is a property of the razor, so it goes away with the tool.
   useEffect(() => {
     if (tool !== "razor") setRazorTarget(null);
-  }, [tool]);
+  }, [tool, setRazorTarget]);
 
   const beginGesture = useCallback(
     (event: React.PointerEvent, gesture: SegmentGesture, segmentId: Id) => {
@@ -641,51 +647,65 @@ export function Timeline() {
   );
 
   // ---------------------------------------------------------------------
-  // Filmstrips
+  // The files behind the clips
   // ---------------------------------------------------------------------
 
-  const strips = useThumbnailStore((s) => s.strips);
-  const requestStrip = useThumbnailStore((s) => s.request);
+  /**
+   * One descriptor per material, rebuilt only when the document is.
+   *
+   * Every clip below receives the same object it received last render, which is
+   * what lets `React.memo` stop a pointer move at the props comparison. Note
+   * that the strips and waveforms themselves are *not* read here: each clip
+   * holds and subscribes to its own file, so a batch of thumbnails landing
+   * repaints the clips that use that file and nothing else — and a clip that is
+   * deleted mid-decode releases the job rather than leaving it to finish for a
+   * lane that no longer exists.
+   */
+  const materials = useMemo(() => buildMaterialIndex(project), [project]);
 
-  // Off the render path deliberately: media_thumbnails blocks Rust while it
-  // decodes, so asking for a strip is a side effect, never something a render
-  // triggers synchronously.
-  useEffect(() => {
-    if (!project) return;
-    const wanted = new Set<string>();
-    for (const track of project.tracks) {
-      if (track.kind === "audio") continue;
-      for (const segment of track.segments) {
-        const path = materialPath(project, segment.material_id);
-        if (path) wanted.add(path);
-      }
-    }
-    for (const path of wanted) requestStrip(path);
-  }, [project, requestStrip]);
-
-  const filmstripFor = useCallback(
-    (materialId: Id): Filmstrip | null => {
-      if (!project) return null;
-      const path = materialPath(project, materialId);
-      if (!path) return null;
-      const urls = strips[path];
-      if (!urls || urls.length === 0) return null;
-      return {
-        urls,
-        aspect: materialAspect(project, materialId) ?? 16 / 9,
-        materialDuration: materialDuration(project, materialId) ?? 0,
-      };
-    },
-    [project, strips],
+  /**
+   * The time window clips draw into.
+   *
+   * Snapped to a pixel grid with overscan on both sides: see
+   * `VIEWPORT_QUANTUM`. The window is a prop on every clip, so what matters is
+   * not that it is right to the pixel but that it stops changing on every
+   * wheel tick.
+   */
+  // Snapped first, memoised second. Keying the memo on `scrollX` itself would
+  // hand out a fresh object on every wheel tick carrying the same two numbers,
+  // which is the whole failure this is here to avoid.
+  const windowLeft = Math.max(
+    0,
+    Math.floor((scrollX - VIEWPORT_OVERSCAN) / VIEWPORT_QUANTUM) * VIEWPORT_QUANTUM,
+  );
+  const windowRight =
+    Math.ceil((scrollX + Math.max(viewportWidth, 600) + VIEWPORT_OVERSCAN) / VIEWPORT_QUANTUM) *
+    VIEWPORT_QUANTUM;
+  const viewport = useMemo(
+    () => ({ from: windowLeft / zoom, to: windowRight / zoom }),
+    [windowLeft, windowRight, zoom],
   );
 
-  /** The time window on screen, so clips only build the tiles that are visible. */
-  const viewport = useMemo(
-    () => ({
-      from: scrollX / zoom,
-      to: (scrollX + Math.max(viewportWidth, 600)) / zoom,
-    }),
-    [scrollX, zoom, viewportWidth],
+  // Per-clip handlers, hoisted so that the clips' props stay identical between
+  // renders. An arrow function in the JSX below would defeat the memo on every
+  // clip on the timeline, on every pointer move.
+  const handleSplitSegment = useCallback((segmentId: Id) => {
+    void splitAt(segmentId, useTimelineStore.getState().playhead);
+  }, []);
+
+  const handleDuplicateSegment = useCallback((segmentId: Id) => {
+    const current = useProjectStore.getState().project;
+    if (current) void duplicateSegment(current, segmentId);
+  }, []);
+
+  const handleDeleteSegment = useCallback(
+    (segmentId: Id) => {
+      const current = useProjectStore.getState().project;
+      if (!current) return;
+      select(null);
+      void deleteSegment(current, segmentId);
+    },
+    [select],
   );
 
   // ---------------------------------------------------------------------
@@ -764,7 +784,7 @@ export function Timeline() {
           onDragOver={handleDragOver}
           onDrop={handleLibraryDrop}
           onPointerMove={trackRazor}
-          onPointerLeave={() => setRazorTarget(null)}
+          onPointerLeave={clearRazor}
           className="relative flex-1 overflow-auto"
           data-slot="timeline-viewport"
         >
@@ -840,21 +860,19 @@ export function Timeline() {
                           label={segmentLabel(project, segment)}
                           selected={selectedSegmentId === segment.id}
                           locked={track.locked}
+                          muted={track.muted || segment.volume <= 0}
                           razor={tool === "razor"}
                           zoom={zoom}
                           preview={dragging && drag.toTrackId !== track.id ? null : preview}
                           ghosted={Boolean(dragging && drag.toTrackId !== track.id)}
                           laneHeight={trackHeight(track.kind)}
-                          filmstrip={filmstripFor(segment.material_id)}
+                          material={materials.get(segment.material_id) ?? null}
                           viewport={viewport}
                           onGesture={beginGesture}
                           onSelect={select}
-                          onSplit={(id) => void splitAt(id, playhead)}
-                          onDuplicate={handleDuplicate}
-                          onDelete={(id) => {
-                            select(null);
-                            void deleteSegment(project, id);
-                          }}
+                          onSplit={handleSplitSegment}
+                          onDuplicate={handleDuplicateSegment}
+                          onDelete={handleDeleteSegment}
                         />
                       );
                     })}
@@ -867,30 +885,23 @@ export function Timeline() {
                         label={segmentLabel(project, external.segment)}
                         selected
                         locked={false}
+                        muted={track.muted || external.segment.volume <= 0}
                         razor={false}
                         zoom={zoom}
                         preview={{ start: drag.start, duration: drag.duration }}
                         ghosted={false}
                         laneHeight={trackHeight(track.kind)}
-                        filmstrip={filmstripFor(external.segment.material_id)}
+                        material={materials.get(external.segment.material_id) ?? null}
                         viewport={viewport}
                         onGesture={beginGesture}
                         onSelect={select}
-                        onSplit={(id) => void splitAt(id, playhead)}
-                        onDuplicate={handleDuplicate}
-                        onDelete={(id) => void deleteSegment(project, id)}
+                        onSplit={handleSplitSegment}
+                        onDuplicate={handleDuplicateSegment}
+                        onDelete={handleDeleteSegment}
                       />
                     ) : null}
 
-                    {/* The razor's cut line: exactly where a click would land,
-                        snapped the same way a drag is. */}
-                    {razorTarget?.trackId === track.id ? (
-                      <span
-                        aria-hidden
-                        className="pointer-events-none absolute inset-y-0 z-20 w-px bg-timeline-razor"
-                        style={{ left: razorTarget.at * zoom }}
-                      />
-                    ) : null}
+                    <RazorGuide trackId={track.id} zoom={zoom} />
                   </TrackLane>
                 );
               })}

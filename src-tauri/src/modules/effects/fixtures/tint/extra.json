@@ -1,0 +1,7 @@
+{
+    "setting": {
+        "effect_adjust_params": [
+            {"effect_key": "effects_adjust_intensity", "default": 0.9, "max": 1.0, "min": 0.0}
+        ]
+    }
+}

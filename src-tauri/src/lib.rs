@@ -70,9 +70,17 @@ pub fn run() {
             modules::timeline::commands::timeline_split,
             modules::timeline::commands::timeline_undo,
             modules::timeline::commands::timeline_redo,
+            // transitions
+            modules::transitions::commands::transitions_catalog,
+            modules::transitions::commands::transitions_max_duration,
+            modules::transitions::commands::transitions_add,
+            modules::transitions::commands::transitions_remove,
+            modules::transitions::commands::transitions_retime,
+            modules::transitions::commands::transitions_set,
             // media
             modules::media::commands::media_probe,
             modules::media::commands::media_thumbnails,
+            modules::media::commands::media_thumbnails_cancel,
             modules::media::commands::media_waveform,
             // preview
             modules::preview::commands::preview_start,
@@ -88,6 +96,16 @@ pub fn run() {
             modules::export::commands::export_presets,
             modules::export::commands::export_start,
             modules::export::commands::export_cancel,
+            // proxy
+            modules::proxy::commands::proxy_request,
+            modules::proxy::commands::proxy_cancel,
+            modules::proxy::commands::proxy_watch,
+            modules::proxy::commands::proxy_queue_status,
+            modules::proxy::commands::proxy_state,
+            modules::proxy::commands::proxy_cache_info,
+            modules::proxy::commands::proxy_cache_clear,
+            // effects
+            modules::effects::commands::effects_describe,
             // workspace
             modules::workspace::commands::workspace_settings_get,
             modules::workspace::commands::workspace_settings_set,
@@ -95,6 +113,7 @@ pub fn run() {
             modules::workspace::commands::workspace_recent_record,
             modules::workspace::commands::workspace_cache_size,
             modules::workspace::commands::workspace_cache_clear,
+            modules::workspace::commands::workspace_hardware,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

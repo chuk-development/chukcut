@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 
 import { Slider } from "@/components/ui/slider";
+import { cn } from "@/lib/utils";
 
 interface PropertySliderProps {
   label: string;
@@ -12,6 +13,8 @@ interface PropertySliderProps {
   /** Called once, on release. Dragging is local state and never reaches Rust. */
   onCommit: (value: number) => void;
   disabled?: boolean;
+  /** Keyframe controls, in a column of their own ahead of the label. */
+  leading?: ReactNode;
 }
 
 export function PropertySlider({
@@ -23,6 +26,7 @@ export function PropertySlider({
   format,
   onCommit,
   disabled,
+  leading,
 }: PropertySliderProps) {
   const [local, setLocal] = useState(value);
   const [dragging, setDragging] = useState(false);
@@ -34,7 +38,14 @@ export function PropertySlider({
   }, [value, dragging]);
 
   return (
-    <div data-slot="property-slider" className="grid grid-cols-[76px_1fr_48px] items-center gap-2">
+    <div
+      data-slot="property-slider"
+      className={cn(
+        "grid items-center gap-2",
+        leading ? "grid-cols-[auto_66px_1fr_44px]" : "grid-cols-[76px_1fr_48px]",
+      )}
+    >
+      {leading}
       <span className="truncate text-[11px] text-muted-foreground">{label}</span>
       <Slider
         aria-label={label}

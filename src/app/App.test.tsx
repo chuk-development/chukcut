@@ -12,6 +12,8 @@ import { render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "@/app/App";
+import { useProjectStore } from "@/modules/project/store";
+import { DEFAULT_SETTINGS } from "@/modules/workspace/types";
 import { makeMaterial, makeProject } from "@/test/fixtures";
 import { type IpcHarness, installIpc } from "@/test/ipc";
 
@@ -22,6 +24,12 @@ function scriptStartup(ipc: IpcHarness) {
   ipc.handle("project_new", makeProject());
   ipc.handle("preview_start", null);
   ipc.handle("media_thumbnails", []);
+  ipc.handle("workspace_settings_get", DEFAULT_SETTINGS);
+  ipc.handle("workspace_recent_list", []);
+  // Neither of these is registered in Rust yet; both are meant to degrade to
+  // "nothing to say" rather than to an error on screen.
+  ipc.fail("workspace_recovery_status", "Command workspace_recovery_status not found");
+  ipc.fail("workspace_recovery_peek", "Command workspace_recovery_peek not found");
 }
 
 async function expectTheEditorIsUp() {
@@ -38,6 +46,15 @@ beforeEach(() => {
     "fetch",
     vi.fn(async () => ({ status: 410, ok: false }) as unknown as Response),
   );
+  // The document store is a module singleton, so a project left open by the
+  // previous test would hide the start screen in the next one.
+  useProjectStore.setState({
+    project: null,
+    path: null,
+    status: "loading",
+    dirty: false,
+    error: null,
+  });
 });
 
 afterEach(() => {
@@ -105,18 +122,26 @@ describe("with a working webview", () => {
     expect(ipc.lastCall("project_import_media")).toEqual({ path: "/media/clip.mp4" });
   });
 
-  it("creates a project when Rust has none open", async () => {
+  it("shows the start screen when Rust has nothing open", async () => {
     ipc.handle("project_get", null);
     render(<App />);
 
+    // It used to create "Untitled" here, which meant the user never chose a
+    // canvas and never found their previous work.
+    expect(await screen.findByLabelText("Start")).toBeInTheDocument();
+    expect(ipc.count("project_new")).toBe(0);
+    expect(screen.queryByLabelText("Player")).toBeNull();
+  });
+
+  it("goes into the editor once the start screen has made something", async () => {
+    ipc.handle("project_get", null);
+    render(<App />);
+    await screen.findByLabelText("Start");
+
+    (await screen.findByText("Vertical")).click();
+
     await waitFor(() => expect(ipc.count("project_new")).toBe(1));
-    // An editor that opens onto an empty shell is hostile.
-    expect(ipc.lastCall("project_new")).toEqual({
-      name: "Untitled",
-      width: 1080,
-      height: 1920,
-      fps: 30,
-    });
+    expect(ipc.lastCall("project_new")).toMatchObject({ width: 1080, height: 1920 });
     await expectTheEditorIsUp();
   });
 });

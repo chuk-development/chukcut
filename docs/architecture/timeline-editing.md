@@ -33,6 +33,13 @@ enum EditCommand {
     SetTransform { segment_id, before, after },
     SetSpeed     { segment_id, before, after },
     SetVolume    { segment_id, before, after },
+
+    AddKeyframe       { segment_id, property, keyframe },
+    RemoveKeyframe    { segment_id, property, keyframe },
+    MoveKeyframe      { segment_id, property, from_time, to_time,
+                        before_value, after_value },
+    SetKeyframeEasing { segment_id, property, time, before, after },
+
     Composite    { label, commands },
 }
 ```
@@ -70,10 +77,48 @@ Enforced by the commands, checked by `Project::validate()`:
    `reindex_render_order()` after any structural change. No command sets it
    by hand.
 4. Every `material_id` resolves in the pool.
+5. Ids are unique: no two tracks and no two segments share one. `track_mut`
+   and `segment_mut` return the *first* match, so a duplicate makes the other
+   unreachable and every later edit aimed at it silently hits the wrong thing.
+6. `source_range.duration = target_range.duration × speed`, to within the
+   rounding one derivation costs (`document::speed_slack`). Every command that
+   writes a source duration writes `document::source_duration_for(...)`, so the
+   document never accumulates the microsecond two callers rounded differently
+   and undo stays byte-exact.
+7. No number in the document is a NaN or an infinity. `serde_json` writes both
+   as `null`, so one that reaches disk is a save that reports success and a
+   file that never opens again.
+8. A `KeyframeTrack` exists exactly while the property is animated, holds each
+   property once, and its keyframes are sorted with distinct times. Tracks are
+   kept in the declaration order of `AnimatableProperty` — the order means
+   nothing to the renderer, and pinning it is what lets undo put a removed
+   track back where it was.
 
-An edit that would break 1 or 2 is rejected with an error rather than applied
-and repaired. "Target range is occupied" is a legitimate outcome of dragging a
-clip onto another one; the UI is expected to show it, not to have prevented it.
+An edit that would break any of these is rejected with an error rather than
+applied and repaired. "Target range is occupied" is a legitimate outcome of
+dragging a clip onto another one; the UI is expected to show it, not to have
+prevented it. The same is true of a trim whose source range does not match its
+timeline range at the clip's speed — the arithmetic is the caller's to get
+right, and the message says what it should have been.
+
+## Keyframes
+
+Keyframe times are relative to the segment start, never timeline time and never
+scaled by speed. A keyframe may only be *placed* inside the clip, but one that
+ends up outside it — which trimming a tail legitimately produces — is kept, and
+`validate()` reports it as a warning rather than an error. Deleting it would
+mean undoing the trim no longer brings the animation back.
+
+Clearing a property's animation is a `Composite` of `RemoveKeyframe`s. The last
+one takes the track with it.
+
+## Autosave
+
+`respond()` in `timeline/commands.rs` persists the document after every edit,
+undo and redo, through `project::autosave`. It is deliberately **not** an entry
+in `History`: undo reverses what the user did, and a background save is not
+something they did. See `project/autosave.rs` for why the write is queued on one
+thread rather than done inline.
 
 ## Snapping (frontend)
 

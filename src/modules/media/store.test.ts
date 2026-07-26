@@ -32,7 +32,7 @@ let ipc: IpcHarness;
 
 beforeEach(() => {
   ipc = installIpc();
-  ipc.handle("media_thumbnails", []);
+  ipc.handle("media_thumbnails", "job-1");
 });
 
 afterEach(() => {

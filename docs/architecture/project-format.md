@@ -131,8 +131,14 @@ the *next* one. `Easing::Hold` gives step animation.
   instance. The app must open and show a relink prompt.
 - **Errors** — the document is internally inconsistent: overlapping segments on
   one track, unsorted segments, a segment referencing a material that is not in
-  the pool. These indicate a bug in an edit command and should never reach
-  disk.
+  the pool, two things sharing an id, a range that starts before zero, a
+  non-finite number, two ranges that disagree about the segment's speed, or a
+  keyframe track that is empty, unsorted or duplicated. These indicate a bug in
+  an edit command and should never reach disk.
+
+A keyframe *outside* its segment is a warning, not an error: trimming a clip's
+tail legitimately leaves one behind and the document keeps it so that undoing
+the trim brings the animation back.
 
 ## Migrations
 
@@ -141,3 +147,23 @@ constant and add a step in `project/migrate.rs` that walks the JSON from the
 old version to the new one before deserializing. Never silently accept an
 unknown version — a project the app half-understands is worse than one it
 refuses.
+
+`migrate::load` is the **only** place allowed to turn bytes into a `Project`.
+A bare `serde_json::from_str::<Project>` anywhere else is the bug this gate
+exists to prevent. It also does the other half of not-guessing: a file from a
+newer build is refused with a message naming both versions, and one damaged by
+the rule below is repaired rather than rejected.
+
+## Numbers that cannot be written
+
+No float in the document may be a NaN or an infinity. JSON has no way to
+express either, and `serde_json` writes `null` — so a project that took one
+saved successfully and then failed to load forever after with "invalid type:
+null, expected f32". A save that reports success and a file that never opens is
+the worst failure this format can have, so non-finite values are refused at the
+edit-command boundary and are errors in `validate()`.
+
+Because those files already exist, **every float field carries a `serde`
+default**, and `migrate::repair_non_finite` drops the `null`s so the defaults
+apply. Dropping the key rather than zeroing it is the point: an opacity comes
+back at 1.0, which is a clip the user can still see.

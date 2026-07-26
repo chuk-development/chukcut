@@ -467,10 +467,13 @@ impl VideoDecoder {
         let pts = self.locate(micros)?;
         let (_, frame) = self.last.take().expect("locate leaves a frame in hand");
         let mapped = if hwdecode::is_hardware_frame(&frame) {
+            let (color_space, color_range) = self.frame_colour(&frame);
             DmabufFrame::map(&frame).map(|dmabuf| MappedFrame {
                 dmabuf,
                 pts,
                 rotation: self.rotation,
+                color_space,
+                color_range,
             })
         } else {
             Err(MediaError::NoHardware(format!(
@@ -480,6 +483,51 @@ impl VideoDecoder {
         };
         self.last = Some((pts, frame));
         mapped
+    }
+
+    /// What matrix and range this frame's chroma is expressed in.
+    ///
+    /// Three sources, in descending order of authority: the frame itself, the
+    /// codec context (which carries what the container declared even when a
+    /// particular frame does not), and finally a guess from the picture height.
+    ///
+    /// The guess exists because a great many files declare nothing at all, and
+    /// "unspecified" is not an answer a shader can use. SD is BT.601 and HD is
+    /// BT.709 is the same convention FFmpeg's own `scale` filter falls back on,
+    /// so guessing this way at least agrees with the tool everyone checks
+    /// against. It is logged as a guess, because a wrong matrix is a tint
+    /// rather than a fault and nothing else would ever surface it.
+    fn frame_colour(&self, frame: &frame::Video) -> (ffmpeg::color::Space, ffmpeg::color::Range) {
+        use ffmpeg::color::{Range, Space};
+
+        let mut space = frame.color_space();
+        if matches!(space, Space::Unspecified | Space::Reserved) {
+            space = self.decoder.color_space();
+        }
+        if matches!(space, Space::Unspecified | Space::Reserved) {
+            // The height of the *coded* picture, not the scaled output: the
+            // convention is about the material, not about how it is displayed.
+            space = if self.src_height > 576 {
+                Space::BT709
+            } else {
+                Space::BT470BG
+            };
+            tracing::debug!(
+                file = %self.path.display(),
+                guessed = ?space,
+                "no colour matrix declared; guessing from the picture height"
+            );
+        }
+
+        let mut range = frame.color_range();
+        if range == Range::Unspecified {
+            range = self.decoder.color_range();
+        }
+        if range == Range::Unspecified {
+            range = Range::MPEG;
+        }
+
+        (space, range)
     }
 
     /// Decode until the frame covering `micros` is in `self.last`, and return
@@ -745,7 +793,7 @@ impl VideoDecoder {
         self.scaled_width = scaled_width;
         self.scaled_height = scaled_height;
 
-        let scaler = scaling::Context::get(
+        let mut scaler = scaling::Context::get(
             decoded.format(),
             self.src_width,
             self.src_height,
@@ -761,8 +809,65 @@ impl VideoDecoder {
             path: self.path.clone(),
             source,
         })?;
+        self.apply_colour(&mut scaler, decoded);
         self.scaler = Some(scaler);
         Ok(())
+    }
+
+    /// Tell swscale which matrix and range this file is in.
+    ///
+    /// **`sws_getContext` does not read the frame's colour tags and never has.**
+    /// It initialises with `SWS_CS_DEFAULT`, which is BT.601, whatever the file
+    /// says — so every BT.709 clip decoded through this path came out with
+    /// BT.601 coefficients: reds and greens off by up to ten code values, a
+    /// consistent tint rather than an obvious fault. FFmpeg's own `scale` filter
+    /// sets this from the frame, which is why our output and `ffmpeg`'s did not
+    /// quite agree and why the difference was small enough to look like rounding.
+    ///
+    /// This was found from the other side. `render/`'s shader takes the matrix
+    /// from [`MappedFrame::color_space`], so a hardware-decoded frame and a
+    /// software-decoded one composited to pictures 9.6 code values apart on
+    /// average — and forcing the *wrong* matrix on the hardware path brought
+    /// them back together, which is a diagnosis rather than a coincidence.
+    ///
+    /// Failure is ignored on purpose: `sws_setColorspaceDetails` returns `-1`
+    /// for conversions with no YUV side, which is every RGB source, and that is
+    /// not a reason to refuse a frame.
+    fn apply_colour(&self, scaler: &mut scaling::Context, decoded: &frame::Video) {
+        let (space, range) = self.frame_colour(decoded);
+        // `sws_getCoefficients` takes an `SWS_CS_*`, and those constants are
+        // numerically the `AVColorSpace` values they name — `SWS_CS_ITU709` is
+        // 1 and so is `AVCOL_SPC_BT709`. It clamps anything it does not know to
+        // its own default, so an odd tag cannot make this unsafe.
+        let id = ffmpeg::ffi::AVColorSpace::from(space) as i32;
+        let source_is_full = i32::from(range == ffmpeg::color::Range::JPEG);
+
+        // SAFETY: `scaler` is a live `SwsContext` this call only reconfigures;
+        // `sws_getCoefficients` returns a pointer into libswscale's own static
+        // table, valid for the process, and the call copies from it rather than
+        // retaining it. The destination is RGBA, which is full range by
+        // definition, hence `1`. The last three are libswscale's spelling of
+        // "no brightness, contrast or saturation adjustment".
+        unsafe {
+            let table = ffmpeg::ffi::sws_getCoefficients(id);
+            let code = ffmpeg::ffi::sws_setColorspaceDetails(
+                scaler.as_mut_ptr(),
+                table,
+                source_is_full,
+                table,
+                1,
+                0,
+                1 << 16,
+                1 << 16,
+            );
+            if code < 0 {
+                tracing::debug!(
+                    file = %self.path.display(),
+                    ?space,
+                    "swscale will not take colour details for this conversion"
+                );
+            }
+        }
     }
 
     /// Turn whatever the decoder produced into tightly packed RGBA.
@@ -849,6 +954,17 @@ pub struct MappedFrame {
     pub pts: Micros,
     /// Display rotation in degrees clockwise, **not** applied.
     pub rotation: i32,
+    /// The matrix this surface's chroma is expressed in, read from the file.
+    ///
+    /// It travels with the frame because the compositor is what converts, and
+    /// it is read rather than assumed because a 1080p clip is *usually* BT.709
+    /// and an SD one *usually* BT.601 — and "usually" ships a saturation error
+    /// that nobody catches until delivery. See
+    /// [`VideoDecoder::frame_colour`] for where the answer comes from when the
+    /// file declares nothing.
+    pub color_space: ffmpeg::color::Space,
+    /// Whether luma runs 16..235 or 0..255.
+    pub color_range: ffmpeg::color::Range,
 }
 
 impl MappedFrame {
@@ -869,6 +985,8 @@ impl std::fmt::Debug for MappedFrame {
         f.debug_struct("MappedFrame")
             .field("pts", &self.pts)
             .field("rotation", &self.rotation)
+            .field("color_space", &self.color_space)
+            .field("color_range", &self.color_range)
             .field("dmabuf", &self.dmabuf)
             .finish()
     }

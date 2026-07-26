@@ -10,7 +10,10 @@ import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { formatDuration, formatTimecode } from "@/lib/time";
+import { KeyframeEditor } from "@/modules/inspector/components/KeyframeEditor";
+import { KeyframeRow } from "@/modules/inspector/components/KeyframeRow";
 import { PropertySlider } from "@/modules/inspector/components/PropertySlider";
+import { TRANSFORM_PROPERTIES, VOLUME } from "@/modules/inspector/lib/properties";
 import { runEdit, useProjectStore } from "@/modules/project/store";
 import type { Transform } from "@/modules/project/types";
 import { findSegment, projectDuration, segmentLabel } from "@/modules/project/types";
@@ -51,9 +54,11 @@ function Field({ label, value }: { label: string; value: string }) {
 export function Inspector() {
   const project = useProjectStore((s) => s.project);
   const selectedSegmentId = useTimelineStore((s) => s.selectedSegmentId);
+  const playhead = useTimelineStore((s) => s.playhead);
 
   const found = project && selectedSegmentId ? findSegment(project, selectedSegmentId) : null;
   const segment = found?.segment ?? null;
+  const hasAudio = found?.track.kind === "video" || found?.track.kind === "audio";
 
   const commitTransform = useCallback(
     (patch: Partial<Transform>) => {
@@ -79,21 +84,6 @@ export function Inspector() {
           segment_id: segment.id,
           before: segment.speed,
           after: speed,
-        }),
-      );
-    },
-    [segment],
-  );
-
-  const commitVolume = useCallback(
-    (volume: number) => {
-      if (!segment) return;
-      void runEdit(() =>
-        timelineApply({
-          type: "set_volume",
-          segment_id: segment.id,
-          before: segment.volume,
-          after: volume,
         }),
       );
     },
@@ -153,53 +143,15 @@ export function Inspector() {
           <Separator />
 
           <Section title="Transform">
-            <PropertySlider
-              label="Position X"
-              value={segment.transform.position[0]}
-              min={-2}
-              max={2}
-              step={0.01}
-              onCommit={(value) =>
-                commitTransform({ position: [value, segment.transform.position[1]] })
-              }
-            />
-            <PropertySlider
-              label="Position Y"
-              value={segment.transform.position[1]}
-              min={-2}
-              max={2}
-              step={0.01}
-              onCommit={(value) =>
-                commitTransform({ position: [segment.transform.position[0], value] })
-              }
-            />
-            <PropertySlider
-              label="Scale"
-              value={segment.transform.scale[0]}
-              min={0.05}
-              max={4}
-              step={0.01}
-              format={(value) => `${Math.round(value * 100)}%`}
-              onCommit={(value) => commitTransform({ scale: [value, value] })}
-            />
-            <PropertySlider
-              label="Rotation"
-              value={segment.transform.rotation}
-              min={-180}
-              max={180}
-              step={1}
-              format={(value) => `${Math.round(value)}°`}
-              onCommit={(value) => commitTransform({ rotation: value })}
-            />
-            <PropertySlider
-              label="Opacity"
-              value={segment.transform.opacity}
-              min={0}
-              max={1}
-              step={0.01}
-              format={(value) => `${Math.round(value * 100)}%`}
-              onCommit={(value) => commitTransform({ opacity: value })}
-            />
+            {TRANSFORM_PROPERTIES.map((def) => (
+              <KeyframeRow
+                key={def.id}
+                project={project}
+                segment={segment}
+                def={def}
+                playhead={playhead}
+              />
+            ))}
 
             <div className="flex items-center gap-1 pt-0.5">
               <Button
@@ -248,16 +200,19 @@ export function Inspector() {
           <Separator />
 
           <Section title="Audio">
-            <PropertySlider
-              label="Volume"
-              value={segment.volume}
-              min={0}
-              max={2}
-              step={0.01}
-              format={(value) => `${Math.round(value * 100)}%`}
-              onCommit={commitVolume}
-              disabled={found.track.kind !== "video" && found.track.kind !== "audio"}
+            <KeyframeRow
+              project={project}
+              segment={segment}
+              def={VOLUME}
+              playhead={playhead}
+              disabled={!hasAudio}
             />
+          </Section>
+
+          <Separator />
+
+          <Section title="Keyframes">
+            <KeyframeEditor project={project} segment={segment} playhead={playhead} />
           </Section>
         </ScrollArea>
       )}

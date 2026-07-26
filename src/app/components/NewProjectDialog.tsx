@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -18,8 +18,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { projectNew } from "@/modules/project/lib/api";
-import { describeError, useProjectStore } from "@/modules/project/store";
+import { createProject } from "@/modules/workspace/lib/lifecycle";
+import { useWorkspaceStore } from "@/modules/workspace/store";
 
 const PRESETS = [
   { value: "1080x1920", label: "Vertical · 1080 × 1920" },
@@ -37,32 +37,43 @@ interface NewProjectDialogProps {
 }
 
 export function NewProjectDialog({ open, onOpenChange }: NewProjectDialogProps) {
-  const loadProject = useProjectStore((s) => s.loadProject);
-  const setError = useProjectStore((s) => s.setError);
+  const settings = useWorkspaceStore((s) => s.settings);
 
   const [name, setName] = useState("Untitled");
   const [preset, setPreset] = useState(PRESETS[0].value);
   const [fps, setFps] = useState("30");
   const [busy, setBusy] = useState(false);
 
+  // Adopt the defaults each time it opens rather than once at mount: settings
+  // can have been changed in between, and a dialog showing yesterday's default
+  // is how a preference silently stops meaning anything.
+  useEffect(() => {
+    if (!open) return;
+    setPreset(`${settings.default_canvas[0]}x${settings.default_canvas[1]}`);
+    setFps(String(settings.default_fps));
+  }, [open, settings.default_canvas, settings.default_fps]);
+
   const create = async () => {
     const [width, height] = preset.split("x").map(Number);
     setBusy(true);
     try {
-      const project = await projectNew({
+      const made = await createProject({
         name: name.trim() || "Untitled",
         width,
         height,
         fps: Number(fps),
       });
-      loadProject(project, null);
-      onOpenChange(false);
-    } catch (error) {
-      setError(describeError(error));
+      if (made) onOpenChange(false);
     } finally {
       setBusy(false);
     }
   };
+
+  const presets = PRESETS.some((option) => option.value === preset)
+    ? PRESETS
+    : // A default canvas set to something this list does not carry still has to
+      // be selectable, or the trigger renders blank.
+      [{ value: preset, label: preset.replace("x", " × ") }, ...PRESETS];
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -93,7 +104,7 @@ export function NewProjectDialog({ open, onOpenChange }: NewProjectDialogProps) 
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {PRESETS.map((option) => (
+                {presets.map((option) => (
                   <SelectItem key={option.value} value={option.value}>
                     {option.label}
                   </SelectItem>
@@ -109,7 +120,7 @@ export function NewProjectDialog({ open, onOpenChange }: NewProjectDialogProps) 
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {FRAME_RATES.map((rate) => (
+                {(FRAME_RATES.includes(fps) ? FRAME_RATES : [fps, ...FRAME_RATES]).map((rate) => (
                   <SelectItem key={rate} value={rate}>
                     {rate} fps
                   </SelectItem>

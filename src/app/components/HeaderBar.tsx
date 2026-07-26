@@ -2,10 +2,12 @@ import {
   ChevronDownIcon,
   FilePlus2Icon,
   FolderOpenIcon,
+  KeyboardIcon,
   Loader2Icon,
   Redo2Icon,
   SaveIcon,
   ScissorsLineDashedIcon,
+  SettingsIcon,
   Undo2Icon,
   UploadIcon,
 } from "lucide-react";
@@ -22,18 +24,28 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Separator } from "@/components/ui/separator";
 import { IconTooltip } from "@/components/ui/tooltip";
-import { openFileDialog, PROJECT_FILTERS, saveFileDialog } from "@/lib/dialog";
 import { runningJobs, useExportStore } from "@/modules/export/store";
-import { projectOpen, projectSave } from "@/modules/project/lib/api";
-import { describeError, useProjectStore } from "@/modules/project/store";
+import { useProjectStore } from "@/modules/project/store";
 import { redo, undo } from "@/modules/timeline/lib/edits";
+import { saveProject } from "@/modules/workspace/lib/lifecycle";
+import { MODIFIER } from "@/modules/workspace/lib/shortcuts";
 
 interface HeaderBarProps {
+  /** Guarded upstream: both of these can discard unsaved work. */
   onNewProject: () => void;
+  onOpenProject: () => void;
   onExport: () => void;
+  onOpenSettings: () => void;
+  onShowShortcuts: () => void;
 }
 
-export function HeaderBar({ onNewProject, onExport }: HeaderBarProps) {
+export function HeaderBar({
+  onNewProject,
+  onOpenProject,
+  onExport,
+  onOpenSettings,
+  onShowShortcuts,
+}: HeaderBarProps) {
   const project = useProjectStore((s) => s.project);
   const path = useProjectStore((s) => s.path);
   const dirty = useProjectStore((s) => s.dirty);
@@ -41,47 +53,22 @@ export function HeaderBar({ onNewProject, onExport }: HeaderBarProps) {
   const canRedo = useProjectStore((s) => s.canRedo);
   const undoLabel = useProjectStore((s) => s.undoLabel);
   const redoLabel = useProjectStore((s) => s.redoLabel);
-  const loadProject = useProjectStore((s) => s.loadProject);
-  const markSaved = useProjectStore((s) => s.markSaved);
-  const setError = useProjectStore((s) => s.setError);
   const exportJobs = useExportStore((s) => s.jobs);
   const [busy, setBusy] = useState(false);
 
   const exporting = runningJobs(exportJobs).length;
 
-  const open = useCallback(async () => {
+  // Saving itself — the file dialog, the recent list, the error — belongs to
+  // `workspace/lib/lifecycle`, because Ctrl+S and the start screen need exactly
+  // the same behaviour and neither of them is this component.
+  const save = useCallback(async (promptForPath: boolean) => {
+    setBusy(true);
     try {
-      const [chosen] = await openFileDialog({ title: "Open project", filters: PROJECT_FILTERS });
-      if (!chosen) return;
-      loadProject(await projectOpen(chosen), chosen);
-    } catch (error) {
-      setError(describeError(error));
+      await saveProject({ promptForPath });
+    } finally {
+      setBusy(false);
     }
-  }, [loadProject, setError]);
-
-  const save = useCallback(
-    async (forcePrompt: boolean) => {
-      setBusy(true);
-      try {
-        let target = path ?? undefined;
-        if (forcePrompt || !target) {
-          const chosen = await saveFileDialog({
-            title: "Save project",
-            filters: PROJECT_FILTERS,
-            defaultPath: `${project?.name ?? "Untitled"}.chukcut`,
-          });
-          if (!chosen) return;
-          target = chosen;
-        }
-        markSaved(await projectSave(target));
-      } catch (error) {
-        setError(describeError(error));
-      } finally {
-        setBusy(false);
-      }
-    },
-    [markSaved, path, project?.name, setError],
-  );
+  }, []);
 
   return (
     <header
@@ -104,26 +91,40 @@ export function HeaderBar({ onNewProject, onExport }: HeaderBarProps) {
           <DropdownMenuItem onSelect={onNewProject}>
             <FilePlus2Icon />
             New project…
+            <DropdownMenuShortcut>{MODIFIER}+N</DropdownMenuShortcut>
           </DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => void open()}>
+          <DropdownMenuItem onSelect={onOpenProject}>
             <FolderOpenIcon />
             Open…
+            <DropdownMenuShortcut>{MODIFIER}+O</DropdownMenuShortcut>
           </DropdownMenuItem>
           <DropdownMenuSeparator />
           <DropdownMenuItem onSelect={() => void save(false)}>
             <SaveIcon />
             Save
-            <DropdownMenuShortcut>Ctrl+S</DropdownMenuShortcut>
+            <DropdownMenuShortcut>{MODIFIER}+S</DropdownMenuShortcut>
           </DropdownMenuItem>
           <DropdownMenuItem onSelect={() => void save(true)}>
             <SaveIcon />
             Save as…
+            <DropdownMenuShortcut>{MODIFIER}+Shift+S</DropdownMenuShortcut>
           </DropdownMenuItem>
           <DropdownMenuSeparator />
           <DropdownMenuItem onSelect={onExport}>
             <UploadIcon />
             Export…
-            <DropdownMenuShortcut>Ctrl+E</DropdownMenuShortcut>
+            <DropdownMenuShortcut>{MODIFIER}+E</DropdownMenuShortcut>
+          </DropdownMenuItem>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem onSelect={onOpenSettings}>
+            <SettingsIcon />
+            Settings…
+            <DropdownMenuShortcut>{MODIFIER}+,</DropdownMenuShortcut>
+          </DropdownMenuItem>
+          <DropdownMenuItem onSelect={onShowShortcuts}>
+            <KeyboardIcon />
+            Keyboard shortcuts
+            <DropdownMenuShortcut>?</DropdownMenuShortcut>
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
@@ -149,12 +150,23 @@ export function HeaderBar({ onNewProject, onExport }: HeaderBarProps) {
           {project?.name ?? "No project"}
         </span>
         {dirty ? (
-          <span className="size-1.5 shrink-0 rounded-full bg-primary" title="Unsaved changes" />
+          <>
+            <span
+              aria-hidden
+              className="size-1.5 shrink-0 rounded-full bg-primary"
+              title="Unsaved changes"
+            />
+            <span className="sr-only">Unsaved changes</span>
+          </>
         ) : null}
         {path ? (
           <span className="hidden truncate text-[11px] text-muted-foreground xl:inline">
             {path}
           </span>
+        ) : project ? (
+          // Worth saying out loud rather than leaving blank: a project with no
+          // path is one crash away from being gone.
+          <span className="hidden text-[11px] text-muted-foreground xl:inline">Never saved</span>
         ) : null}
       </div>
 

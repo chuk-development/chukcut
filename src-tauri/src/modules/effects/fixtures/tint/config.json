@@ -1,0 +1,14 @@
+{
+    "ae_tool": "chukcut-fixture:1",
+    "effect": {
+        "Link": [
+            {
+                "path": "AmazingFeature/",
+                "type": "AmazingFeature",
+                "zorder": 8029
+            }
+        ]
+    },
+    "name": "chukcut_tint",
+    "version": "14.8.0"
+}

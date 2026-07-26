@@ -21,12 +21,22 @@ pub struct EditResponse {
     pub redo_label: Option<String>,
 }
 
+/// Build the reply to an edit, and persist the working copy on the way out.
+///
+/// Every path that changes the document ends here — apply, split, undo and
+/// redo alike — which is what makes "every edit is on disk" true rather than
+/// nearly true. The write itself happens on the autosave thread, so no edit
+/// waits on the disk, and it is deliberately *not* an entry in `History`: undo
+/// reverses what the user did, and saving is not something they did.
 fn respond(state: &AppState) -> Result<EditResponse, String> {
     let project = state
         .project
         .read()
         .clone()
         .ok_or("no project is open")?;
+    let origin = state.project_path.read().clone();
+    crate::modules::project::autosave::schedule(&project, origin);
+
     let history = state.history.read();
     Ok(EditResponse {
         project,

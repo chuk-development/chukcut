@@ -45,7 +45,15 @@ struct QuadUniform {
     mvp: [f32; 16],
     crop: [f32; 4],
     opacity: f32,
-    _pad: [f32; 3],
+    /// 1 when the source is two YUV planes rather than one RGBA texture.
+    planar: u32,
+    /// [`super::source::YuvMatrix`] and [`super::source::YuvRange`] as their
+    /// discriminants.
+    matrix: u32,
+    range: u32,
+    /// Clockwise quarter turns the shader must apply to the texture coordinate.
+    turns: u32,
+    _pad: [u32; 3],
 }
 
 // `#[repr(C)]`, every field a `f32` array, no padding: the definition of a
@@ -242,6 +250,10 @@ pub struct Compositor {
     uniform_layout: wgpu::BindGroupLayout,
     texture_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
+    /// What binding 2 gets when the source is RGBA and there is no chroma
+    /// plane. One neutral texel, never sampled — the shader's `planar` branch
+    /// does not read it — but the binding still has to exist.
+    chroma_placeholder: wgpu::TextureView,
     vertices: wgpu::Buffer,
     indices: wgpu::Buffer,
     /// Per-draw uniforms, addressed with dynamic offsets. Grown, never shrunk —
@@ -300,7 +312,16 @@ impl Compositor {
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("chukcut quad shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/quad.wgsl").into()),
+            // `yuv.wgsl` has no entry point and no bindings; it is prepended
+            // rather than imported because WGSL has no `#include`, and it is a
+            // separate file because `nv12.wgsl` needs the other half of it.
+            source: wgpu::ShaderSource::Wgsl(
+                concat!(
+                    include_str!("shaders/yuv.wgsl"),
+                    include_str!("shaders/quad.wgsl")
+                )
+                .into(),
+            ),
         });
 
         let uniform_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -336,6 +357,19 @@ impl Compositor {
                     binding: 1,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                // The chroma plane of a hardware-decoded frame. Always bound,
+                // because WebGPU has no optional binding and a placeholder
+                // texel is cheaper than a second pipeline.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
                     count: None,
                 },
             ],
@@ -407,6 +441,46 @@ impl Compositor {
             ..Default::default()
         });
 
+        let placeholder = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("chukcut chroma placeholder"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rg8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        // 128, 128 is achromatic. It is never read, but a texture left
+        // uninitialised is a texture wgpu clears on first use anyway, and
+        // writing the neutral value means a future bug that *does* sample it
+        // produces a grey frame rather than a green one.
+        ctx.queue().write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &placeholder,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &[128u8, 128u8],
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(2),
+                rows_per_image: Some(1),
+            },
+            wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+        let chroma_placeholder =
+            placeholder.create_view(&wgpu::TextureViewDescriptor::default());
+
         let vertices = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("chukcut quad vertices"),
             size: std::mem::size_of_val(&QUAD_VERTICES) as u64,
@@ -437,6 +511,7 @@ impl Compositor {
             uniform_layout,
             texture_layout,
             sampler,
+            chroma_placeholder,
             vertices,
             indices,
             uniforms: Mutex::new(Scratch::default()),
@@ -633,7 +708,11 @@ impl Compositor {
                 mvp: draw.placement.mvp,
                 crop: draw.placement.crop,
                 opacity: draw.placement.opacity,
-                _pad: [0.0; 3],
+                planar: u32::from(draw.frame.is_planar()),
+                matrix: draw.frame.matrix as u32,
+                range: draw.frame.range as u32,
+                turns: draw.frame.turns % 4,
+                _pad: [0; 3],
             };
             self.ctx
                 .queue()
@@ -667,6 +746,15 @@ impl Compositor {
                         wgpu::BindGroupEntry {
                             binding: 1,
                             resource: wgpu::BindingResource::Sampler(&self.sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::TextureView(
+                                draw.frame
+                                    .chroma_view
+                                    .as_deref()
+                                    .unwrap_or(&self.chroma_placeholder),
+                            ),
                         },
                     ],
                 })
@@ -904,7 +992,7 @@ mod tests {
     use crate::modules::project::document::{
         CanvasConfig, Segment, TimeRange, Track, TrackKind, Transform,
     };
-    use crate::modules::render::source::{SolidColorProvider, SolidSource};
+    use crate::modules::render::source::{SolidColorProvider, SolidSource, YuvMatrix, YuvRange};
 
     /// wgpu is not available on every machine this suite runs on. Skip rather
     /// than fail — a red suite that means "this box has no GPU" trains people
@@ -967,10 +1055,26 @@ mod tests {
             });
     }
 
-    fn frame(compositor: &Compositor, project: &Project, time: Micros, p: &SolidColorProvider) -> Frame {
+    fn frame(
+        compositor: &Compositor,
+        project: &Project,
+        time: Micros,
+        p: &dyn SourceProvider,
+    ) -> Frame {
         compositor
             .render(project, time, (640, 480), p)
             .expect("render")
+    }
+
+    /// A compositor configured the way the application configures it.
+    ///
+    /// The `Rgba8Unorm` one above exists so tests can assert exact bytes
+    /// without gamma maths, which is the right trade for geometry and blending.
+    /// It is the wrong trade for colour conversion: the YUV path linearises in
+    /// the shader precisely because the render target re-encodes, and a linear
+    /// target would leave every expected value looking arbitrary.
+    fn srgb_compositor() -> Option<Compositor> {
+        Some(Compositor::new(crate::modules::render::test_context()?))
     }
 
     #[test]
@@ -1207,6 +1311,214 @@ mod tests {
         let stats = c.pool().stats();
         assert_eq!(stats.misses, 1);
         assert_eq!(stats.hits, 2);
+    }
+
+    /// A provider that answers with two NV12 planes, uploaded from the CPU.
+    ///
+    /// The real source of those planes is a hardware decoder's surface,
+    /// imported without a copy — but the *shader* cannot tell the difference,
+    /// and this way the colour conversion and the rotation are testable on any
+    /// machine with a GPU, including one with no VAAPI at all. What it does not
+    /// cover is the import itself; `examples/hwdecode_pipeline.rs --verify` does that.
+    #[derive(Clone, Copy)]
+    struct PlanarProvider {
+        y: u8,
+        cb: u8,
+        cr: u8,
+        width: u32,
+        height: u32,
+        matrix: YuvMatrix,
+        range: YuvRange,
+        turns: u32,
+    }
+
+    impl SourceProvider for PlanarProvider {
+        fn frame(
+            &self,
+            ctx: &RenderContext,
+            _request: &SourceRequest<'_>,
+        ) -> anyhow::Result<Option<SourceFrame>> {
+            let plane = |w: u32, h: u32, format: wgpu::TextureFormat, texel: &[u8]| {
+                let texture = ctx.device().create_texture(&wgpu::TextureDescriptor {
+                    label: None,
+                    size: wgpu::Extent3d {
+                        width: w,
+                        height: h,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING
+                        | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                });
+                let mut data = Vec::new();
+                for _ in 0..(w * h) {
+                    data.extend_from_slice(texel);
+                }
+                ctx.queue().write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    &data,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(w * texel.len() as u32),
+                        rows_per_image: Some(h),
+                    },
+                    wgpu::Extent3d {
+                        width: w,
+                        height: h,
+                        depth_or_array_layers: 1,
+                    },
+                );
+                Arc::new(texture)
+            };
+
+            Ok(Some(SourceFrame::from_planes(
+                plane(
+                    self.width,
+                    self.height,
+                    wgpu::TextureFormat::R8Unorm,
+                    &[self.y],
+                ),
+                plane(
+                    self.width / 2,
+                    self.height / 2,
+                    wgpu::TextureFormat::Rg8Unorm,
+                    &[self.cb, self.cr],
+                ),
+                self.matrix,
+                self.range,
+                self.turns,
+                None,
+            )))
+        }
+    }
+
+    fn planar_project() -> Project {
+        let mut project = project([0.0, 0.0, 0.0, 1.0]);
+        add_video(&mut project, "nv12");
+        let mut track = Track::new(TrackKind::Video, "V1");
+        track.segments.push(segment("nv12", 0, 4_000_000));
+        project.tracks.push(track);
+        project
+    }
+
+    /// Limited-range mid grey is code 128 luma with achromatic chroma, and it
+    /// has to come out lighter than 128 in RGB, because 128 sits 112/219 of the
+    /// way up the limited excursion rather than half way.
+    ///
+    /// Asserting the *number* rather than "it is grey" is the point: a shader
+    /// that skipped the range rescale would still produce a perfectly
+    /// convincing grey, just the wrong one, and that is the failure that ships.
+    #[test]
+    fn a_planar_source_is_converted_with_the_limited_range_rescale() {
+        let Some(c) = srgb_compositor() else {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        };
+        let provider = PlanarProvider {
+            y: 128,
+            cb: 128,
+            cr: 128,
+            width: 640,
+            height: 480,
+            matrix: YuvMatrix::Bt709,
+            range: YuvRange::Limited,
+            turns: 0,
+        };
+        let f = frame(&c, &planar_project(), 0, &provider);
+        let [r, g, b, a] = f.pixel(320, 240);
+        // (128 - 16) * 255/219 = 130.4, and the test compositor renders to a
+        // linear target so no transfer function is applied on the way out.
+        for (channel, value) in [("r", r), ("g", g), ("b", b)] {
+            assert!(
+                (value as i32 - 130).abs() <= 2,
+                "{channel} is {value}, expected the limited-range rescale of 128"
+            );
+        }
+        assert_eq!(a, 255);
+    }
+
+    /// The two matrices have to actually differ, or "take it from the file" is
+    /// decoration. A saturated chroma sample is where they disagree most.
+    #[test]
+    fn the_colour_matrix_changes_the_result() {
+        let Some(c) = srgb_compositor() else {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        };
+        let project = planar_project();
+        let base = PlanarProvider {
+            y: 128,
+            cb: 90,
+            cr: 200,
+            width: 640,
+            height: 480,
+            matrix: YuvMatrix::Bt709,
+            range: YuvRange::Limited,
+            turns: 0,
+        };
+        let bt709 = frame(&c, &project, 0, &base).pixel(320, 240);
+        let bt601 = frame(
+            &c,
+            &project,
+            0,
+            &PlanarProvider {
+                matrix: YuvMatrix::Bt601,
+                ..base
+            },
+        )
+        .pixel(320, 240);
+
+        let spread = (0..3)
+            .map(|i| (bt709[i] as i32 - bt601[i] as i32).abs())
+            .max()
+            .unwrap_or(0);
+        assert!(
+            spread >= 8,
+            "BT.709 {bt709:?} and BT.601 {bt601:?} differ by only {spread} code values"
+        );
+    }
+
+    /// A sideways source fills the canvas the way its *display* aspect says it
+    /// should, not the way its stored one does.
+    #[test]
+    fn a_quarter_turned_planar_source_is_fitted_by_its_display_aspect() {
+        let Some(c) = srgb_compositor() else {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        };
+        // Stored 640x480 (4:3), displayed 480x640 (3:4) on a 4:3 canvas: the
+        // fit is height-limited, so 640 * 3/4 = 360 wide, leaving 140 columns
+        // of background on each side.
+        let provider = PlanarProvider {
+            y: 235,
+            cb: 128,
+            cr: 128,
+            width: 640,
+            height: 480,
+            matrix: YuvMatrix::Bt709,
+            range: YuvRange::Limited,
+            turns: 1,
+        };
+        let mut project = planar_project();
+        project.canvas.background = [0.0, 0.0, 1.0, 1.0];
+        let f = frame(&c, &project, 0, &provider);
+
+        assert!(f.pixel(320, 240)[0] > 240, "centre is the clip");
+        assert_eq!(f.pixel(5, 240), [0, 0, 255, 255], "left band is background");
+        assert_eq!(
+            f.pixel(634, 240),
+            [0, 0, 255, 255],
+            "right band is background"
+        );
     }
 
     #[test]

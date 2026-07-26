@@ -44,13 +44,26 @@ that plays correctly in another player.
 
 ## Phase 3 — Effects runtime
 
-Port the reverse-engineered engine from `~/git/x/capcut-renderer`:
+In progress. `src-tauri/src/modules/effects/`, and
+`docs/research/effect-runtime.md` for what was learnt building it.
 
-- Lua VM (`mlua`) exposing the `Amaz` API surface
-- GLSL ES 1.0/3.0 → WGSL translation, multi-pass graphs, ping-pong render
-  targets
-- Effect package loader: manifest, shaders, resources, parameter schema
-- Parameter UI generated from the manifest
+- ✅ **Effect package loader** — directory or zip, `config.json` → `Link[]`,
+  `lua-meta.json` / `js-meta.json` as the parameter manifests, host sliders from
+  `extra.json` and `composer_param[]`
+- ✅ **GLSL ES 1.0/3.0 → WGSL** — *not* via naga's GLSL frontend, which rejects
+  every shader in the corpus. Our rewriter → glslang → `spirv-webgpu-transform`
+  → naga spv-in. 24 of 24 real corpus shaders compile
+- ✅ **Lua VM (`mlua`)** — the `Amaz` surface, the lifecycle, parameter binding
+- ✅ **Multi-pass graphs and ping-pong render targets** — from the `.xshader`'s
+  own `passes[]`
+- ⬜ **The binary `%SerializedFormat%@` container.** Only its YAML twin is read,
+  and that is ~2% of shipped assets. **This is what blocks a downloaded effect
+  from rendering**, and it is the next piece of work
+- ⬜ The ECS scene graph: cameras with `renderOrder`, prefab instancing
+- ⬜ The Lumi framework (110 sub-effects), JavaScript effects, the algorithm graph
+- ✅ **One effect end to end** — `modules/effects/fixtures/tint/`, a two-pass
+  chain authored here in their format, producing pixels on the GPU
+- ⬜ Parameter UI generated from the manifest
 
 Packages are fetched at runtime from a URL the user supplies. Nothing
 ByteDance-authored ships in the bundle, ever.

@@ -52,8 +52,8 @@ pub use dmabuf::DmabufFrame;
 pub use hwdecode::{HwCodec, HwDecodeSupport};
 pub use provider::MediaSourceProvider;
 pub use probe::{probe, AudioStreamInfo, MediaInfo, VideoStreamInfo};
-pub use thumbnails::thumbnail_strip;
-pub use waveform::waveform;
+pub use thumbnails::{thumbnail_strip, thumbnail_stream, BatchSink, Thumbnail, ThumbnailBatch};
+pub use waveform::{waveform, Waveform};
 
 /// Everything that can go wrong reaching for a media file.
 ///
@@ -111,6 +111,20 @@ pub enum MediaError {
 
     #[error("{0}")]
     Invalid(String),
+
+    /// The work was abandoned — the user asked for it to stop, or the webview
+    /// that wanted it went away. Never shown: a cancelled job is an outcome the
+    /// user already knows about, and a message about it would be noise.
+    #[error("the job was cancelled")]
+    Cancelled,
+}
+
+impl MediaError {
+    /// Whether this error is "somebody stopped us" rather than "something went
+    /// wrong". The two travel the same channel and are reported differently.
+    pub fn is_cancellation(&self) -> bool {
+        matches!(self, MediaError::Cancelled)
+    }
 }
 
 pub type Result<T> = std::result::Result<T, MediaError>;

@@ -1,0 +1,32 @@
+%YAML 1.1
+--- !Scene &1
+name: chukcut_tint_scene
+guid: {a: 1, b: 1}
+calibrateVer: V4
+entities:
+  - __class: Entity
+    name: Quad
+    guid: {a: 2, b: 2}
+    scene: {localId: 1}
+    selfvisible: true
+    tag: 0
+    components:
+      - {localId: 2}
+      - __class: MeshRenderer
+        sharedMaterials:
+          - {localId: 1, path: material/tint.material}
+        sortingOrder: 0
+        mesh: {localId: 1, path: mesh/quad.mesh}
+      - __class: ScriptComponent
+        enabled: true
+        path: lua/TintScript.lua
+        className: TintScript
+        properties: {__class: Map, intensity: 0.8, speed: 2}
+    layer: 0
+visible: true
+config: {__class: Map}
+msaa: {__class: MSAAMode, value: NONE}
+--- !Transform &2
+localPosition: {x: 0, y: 0, z: 10}
+localScale: {x: 1, y: 1, z: 1}
+localOrientation: {w: 1, x: 0, y: 0, z: 0}

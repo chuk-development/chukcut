@@ -216,7 +216,11 @@ Route B remains the right answer for the *encode* direction, where the
 conversion has to happen somewhere and the VPP engine is idle. That is a
 different document.
 
-## The patch `render/` needs
+## The patch `render/` needs — **applied, 2026-07-26**
+
+All three parts below are in the tree now. Read them as the design rationale
+rather than as work outstanding; what actually shipped, and what it measured,
+is in `docs/STATUS.md` under "Hardware decode through the compositor".
 
 Two changes, both small, neither of which this module was allowed to make.
 `ash`, `wgpu-hal` and `libc` are already dependencies (the encode-side work
@@ -400,26 +404,33 @@ Built and tested, in `src-tauri/src/modules/media/`:
   alongside `seek_and_decode`, and the automatic fallback.
 - `tests/decode.rs` — 34 tests, of which 22 run against both decoders.
 
+Built since, 2026-07-26, and measured in `docs/STATUS.md`:
+
+- **The `render/` import above**, as `render::dmabuf::import_plane`, plus the
+  compositor's two-texture case and `render::source::SourceFrame::from_planes`.
+- **`provider.rs` handing mapped frames to the compositor.**
+  `provider::DEFAULT_ACCELERATION` is now `Auto`, conditional on
+  `RenderContext::can_import_dmabuf()`; `CHUKCUT_DECODE` still overrides it, and
+  `MediaSourceProvider::from_project_with` forces it per provider so both paths
+  can be measured in one process.
+- **The colour matrix and range come from the file**, through
+  `MappedFrame::{color_space, color_range}`, and rotation is folded into the
+  compositor's texture coordinate rather than applied to pixels.
+
 Not built, in rough order of what it is worth:
 
-1. **The `render/` import above.** Everything else on this list is smaller than
-   it and most of it is pointless without it.
-2. **Wiring `provider.rs` to hand mapped frames to the compositor.** The
-   constant is already there with the reasoning:
-   `provider::DEFAULT_ACCELERATION`, plus a `CHUKCUT_DECODE` environment
-   override for measuring without a rebuild.
-3. **A decoded-surface cache keyed by document identity.** Each mapped frame
+1. **A decoded-surface cache keyed by document identity.** Each mapped frame
    pins a VA surface out of a fixed pool, so the existing texture cache becomes
    a *surface* cache with a hard budget. `hwdecode::EXTRA_HW_FRAMES` is 6 today,
    which is enough for the decoder's own `last` and `pending` plus a handful of
    held frames, and a timeline with many clips on screen will need thinking
    about.
-4. **Hardware decode for thumbnails.** Currently deliberately software:
+2. **Hardware decode for thumbnails.** Currently deliberately software:
    the surface comes back at full resolution whatever height was asked for, so a
    hardware decode downloads every pixel of a 4K frame to make an 80-pixel
    strip. It becomes worth doing only via a VPP downscale, which is route B
    above and is a separate piece of work.
-5. **10-bit and HDR.** Every measurement here is 8-bit 4:2:0. A `P010` surface
+3. **10-bit and HDR.** Every measurement here is 8-bit 4:2:0. A `P010` surface
    exports as `R16`/`GR32` layers and the import needs `R16Unorm`/`Rg16Unorm`;
    `dmabuf.rs::plane_size` already handles the sizing, the format table does
    not.

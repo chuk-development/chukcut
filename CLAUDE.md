@@ -121,6 +121,19 @@ cd src-tauri && cargo check -j 4    # -j 4: full parallelism OOMs on 32 GB
 - **Preview frames do not go through `invoke()`.** They are served over the
   `chukcut-frame://` protocol. Read `docs/architecture/preview-pipeline.md`
   before touching the preview path; the reasoning there is load-bearing.
+- **`naga` cannot read the effect corpus's GLSL, and never will.** Its GLSL
+  frontend accepts only `#version` 440/450/460 and rejects the `es` profile,
+  and 224 of 228 corpus shaders have no version line at all; the tracking issue
+  was closed as not planned. `modules/effects/` therefore runs its own
+  ES1→450 rewriter, then glslang, then `spirv-webgpu-transform` to split the
+  combined image samplers WebGPU has no concept of, and only then naga's
+  *SPIR-V* frontend. Do not "simplify" that to `ShaderSource::Glsl`. See
+  `docs/research/rust-crate-survey.md` §6b and
+  `docs/research/effect-runtime.md`.
+- **The effects module wants `libshaderc` on the system.** `shaderc-sys` links
+  Ubuntu's `libshaderc.so` when it is there and otherwise builds glslang and
+  SPIRV-Tools from source with CMake, which is slow but works. If a cold build
+  suddenly grows several minutes, that is what happened.
 
 ## Legal boundary
 

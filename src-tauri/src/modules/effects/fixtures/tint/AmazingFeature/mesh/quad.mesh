@@ -1,0 +1,14 @@
+%YAML 1.1
+--- !Mesh &1
+name: quad
+vertices: [-1,-1,0, 0,0,  1,-1,0, 1,0,  1,1,0, 1,1,  -1,1,0, 0,1]
+vertexAttribs:
+  - semantic: {__class: VertexAttribType, value: POSITION}
+    bindingIndex: 0
+  - semantic: {__class: VertexAttribType, value: TEXCOORD0}
+    bindingIndex: 0
+submeshes:
+  - indices16: [0, 1, 2, 2, 3, 0]
+    indicesCount: 6
+    primitive: {__class: Primitive, value: TRIANGLES}
+clearAfterUpload: true

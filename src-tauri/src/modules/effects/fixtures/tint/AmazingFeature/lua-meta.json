@@ -1,0 +1,57 @@
+[
+  {
+    "ClassName": "TintScript",
+    "Super": "ScriptComponent",
+    "FilePath": "lua/TintScript.lua",
+    "Properties": [
+      {
+        "VarName": "intensity",
+        "VarType": "Double",
+        "Comment": "",
+        "AnnoItems": [
+          {
+            "ItemType": "UI",
+            "Attributes": [
+              {"AttrType": "Range", "RawValue": "", "Values": [0.0, 1.0]},
+              {"AttrType": "Slider", "RawValue": "", "Values": []},
+              {"AttrType": "Display", "RawValue": "Strength", "Values": ["Strength"]},
+              {"AttrType": "Order", "RawValue": "", "Values": [0]}
+            ]
+          }
+        ]
+      },
+      {
+        "VarName": "speed",
+        "VarType": "Double",
+        "Comment": "",
+        "AnnoItems": [
+          {
+            "ItemType": "UI",
+            "Attributes": [
+              {"AttrType": "Range", "RawValue": "", "Values": [0.0, 8.0]},
+              {"AttrType": "Drag", "RawValue": "", "Values": []},
+              {"AttrType": "Order", "RawValue": "", "Values": [1]}
+            ]
+          }
+        ]
+      },
+      {
+        "VarName": "blendMode",
+        "VarType": "String",
+        "Comment": "",
+        "AnnoItems": [
+          {
+            "ItemType": "UI",
+            "Attributes": [
+              {"AttrType": "Option", "RawValue": "", "Values": ["Add", "Multiply", "Screen"]},
+              {"AttrType": "Order", "RawValue": "", "Values": [2]}
+            ]
+          }
+        ]
+      }
+    ],
+    "Methods": [{"FuncName": "new", "Params": [], "Comment": ""}],
+    "Comment": "",
+    "ExportFiles": []
+  }
+]
