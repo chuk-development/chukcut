@@ -1,24 +1,27 @@
 /**
- * The webview's half of the native menu bar.
+ * The webview's half of the menu bar.
  *
- * The bar itself is built in Rust (`src-tauri/src/modules/workspace/menu.rs`),
- * because a menu drawn in HTML is not a menu — it does not live in the window
- * decoration, it does not follow the desktop's theme, and it cannot own a
- * keyboard accelerator. What Rust cannot do is know whether the document is
- * dirty or whether a clip is selected, so this file is the seam:
+ * The bar is *drawn* here — `components/MenuBar.tsx`, out of the same shadcn
+ * primitives as every other menu in the editor, so a change to
+ * `src/styles/globals.css` changes it too. It is still *decided* in Rust
+ * (`src-tauri/src/modules/workspace/menu.rs`), which holds one table of every
+ * item, its accelerator and the one thing that gates it. This file is the seam
+ * between the two:
  *
  * - **Up:** the Zustand stores are the only authority on document state, and
- *   [`describeMenuState`] turns them into the handful of facts Rust needs. There is
- *   no second copy anywhere; the menu is pushed on every store change and Rust
- *   holds nothing but the enabled flags it derived.
- * - **Down:** a click arrives as the `menu://action` event carrying an item id,
- *   and [`runMenuAction`] does the same thing the existing button or shortcut
- *   would have done. Every branch calls code that already existed — the menu
- *   adds no behaviour of its own, which is what keeps it from drifting away
- *   from the rest of the app.
+ *   [`describeMenuState`] turns them into the handful of facts Rust needs.
+ * - **Across:** `workspace_menu_describe` answers with the whole bar, resolved —
+ *   titles, labels, keys, enabled flags. The React side renders that and works
+ *   nothing out for itself, which is what stops the two halves disagreeing about
+ *   whether an item is live.
+ * - **Down:** a click is an item id, and [`runMenuAction`] does the same thing
+ *   the existing button or shortcut would have done. Every branch calls code
+ *   that already existed — the menu adds no behaviour of its own. The four ids
+ *   in [`RUST_OWNED_IDS`] are the exception, and they go back over the boundary
+ *   because they are about the machine rather than the document.
  *
- * Quitting is the exception and it is deliberate. `menu://close-requested` is
- * raised for both File → Quit *and* the window's close button, the window has
+ * Quitting is the other exception and it is deliberate. `menu://close-requested`
+ * is raised for both File → Quit *and* the window's close button, the window has
  * already been prevented from closing when it arrives, and it stays open until
  * [`answerCloseRequest`] says otherwise. That ordering is the whole reason
  * Cancel can genuinely abort: a close that has begun cannot be recalled.
@@ -44,12 +47,13 @@ import {
 } from "@/modules/timeline/lib/edits";
 import { allSelectableIds, liveSelection } from "@/modules/timeline/lib/selection";
 import { soleSelection, useTimelineStore } from "@/modules/timeline/store";
-import { workspaceCloseAnswer, workspaceMenuSync } from "@/modules/workspace/lib/api";
+import {
+  workspaceCloseAnswer,
+  workspaceMenuDescribe,
+  workspaceMenuRun,
+} from "@/modules/workspace/lib/api";
 import { guardUnsaved, saveProject } from "@/modules/workspace/lib/lifecycle";
-import type { MenuState } from "@/modules/workspace/types";
-
-/** Rust raises this when an item it does not own itself is clicked. */
-export const MENU_ACTION_EVENT = "menu://action";
+import type { MenuSectionView, MenuState } from "@/modules/workspace/types";
 
 /** Raised for both File → Quit and the window's close button. */
 export const CLOSE_REQUESTED_EVENT = "menu://close-requested";
@@ -62,6 +66,7 @@ export const MENU_IDS = {
   saveAs: "file.save_as",
   importMedia: "file.import",
   export: "file.export",
+  quit: "file.quit",
   undo: "edit.undo",
   redo: "edit.redo",
   cut: "edit.cut",
@@ -75,8 +80,26 @@ export const MENU_IDS = {
   zoomOut: "view.zoom_out",
   zoomFit: "view.zoom_fit",
   fullscreen: "view.fullscreen",
+  logs: "view.logs",
+  about: "help.about",
   shortcuts: "help.shortcuts",
+  docs: "help.docs",
 } as const;
+
+/**
+ * The items about the machine rather than the document: quitting, revealing the
+ * log directory, revealing the docs, the about box. None of them can be done
+ * from the webview at all, so they go back over the boundary.
+ *
+ * `menu::is_ours` on the Rust side is the same list, and `run` warns loudly if
+ * the two ever disagree — an id in neither list is an item that does nothing.
+ */
+export const RUST_OWNED_IDS: readonly string[] = [
+  MENU_IDS.quit,
+  MENU_IDS.logs,
+  MENU_IDS.docs,
+  MENU_IDS.about,
+];
 
 /** The document half of the state, as the project store holds it. */
 export interface DocumentFacts {
@@ -212,10 +235,19 @@ const ZOOM_STEP = 1.6;
 /**
  * Do what the item says.
  *
- * Ids that are not listed here are handled in Rust — the about box, the log
- * directory, quitting — and never reach the webview.
+ * The four ids in [`RUST_OWNED_IDS`] cross back to Rust; everything else is done
+ * here, through the same functions the buttons and the keyboard already use.
  */
 export function runMenuAction(id: string, handlers: MenuHandlers): void {
+  if (RUST_OWNED_IDS.includes(id)) {
+    // Quitting, and three things that open something outside the app. A failure
+    // is Rust's to log — there is nothing the user could do about it here, and
+    // an error banner over "the file manager did not open" is worse than the
+    // silence.
+    void workspaceMenuRun(id).catch(() => {});
+    return;
+  }
+
   switch (id) {
     case MENU_IDS.newProject:
       handlers.newProject();
@@ -282,6 +314,47 @@ export function runMenuAction(id: string, handlers: MenuHandlers): void {
       // look broken to the user and fine to us.
       console.warn(`no handler for the menu item "${id}"`);
       break;
+  }
+}
+
+/**
+ * The menu item a keystroke should run, for the keys nothing else in the app
+ * binds.
+ *
+ * Most of what the bar advertises already has an owner, and the owner is the
+ * component the key acts on: `Timeline.tsx` binds Del, C, Ctrl+Z and the
+ * clipboard four, `Preview.tsx` binds F, `App.tsx` binds Ctrl+N/O/S/E and `?`.
+ * That is the right arrangement — a shortcut that fires when its panel is not
+ * mounted is a bug — and it leaves five keys with no owner at all, because while
+ * the bar was a GTK widget *it* was their owner. The widget is gone, so they are
+ * bound here, next to the table that advertises them.
+ *
+ * Deliberately not a loop over the accelerator strings Rust sends. Two handlers
+ * claiming Ctrl+C would both fire, and a key belongs to exactly one of them.
+ */
+export function acceleratorAction(event: KeyboardEvent): string | null {
+  if (!(event.ctrlKey || event.metaKey) || event.altKey) return null;
+  switch (event.key) {
+    // Ctrl+Shift+I is the inspector on every desktop webview, so Import only
+    // answers to the plain one.
+    case "i":
+    case "I":
+      return event.shiftKey ? null : MENU_IDS.importMedia;
+    case "q":
+    case "Q":
+      return event.shiftKey ? null : MENU_IDS.quit;
+    // Both spellings of the same physical key: `+` is what a shifted `=`
+    // reports, and people press it for "zoom in" without thinking about it.
+    case "=":
+    case "+":
+      return MENU_IDS.zoomIn;
+    case "-":
+    case "_":
+      return MENU_IDS.zoomOut;
+    case "0":
+      return MENU_IDS.zoomFit;
+    default:
+      return null;
   }
 }
 
@@ -412,29 +485,42 @@ export async function answerCloseRequest(): Promise<boolean> {
 // ---------------------------------------------------------------------------
 
 /**
- * Keep the bar in step with the stores and route its clicks. Returns the
- * teardown.
+ * Keep the bar in step with the stores, and hand each redrawn bar to whoever is
+ * rendering it. Returns the teardown.
  *
- * Pushed rather than polled, and deduplicated: an edit replaces the whole
- * document and a pointer move over the lanes writes the playhead many times a
- * second, so without the comparison this would be an IPC call per frame.
+ * Pushed rather than polled, and deduplicated on the *state* rather than on the
+ * answer: an edit replaces the whole document and a pointer move over the lanes
+ * writes the playhead many times a second, so without the comparison this would
+ * be an IPC round trip per frame.
+ *
+ * `onSections` is not called when the round trip fails. That leaves the bar
+ * showing whatever it last drew, which is the better of the two wrong answers —
+ * an empty menu bar looks like the app has lost its menus, while a slightly
+ * stale one still opens, and every item in it also has a button or a key behind
+ * it.
  */
-export function installNativeMenu(handlers: MenuHandlers): () => void {
+export function installMenu(onSections: (sections: MenuSectionView[]) => void): () => void {
   let last: MenuState | null = null;
+  let cancelled = false;
 
   const push = () => {
     const next = currentMenuState();
     if (last && sameMenuState(last, next)) return;
     last = next;
-    // A menu that fails to update is a cosmetic problem; an error banner about
-    // it is not. The next change tries again.
-    void workspaceMenuSync(next).catch(() => {});
+    void workspaceMenuDescribe(next)
+      .then((sections) => {
+        if (!cancelled) onSections(sections);
+      })
+      .catch(() => {
+        // Ask again next time something changes rather than holding a state we
+        // never managed to draw.
+        last = null;
+      });
   };
 
   push();
   const unsubscribes = [useProjectStore.subscribe(push), useTimelineStore.subscribe(push)];
 
-  let cancelled = false;
   const listeners: Array<() => void> = [];
   // The subscription can resolve after the effect that started it was torn
   // down, which leaves a listener nothing will ever remove.
@@ -442,16 +528,13 @@ export function installNativeMenu(handlers: MenuHandlers): () => void {
     if (cancelled) off();
     else listeners.push(off);
   };
-  // No event plumbing means no native menu, which the app has to survive: every
-  // item in the bar has a button or a keyboard shortcut behind it as well.
-  const ignore = () => {};
 
-  listen<{ id: string }>(MENU_ACTION_EVENT, (event) => runMenuAction(event.payload.id, handlers))
-    .then(keep)
-    .catch(ignore);
   listen(CLOSE_REQUESTED_EVENT, () => void answerCloseRequest())
     .then(keep)
-    .catch(ignore);
+    // No event plumbing means the close guard never runs. The window still
+    // closes — Rust closes it itself when it cannot reach the webview — so this
+    // is not worth taking the editor down over.
+    .catch(() => {});
 
   return () => {
     cancelled = true;

@@ -981,12 +981,14 @@ export function Timeline() {
         return;
       }
 
-      // The clipboard four are bound here rather than as menu accelerators, and
-      // that is not an oversight: a GTK accelerator is consulted before the key
-      // reaches the focused widget, so an enabled Edit → Copy carrying Ctrl+C
-      // would take the key away from every text field in the app. The handler
-      // above has already declined to act when the focus is in one. See the
-      // module docs in `workspace/menu.rs`.
+      // The clipboard four are bound here rather than by the menu bar, and that
+      // is not an oversight. It began as a GTK constraint — an accelerator was
+      // consulted before the key reached the focused widget, so an enabled
+      // Edit → Copy carrying Ctrl+C took the key away from every text field in
+      // the app — and it outlived the native menu because it is the right shape
+      // anyway: the timeline is what Ctrl+C acts on, the handler above has
+      // already declined when the focus is in a field, and the bar only
+      // advertises the key. One handler per key; see `workspace/menu.rs`.
       if (event.ctrlKey || event.metaKey) {
         switch (event.key.toLowerCase()) {
           case "a":

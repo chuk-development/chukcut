@@ -17,6 +17,23 @@ import { DEFAULT_SETTINGS } from "@/modules/workspace/types";
 import { makeMaterial, makeProject } from "@/test/fixtures";
 import { type IpcHarness, installIpc } from "@/test/ipc";
 
+/** One menu, enough to tell a drawn bar from an empty one. */
+const MENU_BAR = [
+  {
+    title: "File",
+    entries: [
+      {
+        kind: "item",
+        id: "file.new",
+        label: "New Project",
+        accelerator: "Ctrl+N",
+        enabled: true,
+        unavailable_reason: null,
+      },
+    ],
+  },
+];
+
 /** Everything the editor asks for while it is coming up. */
 function scriptStartup(ipc: IpcHarness) {
   ipc.handle("project_get", makeProject());
@@ -26,6 +43,11 @@ function scriptStartup(ipc: IpcHarness) {
   ipc.handle("media_thumbnails", []);
   ipc.handle("workspace_settings_get", DEFAULT_SETTINGS);
   ipc.handle("workspace_recent_list", []);
+  // The menu bar's contents and the window's own state. Both belong to the
+  // title strip, which is drawn whatever else is going on — the window has no
+  // decorations, so it is the only way to move or close it.
+  ipc.handle("workspace_menu_describe", MENU_BAR);
+  ipc.handle("plugin:window|is_maximized", false);
   // Neither of these is registered in Rust yet; both are meant to degrade to
   // "nothing to say" rather than to an error on screen.
   ipc.fail("workspace_recovery_status", "Command workspace_recovery_status not found");
@@ -150,6 +172,8 @@ describe("when the Rust core does not answer at all", () => {
   beforeEach(() => {
     ipc = installIpc();
     ipc.fail("project_get", "the backend is not running");
+    ipc.fail("workspace_menu_describe", "the backend is not running");
+    ipc.fail("plugin:window|is_maximized", "the backend is not running");
     ipc.handle("media_thumbnails", []);
   });
 
@@ -158,5 +182,60 @@ describe("when the Rust core does not answer at all", () => {
 
     expect(await screen.findByText("The Rust core did not answer")).toBeInTheDocument();
     expect(screen.queryByLabelText("Player")).toBeNull();
+  });
+
+  it("still leaves a way to close the window", async () => {
+    // The window has no decorations. If the strip went with the editor, a
+    // backend that failed to start would leave a window with no title bar, no
+    // menus and no close button — and nothing to do but kill it.
+    render(<App />);
+    await screen.findByText("The Rust core did not answer");
+
+    expect(screen.getByRole("button", { name: "Close" })).toBeInTheDocument();
+    expect(screen.getByRole("menubar")).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The title strip
+// ---------------------------------------------------------------------------
+
+describe("the strip that replaces the window decoration", () => {
+  beforeEach(() => {
+    ipc = installIpc();
+    scriptStartup(ipc);
+  });
+
+  it("is there before a document is, and stays there once one is open", async () => {
+    ipc.handle("project_get", null);
+    render(<App />);
+
+    await screen.findByLabelText("Start");
+    expect(screen.getByRole("menubar")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Minimise" })).toBeInTheDocument();
+  });
+
+  it("draws the menus Rust described, rather than a copy kept on this side", async () => {
+    render(<App />);
+    await expectTheEditorIsUp();
+
+    // The bar's contents cross the boundary on every state change: `menu.rs`
+    // holds the one table of items and gates, and a duplicate here would be
+    // free to drift out of step with it.
+    expect(await screen.findByRole("menuitem", { name: "File" })).toBeInTheDocument();
+    expect(ipc.lastCall("workspace_menu_describe")).toMatchObject({
+      state: { has_project: true },
+    });
+  });
+
+  it("is somewhere to pick the window up by", async () => {
+    render(<App />);
+    await expectTheEditorIsUp();
+
+    // Tauri's own drag region, matched against the exact element pressed. Take
+    // the attribute off and the window stops moving, which looks like a CSS bug
+    // for an hour.
+    const strip = document.querySelector('[data-slot="title-bar"]');
+    expect(strip).toHaveAttribute("data-tauri-drag-region");
   });
 });

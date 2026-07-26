@@ -10,6 +10,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   HardwareReport,
   LogLocation,
+  MenuSectionView,
   MenuState,
   RecentProject,
   Settings,
@@ -61,14 +62,26 @@ export function workspaceLogPath(): Promise<LogLocation> {
 }
 
 /**
- * Tell the native menu bar what the document looks like now.
+ * Say what the document looks like now, and get back the bar to draw.
  *
  * Pushed on every change to the stores that feed it rather than polled, because
  * the alternative is a menu that is right a moment after the user opened it.
  * `lib/menu.ts` owns the deduplication.
  */
-export function workspaceMenuSync(state: MenuState): Promise<void> {
-  return invoke<void>("workspace_menu_sync", { state });
+export function workspaceMenuDescribe(state: MenuState): Promise<MenuSectionView[]> {
+  return invoke<MenuSectionView[]>("workspace_menu_describe", { state });
+}
+
+/**
+ * Ask Rust to run one of the four items that are about the machine rather than
+ * the document: Quit, Show Log Directory, Documentation, About.
+ *
+ * Everything else the webview does itself. `RUST_OWNED_IDS` in `lib/menu.ts` is
+ * this side of the split; `menu::is_ours` is the other, and a Rust unit test
+ * holds the two lists to the same shape.
+ */
+export function workspaceMenuRun(id: string): Promise<void> {
+  return invoke<void>("workspace_menu_run", { id });
 }
 
 /**

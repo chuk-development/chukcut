@@ -4,15 +4,33 @@ use super::menu::{self, MenuState};
 use super::settings::{RecentProjects, Settings};
 use super::{logging, paths};
 
-/// Tell the native menu bar what the document looks like now.
+/// The menu bar as it should now be drawn, for the document the webview
+/// describes.
 ///
-/// The frontend's stores are the only authority on this, so the menu is pushed
-/// rather than polled: every field here is read straight out of Zustand, and
-/// Rust keeps no copy of it beyond the enabled flags it sets. Which items that
-/// state lights up is decided in one pure function, `menu::enablement`.
+/// The frontend's stores are the only authority on the state, so this is pushed
+/// rather than polled: every field of `MenuState` is read straight out of
+/// Zustand, and Rust keeps no copy of it. What comes back is the whole bar —
+/// titles, labels, accelerators, enabled flags, and the reason for any item
+/// that can never be enabled — so that the table in `menu.rs` is the only place
+/// either half has to look. Which items a state lights up is decided in one pure
+/// function, `menu::enablement`.
+///
+/// Capabilities are re-probed on every call rather than cached: a log directory
+/// appears the first time something is written, and an item that is grey until
+/// then and quietly becomes clickable is the honest behaviour.
 #[tauri::command]
-pub fn workspace_menu_sync(app: tauri::AppHandle, state: MenuState) {
-    menu::apply(&app, &state);
+pub fn workspace_menu_describe(state: MenuState) -> Vec<menu::SectionView> {
+    menu::describe(&state, &menu::Capabilities::probe())
+}
+
+/// Run one of the four items that are about the machine rather than the
+/// document — quitting, the log directory, the docs, the about box.
+///
+/// The webview runs everything else itself; `menu::is_ours` is the split, and
+/// `runMenuAction` in `workspace/lib/menu.ts` is the other side of it.
+#[tauri::command]
+pub fn workspace_menu_run(app: tauri::AppHandle, id: String) {
+    menu::run(&app, &id);
 }
 
 /// The webview's answer to the close request raised by File → Quit or by the

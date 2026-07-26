@@ -1395,27 +1395,46 @@ nothing else in the system would say so.
 ## Traps that have already cost time
 
 - **A GTK menu accelerator shadows typing, and a bare letter therefore cannot be
-  one.** `gtk_window_key_press_event` consults the window's `GtkAccelGroup`
-  *before* it propagates the key to the focused widget, so registering `C` for
-  Split Clip would stop the letter `c` reaching a text field, and registering
-  `Delete` would stop it deleting characters. Both keys are already bound by the
-  timeline, so the native menu shows them in the item's label — `Split Clip (C)`
-  — and does not claim them.
+  one. This no longer applies, and it is here so nobody re-derives it.**
+  `gtk_window_key_press_event` consults the window's `GtkAccelGroup` *before* it
+  propagates the key to the focused widget, so registering `C` for Split Clip
+  stopped the letter `c` reaching a text field, and registering `Delete` stopped
+  it deleting characters. It bit the clipboard items worst. While
+  Cut/Copy/Paste/Select All were permanently disabled they could safely carry
+  `Ctrl+X`/`C`/`V`/`A`, because `gtk_widget_can_activate_accel` refuses an
+  insensitive widget and reports the key unhandled, so it fell through to the
+  webview and text editing kept working. The moment they became clickable that
+  stopped being true: an enabled item with `Ctrl+C` in the accel group takes the
+  key away from every text field in the app, and copy in the project-name box
+  broke as soon as a clip was selected. The bar therefore spelled its keys into
+  the labels — `Copy (Ctrl+C)`, `Split Clip (C)` — and registered nothing.
 
-  **This bit the clipboard items, and the fix is worth knowing before adding a
-  menu item.** While Cut/Copy/Paste/Select All were permanently disabled they
-  could safely carry `Ctrl+X`/`C`/`V`/`A`, because
-  `gtk_widget_can_activate_accel` refuses an insensitive widget and reports the
-  key unhandled, so it fell through to the webview and text editing kept
-  working. The moment they became clickable that stopped being true: an enabled
-  item with `Ctrl+C` in the accel group takes the key away from every text field
-  in the app, and copy in the project-name box would break as soon as a clip was
-  selected. So all five Edit items now advertise their key in the label —
-  `Copy (Ctrl+C)` — and register nothing, and `Timeline.tsx` binds them in a
-  `keydown` handler that already declines to act when the focus is in an input.
-  `modules::workspace::menu` has both rules as unit tests —
-  `every_accelerator_carries_a_modifier` and
-  `keys_the_app_already_binds_are_shown_and_not_claimed`.
+  **The accel group went with the native menu.** The bar is drawn in the webview
+  now (`decisions/0006-in-app-menu-bar.md`), there is no `GtkAccelGroup` in play,
+  and a keystroke reaches the focused element the way it does in a browser. So
+  `Ctrl+C` can be bound normally, the labels are plain again — the key is drawn
+  in its own column from `Item::accelerator` — and the only rule left is the
+  ordinary one: **one handler per key.** Two `keydown` listeners claiming
+  `Ctrl+C` both fire, which is why the bindings still live next to the thing they
+  act on (`Timeline.tsx`, `Preview.tsx`, `App.tsx`) and the bar only advertises
+  them. `menu.rs`'s `every_key_the_app_binds_is_advertised_by_the_item_that_shares_it`
+  holds the advertisement to the binding, and
+  `workspace/lib/menu.ts::acceleratorAction` owns the five keys — Ctrl+I, Ctrl+Q,
+  Ctrl+=, Ctrl+-, Ctrl+0 — that nothing else in the app binds because the native
+  menu used to bind them itself.
+
+- **An undecorated GTK window has no resize border, and nothing tells you.**
+  `decorations: false` is what makes the menu bar themeable, and on GTK the
+  resize frame *is* the decoration: with it gone the window manager has nothing
+  to hit-test, so the window can be moved (Tauri's `data-tauri-drag-region`) and
+  never resized. There is no error and no warning — you find out by trying to
+  drag a corner. `src/app/components/ResizeEdges.tsx` puts eight transparent
+  grips around the window that call `startResizeDragging`, which is the same
+  thing a GTK client-side-decorated app does, and it needs
+  `core:window:allow-start-resize-dragging` in `capabilities/default.json` or it
+  is silently rejected at the boundary. The other four window permissions there
+  are the same story for dragging, minimising, maximising and closing: none of
+  them is in `core:default`, because a decorated window never asks for them.
 - **A busy machine is not a slow machine, it is a different machine.** The same
   suite, same binary, same commit, measured minutes apart: at load 2 a whole
   preview frame is 25 ms; at load 44 it is 258 ms. Not 2× — **ten times**. Worse,

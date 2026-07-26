@@ -154,7 +154,9 @@ describe("pressing play at the end", () => {
     const duration = 5_000_000;
     app.useProjectStore
       .getState()
-      .loadProject(projectWithSegments(makeSegment("clip-1", { target_range: range(0, duration) })));
+      .loadProject(
+        projectWithSegments(makeSegment("clip-1", { target_range: range(0, duration) })),
+      );
     await app.preview.ensureStarted();
     return { app, duration };
   }

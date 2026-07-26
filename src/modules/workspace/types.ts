@@ -38,7 +38,7 @@ export interface LogLocation {
 }
 
 /**
- * What the native menu bar is told about the document. Mirrors
+ * What the menu bar is told about the document. Mirrors
  * `workspace::menu::MenuState`.
  *
  * Facts, not decisions: which of these greys out which item is decided in one
@@ -68,6 +68,35 @@ export interface MenuState {
   has_clipboard: boolean;
   /** There is at least one clip anywhere, so Select All would select something. */
   has_clips: boolean;
+}
+
+/**
+ * The menu bar as Rust says to draw it. Mirrors `workspace::menu::SectionView`
+ * and friends.
+ *
+ * The whole bar crosses, not only the enabled flags, and that is the point:
+ * `menu.rs` holds one table of every item and its gate, and `MenuBar.tsx`
+ * renders it. Adding an item on this side is therefore not possible, which is
+ * what stops the bar from growing a row that looks live and does nothing.
+ */
+export interface MenuItemView {
+  id: string;
+  label: string;
+  /** Written the way it is written on a keyboard: `Ctrl+S`, `Del`, `C`. */
+  accelerator: string | null;
+  enabled: boolean;
+  /**
+   * Why this item can never be enabled, when the feature does not exist at all.
+   * `null` for anything that is merely unavailable in the current document.
+   */
+  unavailable_reason: string | null;
+}
+
+export type MenuEntryView = ({ kind: "item" } & MenuItemView) | { kind: "separator" };
+
+export interface MenuSectionView {
+  title: string;
+  entries: MenuEntryView[];
 }
 
 /**

@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window",
+  "description": "The main window. The window permissions past core:default are what an undecorated window costs: the title strip we draw ourselves has to be able to drag, resize, minimise, maximise and close the window, none of which core:default grants because a decorated window never needs them. See src/app/components/TitleBar.tsx.",
   "windows": [
     "main"
   ],
@@ -10,6 +10,13 @@
     "opener:default",
     "dialog:allow-open",
     "dialog:allow-save",
-    "core:window:allow-set-fullscreen"
+    "core:window:allow-set-fullscreen",
+    "core:window:allow-start-dragging",
+    "core:window:allow-start-resize-dragging",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-internal-toggle-maximize",
+    "core:window:allow-is-maximized",
+    "core:window:allow-close"
   ]
 }

@@ -1,8 +1,10 @@
 import { AlertTriangleIcon, FileDownIcon, LifeBuoyIcon, Loader2Icon, XIcon } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { HeaderBar } from "@/app/components/HeaderBar";
 import { NewProjectDialog } from "@/app/components/NewProjectDialog";
 import { PanelDivider } from "@/app/components/PanelDivider";
+import { ResizeEdges } from "@/app/components/ResizeEdges";
+import { TitleBar } from "@/app/components/TitleBar";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { type FileDropEvent, listenForFileDrop } from "@/lib/fileDrop";
 import { clamp } from "@/lib/time";
@@ -24,9 +26,15 @@ import { ShortcutsDialog } from "@/modules/workspace/components/ShortcutsDialog"
 import { StartScreen } from "@/modules/workspace/components/StartScreen";
 import { UnsavedChangesDialog } from "@/modules/workspace/components/UnsavedChangesDialog";
 import { chooseAndOpenProject, guardUnsaved, saveProject } from "@/modules/workspace/lib/lifecycle";
-import { installNativeMenu } from "@/modules/workspace/lib/menu";
+import {
+  acceleratorAction,
+  installMenu,
+  type MenuHandlers,
+  runMenuAction,
+} from "@/modules/workspace/lib/menu";
 import { type RecoveryNotice, restoredFromWorkingCopy } from "@/modules/workspace/lib/recovery";
 import { useWorkspaceStore } from "@/modules/workspace/store";
+import type { MenuSectionView } from "@/modules/workspace/types";
 
 const LIBRARY_BOUNDS = [220, 560] as const;
 const INSPECTOR_BOUNDS = [200, 520] as const;
@@ -52,6 +60,15 @@ export function App() {
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [fileDragging, setFileDragging] = useState(false);
   const [recovered, setRecovered] = useState<RecoveryNotice | null>(null);
+  /**
+   * The menu bar as Rust last resolved it.
+   *
+   * Empty until the first answer lands, which is a frame or two: the bar's
+   * contents are not a constant on this side, on purpose. `menu.rs` holds the
+   * one table of items and gates, and a copy here to render "instantly" would be
+   * a second one, free to drift.
+   */
+  const [menuSections, setMenuSections] = useState<MenuSectionView[]>([]);
 
   /**
    * Adopt whatever Rust already has open.
@@ -129,24 +146,29 @@ export function App() {
   }, []);
 
   /**
-   * The native menu bar.
-   *
-   * Mounted here because this is where the dialogs it opens live; everything
-   * else it does — saving, undo, zoom, fullscreen — it drives through the same
-   * functions the buttons and shortcuts use. The bar itself is built in Rust,
-   * and this keeps its enabled state in step with the stores. See
-   * `workspace/lib/menu.ts`.
+   * The four items whose action is a dialog. Everything else the menu does —
+   * saving, undo, zoom, fullscreen — it drives through the same functions the
+   * buttons and the shortcuts use, so the bar adds no behaviour of its own.
    */
-  useEffect(
-    () =>
-      installNativeMenu({
-        newProject: () => void startNewProject(),
-        openProject: () => void openProject(),
-        showExport: () => setExportOpen(true),
-        showShortcuts: () => setShortcutsOpen(true),
-      }),
+  const menuHandlers: MenuHandlers = useMemo(
+    () => ({
+      newProject: () => void startNewProject(),
+      openProject: () => void openProject(),
+      showExport: () => setExportOpen(true),
+      showShortcuts: () => setShortcutsOpen(true),
+    }),
     [openProject, startNewProject],
   );
+
+  /**
+   * The menu bar.
+   *
+   * Mounted here because this is where the dialogs it opens live. What the bar
+   * offers and which of it is clickable is still decided in Rust; this keeps
+   * that answer in step with the stores and hands each redraw to `TitleBar`. See
+   * `workspace/lib/menu.ts`.
+   */
+  useEffect(() => installMenu(setMenuSections), []);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -162,6 +184,21 @@ export function App() {
           event.preventDefault();
           setShortcutsOpen(true);
         }
+        return;
+      }
+
+      // The keys the bar advertises that nothing else in the app binds — import,
+      // quit and the three zooms. They were the native menu's accelerators until
+      // the native menu went; `acceleratorAction` says which ones and why.
+      //
+      // Not gated on `typing`, like the four below it and like the accelerators
+      // these replace. None of them is a text-editing key, and a Ctrl+Q that
+      // does nothing because the caret happens to be in the project-name box is
+      // a worse surprise than one that quits.
+      const accelerated = acceleratorAction(event);
+      if (accelerated) {
+        event.preventDefault();
+        runMenuAction(accelerated, menuHandlers);
         return;
       }
 
@@ -193,7 +230,7 @@ export function App() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [openProject, startNewProject]);
+  }, [menuHandlers, openProject, startNewProject]);
 
   /**
    * Files dragged in from the desktop.
@@ -262,6 +299,15 @@ export function App() {
   return (
     <TooltipProvider>
       <div className="flex h-full flex-col overflow-hidden bg-background text-foreground">
+        {/* Unconditional, unlike the header bar below it: the window has no
+            decorations, so this strip is the only way to move, resize or close
+            it. A start screen or a backend that never answered must not be a
+            window the user cannot shut. */}
+        <TitleBar
+          sections={menuSections}
+          onSelectMenuItem={(id) => runMenuAction(id, menuHandlers)}
+        />
+
         {project ? (
           <HeaderBar
             onNewProject={() => void startNewProject()}
@@ -380,6 +426,10 @@ export function App() {
         {/* Outside the dialog on purpose: an export outlives the dialog that
             started it, and the editor stays usable while it runs. */}
         <ExportProgressDock />
+
+        {/* Last, and above everything: an undecorated window has no frame to
+            grab, so these are the only way to resize it with a pointer. */}
+        <ResizeEdges />
       </div>
     </TooltipProvider>
   );

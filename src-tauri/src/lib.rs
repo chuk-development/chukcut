@@ -55,11 +55,12 @@ pub fn run() {
         // wait briefly for a frame that is mid-render, and that wait must never
         // sit on a webview thread.
         .register_asynchronous_uri_scheme_protocol(SCHEME, frame_protocol_async)
-        // The native menu bar. Everything about it — the items, which of them
-        // are clickable, and why the rest are not — lives in
-        // `modules::workspace::menu`.
-        .menu(modules::workspace::menu::build)
-        .on_menu_event(modules::workspace::menu::handle_event)
+        // No `.menu(…)`: the bar is drawn in the webview so that it takes the
+        // app's own theme, and the window has no decorations for a native one to
+        // live in. What the bar offers and which items are clickable is still
+        // decided in `modules::workspace::menu`, which hands the whole thing
+        // over through `workspace_menu_describe`.
+        //
         // The close button is the same action as File → Quit and is guarded the
         // same way: nothing closes until the webview has answered.
         .on_window_event(|window, event| {
@@ -134,7 +135,8 @@ pub fn run() {
             modules::workspace::commands::workspace_cache_clear,
             modules::workspace::commands::workspace_hardware,
             modules::workspace::commands::workspace_log_path,
-            modules::workspace::commands::workspace_menu_sync,
+            modules::workspace::commands::workspace_menu_describe,
+            modules::workspace::commands::workspace_menu_run,
             modules::workspace::commands::workspace_close_answer,
         ])
         .run(tauri::generate_context!())

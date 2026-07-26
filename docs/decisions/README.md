@@ -14,6 +14,7 @@ recommend anything is a survey, and surveys are in `../research/`.
 | [0003](0003-proxy-media.md) | Proxy media: the rule for when one is worth making, all-intra H.264, and a type that keeps proxies out of the export | Decided 2026-07-26 |
 | [0004](0004-the-app-shell-asks-before-it-decides.md) | The shell opens onto a start screen rather than an invented project; the unsaved guard; what settings can and cannot take effect live; the hardware and crash-recovery seams | Decided 2026-07-26 |
 | [0005](0005-linked-audio-and-video.md) | An imported file with both streams becomes two linked clips; linkage lives in `Segment::extras`, not on `Segment` and not in a side table; linked edits expand in `History::apply` | Decided 2026-07-26 |
+| [0006](0006-in-app-menu-bar.md) | The window loses its decorations and we draw the title strip; the menu bar is React and takes the theme; the item table and its gates stay in Rust and cross as a resolved bar | Decided 2026-07-27 |
 
 Decisions already recorded elsewhere, because they predate this directory:
 

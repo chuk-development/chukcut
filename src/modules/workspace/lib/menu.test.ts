@@ -1,11 +1,12 @@
 /**
- * The menu bar's two decisions.
+ * The seam between the bar and the rest of the app.
  *
- * **What is clickable.** The bar is native and has no DOM, so the only way to
- * test it is to test the function that decides it. `describeMenuState` turns
- * the stores into the facts Rust greys items out from, and every fact here is
- * one an item depends on — a wrong answer is an item that looks available and
- * does nothing, which is the failure the whole arrangement exists to prevent.
+ * **What is clickable.** `describeMenuState` turns the stores into the facts
+ * Rust greys items out from, and every fact here is one an item depends on — a
+ * wrong answer is an item that looks available and does nothing, which is the
+ * failure the whole arrangement exists to prevent. What the bar then *looks*
+ * like is `components/MenuBar.test.tsx`; this file is the state it is drawn
+ * from and the actions it runs.
  *
  * **Whether the app may close.** Closing is guarded exactly like New and Open,
  * and the guard's third answer is the one that matters: "Save" only lets the
@@ -18,10 +19,13 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { useProjectStore } from "@/modules/project/store";
 import { useTimelineStore } from "@/modules/timeline/store";
 import {
+  acceleratorAction,
   answerCloseRequest,
   currentMenuState,
   describeMenuState,
+  installMenu,
   MENU_IDS,
+  RUST_OWNED_IDS,
   runMenuAction,
   sameMenuState,
 } from "@/modules/workspace/lib/menu";
@@ -465,3 +469,160 @@ describe("an item whose state has moved on since the menu opened", () => {
     expect(ipc.unhandled).toEqual([]);
   });
 });
+
+describe("an item Rust owns", () => {
+  it("goes back over the boundary rather than being guessed at here", async () => {
+    // Quitting, and three things that open something outside the app. None of
+    // them is possible from a webview, and none of them is in `runMenuAction`'s
+    // switch — a branch here would be a second, silently different answer to
+    // "who runs this".
+    ipc.handle("workspace_menu_run", null);
+
+    for (const id of RUST_OWNED_IDS) {
+      runMenuAction(id, HANDLERS);
+    }
+    await settle();
+
+    expect(ipc.calls("workspace_menu_run")).toEqual(RUST_OWNED_IDS.map((id) => ({ id })));
+  });
+
+  it("is exactly the four the About box, the logs, the docs and Quit need", () => {
+    // `menu::is_ours` on the Rust side is the same list and has its own test.
+    // An id in neither list is an item that does nothing at all.
+    expect([...RUST_OWNED_IDS].sort()).toEqual(
+      [MENU_IDS.quit, MENU_IDS.logs, MENU_IDS.docs, MENU_IDS.about].sort(),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The keys the bar used to own alone
+// ---------------------------------------------------------------------------
+
+describe("the accelerators nothing else in the app binds", () => {
+  const press = (key: string, modifiers: Partial<KeyboardEventInit> = {}) =>
+    acceleratorAction(new KeyboardEvent("keydown", { key, ctrlKey: true, ...modifiers }));
+
+  it("routes the five the native menu used to swallow", () => {
+    expect(press("i")).toBe(MENU_IDS.importMedia);
+    expect(press("q")).toBe(MENU_IDS.quit);
+    expect(press("=")).toBe(MENU_IDS.zoomIn);
+    expect(press("-")).toBe(MENU_IDS.zoomOut);
+    expect(press("0")).toBe(MENU_IDS.zoomFit);
+    // `+` is what a shifted `=` reports, and it is what people press for
+    // "zoom in" without thinking about it.
+    expect(press("+", { shiftKey: true })).toBe(MENU_IDS.zoomIn);
+  });
+
+  it("claims nothing that another handler already binds", () => {
+    // Every one of these has an owner next to the thing it acts on — the
+    // timeline binds the clipboard four and undo, the preview binds F, App
+    // binds save and export. Two handlers claiming a key both fire.
+    for (const key of ["c", "x", "v", "d", "a", "z", "y", "s", "n", "o", "e"]) {
+      expect(press(key)).toBeNull();
+    }
+  });
+
+  it("ignores a bare key, and lets Alt and Ctrl+Shift+I past", () => {
+    expect(acceleratorAction(new KeyboardEvent("keydown", { key: "i" }))).toBeNull();
+    expect(press("i", { altKey: true })).toBeNull();
+    // Ctrl+Shift+I is the inspector on every desktop webview.
+    expect(press("i", { shiftKey: true })).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Keeping the drawn bar in step
+// ---------------------------------------------------------------------------
+
+describe("the bar Rust hands back", () => {
+  const BAR = [
+    {
+      title: "File",
+      entries: [
+        {
+          kind: "item" as const,
+          id: MENU_IDS.save,
+          label: "Save",
+          accelerator: "Ctrl+S",
+          enabled: true,
+          unavailable_reason: null,
+        },
+      ],
+    },
+  ];
+
+  it("is asked for from the current state and given to whoever draws it", async () => {
+    ipc.handle("workspace_menu_describe", BAR);
+    const drawn: unknown[] = [];
+
+    const stop = installMenu((sections) => drawn.push(sections));
+    await settle();
+    stop();
+
+    expect(ipc.lastCall("workspace_menu_describe")).toEqual({ state: currentMenuState() });
+    expect(drawn).toEqual([BAR]);
+  });
+
+  it("is asked for again when the document changes, and not when it has not", async () => {
+    ipc.handle("workspace_menu_describe", BAR);
+    const stop = installMenu(() => {});
+    await settle();
+    expect(ipc.count("workspace_menu_describe")).toBe(1);
+
+    // A pointer move over the lanes writes the playhead many times a second and
+    // none of it changes a single item. Without the comparison this would be an
+    // IPC round trip per frame.
+    useTimelineStore.setState({ playhead: 10 });
+    useTimelineStore.setState({ playhead: 20 });
+    await settle();
+    expect(ipc.count("workspace_menu_describe")).toBe(1);
+
+    useProjectStore.setState({ project: PROJECT, dirty: true });
+    await settle();
+    expect(ipc.count("workspace_menu_describe")).toBe(2);
+
+    stop();
+  });
+
+  it("keeps the last bar it drew when the round trip fails", async () => {
+    ipc.handle("workspace_menu_describe", BAR);
+    const drawn: unknown[] = [];
+    const stop = installMenu((sections) => drawn.push(sections));
+    await settle();
+
+    ipc.fail("workspace_menu_describe", "the engine is busy");
+    useProjectStore.setState({ project: PROJECT, dirty: true });
+    await settle();
+
+    // An empty menu bar looks like the app has lost its menus. A slightly stale
+    // one still opens, and every item in it also has a button or a key.
+    expect(drawn).toEqual([BAR]);
+
+    // And the failed state is not remembered as drawn, so the next change asks
+    // again rather than deduplicating against a bar that was never shown.
+    ipc.handle("workspace_menu_describe", BAR);
+    useProjectStore.setState({ dirty: false });
+    await settle();
+    expect(drawn).toEqual([BAR, BAR]);
+
+    stop();
+  });
+
+  it("stops asking once it is torn down", async () => {
+    ipc.handle("workspace_menu_describe", BAR);
+    const stop = installMenu(() => {});
+    await settle();
+    stop();
+
+    useProjectStore.setState({ project: PROJECT, dirty: true });
+    await settle();
+
+    expect(ipc.count("workspace_menu_describe")).toBe(1);
+  });
+});
+
+/** Let every promise the call chain queued resolve. */
+function settle(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}

@@ -1,4 +1,4 @@
-//! The native menu bar.
+//! What the menu bar offers, and what decides whether an item can be clicked.
 //!
 //! One rule holds this module together: **an item you can click does
 //! something.** Everything the bar offers is either wired to working code or
@@ -8,45 +8,53 @@
 //! an item without deciding that is not possible, because [`Gate`] has no
 //! default.
 //!
+//! ## The bar is drawn in the webview; it is still decided here
+//!
+//! Until this module was rewritten the bar was a real `tauri::menu::Menu` — a
+//! GTK widget the *desktop* drew. That is exactly why it went: no token in
+//! `src/styles/globals.css` could reach it, so it kept the machine's own colours
+//! whatever the app's theme was, and looked foreign on every machine with a
+//! different GTK theme. What was deleted is the widget. The table below and the
+//! pure [`enablement`] mapping over it were not: they are still the single
+//! answer to "why is Save grey". [`describe`] hands the whole thing to the
+//! webview — titles, labels, accelerators, enabled flags, reasons — so
+//! `src/modules/workspace/components/MenuBar.tsx` renders what this file says
+//! and decides nothing of its own.
+//!
 //! ## Where the enabled state comes from
 //!
 //! The frontend's Zustand stores are the only authority on document state —
 //! whether anything is open, whether it is dirty, whether the undo stack has
 //! anything on it. Rust does not keep a second copy and does not infer one. The
-//! webview pushes a [`MenuState`] through `workspace_menu_sync` whenever those
-//! facts change, and [`enablement`] maps that state onto the bar. The mapping
-//! is a pure function so it can be tested without a GUI, which is the whole
-//! reason it is a table and not a pile of `if` statements in the builder.
+//! webview pushes a [`MenuState`] through `workspace_menu_describe` whenever
+//! those facts change and gets the drawn bar back. The mapping is a pure
+//! function so it can be tested without a GUI, which is the whole reason it is a
+//! table and not a pile of `if` statements in a builder.
 //!
-//! ## Accelerators, and the two we deliberately do not register
+//! ## Accelerators are advertised here and bound in the webview
 //!
-//! On GTK a menu accelerator is an entry in the window's `GtkAccelGroup`, and
-//! `gtk_window_key_press_event` consults the accel group *before* it propagates
-//! the key to the focused widget. A bare-letter accelerator therefore shadows
-//! typing: registering `C` for Split Clip would mean the letter `c` never
-//! reaches a text field again, and `Delete` would stop deleting characters.
-//! Both of those keys are already bound by the timeline, so the menu shows them
-//! in its label — `Split Clip (C)` — and does not claim them. The binding that
-//! already exists wins; the menu only advertises it.
+//! [`Item::accelerator`] is what gets *printed* down the right-hand side of a
+//! menu — `Ctrl+S`, `Del`, `C`. Nothing in Rust binds a key any more. The
+//! handlers live next to the code they drive (`Timeline.tsx`, `Preview.tsx`,
+//! `App.tsx`), which is where a shortcut belongs, and
+//! `workspace/lib/menu.ts::acceleratorAction` picks up the handful the bar used
+//! to own alone.
 //!
-//! The clipboard items are the same story one step further on. While they were
-//! permanently disabled they could safely carry `Ctrl+X`/`C`/`V`/`A`, because
-//! GTK's `gtk_widget_can_activate_accel` refuses to activate an insensitive
-//! widget and reports the key as unhandled — so it fell through to the webview
-//! and text editing kept working. **Now that they are clickable, that is no
-//! longer true**: an enabled item with `Ctrl+C` in the accel group takes the key
-//! away from every text field in the app, and "copy" stops working in the
-//! project name box the moment a clip is selected. So the four of them are shown
-//! and not claimed, exactly like `Del` and `C`: the timeline binds them in the
-//! webview, where the handler already declines to act when the focus is in a
-//! field, and the menu only advertises the key in its label.
+//! While the bar was native it could not have been otherwise. A GTK accelerator
+//! is an entry in the window's `GtkAccelGroup`, and `gtk_window_key_press_event`
+//! consults it *before* propagating the key to the focused widget, so an enabled
+//! Edit → Copy carrying `Ctrl+C` took the key away from every text field in the
+//! app — and a bare `C` for Split Clip stopped the letter reaching a text field
+//! at all. That trap died with the widget (`docs/STATUS.md` says so under
+//! "Traps"), and the arrangement it forced is kept because it turned out to be
+//! the right one anyway: one binding per key, next to what it does, and a menu
+//! that advertises rather than competes.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
-use tauri::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 use super::paths;
@@ -84,9 +92,6 @@ pub mod ids {
     pub const HELP_SHORTCUTS: &str = "help.shortcuts";
     pub const HELP_DOCS: &str = "help.docs";
 }
-
-/// The event the webview listens on. One payload field, the item id.
-pub const MENU_ACTION_EVENT: &str = "menu://action";
 
 /// Raised for both File → Quit and the window's close button, because they are
 /// the same action and must be guarded the same way.
@@ -178,9 +183,16 @@ pub enum Gate {
 
 pub struct Item {
     pub id: &'static str,
+    /// The words on the item, and nothing else. The key goes in
+    /// [`Item::accelerator`] and is drawn in its own column, so a label that
+    /// repeats it — `Copy (Ctrl+C)`, which is what the native bar had to do —
+    /// would print the key twice.
     pub label: &'static str,
-    /// muda accelerator syntax. `None` where the key is bare and would shadow
-    /// typing — see the module docs.
+    /// The key printed down the right-hand side of the menu, written the way it
+    /// is written on a keyboard: `Ctrl+S`, `Ctrl+Shift+Z`, `Del`, `C`.
+    ///
+    /// Advertised, not bound. Nothing in Rust registers a key; see the module
+    /// docs for where the handler actually lives.
     pub accelerator: Option<&'static str>,
     pub gate: Gate,
 }
@@ -211,62 +223,54 @@ pub const ITEMS: &[MenuSection] = &[
     MenuSection {
         title: "File",
         entries: &[
-            item(ids::FILE_NEW, "New Project", Some("CmdOrCtrl+N"), Gate::Always),
-            item(ids::FILE_OPEN, "Open Project…", Some("CmdOrCtrl+O"), Gate::Always),
+            item(ids::FILE_NEW, "New Project", Some("Ctrl+N"), Gate::Always),
+            item(ids::FILE_OPEN, "Open Project…", Some("Ctrl+O"), Gate::Always),
             Entry::Separator,
             // Greyed when there is nothing to write. A Save that is a no-op
             // still teaches the user that Save sometimes does nothing.
-            item(ids::FILE_SAVE, "Save", Some("CmdOrCtrl+S"), Gate::State(|s| s.has_project && s.dirty)),
-            item(ids::FILE_SAVE_AS, "Save As…", Some("CmdOrCtrl+Shift+S"), Gate::State(|s| s.has_project)),
+            item(ids::FILE_SAVE, "Save", Some("Ctrl+S"), Gate::State(|s| s.has_project && s.dirty)),
+            item(ids::FILE_SAVE_AS, "Save As…", Some("Ctrl+Shift+S"), Gate::State(|s| s.has_project)),
             Entry::Separator,
-            item(ids::FILE_IMPORT, "Import Media…", Some("CmdOrCtrl+I"), Gate::State(|s| s.has_project)),
-            item(ids::FILE_EXPORT, "Export…", Some("CmdOrCtrl+E"), Gate::State(|s| s.has_project)),
+            item(ids::FILE_IMPORT, "Import Media…", Some("Ctrl+I"), Gate::State(|s| s.has_project)),
+            item(ids::FILE_EXPORT, "Export…", Some("Ctrl+E"), Gate::State(|s| s.has_project)),
             Entry::Separator,
-            item(ids::FILE_QUIT, "Quit", Some("CmdOrCtrl+Q"), Gate::Always),
+            item(ids::FILE_QUIT, "Quit", Some("Ctrl+Q"), Gate::Always),
         ],
     },
     MenuSection {
         title: "Edit",
         entries: &[
-            item(ids::EDIT_UNDO, "Undo", Some("CmdOrCtrl+Z"), Gate::State(|s| s.can_undo)),
-            item(ids::EDIT_REDO, "Redo", Some("CmdOrCtrl+Shift+Z"), Gate::State(|s| s.can_redo)),
+            item(ids::EDIT_UNDO, "Undo", Some("Ctrl+Z"), Gate::State(|s| s.can_undo)),
+            item(ids::EDIT_REDO, "Redo", Some("Ctrl+Shift+Z"), Gate::State(|s| s.can_redo)),
             Entry::Separator,
             // The clipboard holds detached clips and lives in the webview, so
             // Cut and Copy need something selected and Paste needs something
-            // copied. None of the four claims its accelerator: an enabled GTK
-            // item would take Ctrl+C away from every text field in the app. The
-            // timeline binds them and the label advertises them; see the
-            // module docs.
-            item(ids::EDIT_CUT, "Cut (Ctrl+X)", None, Gate::State(|s| s.has_selection)),
-            item(ids::EDIT_COPY, "Copy (Ctrl+C)", None, Gate::State(|s| s.has_selection)),
-            item(ids::EDIT_PASTE, "Paste (Ctrl+V)", None, Gate::State(|s| s.has_project && s.has_clipboard)),
-            item(ids::EDIT_DUPLICATE, "Duplicate (Ctrl+D)", None, Gate::State(|s| s.has_selection)),
+            // copied.
+            item(ids::EDIT_CUT, "Cut", Some("Ctrl+X"), Gate::State(|s| s.has_selection)),
+            item(ids::EDIT_COPY, "Copy", Some("Ctrl+C"), Gate::State(|s| s.has_selection)),
+            item(ids::EDIT_PASTE, "Paste", Some("Ctrl+V"), Gate::State(|s| s.has_project && s.has_clipboard)),
+            item(ids::EDIT_DUPLICATE, "Duplicate", Some("Ctrl+D"), Gate::State(|s| s.has_selection)),
             Entry::Separator,
-            // Del and C are the timeline's own bindings and are shown, not
-            // claimed. Registering them would stop both keys reaching a text
-            // field. See the module docs.
-            item(ids::EDIT_DELETE, "Delete Clip (Del)", None, Gate::State(|s| s.has_selection)),
+            item(ids::EDIT_DELETE, "Delete Clip", Some("Del"), Gate::State(|s| s.has_selection)),
             item(
                 ids::EDIT_SELECT_ALL,
-                "Select All (Ctrl+A)",
-                None,
+                "Select All",
+                Some("Ctrl+A"),
                 // Not `has_project` alone: selecting everything on an empty
                 // timeline lights up Delete and Copy for a selection of nothing.
                 Gate::State(|s| s.has_project && s.has_clips),
             ),
-            item(ids::EDIT_SPLIT, "Split Clip (C)", None, Gate::State(|s| s.can_split)),
+            item(ids::EDIT_SPLIT, "Split Clip", Some("C"), Gate::State(|s| s.can_split)),
         ],
     },
     MenuSection {
         title: "View",
         entries: &[
-            item(ids::VIEW_ZOOM_IN, "Zoom In", Some("CmdOrCtrl+="), Gate::State(|s| s.has_project)),
-            item(ids::VIEW_ZOOM_OUT, "Zoom Out", Some("CmdOrCtrl+-"), Gate::State(|s| s.has_project)),
-            item(ids::VIEW_ZOOM_FIT, "Fit Timeline", Some("CmdOrCtrl+0"), Gate::State(|s| s.can_fit)),
+            item(ids::VIEW_ZOOM_IN, "Zoom In", Some("Ctrl+="), Gate::State(|s| s.has_project)),
+            item(ids::VIEW_ZOOM_OUT, "Zoom Out", Some("Ctrl+-"), Gate::State(|s| s.has_project)),
+            item(ids::VIEW_ZOOM_FIT, "Fit Timeline", Some("Ctrl+0"), Gate::State(|s| s.can_fit)),
             Entry::Separator,
-            // F is the preview's binding and is shown rather than claimed; the
-            // action itself is real window fullscreen either way.
-            item(ids::VIEW_FULLSCREEN, "Toggle Fullscreen (F)", None, Gate::Always),
+            item(ids::VIEW_FULLSCREEN, "Toggle Fullscreen", Some("F"), Gate::Always),
             item(ids::VIEW_LOGS, "Show Log Directory", None, Gate::Capability(|c| c.logs)),
         ],
     },
@@ -274,7 +278,7 @@ pub const ITEMS: &[MenuSection] = &[
         title: "Help",
         entries: &[
             item(ids::HELP_ABOUT, "About chukcut", None, Gate::Always),
-            item(ids::HELP_SHORTCUTS, "Keyboard Shortcuts", None, Gate::Always),
+            item(ids::HELP_SHORTCUTS, "Keyboard Shortcuts", Some("?"), Gate::Always),
             // The docs are markdown in the repository. There is no published
             // copy and nothing is bundled into the app, so this can only be
             // offered from a source checkout.
@@ -324,106 +328,106 @@ pub fn enablement(state: &MenuState, capabilities: &Capabilities) -> BTreeMap<&'
 }
 
 // ---------------------------------------------------------------------------
-// Building and updating
+// The bar, as the webview draws it
 // ---------------------------------------------------------------------------
 
-/// The live items, kept so an update is one call per item rather than a
-/// recursive walk of the bar. `Menu::get` only looks at the top level, and
-/// every one of our items is a level below that.
-pub struct MenuHandles<R: Runtime> {
-    items: BTreeMap<&'static str, MenuItem<R>>,
+/// One item, resolved against a state. Everything `MenuBar.tsx` needs to draw a
+/// row and nothing it needs to decide.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ItemView {
+    pub id: &'static str,
+    pub label: &'static str,
+    /// Printed in its own column on the right. `null` for an item with no key.
+    pub accelerator: Option<&'static str>,
+    pub enabled: bool,
+    /// Why this item can *never* be enabled, when the answer is "the feature
+    /// does not exist". `null` for everything that is merely unavailable right
+    /// now — the state around it already explains those, and prose on Save
+    /// saying "no unsaved changes" would be noise on every second render.
+    ///
+    /// The webview puts it in the item's `title` and in its accessible
+    /// description, which is the whole reason it crosses: a greyed item with no
+    /// reason is indistinguishable from a broken one.
+    pub unavailable_reason: Option<&'static str>,
 }
 
-impl<R: Runtime> MenuHandles<R> {
-    fn set_enabled(&self, id: &str, enabled: bool) {
-        if let Some(item) = self.items.get(id) {
-            if let Err(error) = item.set_enabled(enabled) {
-                tracing::warn!(%error, id, "could not update a menu item");
-            }
-        }
-    }
-}
-
-/// Build the bar and register the handles for later updates.
+/// An item or the rule between two groups of them.
 ///
-/// The initial state is "nothing is open", which is true at launch: the
-/// frontend has not asked Rust what it has yet. The first
-/// `workspace_menu_sync` corrects it a few milliseconds later.
-pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
-    let capabilities = Capabilities::probe();
-    let initial = MenuState::default();
-    let enabled = enablement(&initial, &capabilities);
-
-    let mut handles: BTreeMap<&'static str, MenuItem<R>> = BTreeMap::new();
-    let menu = Menu::new(app)?;
-
-    for section in ITEMS {
-        let submenu = Submenu::new(app, section.title, true)?;
-        for entry in section.entries {
-            match entry {
-                Entry::Separator => submenu.append(&PredefinedMenuItem::separator(app)?)?,
-                Entry::Item(spec) => {
-                    let built = MenuItem::with_id(
-                        app,
-                        spec.id,
-                        spec.label,
-                        enabled.get(spec.id).copied().unwrap_or(false),
-                        spec.accelerator,
-                    )?;
-                    submenu.append(&built)?;
-                    handles.insert(spec.id, built);
-                }
-            }
-        }
-        menu.append(&submenu)?;
-    }
-
-    // `manage` answers whether this was the first one. A second call would mean
-    // the bar was built twice, which nothing does.
-    let _ = app.manage(MenuHandles { items: handles });
-    Ok(menu)
+/// Internally tagged so the TypeScript side can discriminate on `kind` without
+/// a wrapper object; see `src/modules/workspace/types.ts`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum EntryView {
+    Item(ItemView),
+    Separator,
 }
 
-/// Push the frontend's view of the world onto the bar.
-pub fn apply<R: Runtime>(app: &AppHandle<R>, state: &MenuState) {
-    let Some(handles) = app.try_state::<MenuHandles<R>>() else {
-        // No menu was built — a headless test, or a platform where the bar was
-        // not installed. Not an error, and not worth a message.
-        return;
-    };
-    for (id, enabled) in enablement(state, &Capabilities::probe()) {
-        handles.set_enabled(id, enabled);
-    }
+/// One top-level menu, in the order it is drawn.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SectionView {
+    pub title: &'static str,
+    pub entries: Vec<EntryView>,
 }
 
-// ---------------------------------------------------------------------------
-// Events
-// ---------------------------------------------------------------------------
-
-/// What the webview is told when an item is clicked.
-#[derive(Debug, Clone, Serialize)]
-pub struct MenuAction {
-    pub id: String,
-}
-
-/// Route a click.
+/// The whole bar, resolved against what the document and the machine can do.
 ///
-/// Most items belong to the frontend, because that is where the document, the
-/// dialogs and the file pickers live. The handful Rust owns are the ones that
-/// are about the machine rather than the document.
-pub fn handle_event<R: Runtime>(app: &AppHandle<R>, event: MenuEvent) {
-    let id = event.id().0.as_str();
+/// This is the *only* thing that crosses to the webview about the menu's shape.
+/// Sending the structure rather than only the enabled flags is deliberate: it
+/// leaves exactly one table in the codebase, so an item cannot be added to the
+/// bar in TypeScript without a gate, which is the property [`Gate`] exists to
+/// enforce.
+pub fn describe(state: &MenuState, capabilities: &Capabilities) -> Vec<SectionView> {
+    let enabled = enablement(state, capabilities);
+    ITEMS
+        .iter()
+        .map(|section| SectionView {
+            title: section.title,
+            entries: section
+                .entries
+                .iter()
+                .map(|entry| match entry {
+                    Entry::Separator => EntryView::Separator,
+                    Entry::Item(item) => EntryView::Item(ItemView {
+                        id: item.id,
+                        label: item.label,
+                        accelerator: item.accelerator,
+                        enabled: enabled.get(item.id).copied().unwrap_or(false),
+                        unavailable_reason: unavailable_reason(item.id),
+                    }),
+                })
+                .collect(),
+        })
+        .collect()
+}
 
+// ---------------------------------------------------------------------------
+// The items Rust runs itself
+// ---------------------------------------------------------------------------
+
+/// Whether an id is one the machine owns rather than the document.
+///
+/// The webview asks Rust to run exactly these four and does the rest itself,
+/// because the rest is about a document, a dialog or a file picker — all of
+/// which live in the webview. Split out from [`run`] so the routing can be
+/// checked without an `AppHandle`.
+pub fn is_ours(id: &str) -> bool {
+    matches!(
+        id,
+        ids::FILE_QUIT | ids::VIEW_LOGS | ids::HELP_DOCS | ids::HELP_ABOUT
+    )
+}
+
+/// Do what one of Rust's own items says.
+pub fn run<R: Runtime>(app: &AppHandle<R>, id: &str) {
     match id {
         ids::FILE_QUIT => request_close(app),
         ids::VIEW_LOGS => reveal(log_directory(), "log directory"),
         ids::HELP_DOCS => reveal(docs_directory(), "documentation"),
         ids::HELP_ABOUT => show_about(app),
-        _ => {
-            if let Err(error) = app.emit(MENU_ACTION_EVENT, MenuAction { id: id.to_string() }) {
-                tracing::warn!(%error, id, "could not deliver a menu action to the webview");
-            }
-        }
+        // The webview decides what it can run and asks for the rest, so this is
+        // the two halves disagreeing about which of them owns an id — a bug in
+        // `workspace/lib/menu.ts`, and silence would hide it.
+        _ => tracing::warn!(id, "the webview asked Rust to run a menu item Rust does not own"),
     }
 }
 
@@ -803,46 +807,120 @@ mod tests {
     }
 
     #[test]
-    fn keys_the_app_already_binds_are_shown_and_not_claimed() {
-        // Registering these as accelerators would take the key away from every
-        // text field in the app; see the module docs. That is obvious for the
-        // bare keys and easy to get wrong for the clipboard four, which carried
-        // Ctrl+X/C/V/A safely for exactly as long as they were disabled. The
-        // guard is that the label says what the key is and the accelerator
-        // stays empty.
-        for id in [
-            ids::EDIT_DELETE,
-            ids::EDIT_SPLIT,
-            ids::VIEW_FULLSCREEN,
-            ids::EDIT_CUT,
-            ids::EDIT_COPY,
-            ids::EDIT_PASTE,
-            ids::EDIT_DUPLICATE,
-            ids::EDIT_SELECT_ALL,
+    fn every_key_the_app_binds_is_advertised_by_the_item_that_shares_it() {
+        // These are bound in the webview — the timeline's own `keydown` handler
+        // and the preview's — and the bar's job is to be the place a user finds
+        // out. While the bar was a GTK widget none of them could carry an
+        // accelerator at all (the accel group swallows the key before a text
+        // field sees it), so the label had to say `Copy (Ctrl+C)` instead. The
+        // widget is gone; the advertisement is not.
+        for (id, key) in [
+            (ids::EDIT_CUT, "Ctrl+X"),
+            (ids::EDIT_COPY, "Ctrl+C"),
+            (ids::EDIT_PASTE, "Ctrl+V"),
+            (ids::EDIT_DUPLICATE, "Ctrl+D"),
+            (ids::EDIT_SELECT_ALL, "Ctrl+A"),
+            (ids::EDIT_DELETE, "Del"),
+            (ids::EDIT_SPLIT, "C"),
+            (ids::VIEW_FULLSCREEN, "F"),
+            (ids::EDIT_UNDO, "Ctrl+Z"),
+            (ids::EDIT_REDO, "Ctrl+Shift+Z"),
         ] {
             let item = all_items().find(|item| item.id == id).unwrap();
+            assert_eq!(item.accelerator, Some(key), "{id} advertises the wrong key");
+        }
+    }
+
+    #[test]
+    fn a_label_never_repeats_its_own_accelerator() {
+        // The key has its own column now. `Copy (Ctrl+C)` — which is what the
+        // native bar was reduced to — would print it twice.
+        for item in all_items() {
             assert!(
-                item.accelerator.is_none(),
-                "{id} must not register a bare-key accelerator"
-            );
-            assert!(
-                item.label.contains('('),
-                "{id} must show the key it does not claim"
+                !item.label.contains('('),
+                "{} spells its key into the label: {:?}",
+                item.id,
+                item.label
             );
         }
     }
 
     #[test]
-    fn every_accelerator_carries_a_modifier() {
-        for item in all_items() {
-            let Some(accelerator) = item.accelerator else {
-                continue;
-            };
-            assert!(
-                accelerator.contains('+'),
-                "{} binds {accelerator}, which would shadow typing",
-                item.id
-            );
+    fn the_drawn_bar_is_the_table_with_the_enabled_flags_filled_in() {
+        let state = everything();
+        let capabilities = Capabilities::default();
+        let sections = describe(&state, &capabilities);
+        let decided = enablement(&state, &capabilities);
+
+        assert_eq!(
+            sections.iter().map(|s| s.title).collect::<Vec<_>>(),
+            ITEMS.iter().map(|s| s.title).collect::<Vec<_>>()
+        );
+
+        let mut drawn = 0;
+        for (section, source) in sections.iter().zip(ITEMS) {
+            assert_eq!(section.entries.len(), source.entries.len());
+            for (entry, origin) in section.entries.iter().zip(source.entries) {
+                match (entry, origin) {
+                    (EntryView::Separator, Entry::Separator) => {}
+                    (EntryView::Item(view), Entry::Item(item)) => {
+                        drawn += 1;
+                        assert_eq!(view.id, item.id);
+                        assert_eq!(view.label, item.label);
+                        assert_eq!(view.accelerator, item.accelerator);
+                        // The point of the whole arrangement: the webview is
+                        // told, never asked to work it out.
+                        assert_eq!(view.enabled, decided[item.id], "{} is drawn wrong", item.id);
+                    }
+                    _ => panic!("the drawn bar and the table disagree about a separator"),
+                }
+            }
+        }
+        assert_eq!(drawn, all_items().count());
+    }
+
+    #[test]
+    fn a_greyed_item_is_drawn_greyed() {
+        // The same table, two states, and the flag has to follow the document
+        // rather than the order the sections happen to be in.
+        let closed = describe(&MenuState::default(), &Capabilities::default());
+        let open = describe(&everything(), &Capabilities::default());
+
+        let find = |sections: &[SectionView], id: &str| -> ItemView {
+            sections
+                .iter()
+                .flat_map(|section| section.entries.iter())
+                .find_map(|entry| match entry {
+                    EntryView::Item(view) if view.id == id => Some(view.clone()),
+                    _ => None,
+                })
+                .expect("the id is in the bar")
+        };
+
+        assert!(!find(&closed, ids::FILE_SAVE).enabled);
+        assert!(find(&open, ids::FILE_SAVE).enabled);
+        assert!(find(&closed, ids::FILE_NEW).enabled);
+    }
+
+    #[test]
+    fn only_the_machines_own_items_are_run_in_rust() {
+        // Everything else needs the document, a dialog or a file picker, all of
+        // which are in the webview. The two halves splitting the list
+        // differently is exactly the bug `run`'s fallback warns about.
+        for id in [ids::FILE_QUIT, ids::VIEW_LOGS, ids::HELP_DOCS, ids::HELP_ABOUT] {
+            assert!(is_ours(id), "{id} is Rust's to run");
+        }
+        for id in [
+            ids::FILE_NEW,
+            ids::FILE_SAVE,
+            ids::FILE_EXPORT,
+            ids::EDIT_UNDO,
+            ids::EDIT_SPLIT,
+            ids::VIEW_ZOOM_FIT,
+            ids::VIEW_FULLSCREEN,
+            ids::HELP_SHORTCUTS,
+        ] {
+            assert!(!is_ours(id), "{id} belongs to the webview");
         }
     }
 }

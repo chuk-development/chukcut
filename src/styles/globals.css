@@ -43,6 +43,34 @@
   --input: oklch(1 0 0 / 14%);
   --ring: oklch(0.62 0.19 264);
 
+  /* ------------------------------------------------------------------------
+   * The title strip and the menu bar.
+   *
+   * **Designers: this block is the whole surface.** The window has no
+   * decorations — we draw the strip, the menus and the minimise/maximise/close
+   * buttons ourselves — and nothing in `TitleBar.tsx`, `MenuBar.tsx` or
+   * `WindowControls.tsx` carries a colour, a height or a radius of its own.
+   * Change these seven values and the bar changes with the rest of the app;
+   * that is the entire reason the native GTK menu was thrown away.
+   *
+   * The dropdowns themselves are ordinary shadcn menus, so they follow
+   * `--popover`, `--accent` and `--border` along with every other menu in the
+   * editor rather than having a palette of their own.
+   * --------------------------------------------------------------------- */
+  --titlebar: oklch(0.185 0 0);
+  --titlebar-foreground: oklch(0.92 0 0);
+  /* The height of the strip. Also the size of a window-control button, which
+   * is why they are square without either measurement being written twice. */
+  --titlebar-height: 2rem;
+  --titlebar-radius: calc(var(--radius) - 4px);
+  /* Hover and open-menu fills. Both are lifts on whatever is underneath rather
+   * than fixed greys, so a light theme does not need a second set. */
+  --titlebar-hover: oklch(1 0 0 / 8%);
+  --titlebar-active: oklch(1 0 0 / 14%);
+  /* The close button, and only on hover: a permanently red X in the corner of
+   * an editor reads as an error state. */
+  --titlebar-close: oklch(0.62 0.21 25);
+
   /* What surrounds the picture in fullscreen. Black rather than a panel grey on
    * purpose: the whole point of fullscreen is judging the image, and a lifted
    * surround pulls the perceived black level of the frame up with it. */
@@ -120,6 +148,15 @@
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
+
+  --color-titlebar: var(--titlebar);
+  --color-titlebar-foreground: var(--titlebar-foreground);
+  --color-titlebar-hover: var(--titlebar-hover);
+  --color-titlebar-active: var(--titlebar-active);
+  --color-titlebar-close: var(--titlebar-close);
+  /* `h-titlebar` and `size-titlebar`, so the strip's height is written once. */
+  --spacing-titlebar: var(--titlebar-height);
+  --radius-titlebar: var(--titlebar-radius);
 
   --color-preview-letterbox: var(--preview-letterbox);
 

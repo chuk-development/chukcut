@@ -59,6 +59,11 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
       { keys: mod("Q"), description: "Quit", note: "Asks before discarding unsaved work" },
       { keys: mod(","), description: "Settings" },
       { keys: "?", description: "This list", note: "F1 does the same" },
+      {
+        keys: "Alt",
+        description: "Open the menu bar",
+        note: "Then ← → between menus, ↑ ↓ inside one",
+      },
     ],
   },
   {
