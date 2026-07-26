@@ -315,6 +315,37 @@ export function linkedPartners(project: Project, segmentId: Id): Segment[] {
   return partners;
 }
 
+/**
+ * Whether this clip's sound is carried by a *linked* clip on an audio lane
+ * rather than by the clip itself.
+ *
+ * The mirror of `Project::sound_is_on_a_linked_lane` in Rust, and it has to
+ * stay a mirror: there the rule decides whether the mixer plays a clip, here it
+ * decides whether the clip draws a waveform. If the two disagree, the timeline
+ * shows a waveform on a clip that is silent, or hides one on a clip that is
+ * heard — and the second is the worse of the two.
+ *
+ * Importing a file with both streams puts the picture on a video lane and the
+ * sound on an audio lane as one linked pair. Both segments name the same
+ * material, so the video clip would otherwise draw the very waveform the audio
+ * clip below it is already drawing.
+ */
+export function soundIsOnALinkedLane(project: Project, track: Track, segment: Segment): boolean {
+  if (track.kind === "audio") return false;
+  const group = linkGroupOf(project, segment);
+  if (!group) return false;
+  return project.tracks.some(
+    (lane) =>
+      lane.kind === "audio" &&
+      lane.segments.some(
+        (other) =>
+          other.id !== segment.id &&
+          other.material_id === segment.material_id &&
+          other.extras.includes(group),
+      ),
+  );
+}
+
 /** What to write on a clip. Falls back to the material id so a broken reference is visible rather than blank. */
 export function segmentLabel(project: Project, segment: Segment): string {
   const { videos, audios, images, texts } = project.materials;

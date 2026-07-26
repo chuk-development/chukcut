@@ -106,6 +106,12 @@ interface SegmentProps {
    */
   linked: boolean;
   /**
+   * This clip's sound lives on a linked audio lane, so it is heard from there
+   * and drawn there. Suppresses the waveform on this one; see
+   * `soundIsOnALinkedLane`, whose Rust twin decides the matching mixer rule.
+   */
+  soundOnPartnerLane: boolean;
+  /**
    * Several clips are selected and this is one of them, so "Link" is worth
    * offering. It is a property of the selection rather than of the clip, but
    * the clip is where the context menu is.
@@ -146,6 +152,7 @@ function ClipBody({
   muted,
   razor,
   linked,
+  soundOnPartnerLane,
   linkable,
   zoom,
   preview,
@@ -202,7 +209,11 @@ function ClipBody({
     return () => releaseStrip(stripPath);
   }, [stripPath, retainStrip, releaseStrip]);
 
-  const showsWaveform = onScreen && material?.path != null && material.hasAudio;
+  // A clip whose sound was split onto its own linked lane must not draw the
+  // waveform too — the audio clip below is already drawing exactly it, and two
+  // copies of one waveform read as two pieces of audio.
+  const showsWaveform =
+    onScreen && material?.path != null && material.hasAudio && !soundOnPartnerLane;
   const waveformHeight = soundOnly
     ? Math.max(1, height - LABEL_BAND)
     : Math.min(STRIP_WAVEFORM_HEIGHT, Math.max(0, height - LABEL_BAND));

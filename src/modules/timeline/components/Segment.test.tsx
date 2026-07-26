@@ -43,6 +43,7 @@ function renderClip(over: Partial<Parameters<typeof Segment>[0]> = {}) {
       muted={false}
       razor={false}
       linked={false}
+      soundOnPartnerLane={false}
       linkable={false}
       zoom={1e-4}
       preview={null}
@@ -291,6 +292,19 @@ describe("audio on a clip", () => {
     // The slim band along the bottom edge is what makes it possible to cut on a
     // beat without moving the clip to its own lane first.
     expect(document.querySelector('[data-slot="waveform"]')).toBeInTheDocument();
+  });
+
+  it("draws none on a video clip whose sound was split onto a linked lane", () => {
+    // The import now puts the sound on its own audio lane, and that clip draws
+    // the full waveform. Drawing the band here as well shows one waveform
+    // twice, which reads as two pieces of audio — reported as "in der Videospur
+    // ist immer noch die Audiospur zusätzlich zu sehen, also ist sie
+    // dupliziert".
+    renderClip({ soundOnPartnerLane: true });
+
+    expect(document.querySelector('[data-slot="waveform"]')).toBeNull();
+    // The picture is still a picture: only the waveform goes.
+    expect(filmstrip()).toBeInTheDocument();
   });
 
   it("draws none on a video clip with no audio stream", () => {

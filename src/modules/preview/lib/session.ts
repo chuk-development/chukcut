@@ -29,6 +29,7 @@ import {
 import { usePreviewStore } from "@/modules/preview/store";
 import { describeError, useProjectStore } from "@/modules/project/store";
 import type { Micros } from "@/modules/project/types";
+import { projectDuration } from "@/modules/project/types";
 import { useTimelineStore } from "@/modules/timeline/store";
 
 /**
@@ -39,6 +40,14 @@ import { useTimelineStore } from "@/modules/timeline/store";
  * the GPU on frames nobody sees.
  */
 const RESTART_DEBOUNCE_MS = 160;
+
+/**
+ * How close to the end still counts as "at the end" for the rewind in `play`.
+ *
+ * One frame at 24 fps — the slowest rate the editor works at, so it is at least
+ * a whole frame at every other rate too.
+ */
+const END_TOLERANCE: Micros = 41_667;
 
 let starting: Promise<void> | null = null;
 let restartTimer: ReturnType<typeof setTimeout> | null = null;
@@ -144,7 +153,29 @@ export const preview = {
     }
   },
 
+  /**
+   * Start playing, rewinding first if there is nothing left to play.
+   *
+   * A playhead resting on the last frame is the normal state after watching to
+   * the end — and it is also what a restored session comes back with, because
+   * the playhead is saved. Playing from there runs out immediately: Rust dutifully
+   * plays the zero frames that remain and stops, the picture never moves, and
+   * what the user sees is an editor whose play button does nothing. Reported
+   * exactly that way: "Playback ist nicht mehr vorhanden".
+   *
+   * So the end is treated as "play from the top", which is what every player
+   * does. The tolerance is one frame at 24 fps: landing a frame short of the
+   * end is the same intent, and anything larger would rewind a deliberate play
+   * of the last half-second.
+   */
   async play(): Promise<void> {
+    const document = useProjectStore.getState().project;
+    const duration = document ? projectDuration(document) : 0;
+    const playhead = useTimelineStore.getState().playhead;
+    if (duration > 0 && playhead >= duration - END_TOLERANCE) {
+      await preview.seek(0);
+      useTimelineStore.getState().setPlayhead(0);
+    }
     try {
       usePreviewStore.getState().applyInfo(await previewPlay());
     } catch (error) {

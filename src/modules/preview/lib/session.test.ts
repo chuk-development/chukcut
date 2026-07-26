@@ -143,6 +143,63 @@ describe("who moves the playhead", () => {
   });
 });
 
+describe("pressing play at the end", () => {
+  /** A project with something in it, so `projectDuration` is not zero. */
+  async function withClip(): Promise<{ app: Session; duration: number }> {
+    const app = await freshSession();
+    ipc.handle("preview_start", makePreviewInfo({ session: 7 }));
+    ipc.handle("preview_seek", makePreviewInfo({ session: 7 }));
+    ipc.handle("preview_play", makePreviewInfo({ session: 7, playing: true }));
+    const { makeSegment, projectWithSegments, range } = await import("@/test/fixtures");
+    const duration = 5_000_000;
+    app.useProjectStore
+      .getState()
+      .loadProject(projectWithSegments(makeSegment("clip-1", { target_range: range(0, duration) })));
+    await app.preview.ensureStarted();
+    return { app, duration };
+  }
+
+  it("rewinds to the start when the playhead is already at the end", async () => {
+    // The state an editor is in every time the user has watched to the end, and
+    // the state a restored session comes back in. Without the rewind, Rust
+    // plays the zero frames that remain and the picture never moves — which is
+    // indistinguishable from a broken play button.
+    const { app, duration } = await withClip();
+    app.useTimelineStore.getState().setPlayhead(duration);
+
+    await app.preview.play();
+
+    expect(ipc.lastCall("preview_seek")).toEqual({ time: 0 });
+    expect(app.useTimelineStore.getState().playhead).toBe(0);
+    expect(ipc.count("preview_play")).toBe(1);
+  });
+
+  it("rewinds from within one frame of the end, and not from further back", async () => {
+    const { app, duration } = await withClip();
+
+    // A frame short of the end is the same intent.
+    app.useTimelineStore.getState().setPlayhead(duration - 20_000);
+    await app.preview.play();
+    expect(ipc.count("preview_seek")).toBe(1);
+
+    // Half a second of material left is a deliberate play of the tail.
+    app.useTimelineStore.getState().setPlayhead(duration - 500_000);
+    await app.preview.play();
+    expect(ipc.count("preview_seek")).toBe(1);
+    expect(app.useTimelineStore.getState().playhead).toBe(duration - 500_000);
+  });
+
+  it("plays from where it stands in the middle of the timeline", async () => {
+    const { app, duration } = await withClip();
+    app.useTimelineStore.getState().setPlayhead(Math.floor(duration / 2));
+
+    await app.preview.play();
+
+    expect(ipc.count("preview_seek")).toBe(0);
+    expect(app.useTimelineStore.getState().playhead).toBe(Math.floor(duration / 2));
+  });
+});
+
 describe("restarting after an edit", () => {
   it("opens exactly one new session when ten commands arrive in a burst", async () => {
     const app = await started();

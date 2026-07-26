@@ -24,6 +24,7 @@ import {
   projectDuration,
   rangeEnd,
   segmentLabel,
+  soundIsOnALinkedLane,
 } from "@/modules/project/types";
 import { Playhead } from "@/modules/timeline/components/Playhead";
 import { RazorGuide } from "@/modules/timeline/components/RazorGuide";
@@ -1449,6 +1450,7 @@ export function Timeline() {
                           muted={track.muted || segment.volume <= 0}
                           razor={tool === "razor"}
                           linked={linkGroupOf(project, segment) !== null}
+                          soundOnPartnerLane={soundIsOnALinkedLane(project, track, segment)}
                           linkable={selection.length > 1 && selected.has(segment.id)}
                           zoom={zoom}
                           preview={dragging && drag.toTrackId !== track.id ? null : preview}
@@ -1478,6 +1480,7 @@ export function Timeline() {
                         muted={track.muted || external.segment.volume <= 0}
                         razor={false}
                         linked={linkGroupOf(project, external.segment) !== null}
+                        soundOnPartnerLane={soundIsOnALinkedLane(project, track, external.segment)}
                         linkable={false}
                         zoom={zoom}
                         preview={{ start: drag.start, duration: drag.duration }}
