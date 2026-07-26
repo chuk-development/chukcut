@@ -141,6 +141,24 @@ pub enum EditCommand {
         before: Easing,
         after: Easing,
     },
+    /// Put a segment into a link group, or take it out of one.
+    ///
+    /// Linked segments move, trim, split and delete together — see
+    /// [`mirror_linked_edits`] — and this is the only command that changes who
+    /// is linked to whom. It is also the only thing that writes
+    /// `MaterialPool::links`, which is what keeps that set exactly derivable
+    /// from the segments: `after: Some(g)` registers `g` if it is new, and
+    /// `after: None` unregisters it once the segment leaving was the last
+    /// member. Both directions are therefore byte-exact inverses.
+    ///
+    /// One segment per command on purpose. Linking a pair is a `Composite` of
+    /// two, which is one undo step and needs no new variant; a variant that
+    /// took a list would have to decide what a partial failure means.
+    SetLinkGroup {
+        segment_id: String,
+        before: Option<String>,
+        after: Option<String>,
+    },
     /// Several commands that undo as one unit, applied in order.
     Composite {
         label: String,
@@ -332,6 +350,13 @@ impl EditCommand {
             EditCommand::RemoveKeyframe { .. } => "Delete keyframe".into(),
             EditCommand::MoveKeyframe { .. } => "Move keyframe".into(),
             EditCommand::SetKeyframeEasing { .. } => "Change easing".into(),
+            EditCommand::SetLinkGroup { after, .. } => {
+                if after.is_some() {
+                    "Link clips".into()
+                } else {
+                    "Unlink clips".into()
+                }
+            }
             EditCommand::Composite { label, .. } => label.clone(),
         }
     }
@@ -705,6 +730,58 @@ impl EditCommand {
                 Ok(())
             }
 
+            EditCommand::SetLinkGroup {
+                segment_id,
+                before,
+                after,
+            } => {
+                // The `before` is checked rather than trusted. A stale unlink —
+                // the panel's copy of the document is one edit behind, the user
+                // clicks Unlink — would otherwise strip a group the clip joined
+                // in the meantime, and its inverse would put the *old* group
+                // back, which is a link between two clips that were never
+                // linked.
+                let known: Vec<String> = project
+                    .segment(segment_id)
+                    .map(|(_, segment)| {
+                        segment
+                            .extras
+                            .iter()
+                            .filter(|id| project.materials.links.contains(*id))
+                            .cloned()
+                            .collect()
+                    })
+                    .ok_or_else(|| format!("unknown segment {segment_id}"))?;
+                if known.first() != before.as_ref() {
+                    return Err(
+                        "this clip's links changed underneath the edit; try it again".into()
+                    );
+                }
+
+                if let Some(group) = after {
+                    project.materials.links.insert(group.clone());
+                }
+                let group = after.clone();
+                let segment = project.segment_mut(segment_id).expect("segment existed");
+                segment.extras.retain(|id| !known.contains(id));
+                if let Some(group) = group {
+                    segment.extras.push(group);
+                }
+
+                // A group nothing points at any more goes with the last member
+                // that left, so that this command and its inverse are exact
+                // opposites down to the bytes on disk. Note the asymmetry with
+                // `RemoveSegment`, which deliberately does *not* prune: the
+                // segment it took away is coming back on undo still carrying
+                // the id.
+                if let Some(left) = before {
+                    if project.link_members(left).is_empty() {
+                        project.materials.links.remove(left);
+                    }
+                }
+                Ok(())
+            }
+
             EditCommand::Composite { commands, .. } => {
                 for (i, cmd) in commands.iter().enumerate() {
                     if let Err(e) = cmd.apply(project) {
@@ -881,6 +958,15 @@ impl EditCommand {
                 before: *after,
                 after: *before,
             },
+            EditCommand::SetLinkGroup {
+                segment_id,
+                before,
+                after,
+            } => EditCommand::SetLinkGroup {
+                segment_id: segment_id.clone(),
+                before: after.clone(),
+                after: before.clone(),
+            },
             EditCommand::Composite { label, commands } => EditCommand::Composite {
                 label: label.clone(),
                 // Undoing a composite means undoing its parts in reverse.
@@ -895,7 +981,74 @@ impl EditCommand {
 /// Split is not a primitive: it trims the original to end at the cut and
 /// inserts a new segment covering the remainder, pointing at the matching
 /// slice of the same material.
+///
+/// A **linked** clip splits with its partners, and the two new right-hand
+/// halves become a link group of their own — otherwise the four segments would
+/// all carry the original group and dragging the second half of the picture
+/// would drag the first half of the sound with it. The whole thing is one
+/// `Composite`, so it is one undo step.
 pub fn split_at(project: &Project, segment_id: &str, at: Micros) -> Result<EditCommand, String> {
+    let group = project.link_group_of(segment_id).cloned();
+
+    // The named clip first, then its partners in document order, so the
+    // composite a given cut expands into is always the same one.
+    let mut targets = vec![segment_id.to_string()];
+    if let Some(group) = &group {
+        targets.extend(
+            project
+                .link_members(group)
+                .into_iter()
+                .map(|(_, _, segment)| segment.id.clone())
+                .filter(|id| id != segment_id),
+        );
+    }
+
+    let mut commands = Vec::new();
+    let mut right_halves = Vec::new();
+    for (index, target) in targets.iter().enumerate() {
+        let split = match split_one(project, target, at) {
+            Ok(split) => split,
+            // The clip the user aimed at has to cut. A partner the cut misses —
+            // only reachable from a hand-edited file, since a linked pair is
+            // trimmed and moved as one — is left whole rather than taking the
+            // gesture down with it.
+            Err(error) if index == 0 => return Err(error),
+            Err(_) => continue,
+        };
+        right_halves.push(split.right_id);
+        commands.push(split.trim);
+        commands.push(split.insert);
+    }
+
+    // Both halves of a cut pair need a group, and it has to be a new one: the
+    // original stays on the two left halves, which are still each other's
+    // partner.
+    if right_halves.len() > 1 {
+        let fresh = crate::modules::project::new_id();
+        for right in right_halves {
+            commands.push(EditCommand::SetLinkGroup {
+                segment_id: right,
+                before: None,
+                after: Some(fresh.clone()),
+            });
+        }
+    }
+
+    Ok(EditCommand::Composite {
+        label: "Split clip".into(),
+        commands,
+    })
+}
+
+/// One clip's half of a split: the trim that shortens it and the insert that
+/// puts the remainder back.
+struct SplitHalves {
+    trim: EditCommand,
+    insert: EditCommand,
+    right_id: String,
+}
+
+fn split_one(project: &Project, segment_id: &str, at: Micros) -> Result<SplitHalves, String> {
     let (track, segment) = project
         .segment(segment_id)
         .ok_or_else(|| format!("unknown segment {segment_id}"))?;
@@ -930,10 +1083,15 @@ pub fn split_at(project: &Project, segment_id: &str, at: Micros) -> Result<EditC
     // cut edge never has one. This one line is the entire cost of splitting a
     // clip that carries a transition — see `TransitionMaterial` for why the
     // incoming clip owns it rather than the outgoing one.
-    right
-        .extras
-        .retain(|id| project.materials.transition(id).is_none());
+    // The same argument applies to the link group, for a different reason: the
+    // right half is a new clip, and if it kept the group it would be a third
+    // member of a pair. The caller gives the right halves a group of their own
+    // once it knows how many there are.
+    right.extras.retain(|id| {
+        project.materials.transition(id).is_none() && !project.materials.links.contains(id)
+    });
 
+    let right_id = right.id.clone();
     let index = track
         .segments
         .iter()
@@ -941,22 +1099,380 @@ pub fn split_at(project: &Project, segment_id: &str, at: Micros) -> Result<EditC
         .expect("segment is on this track")
         + 1;
 
+    Ok(SplitHalves {
+        trim: EditCommand::TrimSegment {
+            segment_id: segment_id.to_string(),
+            before_target: segment.target_range,
+            before_source: segment.source_range,
+            after_target: left_target,
+            after_source: left_source,
+        },
+        insert: EditCommand::InsertSegment {
+            track_id: track.id.clone(),
+            segment: right,
+            index,
+        },
+        right_id,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Links
+// ---------------------------------------------------------------------------
+
+/// Wrap `command` so that everything linked to what it touches moves with it.
+///
+/// A clip imported with sound is two segments on two lanes, and the promise
+/// they make to the user is that they behave like one: drag either and both
+/// move, trim either and both trim, delete either and both go. The primitives
+/// cannot do that themselves — `MoveSegment` names one segment and has nowhere
+/// to put a second — so the *caller* adds the partners' commands and the whole
+/// thing is one `Composite`. That is one undo step, and undoing it puts both
+/// clips back.
+///
+/// This is the same shape as [`detach_broken_transitions`] and sits next to it
+/// in `History::apply` for the same reason: it is the one place every edit
+/// passes through, so no caller can forget.
+///
+/// Deliberately **not** recursive into a `Composite`. The two composites the
+/// app builds — a split and an import — already know about links and place
+/// their own; mirroring their parts as well would double every command in them.
+pub fn mirror_linked_edits(project: &Project, command: EditCommand) -> EditCommand {
+    let mirrored = mirrored_partners(project, &command);
+    if mirrored.is_empty() {
+        return command;
+    }
+    let label = command.label();
+    let mut commands = vec![command];
+    commands.extend(mirrored);
+    EditCommand::Composite { label, commands }
+}
+
+/// The commands that carry `command` over to everything linked to what it
+/// touches. Empty when nothing is linked, which is the common case.
+///
+/// Split out of [`mirror_linked_edits`] because [`compose_edits`] needs the
+/// same expansion with different bookkeeping: a multi-clip edit has to mirror
+/// each of its parts and then *drop* the mirrors that name a clip the edit
+/// already moves itself.
+fn mirrored_partners(project: &Project, command: &EditCommand) -> Vec<EditCommand> {
+    if project.materials.links.is_empty() {
+        return Vec::new();
+    }
+    match command {
+        EditCommand::MoveSegment {
+            segment_id,
+            to_start,
+            ..
+        } => mirror_move(project, segment_id, *to_start),
+        EditCommand::TrimSegment {
+            segment_id,
+            before_target,
+            after_target,
+            ..
+        } => mirror_trim(project, segment_id, *before_target, *after_target),
+        EditCommand::RemoveSegment { segment, .. } => mirror_remove(project, &segment.id),
+        _ => Vec::new(),
+    }
+}
+
+/// The clip a command is aimed at, for the commands that are aimed at one.
+fn primary_segment(command: &EditCommand) -> Option<&str> {
+    match command {
+        EditCommand::MoveSegment { segment_id, .. }
+        | EditCommand::TrimSegment { segment_id, .. }
+        | EditCommand::SetTransform { segment_id, .. }
+        | EditCommand::SetSpeed { segment_id, .. }
+        | EditCommand::SetVolume { segment_id, .. }
+        | EditCommand::SetLinkGroup { segment_id, .. } => Some(segment_id),
+        EditCommand::RemoveSegment { segment, .. } | EditCommand::InsertSegment { segment, .. } => {
+            Some(&segment.id)
+        }
+        _ => None,
+    }
+}
+
+/// Fold one edit per clip into a single undo step.
+///
+/// This is what a multi-selection produces: the user drags four clips, or
+/// deletes them, and that is *one* thing they did. The parts are ordinary
+/// primitives, so nothing about how an edit applies or inverts changes — what
+/// this adds is the two pieces of bookkeeping a batch needs and a single
+/// command does not.
+///
+/// **Links are expanded here, exactly once.** `History::apply` mirrors a bare
+/// command onto its link partners but deliberately does not recurse into a
+/// `Composite` (see [`mirror_linked_edits`]), so a batch has to bring its own
+/// partners — and it has to leave out any partner the batch already names. A
+/// selection holding both halves of a linked pair would otherwise move the
+/// sound twice: once because the user selected it, once because the picture
+/// dragged it along.
+///
+/// **The parts are ordered so they do not trip over each other.** Segments on a
+/// track may not overlap even for the instant between two commands of the same
+/// composite, so a block of clips moving one second later has to be applied
+/// right-to-left; the same block moving earlier, left-to-right. A composite
+/// whose first part is refused rolls the whole batch back, which the user sees
+/// as the drag having done nothing at all.
+///
+/// A batch of one is returned untouched rather than wrapped: it is not a batch,
+/// and letting `History::apply` mirror it keeps single-clip editing on exactly
+/// the path it has always taken.
+pub fn compose_edits(
+    project: &Project,
+    label: &str,
+    commands: Vec<EditCommand>,
+) -> Result<EditCommand, String> {
+    if commands.is_empty() {
+        return Err("there is nothing to edit".into());
+    }
+    if commands.len() == 1 {
+        return Ok(commands.into_iter().next().expect("one command"));
+    }
+
+    let ordered = order_for_apply(commands);
+
+    // Every clip the batch names itself. A mirror that would land on one of
+    // these is dropped: the batch is already moving it.
+    let mut covered: std::collections::BTreeSet<String> = ordered
+        .iter()
+        .filter_map(primary_segment)
+        .map(str::to_string)
+        .collect();
+
+    let mut out: Vec<EditCommand> = Vec::with_capacity(ordered.len());
+    for command in ordered {
+        let mirrored = mirrored_partners(project, &command);
+        out.push(command);
+        for partner in mirrored {
+            let Some(id) = primary_segment(&partner).map(str::to_string) else {
+                continue;
+            };
+            // `insert` answers whether this is the first time: a clip linked to
+            // two of the batch's own clips is still only moved once.
+            if covered.insert(id) {
+                out.push(partner);
+            }
+        }
+    }
+
     Ok(EditCommand::Composite {
-        label: "Split clip".into(),
-        commands: vec![
+        label: label.to_string(),
+        commands: out,
+    })
+}
+
+/// Put a batch in an order that no intermediate state rejects.
+///
+/// Only two shapes need it, and both for the same reason — a clip may not pass
+/// through a neighbour, even momentarily:
+///
+/// - **Moves.** Whatever travels forward is applied from the right, whatever
+///   travels backward from the left, so each clip's destination has been
+///   vacated by the time it gets there.
+/// - **Trims.** Every clip that gives space back goes before every clip that
+///   takes space, so a block closing up does not have to grow into a gap that
+///   is about to appear.
+///
+/// A mixed batch is left in the order the caller gave, because there is no
+/// ordering that is right for one — and the app does not build one.
+fn order_for_apply(mut commands: Vec<EditCommand>) -> Vec<EditCommand> {
+    if commands
+        .iter()
+        .all(|c| matches!(c, EditCommand::MoveSegment { .. }))
+    {
+        commands.sort_by_key(|command| match command {
+            EditCommand::MoveSegment {
+                from_start,
+                to_start,
+                ..
+            } if to_start >= from_start => (0i8, -*to_start),
+            EditCommand::MoveSegment { to_start, .. } => (1i8, *to_start),
+            _ => (2i8, 0),
+        });
+        return commands;
+    }
+
+    if commands
+        .iter()
+        .all(|c| matches!(c, EditCommand::TrimSegment { .. }))
+    {
+        commands.sort_by_key(|command| match command {
             EditCommand::TrimSegment {
-                segment_id: segment_id.to_string(),
-                before_target: segment.target_range,
-                before_source: segment.source_range,
-                after_target: left_target,
-                after_source: left_source,
-            },
-            EditCommand::InsertSegment {
-                track_id: track.id.clone(),
-                segment: right,
-                index,
-            },
-        ],
+                before_target,
+                after_target,
+                ..
+            } => i8::from(after_target.duration > before_target.duration),
+            _ => 2i8,
+        });
+    }
+
+    commands
+}
+
+/// Everything linked to `segment_id` except `segment_id` itself.
+fn link_partners<'a>(
+    project: &'a Project,
+    segment_id: &str,
+) -> Vec<(&'a Track, usize, &'a Segment)> {
+    let Some(group) = project.link_group_of(segment_id) else {
+        return Vec::new();
+    };
+    project
+        .link_members(group)
+        .into_iter()
+        .filter(|(_, _, segment)| segment.id != segment_id)
+        .collect()
+}
+
+/// Partners travel by the same distance, and stay on their own lane.
+///
+/// The lane matters: dragging a clip from one video track to another must not
+/// drag its sound onto a video track too. Only the *time* is shared.
+///
+/// The distance is measured from where the segment is now rather than from the
+/// command's `from_start`, which is where the UI last saw it. Those differ
+/// exactly when the document moved under a stale panel, and moving the partner
+/// by a distance nobody dragged is worse than the move being refused.
+fn mirror_move(project: &Project, segment_id: &str, to_start: Micros) -> Vec<EditCommand> {
+    let Some((_, moved)) = project.segment(segment_id) else {
+        return Vec::new();
+    };
+    let delta = to_start - moved.target_range.start;
+    if delta == 0 {
+        // A move between lanes at the same instant. The partner has nowhere to
+        // go, and emitting a no-op move for it would only be one more command
+        // that can fail.
+        return Vec::new();
+    }
+    link_partners(project, segment_id)
+        .into_iter()
+        .map(|(track, _, partner)| EditCommand::MoveSegment {
+            segment_id: partner.id.clone(),
+            from_track: track.id.clone(),
+            to_track: track.id.clone(),
+            from_start: partner.target_range.start,
+            to_start: partner.target_range.start + delta,
+        })
+        .collect()
+}
+
+/// Partners take the same movement at each edge.
+///
+/// Expressed as two deltas — how far the head moved and how far the tail moved
+/// — rather than as the same absolute range, because linking is not only for a
+/// clip and its own sound: two clips a user linked by hand may sit at different
+/// places, and dragging one's tail must not teleport the other.
+///
+/// Each partner's *source* range follows at its own speed. A head trim of
+/// 100 ms on a 2x clip consumes 200 ms of file, and a partner at 1x consumes
+/// 100 ms; deriving each from its own speed is what keeps both sides of
+/// `check_speed_invariant` happy.
+fn mirror_trim(
+    project: &Project,
+    segment_id: &str,
+    before_target: TimeRange,
+    after_target: TimeRange,
+) -> Vec<EditCommand> {
+    let head = after_target.start - before_target.start;
+    let tail = after_target.end() - before_target.end();
+    if head == 0 && tail == 0 {
+        return Vec::new();
+    }
+    link_partners(project, segment_id)
+        .into_iter()
+        .map(|(_, _, partner)| {
+            let target = TimeRange::new(
+                partner.target_range.start + head,
+                partner.target_range.duration + tail - head,
+            );
+            let source = TimeRange::new(
+                partner.source_range.start + source_duration_for(head, partner.speed),
+                source_duration_for(target.duration, partner.speed),
+            );
+            EditCommand::TrimSegment {
+                segment_id: partner.id.clone(),
+                before_target: partner.target_range,
+                before_source: partner.source_range,
+                after_target: target,
+                after_source: source,
+            }
+        })
+        .collect()
+}
+
+/// Deleting one member deletes the group.
+///
+/// The whole `Segment` goes in the command, exactly as the primitive does it,
+/// so undo puts the partner back where it was — link group and all — without
+/// anything having to remember that it was linked.
+fn mirror_remove(project: &Project, segment_id: &str) -> Vec<EditCommand> {
+    link_partners(project, segment_id)
+        .into_iter()
+        .map(|(track, index, partner)| EditCommand::RemoveSegment {
+            track_id: track.id.clone(),
+            segment: partner.clone(),
+            index,
+        })
+        .collect()
+}
+
+/// The composite that links `segment_ids` into one group.
+///
+/// Any segment already in a group leaves it first, which is the same command
+/// in the other direction; the whole thing is one undo step.
+pub fn link(project: &Project, segment_ids: &[String]) -> Result<EditCommand, String> {
+    if segment_ids.len() < 2 {
+        return Err("linking needs two clips".into());
+    }
+    let group = crate::modules::project::new_id();
+    let mut commands = Vec::new();
+    for segment_id in segment_ids {
+        let (_, segment) = project
+            .segment(segment_id)
+            .ok_or_else(|| format!("unknown segment {segment_id}"))?;
+        let before = project.materials.link_of(segment).cloned();
+        if before.is_some() {
+            commands.push(EditCommand::SetLinkGroup {
+                segment_id: segment_id.clone(),
+                before: before.clone(),
+                after: None,
+            });
+        }
+        commands.push(EditCommand::SetLinkGroup {
+            segment_id: segment_id.clone(),
+            before: None,
+            after: Some(group.clone()),
+        });
+    }
+    Ok(EditCommand::Composite {
+        label: "Link clips".into(),
+        commands,
+    })
+}
+
+/// The composite that breaks the group `segment_id` belongs to.
+///
+/// Every member is released, not only the two the user can see: a group is one
+/// thing, and leaving a clip linked to nothing would leave the timeline drawing
+/// a link badge on a clip that has no partner.
+pub fn unlink(project: &Project, segment_id: &str) -> Result<EditCommand, String> {
+    let group = project
+        .link_group_of(segment_id)
+        .cloned()
+        .ok_or("this clip is not linked to anything")?;
+    let commands = project
+        .link_members(&group)
+        .into_iter()
+        .map(|(_, _, segment)| EditCommand::SetLinkGroup {
+            segment_id: segment.id.clone(),
+            before: Some(group.clone()),
+            after: None,
+        })
+        .collect();
+    Ok(EditCommand::Composite {
+        label: "Unlink clips".into(),
+        commands,
     })
 }
 
@@ -1093,7 +1609,8 @@ fn reindex_render_order(project: &mut Project) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::modules::project::{CanvasConfig, TrackKind};
+    use crate::modules::project::{CanvasConfig, TrackKind, VideoMaterial};
+    use crate::modules::timeline::History;
 
     fn project_with_clip() -> (Project, String, String) {
         let mut project = Project::new("t", CanvasConfig::default(), 30.0);
@@ -1697,6 +2214,475 @@ mod tests {
         assert!(errors(&project).is_empty(), "{:?}", errors(&project));
     }
 
+    // -----------------------------------------------------------------------
+    // Linked clips
+    // -----------------------------------------------------------------------
+
+    /// What an import of a file with both streams produces: the picture on a
+    /// video lane, the sound on an audio lane, the same material under both,
+    /// the same `target_range`, and one link group holding them together.
+    struct Pair {
+        project: Project,
+        video_track: String,
+        audio_track: String,
+        video: String,
+        audio: String,
+        group: String,
+    }
+
+    fn linked_pair() -> Pair {
+        let mut project = Project::new("t", CanvasConfig::default(), 30.0);
+        project.materials.videos.push(VideoMaterial {
+            id: "m".into(),
+            path: "/media/clip.mp4".into(),
+            width: 1920,
+            height: 1080,
+            duration: 10_000_000,
+            fps: 30.0,
+            has_audio: true,
+            rotation: 0,
+        });
+
+        let mut video_track = Track::new(TrackKind::Video, "V1");
+        let mut audio_track = Track::new(TrackKind::Audio, "A1");
+        // `render_index` is derived from track order and normalised by
+        // `reindex_render_order` on the first structural edit — which nothing
+        // inverts, because it is a function of the document rather than of the
+        // command. A fixture that got it wrong would therefore fail every
+        // byte-exact undo assertion below for a reason that has nothing to do
+        // with links.
+        let make = |id: &str, render_index: i32| Segment {
+            id: id.to_string(),
+            material_id: "m".into(),
+            target_range: TimeRange::new(1_000_000, 4_000_000),
+            source_range: TimeRange::new(0, 4_000_000),
+            render_index,
+            speed: 1.0,
+            volume: 1.0,
+            transform: Transform::default(),
+            crop: None,
+            extras: Vec::new(),
+            keyframes: Vec::new(),
+        };
+        video_track.segments.push(make("v", 0));
+        audio_track.segments.push(make("a", 1));
+        let video_track_id = video_track.id.clone();
+        let audio_track_id = audio_track.id.clone();
+        project.tracks.push(video_track);
+        project.tracks.push(audio_track);
+
+        link(&project, &["v".into(), "a".into()])
+            .expect("two clips can be linked")
+            .apply(&mut project)
+            .expect("linking is accepted");
+        let group = project
+            .link_group_of("v")
+            .expect("the pair is linked")
+            .clone();
+
+        Pair {
+            project,
+            video_track: video_track_id,
+            audio_track: audio_track_id,
+            video: "v".into(),
+            audio: "a".into(),
+            group,
+        }
+    }
+
+    fn range_of(project: &Project, segment_id: &str) -> TimeRange {
+        project
+            .segment(segment_id)
+            .unwrap_or_else(|| panic!("{segment_id} is on the timeline"))
+            .1
+            .target_range
+    }
+
+    #[test]
+    fn linking_registers_one_group_and_puts_it_on_both_clips() {
+        let pair = linked_pair();
+        assert_eq!(
+            pair.project.materials.links.len(),
+            1,
+            "one group, not one per clip"
+        );
+        assert_eq!(pair.project.link_group_of("a"), Some(&pair.group));
+        assert_eq!(
+            pair.project.link_members(&pair.group).len(),
+            2,
+            "and both clips are in it"
+        );
+        assert!(errors(&pair.project).is_empty(), "{:?}", errors(&pair.project));
+    }
+
+    #[test]
+    fn moving_a_linked_clip_moves_its_partner_as_one_undo_step() {
+        let Pair {
+            mut project,
+            video_track,
+            ..
+        } = linked_pair();
+        let before = serde_json::to_string(&project).unwrap();
+        let mut history = History::new();
+
+        history
+            .apply(
+                &mut project,
+                EditCommand::MoveSegment {
+                    segment_id: "v".into(),
+                    from_track: video_track.clone(),
+                    to_track: video_track,
+                    from_start: 1_000_000,
+                    to_start: 3_000_000,
+                },
+            )
+            .expect("the move is accepted");
+
+        assert_eq!(range_of(&project, "v"), TimeRange::new(3_000_000, 4_000_000));
+        assert_eq!(
+            range_of(&project, "a"),
+            TimeRange::new(3_000_000, 4_000_000),
+            "the sound travelled the same distance"
+        );
+        assert_eq!(
+            project.segment("a").unwrap().0.kind,
+            TrackKind::Audio,
+            "and stayed on its own lane"
+        );
+        let after = serde_json::to_string(&project).unwrap();
+
+        // One step, not two: the whole thing came back on a single undo.
+        history.undo(&mut project).expect("undo");
+        assert_eq!(
+            serde_json::to_string(&project).unwrap(),
+            before,
+            "one undo put both clips back"
+        );
+        assert!(!history.can_undo(), "and there was only one step to undo");
+
+        history.redo(&mut project).expect("redo");
+        assert_eq!(serde_json::to_string(&project).unwrap(), after);
+    }
+
+    #[test]
+    fn dragging_a_linked_clip_to_another_video_lane_leaves_its_sound_where_it_is() {
+        // The lane is not shared, only the time is. Moving the picture up a
+        // lane must not drag the sound onto a video track.
+        let Pair {
+            mut project,
+            video_track,
+            ..
+        } = linked_pair();
+        let second = Track::new(TrackKind::Video, "V2");
+        let second_id = second.id.clone();
+        project.tracks.insert(1, second);
+
+        let mut history = History::new();
+        history
+            .apply(
+                &mut project,
+                EditCommand::MoveSegment {
+                    segment_id: "v".into(),
+                    from_track: video_track,
+                    to_track: second_id.clone(),
+                    from_start: 1_000_000,
+                    to_start: 1_000_000,
+                },
+            )
+            .expect("the move is accepted");
+
+        assert_eq!(project.segment("v").unwrap().0.id, second_id);
+        assert_eq!(
+            project.segment("a").unwrap().0.kind,
+            TrackKind::Audio,
+            "the sound is still on the audio lane"
+        );
+        assert_eq!(range_of(&project, "a"), TimeRange::new(1_000_000, 4_000_000));
+    }
+
+    #[test]
+    fn trimming_a_linked_clip_trims_its_partner_at_the_same_edge() {
+        let Pair { mut project, .. } = linked_pair();
+        let mut history = History::new();
+
+        // Pull the head in by half a second.
+        history
+            .apply(
+                &mut project,
+                EditCommand::TrimSegment {
+                    segment_id: "v".into(),
+                    before_target: TimeRange::new(1_000_000, 4_000_000),
+                    before_source: TimeRange::new(0, 4_000_000),
+                    after_target: TimeRange::new(1_500_000, 3_500_000),
+                    after_source: TimeRange::new(500_000, 3_500_000),
+                },
+            )
+            .expect("the trim is accepted");
+
+        let (_, audio) = project.segment("a").unwrap();
+        assert_eq!(audio.target_range, TimeRange::new(1_500_000, 3_500_000));
+        assert_eq!(
+            audio.source_range,
+            TimeRange::new(500_000, 3_500_000),
+            "the sound reads from the same place in the file as the picture"
+        );
+        assert!(errors(&project).is_empty(), "{:?}", errors(&project));
+
+        // And the tail, which must leave the head alone.
+        history
+            .apply(
+                &mut project,
+                EditCommand::TrimSegment {
+                    segment_id: "a".into(),
+                    before_target: TimeRange::new(1_500_000, 3_500_000),
+                    before_source: TimeRange::new(500_000, 3_500_000),
+                    after_target: TimeRange::new(1_500_000, 2_000_000),
+                    after_source: TimeRange::new(500_000, 2_000_000),
+                },
+            )
+            .expect("trimming from the audio side works the same way");
+
+        assert_eq!(range_of(&project, "v"), TimeRange::new(1_500_000, 2_000_000));
+        assert_eq!(range_of(&project, "a"), TimeRange::new(1_500_000, 2_000_000));
+    }
+
+    #[test]
+    fn splitting_a_linked_pair_produces_two_pairs_that_move_apart() {
+        let Pair {
+            mut project,
+            video_track,
+            audio_track,
+            group,
+            ..
+        } = linked_pair();
+        let before = serde_json::to_string(&project).unwrap();
+        let mut history = History::new();
+
+        let command = split_at(&project, "v", 3_000_000).expect("the cut is inside the clip");
+        history.apply(&mut project, command).expect("split");
+
+        assert_eq!(project.track(&video_track).unwrap().segments.len(), 2);
+        assert_eq!(
+            project.track(&audio_track).unwrap().segments.len(),
+            2,
+            "the sound was cut at the same instant"
+        );
+
+        let right_video = project.track(&video_track).unwrap().segments[1].id.clone();
+        let right_audio = project.track(&audio_track).unwrap().segments[1].id.clone();
+        assert_eq!(
+            range_of(&project, &right_video),
+            TimeRange::new(3_000_000, 2_000_000)
+        );
+        assert_eq!(
+            range_of(&project, &right_audio),
+            TimeRange::new(3_000_000, 2_000_000)
+        );
+
+        // Two pairs, not one group of four: the second half of the picture must
+        // drag the second half of the sound and nothing else.
+        let right_group = project
+            .link_group_of(&right_video)
+            .expect("the right halves are linked")
+            .clone();
+        assert_ne!(right_group, group, "and it is a group of their own");
+        assert_eq!(project.link_group_of(&right_audio), Some(&right_group));
+        assert_eq!(project.link_group_of("v"), Some(&group));
+        assert_eq!(project.link_members(&group).len(), 2);
+        assert_eq!(project.link_members(&right_group).len(), 2);
+        assert!(errors(&project).is_empty(), "{:?}", errors(&project));
+
+        // Dragging the right pair moves exactly two clips.
+        history
+            .apply(
+                &mut project,
+                EditCommand::MoveSegment {
+                    segment_id: right_video.clone(),
+                    from_track: video_track.clone(),
+                    to_track: video_track,
+                    from_start: 3_000_000,
+                    to_start: 6_000_000,
+                },
+            )
+            .expect("the right pair moves");
+        assert_eq!(
+            range_of(&project, &right_audio),
+            TimeRange::new(6_000_000, 2_000_000)
+        );
+        assert_eq!(
+            range_of(&project, "v"),
+            TimeRange::new(1_000_000, 2_000_000),
+            "the left half stayed put"
+        );
+        assert_eq!(range_of(&project, "a"), TimeRange::new(1_000_000, 2_000_000));
+
+        // And the whole session undoes back to where it started, including the
+        // group that the split invented.
+        history.undo(&mut project).expect("undo the move");
+        history.undo(&mut project).expect("undo the split");
+        assert_eq!(
+            serde_json::to_string(&project).unwrap(),
+            before,
+            "undoing a split of a linked pair restores the document exactly"
+        );
+    }
+
+    #[test]
+    fn deleting_one_of_a_linked_pair_deletes_both_and_one_undo_restores_both() {
+        let Pair {
+            mut project,
+            audio_track,
+            ..
+        } = linked_pair();
+        let before = serde_json::to_string(&project).unwrap();
+        let audio = project.segment("a").unwrap().1.clone();
+        let mut history = History::new();
+
+        history
+            .apply(
+                &mut project,
+                EditCommand::RemoveSegment {
+                    track_id: audio_track,
+                    segment: audio,
+                    index: 0,
+                },
+            )
+            .expect("the delete is accepted");
+
+        assert!(project.segment("a").is_none());
+        assert!(
+            project.segment("v").is_none(),
+            "deleting the sound deleted the picture with it"
+        );
+
+        history.undo(&mut project).expect("undo");
+        assert_eq!(
+            serde_json::to_string(&project).unwrap(),
+            before,
+            "one undo brought both clips back, still linked"
+        );
+        assert_eq!(project.link_group_of("v"), project.link_group_of("a"));
+    }
+
+    #[test]
+    fn unlinking_lets_the_two_move_independently() {
+        let Pair {
+            mut project,
+            video_track,
+            ..
+        } = linked_pair();
+        let mut history = History::new();
+
+        let command = unlink(&project, "v").expect("the pair is linked");
+        history.apply(&mut project, command).expect("unlink");
+
+        assert_eq!(project.link_group_of("v"), None);
+        assert_eq!(project.link_group_of("a"), None);
+        assert!(
+            project.materials.links.is_empty(),
+            "the group went with its last member"
+        );
+
+        history
+            .apply(
+                &mut project,
+                EditCommand::MoveSegment {
+                    segment_id: "v".into(),
+                    from_track: video_track.clone(),
+                    to_track: video_track,
+                    from_start: 1_000_000,
+                    to_start: 5_000_000,
+                },
+            )
+            .expect("the move is accepted");
+
+        assert_eq!(range_of(&project, "v"), TimeRange::new(5_000_000, 4_000_000));
+        assert_eq!(
+            range_of(&project, "a"),
+            TimeRange::new(1_000_000, 4_000_000),
+            "the sound stayed exactly where it was"
+        );
+
+        // And undoing the unlink links them again, so the next move mirrors.
+        history.undo(&mut project).expect("undo the move");
+        history.undo(&mut project).expect("undo the unlink");
+        assert_eq!(project.link_group_of("v"), project.link_group_of("a"));
+        assert!(project.link_group_of("v").is_some());
+    }
+
+    #[test]
+    fn an_unlink_built_against_a_stale_document_is_refused() {
+        // The panel's copy of the document is one edit behind and the user
+        // clicks Unlink. Applying it anyway would strip whichever group the
+        // clip is in now, and its inverse would restore a link that never
+        // existed.
+        let Pair { mut project, .. } = linked_pair();
+        let stale = EditCommand::SetLinkGroup {
+            segment_id: "v".into(),
+            before: Some("a-group-from-a-previous-life".into()),
+            after: None,
+        };
+        let error = stale
+            .apply(&mut project)
+            .expect_err("a stale link edit must be refused");
+        assert!(error.contains("changed underneath"), "{error}");
+        assert!(project.link_group_of("v").is_some(), "and nothing changed");
+    }
+
+    #[test]
+    fn a_linked_edit_that_cannot_be_mirrored_changes_nothing() {
+        // The audio lane is occupied where the sound would have to land. The
+        // pair moves as one thing or not at all — half a move is a pair that no
+        // longer lines up, which is worse than a refusal.
+        let Pair {
+            mut project,
+            video_track,
+            audio_track,
+            ..
+        } = linked_pair();
+        let blocker = Segment {
+            id: "blocker".into(),
+            material_id: "m".into(),
+            target_range: TimeRange::new(6_000_000, 1_000_000),
+            source_range: TimeRange::new(0, 1_000_000),
+            // The audio lane is the second track; see `linked_pair`.
+            render_index: 1,
+            speed: 1.0,
+            volume: 1.0,
+            transform: Transform::default(),
+            crop: None,
+            extras: Vec::new(),
+            keyframes: Vec::new(),
+        };
+        project
+            .track_mut(&audio_track)
+            .unwrap()
+            .segments
+            .push(blocker);
+        let before = serde_json::to_string(&project).unwrap();
+
+        let mut history = History::new();
+        let error = history
+            .apply(
+                &mut project,
+                EditCommand::MoveSegment {
+                    segment_id: "v".into(),
+                    from_track: video_track.clone(),
+                    to_track: video_track,
+                    from_start: 1_000_000,
+                    to_start: 6_000_000,
+                },
+            )
+            .expect_err("the sound has nowhere to go");
+        assert!(error.contains("occupied"), "{error}");
+        assert_eq!(
+            serde_json::to_string(&project).unwrap(),
+            before,
+            "and the picture did not move either"
+        );
+        assert!(!history.can_undo(), "a refused edit is not in the history");
+    }
+
     #[test]
     fn move_into_occupied_range_is_rejected_and_leaves_document_intact() {
         let (mut project, track_id, segment_id) = project_with_clip();
@@ -1727,5 +2713,248 @@ mod tests {
         let track = project.track(&track_id).unwrap();
         assert_eq!(track.segments.len(), 2);
         assert!(track.segments.iter().any(|s| s.id == segment_id));
+    }
+
+    // -----------------------------------------------------------------------
+    // Multi-clip edits
+    //
+    // A selection is one gesture and has to be one undo step. What these guard
+    // is the two things a batch has that a single command does not: the link
+    // partners it must expand exactly once, and the order its parts must be
+    // applied in so that no intermediate state overlaps.
+    // -----------------------------------------------------------------------
+
+    /// Three one-second clips on one lane, back to back from zero.
+    fn row_of_three() -> (Project, String, Vec<String>) {
+        let mut project = Project::new("t", CanvasConfig::default(), 30.0);
+        let mut track = Track::new(TrackKind::Video, "V1");
+        let ids: Vec<String> = ["one", "two", "three"].iter().map(|s| s.to_string()).collect();
+        for (index, id) in ids.iter().enumerate() {
+            track.segments.push(Segment {
+                id: id.clone(),
+                material_id: "m".into(),
+                target_range: TimeRange::new(index as Micros * 1_000_000, 1_000_000),
+                source_range: TimeRange::new(0, 1_000_000),
+                render_index: 0,
+                speed: 1.0,
+                volume: 1.0,
+                transform: Transform::default(),
+                crop: None,
+                extras: Vec::new(),
+                keyframes: Vec::new(),
+            });
+        }
+        let track_id = track.id.clone();
+        project.tracks.push(track);
+        (project, track_id, ids)
+    }
+
+    fn remove_command(project: &Project, segment_id: &str) -> EditCommand {
+        let (track, segment) = project.segment(segment_id).expect("on the timeline");
+        let index = track
+            .segments
+            .iter()
+            .position(|s| s.id == segment_id)
+            .expect("in its lane");
+        EditCommand::RemoveSegment {
+            track_id: track.id.clone(),
+            segment: segment.clone(),
+            index,
+        }
+    }
+
+    fn move_command(project: &Project, segment_id: &str, delta: Micros) -> EditCommand {
+        let (track, segment) = project.segment(segment_id).expect("on the timeline");
+        EditCommand::MoveSegment {
+            segment_id: segment_id.to_string(),
+            from_track: track.id.clone(),
+            to_track: track.id.clone(),
+            from_start: segment.target_range.start,
+            to_start: segment.target_range.start + delta,
+        }
+    }
+
+    #[test]
+    fn deleting_a_selection_is_one_undo_step() {
+        let (mut project, track_id, ids) = row_of_three();
+        let batch = vec![
+            remove_command(&project, &ids[0]),
+            remove_command(&project, &ids[2]),
+        ];
+        let command = compose_edits(&project, "Delete clips", batch).unwrap();
+
+        let mut history = History::new();
+        history.apply(&mut project, command).unwrap();
+        assert_eq!(project.track(&track_id).unwrap().segments.len(), 1);
+
+        history.undo(&mut project).unwrap();
+        let track = project.track(&track_id).unwrap();
+        assert_eq!(
+            track.segments.len(),
+            3,
+            "one undo has to bring back everything one gesture took away"
+        );
+        // And it puts them back where they were, in order.
+        assert_eq!(
+            track
+                .segments
+                .iter()
+                .map(|s| s.target_range.start)
+                .collect::<Vec<_>>(),
+            vec![0, 1_000_000, 2_000_000]
+        );
+        assert!(!history.can_undo(), "one gesture, one entry");
+        assert!(errors(&project).is_empty(), "{:?}", errors(&project));
+    }
+
+    #[test]
+    fn a_selection_holding_both_halves_of_a_linked_pair_moves_it_once() {
+        let Pair {
+            mut project,
+            video,
+            audio,
+            ..
+        } = linked_pair();
+
+        let batch = vec![
+            move_command(&project, &video, 2_000_000),
+            move_command(&project, &audio, 2_000_000),
+        ];
+        let command = compose_edits(&project, "Move clips", batch).unwrap();
+
+        let EditCommand::Composite { commands, .. } = &command else {
+            panic!("a batch is a composite");
+        };
+        assert_eq!(
+            commands.len(),
+            2,
+            "the sound is in the selection, so the picture must not drag it as well: {commands:#?}"
+        );
+
+        let mut history = History::new();
+        history.apply(&mut project, command).unwrap();
+        // Moved once, by the distance the user dragged — not twice, which would
+        // have landed it at 7s.
+        assert_eq!(range_of(&project, &video), TimeRange::new(3_000_000, 4_000_000));
+        assert_eq!(range_of(&project, &audio), TimeRange::new(3_000_000, 4_000_000));
+
+        history.undo(&mut project).unwrap();
+        assert_eq!(range_of(&project, &video), TimeRange::new(1_000_000, 4_000_000));
+        assert_eq!(range_of(&project, &audio), TimeRange::new(1_000_000, 4_000_000));
+    }
+
+    #[test]
+    fn a_selection_holding_one_half_of_a_linked_pair_still_drags_the_other() {
+        let Pair {
+            mut project,
+            video_track,
+            video,
+            audio,
+            ..
+        } = linked_pair();
+
+        // A second, unlinked clip on the picture lane, selected along with the
+        // half of the pair. The sound is *not* selected, so the batch has to
+        // bring it along itself.
+        project.track_mut(&video_track).unwrap().segments.push(Segment {
+            id: "loose".into(),
+            material_id: "m".into(),
+            target_range: TimeRange::new(6_000_000, 1_000_000),
+            source_range: TimeRange::new(0, 1_000_000),
+            render_index: 0,
+            speed: 1.0,
+            volume: 1.0,
+            transform: Transform::default(),
+            crop: None,
+            extras: Vec::new(),
+            keyframes: Vec::new(),
+        });
+
+        let batch = vec![
+            move_command(&project, &video, 2_000_000),
+            move_command(&project, "loose", 2_000_000),
+        ];
+        let command = compose_edits(&project, "Move clips", batch).unwrap();
+        let EditCommand::Composite { commands, .. } = &command else {
+            panic!("a batch is a composite");
+        };
+        assert_eq!(commands.len(), 3, "two clips asked for, one partner added");
+
+        History::new().apply(&mut project, command).unwrap();
+        assert_eq!(range_of(&project, &audio).start, 3_000_000);
+        assert_eq!(range_of(&project, "loose").start, 8_000_000);
+    }
+
+    #[test]
+    fn a_block_of_clips_moving_together_does_not_trip_over_itself() {
+        // Every one of these destinations is occupied by the clip in front of
+        // it at the moment the batch starts. Applied left to right the first
+        // command is refused and the whole gesture is rolled back.
+        let (mut project, track_id, ids) = row_of_three();
+        let forward: Vec<EditCommand> = ids
+            .iter()
+            .map(|id| move_command(&project, id, 3_000_000))
+            .collect();
+        let command = compose_edits(&project, "Move clips", forward).unwrap();
+        History::new().apply(&mut project, command).unwrap();
+        assert_eq!(
+            project
+                .track(&track_id)
+                .unwrap()
+                .segments
+                .iter()
+                .map(|s| s.target_range.start)
+                .collect::<Vec<_>>(),
+            vec![3_000_000, 4_000_000, 5_000_000]
+        );
+
+        // And the same block coming back, which needs the opposite order.
+        let backward: Vec<EditCommand> = ids
+            .iter()
+            .map(|id| move_command(&project, id, -3_000_000))
+            .collect();
+        let command = compose_edits(&project, "Move clips", backward).unwrap();
+        History::new().apply(&mut project, command).unwrap();
+        assert_eq!(
+            project
+                .track(&track_id)
+                .unwrap()
+                .segments
+                .iter()
+                .map(|s| s.target_range.start)
+                .collect::<Vec<_>>(),
+            vec![0, 1_000_000, 2_000_000]
+        );
+        assert!(errors(&project).is_empty(), "{:?}", errors(&project));
+    }
+
+    #[test]
+    fn a_batch_of_one_is_left_alone_so_the_history_still_mirrors_it() {
+        // Selecting one clip and dragging it has to stay on exactly the path it
+        // has always taken: a bare command, mirrored onto its partner by
+        // `History::apply`. Wrapping it would take that mirroring away, because
+        // a composite is deliberately not expanded there.
+        let Pair {
+            mut project,
+            video,
+            audio,
+            ..
+        } = linked_pair();
+
+        let batch = vec![move_command(&project, &video, 2_000_000)];
+        let command = compose_edits(&project, "Move clips", batch).unwrap();
+        assert!(
+            matches!(command, EditCommand::MoveSegment { .. }),
+            "one clip is not a batch"
+        );
+
+        History::new().apply(&mut project, command).unwrap();
+        assert_eq!(range_of(&project, &audio).start, 3_000_000);
+    }
+
+    #[test]
+    fn an_empty_batch_is_refused_rather_than_recorded_as_an_edit() {
+        let (project, _, _) = row_of_three();
+        assert!(compose_edits(&project, "Move clips", Vec::new()).is_err());
     }
 }

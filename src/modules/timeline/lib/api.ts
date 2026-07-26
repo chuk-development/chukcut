@@ -60,6 +60,12 @@ export type EditCommand =
   | { type: "set_speed"; segment_id: Id; before: number; after: number }
   | { type: "set_volume"; segment_id: Id; before: number; after: number }
   | { type: "set_track_flags"; track_id: Id; before: TrackFlags; after: TrackFlags }
+  /**
+   * Put a clip into a link group, or take it out of one. `null` on both sides
+   * is how Rust spells `Option<Id>`; `before` is checked against the document,
+   * so a stale panel is refused rather than obeyed.
+   */
+  | { type: "set_link_group"; segment_id: Id; before: Id | null; after: Id | null }
   | { type: "composite"; label: string; commands: EditCommand[] };
 
 /** What every mutating command answers with: the whole document plus history state. */
@@ -75,8 +81,37 @@ export function timelineApply(command: EditCommand): Promise<EditResponse> {
   return invoke<EditResponse>("timeline_apply", { command });
 }
 
+/**
+ * One edit per clip, applied as a single undo step.
+ *
+ * What a multi-selection sends. Deliberately *not* a `composite` through
+ * `timeline_apply`: Rust has to expand the link partners of every part and put
+ * the parts in an order no intermediate state rejects, and it will not do
+ * either of those things to a composite the webview built — see `compose_edits`
+ * in `timeline/ops.rs`. The label is ours because only this side knows whether
+ * four removals were a delete or the tail of a cut.
+ */
+export function timelineApplyMany(commands: EditCommand[], label: string): Promise<EditResponse> {
+  return invoke<EditResponse>("timeline_apply_many", { commands, label });
+}
+
 export function timelineSplit(segmentId: Id, at: Micros): Promise<EditResponse> {
   return invoke<EditResponse>("timeline_split", { segmentId, at });
+}
+
+/**
+ * Break the group a clip belongs to, releasing every member.
+ *
+ * Rust builds the composite, because which clips are in the group is a fact
+ * about the document rather than about what the user could see.
+ */
+export function timelineUnlink(segmentId: Id): Promise<EditResponse> {
+  return invoke<EditResponse>("timeline_unlink", { segmentId });
+}
+
+/** Make several clips move, trim and delete as one. */
+export function timelineLink(segmentIds: Id[]): Promise<EditResponse> {
+  return invoke<EditResponse>("timeline_link", { segmentIds });
 }
 
 export function timelineUndo(): Promise<EditResponse> {

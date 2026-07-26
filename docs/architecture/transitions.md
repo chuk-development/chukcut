@@ -298,326 +298,113 @@ appears in the picker without the frontend changing. Each descriptor carries
 `directional`, `has_color`, `has_softness` and `has_zoom`, which are properties
 of the shader — a dissolve has no direction and never will.
 
-Still to do on the TypeScript side: `TransitionMaterial`, `TransitionKind` and
-`TransitionDirection` in `src/modules/project/types.ts`, plus `transitions:
-TransitionMaterial[]` on `MaterialPool`; the three new `EditCommand` variants in
-`src/modules/timeline/lib/api.ts` for anything that wants to send them
-directly; a marker at the cut whose width is the transition duration and whose
-drag calls `transitions_retime`; a picker fed by the catalog; and a gesture on a
-clip's left edge that calls `transitions_add`.
+The TypeScript side lives in `src/modules/transitions/`. `lib/geometry.ts` is
+the mirror of `resolve.rs` — window, clamping, `max_duration` — duplicated on
+purpose, because the renderer must not ask the webview where to draw and the
+webview must not ask Rust where to put a handle it is dragging at sixty frames a
+second; the two are kept honest by being pinned to the same worked examples.
+`components/TransitionLane.tsx` draws a marker over every cut on a lane — a `+`
+button where there is no transition yet, a bow-tie badge over the window where
+there is — and `components/TransitionInspector.tsx` is the parameter panel,
+with its controls chosen by the catalogue's `has_*` flags rather than by a
+second table on this side.
+
+One seam is still open, and it is one element: `TransitionLane` has to be
+mounted inside the timeline's lane, which owns the zoom and the client-x to
+instant mapping it takes as props. `src/modules/timeline/` was owned by other
+work when this landed. The same applies to `edits.ts::applyOverlap`, which is
+the drag-a-clip-over-its-neighbour gesture: the arithmetic and the command are
+here and tested, and the timeline's drag handler is where it has to be called
+from — a move whose proposed start would overlap the left-hand neighbour is a
+transition of that length, not a move, and the clip stays where it was.
 
 ---
 
-## The compositor patch
+## How the compositor draws one
 
-Not yet applied. `render/compositor.rs` was owned by other work while this
-landed, so the change is written out here rather than half-done in the file.
-Line numbers will have drifted — the compositor has since grown planar sources,
-chroma views and rotation — but nothing below depends on those.
+**Applied.** `render/compositor.rs` renders transitions in both the preview and
+the export; what follows is the shape of it and the two decisions that are not
+obvious from reading the code. An earlier version of this section carried the
+patch as a diff, written out because the file was owned by other work at the
+time. That diff went stale — `QuadUniform` grew `planar`, `matrix`, `range` and
+`turns`, and the source bind group grew a third entry for the chroma plane —
+and a stale patch is worse than none, so it has been replaced by this.
 
-Everything it needs already exists and is tested: `transitions::instant_for`
-resolves the pair, and `TransitionPipeline` blends two views.
+### The shape
 
-### 1. Imports
+- **`Draw` is an enum.** `Draw::Quad(QuadDraw)` is what it always was;
+  `Draw::Transition { params, from, to }` carries two of the same `QuadDraw`
+  and the blend parameters. Either side may be `None` — a provider with no
+  frame, an audio material, a clip faded fully out — and that side is then a
+  transparent layer, so a transition with a missing clip fades from or to
+  nothing instead of losing the frame.
+- **A `QuadDraw` owns its uniform slot.** It used to be positional: the *n*th
+  draw read the *n*th uniform block. A transition is one draw and two quads, so
+  the two numbers stopped agreeing and the slot is now explicit
+  (`DrawList::slots` hands them out, `DrawList::quads()` walks them in order).
+  Getting this wrong shifts every dynamic offset after the first transition,
+  which draws the right clips with each other's transforms.
+- **`collect_draws` asks `transitions::instant_for` once per visible segment.**
+  Exactly one of the two clips contains any instant of the window — the cut is
+  the boundary between them — so no frame collects the same transition twice,
+  and the far-side clip is not separately visible. A transition whose cut no
+  longer exists resolves to `None` and the pair renders as an ordinary cut;
+  the compositor does not depend on `detach_broken_transitions` having run.
+- **Each side is drawn into a canvas-sized pooled target before the composite
+  pass**, and the blend is then one fullscreen draw *inside* that pass, at the
+  place in the painter's order the segment would have had. So a transition
+  composites onto the tracks beneath it exactly as a clip would, and the
+  single-pass structure is unchanged.
 
-```rust
-use crate::modules::transitions::{self, TransitionParams, TransitionPipeline};
-```
+### Hardware-decoded sources come free, and that is the point
 
-### 2. `Compositor` gains one lazily built pipeline
+The layers are drawn with **the same quad pipeline and the same `QuadUniform`**
+as any other clip, so `planar`, `matrix`, `range` and `turns` travel through
+untouched and an NV12 surface imported from the decoder blends exactly like a
+software-decoded RGBA one. Nothing in the transition path branches on how a
+frame was decoded.
 
-Next to `nv12`:
+That is not a detail to take on trust: hardware decode is the default on any
+machine that can import a decoded surface as a texture, so a transition that
+only worked on the software path would fail on most real footage, and it would
+fail *plausibly* — as a wrong-looking mix rather than as an error.
+`a_crossfade_is_the_same_however_each_side_was_decoded` renders the same
+crossfade with all four combinations of the two paths and asserts one number for
+all of them.
 
-```rust
-    /// The transition blend pass, built on first use.
-    ///
-    /// Lazy for the reason `nv12` is: a project with no transitions should not
-    /// pay five shader compiles.
-    transitions: OnceLock<TransitionPipeline>,
-```
+### The layer pipeline has blending switched off, and it must
 
-`transitions: OnceLock::new()` in `with_config`'s `Self { .. }`, and an accessor
-beside `nv12_converter`:
+A layer holds exactly one clip over a transparent clear, so there is nothing to
+blend with — and blending is not merely unnecessary here, it is wrong.
+`ALPHA_BLENDING` over a transparent destination leaves **premultiplied** colour
+behind, while `transition.wgsl` samples its layers as straight alpha and
+premultiplies them itself. Anything not fully opaque is then multiplied by its
+own coverage twice.
 
-```rust
-    fn transition_pipeline(&self) -> &TransitionPipeline {
-        self.transitions
-            .get_or_init(|| TransitionPipeline::new(&self.ctx, self.config.format))
-    }
-```
+The symptom is specific and easy to miss: two opaque clips look perfect, and a
+clip at 50% opacity *darkens the instant the transition window opens* and
+brightens again as it closes. `Compositor::layer_pipeline` is the same pipeline
+as `pipeline` with `blend: None`, which writes the fragment through untouched,
+and `a_half_transparent_clip_does_not_change_brightness_when_the_window_opens`
+fails by exactly a factor of two if it is switched back.
 
-### 3. `Draw` becomes an enum
+### Preview and export agree because the work is below both of them
 
-Replacing the struct at the bottom of the file:
-
-```rust
-/// One entry in the painter's-algorithm loop.
-enum Draw {
-    /// One segment as one textured quad.
-    Quad {
-        frame: SourceFrame,
-        placement: QuadPlacement,
-    },
-    /// Two segments blended by a transition, as one full-canvas pass.
-    ///
-    /// Either side may be `None` — a provider with no frame for it, or an audio
-    /// material — in which case that layer is transparent and the transition
-    /// fades from or to nothing. That is what a missing clip should look like,
-    /// rather than a hard error in the middle of a cut.
-    Transition {
-        from: Option<(SourceFrame, QuadPlacement)>,
-        to: Option<(SourceFrame, QuadPlacement)>,
-        params: TransitionParams,
-    },
-}
-```
-
-### 4. `collect_draws` — the hook
-
-The loop header takes the track it was already given, and gains three lines:
-
-```rust
--        for (_, segment) in layout::visible_segments(project, time) {
-+        for (track, segment) in layout::visible_segments(project, time) {
-+            // A segment inside a live transition is drawn as the pair, not on
-+            // its own. Exactly one of the two clips contains any instant of the
-+            // window — the cut is the boundary between them — so no frame ever
-+            // collects the same transition twice.
-+            if let Some(instant) =
-+                transitions::instant_for(track, &project.materials, segment, time)
-+            {
-+                draws.push(self.collect_transition(project, &instant, time, size, sources)?);
-+                continue;
-+            }
-```
-
-and the tail of the loop body:
-
-```rust
--            draws.push(Draw { frame, placement });
-+            draws.push(Draw::Quad { frame, placement });
-```
-
-### 5. Two new methods beside `collect_draws`
-
-```rust
-    /// Both sides of a transition, each as its own would-be quad.
-    fn collect_transition(
-        &self,
-        project: &Project,
-        instant: &transitions::TransitionInstant<'_>,
-        time: Micros,
-        size: (u32, u32),
-        sources: &dyn SourceProvider,
-    ) -> Result<Draw> {
-        Ok(Draw::Transition {
-            from: self.collect_layer(project, &instant.from, time, size, sources)?,
-            to: self.collect_layer(project, &instant.to, time, size, sources)?,
-            params: TransitionParams::from(instant),
-        })
-    }
-
-    /// One side of a transition.
-    ///
-    /// The same work as the per-segment body of `collect_draws`, with one
-    /// difference that is the whole point: the source instant comes from the
-    /// transition, not from `Segment::source_time_at`, because for half the
-    /// window it lies outside the segment's own range.
-    ///
-    /// The transform is still sampled at the real timeline instant.
-    /// `animated_transform` clamps to the first and last keyframe, so a
-    /// borrowed frame holds the pose the clip was in at its boundary — which is
-    /// what it should do, and what makes this correct without a special case.
-    fn collect_layer(
-        &self,
-        project: &Project,
-        layer: &transitions::TransitionLayer<'_>,
-        time: Micros,
-        size: (u32, u32),
-        sources: &dyn SourceProvider,
-    ) -> Result<Option<(SourceFrame, QuadPlacement)>> {
-        if layer.kind == MaterialKind::Audio {
-            return Ok(None);
-        }
-        let segment = layer.segment;
-        let request = SourceRequest {
-            material_id: &segment.material_id,
-            kind: layer.kind,
-            source_time: layer.source_time,
-            segment_id: &segment.id,
-            max_size: size,
-        };
-        let frame = match sources.frame(&self.ctx, &request) {
-            Ok(Some(frame)) => frame,
-            Ok(None) => return Ok(None),
-            Err(e) => {
-                if self.config.strict_sources {
-                    return Err(RenderError::Source {
-                        material_id: segment.material_id.clone(),
-                        source_time: layer.source_time,
-                        source: e,
-                    });
-                }
-                tracing::warn!(
-                    segment = %segment.id,
-                    material = %segment.material_id,
-                    error = %e,
-                    "skipping a transition layer: source unavailable"
-                );
-                return Ok(None);
-            }
-        };
-        let canvas = (project.canvas.width, project.canvas.height);
-        let transform = layout::animated_transform(segment, time);
-        Ok(layout::place_quad(canvas, frame.size(), &transform, segment.crop)
-            .map(|placement| (frame, placement)))
-    }
-```
-
-### 6. `render_to_texture`
-
-The uniform-writing loop tolerates both variants. A transition needs no quad
-block, but the block index has to stay in step with the draw index or every
-dynamic offset after the first transition is wrong:
-
-```rust
-        for (i, draw) in draws.iter().enumerate() {
-            let block = match draw {
-                Draw::Quad { frame, placement } => QuadUniform { /* as today */ },
-                Draw::Transition { .. } => QuadUniform::zeroed(),
-            };
-            self.ctx.queue().write_buffer(
-                uniform_buffer,
-                i as u64 * stride,
-                bytemuck::bytes_of(&block),
-            );
-        }
-```
-
-`source_groups` becomes `Vec<Option<wgpu::BindGroup>>`, `None` for transitions.
-
-Immediately before `let mut encoder = ...`:
-
-```rust
-        // A transition needs each of its two sides as a whole layer before it
-        // can blend them, because a wipe, a slide and a zoom are defined
-        // against the *frame* and not against the clip: a wipe across a clip
-        // scaled to a third of the canvas and rotated is not a wipe, and nobody
-        // would recognise it as one.
-        //
-        // Two extra canvas-sized targets per transition per frame, out of the
-        // same pool everything else comes from.
-        let mut layers: Vec<Option<(PooledTexture, PooledTexture)>> =
-            Vec::with_capacity(draws.len());
-        for draw in &draws {
-            match draw {
-                Draw::Quad { .. } => layers.push(None),
-                Draw::Transition { from, to, .. } => layers.push(Some((
-                    self.render_layer(size, from.as_ref())?,
-                    self.render_layer(size, to.as_ref())?,
-                ))),
-            }
-        }
-
-        let blend = draws
-            .iter()
-            .any(|d| matches!(d, Draw::Transition { .. }))
-            .then(|| self.transition_pipeline());
-        let layer_groups: Vec<Option<wgpu::BindGroup>> = layers
-            .iter()
-            .map(|pair| {
-                pair.as_ref().map(|(a, b)| {
-                    blend
-                        .expect("a layer pair exists only for a transition draw")
-                        .bind_layers(&self.ctx, a.view(), b.view())
-                })
-            })
-            .collect();
-```
-
-The pass loop branches. The three `set_*` calls move inside the `Quad` arm
-because a transition draw changes the pipeline; re-setting them per quad costs
-nothing measurable and is clearer than tracking which state is still bound:
-
-```rust
-            for (i, draw) in draws.iter().enumerate() {
-                match draw {
-                    Draw::Quad { .. } => {
-                        pass.set_pipeline(&self.pipeline);
-                        pass.set_vertex_buffer(0, self.vertices.slice(..));
-                        pass.set_index_buffer(
-                            self.indices.slice(..),
-                            wgpu::IndexFormat::Uint16,
-                        );
-                        pass.set_bind_group(
-                            0,
-                            &uniform_group,
-                            &[i as u32 * self.uniform_stride],
-                        );
-                        pass.set_bind_group(
-                            1,
-                            source_groups[i].as_ref().expect("a quad has a source"),
-                            &[],
-                        );
-                        pass.draw_indexed(0..QUAD_INDICES.len() as u32, 0, 0..1);
-                    }
-                    Draw::Transition { params, .. } => {
-                        // Same pass, same attachment, same blend state, at its
-                        // own place in the painter's order — so a transition
-                        // composites onto the tracks beneath it exactly as a
-                        // clip would, and nothing about this module's
-                        // single-pass structure has to change.
-                        blend.expect("a transition draw exists").draw(
-                            &self.ctx,
-                            &mut pass,
-                            i as u32,
-                            params,
-                            layer_groups[i].as_ref().expect("built above"),
-                        );
-                    }
-                }
-            }
-```
-
-After `self.ctx.queue().submit(...)`, give the layer textures back:
-
-```rust
-        for (a, b) in layers.into_iter().flatten() {
-            self.pool.release(a);
-            self.pool.release(b);
-        }
-```
-
-### 7. `render_layer`
-
-```rust
-    /// Composite one side of a transition into a canvas-sized target of its own.
-    ///
-    /// Cleared to **transparent**, not to the project background. The two
-    /// layers are blended and only then composited over whatever is beneath, so
-    /// a background in each of them would be composited twice and the letterbox
-    /// bars would come out opaque.
-    ///
-    /// `None` draws nothing and the clear is the whole result.
-    fn render_layer(
-        &self,
-        size: (u32, u32),
-        layer: Option<&(SourceFrame, QuadPlacement)>,
-    ) -> Result<PooledTexture> {
-        // One pooled target from `self.target_key(size)`, one render pass with
-        // `LoadOp::Clear(wgpu::Color::TRANSPARENT)`, one quad draw with the
-        // existing pipeline. Use a second `Mutex<Scratch>` (`layer_uniforms`)
-        // rather than `self.uniforms`, so a layer's uniform block cannot
-        // collide with the frame's own.
-        …
-    }
-```
+The hook is inside `render_to_texture`, which `render`, `render_frame`,
+`render_nv12` and `render_nv12_into` all call. The preview reads the composited
+target back as RGBA; a hardware export runs the RGBA→NV12 compute pass over the
+same target and never touches system memory in between. Neither knows
+transitions exist.
+`the_preview_and_the_export_agree_on_a_frame_mid_transition` renders three
+instants of one crossfade — one side hardware-decoded, one side software —
+through both entry points and compares the pixels, inverting the NV12 by hand.
 
 ### Cost, and the alternative that was rejected
 
 Two extra canvas-sized pooled targets per transition per frame, plus one
 fullscreen pass. Transitions are rare in a frame — at most one per track — and
-the textures come out of the pool, so the steady-state allocation is zero.
+the textures come out of the same pool everything else does, so the steady-state
+allocation is zero.
 
 Blending inside the quad pass, in quad space, would avoid both. It was rejected
 because a wipe, a slide and a zoom are defined against the frame rather than

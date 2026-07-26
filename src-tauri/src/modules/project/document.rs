@@ -23,7 +23,7 @@
 //! rather than a tree walk.
 
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use uuid::Uuid;
 
 /// Current on-disk schema version. Bump on any breaking change and add a
@@ -148,6 +148,59 @@ impl Project {
             .find_map(|t| t.segments.iter_mut().find(|s| s.id == id))
     }
 
+    /// The link group `segment_id` belongs to, if any.
+    pub fn link_group_of(&self, segment_id: &str) -> Option<&Id> {
+        let (_, segment) = self.segment(segment_id)?;
+        self.materials.link_of(segment)
+    }
+
+    /// Every segment in `group`, with the track it sits on and its index there.
+    ///
+    /// In document order, which is what makes a mirrored edit deterministic:
+    /// the composite a linked gesture expands into must be the same composite
+    /// every time or undo stops being exact.
+    pub fn link_members(&self, group: &str) -> Vec<(&Track, usize, &Segment)> {
+        self.tracks
+            .iter()
+            .flat_map(|track| {
+                track
+                    .segments
+                    .iter()
+                    .enumerate()
+                    .filter(move |(_, segment)| segment.extras.iter().any(|extra| extra == group))
+                    .map(move |(index, segment)| (track, index, segment))
+            })
+            .collect()
+    }
+
+    /// Whether this clip's sound is played by a *linked* clip on an audio lane
+    /// rather than by the clip itself.
+    ///
+    /// Importing a file with both streams puts the picture on a video lane and
+    /// the sound on an audio lane, as two linked segments of the same material.
+    /// Both would otherwise be heard — the mixer's rule is "a video material
+    /// whose container carries audio contributes sound, wherever it sits" — and
+    /// the same waveform summed with itself is 6 dB louder and phases with
+    /// every microsecond the two are out by.
+    ///
+    /// So the segment that is *not* on the audio lane defers. The check is
+    /// deliberately about where the partner sits rather than about a stored
+    /// role: dragging the audio clip onto a video lane, or the picture onto an
+    /// audio one, then does the obvious thing instead of silencing both.
+    pub fn sound_is_on_a_linked_lane(&self, track: &Track, segment: &Segment) -> bool {
+        if track.kind == TrackKind::Audio {
+            return false;
+        }
+        let Some(group) = self.materials.link_of(segment) else {
+            return false;
+        };
+        self.link_members(group).into_iter().any(|(lane, _, other)| {
+            lane.kind == TrackKind::Audio
+                && other.id != segment.id
+                && other.material_id == segment.material_id
+        })
+    }
+
     /// Every segment live at `time`, ordered back-to-front for compositing.
     ///
     /// Compositing order is `render_index` ascending, and `render_index` is
@@ -216,6 +269,50 @@ pub struct MaterialPool {
     /// neither should be parsing `serde_json::Value` to do it.
     #[serde(default)]
     pub transitions: Vec<TransitionMaterial>,
+    /// Every link group id that some segment currently belongs to.
+    ///
+    /// ## Why linkage is on the segment and this is only a type tag
+    ///
+    /// A clip and the sound it was imported with are **two segments** on two
+    /// lanes that move, trim, split and delete as one (see
+    /// `docs/decisions/0005-linked-audio-and-video.md`). Where that
+    /// relationship is stored was a real choice, and the alternative — a table
+    /// on `Project` naming the pairs — was rejected for the reason
+    /// [`TransitionMaterial`] gives for rejecting the same idea: a side table
+    /// that names segment ids is a **second place segment ids appear**, so
+    /// every structural edit has to remember to fix it up, and the one that
+    /// forgets leaves a row pointing at a segment that no longer exists.
+    ///
+    /// So membership hangs on the segment: a link group id sits in
+    /// [`Segment::extras`], and two segments are linked when they carry the
+    /// same one. That single decision is what makes the rest free —
+    /// `RemoveSegment` already snapshots the whole `Segment`, so undoing a
+    /// delete restores the linkage without knowing links exist; `MoveSegment`
+    /// and `TrimSegment` never touch `extras`, so a linked clip carries its
+    /// group through every edit; and `split_at` clones the segment, so the
+    /// only work is one line that gives the two new halves a group of their
+    /// own.
+    ///
+    /// What is left over is the one thing membership-on-the-segment cannot
+    /// answer: `extras` is a bare list of ids with **no type tag** — the kind
+    /// of an id is whichever pool category it resolves in — so nothing in an
+    /// id says whether it names a link group or an effect instance. This set
+    /// is that category, and holds nothing else, because a link group has no
+    /// parameters. It is maintained by exactly one command,
+    /// `EditCommand::SetLinkGroup`, which is also what keeps it exactly
+    /// invertible.
+    ///
+    /// A `BTreeSet` rather than a `Vec` for the reason `extras` below is a
+    /// `BTreeMap`: a save of an unchanged project must produce an unchanged
+    /// file, and an insertion-ordered list of ids does not.
+    ///
+    /// Deleting every member of a group leaves its id here with nothing
+    /// pointing at it. That is deliberate: pruning on delete would mean the
+    /// undo of that delete had to put the id back, and `RemoveSegment` does
+    /// not carry it. An unreferenced group is inert — it is 38 bytes of JSON
+    /// and no code path looks at it.
+    #[serde(default)]
+    pub links: BTreeSet<Id>,
     /// Non-media parameter blocks referenced by segments (speed curves,
     /// transitions, effect instances). Kept as one map so adding a new kind
     /// does not change the schema.
@@ -264,6 +361,16 @@ impl MaterialPool {
     /// rendering *a* transition beats rendering none.
     pub fn transition_of(&self, segment: &Segment) -> Option<&TransitionMaterial> {
         segment.extras.iter().find_map(|id| self.transition(id))
+    }
+
+    /// The link group `segment` belongs to, if any.
+    ///
+    /// The resolution step for the link category, exactly like
+    /// [`Self::transition_of`] is for transitions. A segment carrying more than
+    /// one is malformed and `validate()` reports it; this returns the first,
+    /// because moving a clip with *a* partner beats moving it with none.
+    pub fn link_of<'a>(&self, segment: &'a Segment) -> Option<&'a Id> {
+        segment.extras.iter().find(|id| self.links.contains(*id))
     }
 
     /// Which kind a material id belongs to, without the caller guessing.
@@ -1077,6 +1184,22 @@ impl Project {
                 if seg.source_range.duration <= 0 {
                     error(
                         "segment has a non-positive source duration".into(),
+                        Some(seg.id.clone()),
+                    );
+                }
+
+                // Two link groups on one clip means every mirrored edit picks
+                // whichever `link_of` returned first, so half the partners move
+                // and half do not. `SetLinkGroup` cannot produce it; a
+                // hand-edited file can.
+                let links = seg
+                    .extras
+                    .iter()
+                    .filter(|id| self.materials.links.contains(*id))
+                    .count();
+                if links > 1 {
+                    error(
+                        format!("clip belongs to {links} link groups; it may belong to one"),
                         Some(seg.id.clone()),
                     );
                 }

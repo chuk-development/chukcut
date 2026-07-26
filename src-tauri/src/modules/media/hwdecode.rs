@@ -78,6 +78,26 @@ pub const DEFAULT_RENDER_NODE: &str = "/dev/dri/renderD128";
 /// like a corrupt stream and is not one.
 const EXTRA_HW_FRAMES: i32 = 6;
 
+/// VAAPI displays *opened* in this process. One, unless somebody went around
+/// `gpu`.
+///
+/// Opens, not live handles, and never decremented — which is the difference
+/// from `render::context::LIVE_DEVICES`. A [`VaapiDevice`] is `Clone` and a
+/// clone is another reference to the same display, so counting drops would make
+/// an ordinary hand-out look like a close. The process's one display lives in a
+/// `static` and is never closed anyway.
+///
+/// The counterpart of `render::context::LIVE_DEVICES`, and here for the same
+/// reason: the cost of a second display is intermittent and points nowhere near
+/// its cause — `vaInitialize` is tens of milliseconds, a driver has a finite
+/// number of contexts, and running out of them shows up as a decode failing
+/// part-way through a timeline with many clips. A counter costs nothing and
+/// turns that into a line in the log naming the cause.
+///
+/// The `#[cfg(test)]` opens are the exception and are deliberate: a test that
+/// checks what a bad device node does has to try to open one.
+static LIVE_DISPLAYS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 fn hw_error(what: impl Into<String>, code: i32) -> MediaError {
     MediaError::Hardware {
         what: what.into(),
@@ -166,6 +186,14 @@ impl VaapiDevice {
                 "cannot open the VAAPI device {node} ({})",
                 ffmpeg::Error::from(if code < 0 { code } else { -1 })
             )));
+        }
+
+        if LIVE_DISPLAYS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0 {
+            tracing::error!(
+                node,
+                "a second VAAPI display was opened in this process; every caller \
+                 should be going through gpu::vaapi_device"
+            );
         }
 
         Ok(Self {

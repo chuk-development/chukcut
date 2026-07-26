@@ -38,7 +38,10 @@ import {
   type EditCommand,
   type EditResponse,
   timelineApply,
+  timelineApplyMany,
+  timelineLink,
   timelineSplit,
+  timelineUnlink,
 } from "@/modules/timeline/lib/api";
 import { IDENTITY_TRANSFORM, makePreviewInfo, makeSegment, makeTrack } from "@/test/fixtures";
 import { type IpcHarness, installIpc } from "@/test/ipc";
@@ -230,6 +233,16 @@ const EDIT_COMMANDS: EditCommand[] = [
     before: { muted: false, locked: false, hidden: false, volume: 1 },
     after: { muted: true, locked: false, hidden: false, volume: 1 },
   },
+  // `Option<Id>` on the Rust side, and serde writes `None` as `null` rather
+  // than omitting the key. A field that went missing instead would deserialize
+  // as `None` too, which is why the assertion below is on the null and not only
+  // on the shape.
+  {
+    type: "set_link_group",
+    segment_id: "segment-1",
+    before: null,
+    after: "link-1",
+  },
 ];
 
 function keysDeep(value: unknown, into: string[] = []): string[] {
@@ -273,6 +286,23 @@ describe("EditCommand is internally tagged and stays snake_case", () => {
     expect(Object.keys(ipc.lastCall("timeline_apply") ?? {})).toEqual(["command"]);
   });
 
+  it("sends a batch as a list plus a label, not as a composite", async () => {
+    // `timeline_apply_many` is a different command rather than a `composite`
+    // through `timeline_apply` on purpose: Rust expands link partners and
+    // orders the parts for a batch, and does neither for a composite the
+    // webview built. The wire shape is what keeps the two apart.
+    ipc.handle("timeline_apply_many", { project: {}, can_undo: true, can_redo: false });
+    await timelineApplyMany([EDIT_COMMANDS[1], EDIT_COMMANDS[2]], "Delete clips");
+
+    const payload = ipc.lastCall("timeline_apply_many");
+    expect(Object.keys(payload ?? {}).sort()).toEqual(["commands", "label"]);
+    expect(payload?.label).toBe("Delete clips");
+    expect(payload?.commands).toHaveLength(2);
+    for (const key of keysDeep(payload?.commands)) {
+      expect(key, `"${key}" must not be camelCase`).toBe(key.toLowerCase());
+    }
+  });
+
   it("carries both sides of the change, so Rust can invert it", async () => {
     ipc.handle("timeline_apply", { project: {}, can_undo: true, can_redo: false });
     await timelineApply({
@@ -313,6 +343,35 @@ describe("EditCommand is internally tagged and stays snake_case", () => {
 
     expect(ipc.lastCall("timeline_split")).toEqual({ segmentId: "segment-1", at: 1_500_000 });
   });
+
+  it("spells `Option<Id>` as an explicit null on both sides of a link change", async () => {
+    ipc.handle("timeline_apply", { project: {}, can_undo: true, can_redo: false });
+    await timelineApply({
+      type: "set_link_group",
+      segment_id: "segment-1",
+      before: "link-1",
+      after: null,
+    });
+
+    expect(ipc.lastCall("timeline_apply")?.command).toEqual({
+      type: "set_link_group",
+      segment_id: "segment-1",
+      before: "link-1",
+      after: null,
+    });
+  });
+
+  it("passes link and unlink their arguments camelCase, like every other command", async () => {
+    ipc.handle("timeline_unlink", { project: {}, can_undo: true, can_redo: false });
+    await timelineUnlink("segment-1");
+    expect(ipc.lastCall("timeline_unlink")).toEqual({ segmentId: "segment-1" });
+
+    ipc.handle("timeline_link", { project: {}, can_undo: true, can_redo: false });
+    await timelineLink(["segment-1", "segment-2"]);
+    expect(ipc.lastCall("timeline_link")).toEqual({
+      segmentIds: ["segment-1", "segment-2"],
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -344,6 +403,8 @@ const WIRE_PROJECT = {
     audios: [],
     images: [],
     texts: [],
+    links: [],
+    transitions: [],
     extras: {},
   },
   tracks: [

@@ -8,7 +8,7 @@
 use std::sync::Arc;
 use tauri::State;
 
-use super::ops::{split_at, EditCommand};
+use super::ops::{compose_edits, link, split_at, unlink, EditCommand};
 use crate::modules::project::{Micros, Project};
 use crate::state::AppState;
 
@@ -60,6 +60,31 @@ pub fn timeline_apply(
     respond(&state)
 }
 
+/// Apply one edit per clip as a single undo step.
+///
+/// What a multi-selection produces. The frontend sends one primitive per clip
+/// it means to touch and nothing else — no link partners, no ordering — because
+/// both of those are facts about the document rather than about what the user
+/// could see, and `compose_edits` is where the document is. See its docs for
+/// why a batch cannot simply be a `Composite` the webview built itself.
+///
+/// `label` is what the undo menu will say, because only the caller knows
+/// whether four `RemoveSegment`s were a delete or the tail of a paste.
+#[tauri::command]
+pub fn timeline_apply_many(
+    state: State<'_, Arc<AppState>>,
+    commands: Vec<EditCommand>,
+    label: String,
+) -> Result<EditResponse, String> {
+    {
+        let mut project_guard = state.project.write();
+        let project = project_guard.as_mut().ok_or("no project is open")?;
+        let command = compose_edits(project, &label, commands)?;
+        state.history.write().apply(project, command)?;
+    }
+    respond(&state)
+}
+
 #[tauri::command]
 pub fn timeline_split(
     state: State<'_, Arc<AppState>>,
@@ -70,6 +95,39 @@ pub fn timeline_split(
         let mut project_guard = state.project.write();
         let project = project_guard.as_mut().ok_or("no project is open")?;
         let command = split_at(project, &segment_id, at)?;
+        state.history.write().apply(project, command)?;
+    }
+    respond(&state)
+}
+
+/// Break the link between a clip and whatever it moves with.
+///
+/// After this the two are ordinary clips: the mirroring in `History::apply`
+/// finds no group and every later edit touches exactly what it names.
+#[tauri::command]
+pub fn timeline_unlink(
+    state: State<'_, Arc<AppState>>,
+    segment_id: String,
+) -> Result<EditResponse, String> {
+    {
+        let mut project_guard = state.project.write();
+        let project = project_guard.as_mut().ok_or("no project is open")?;
+        let command = unlink(project, &segment_id)?;
+        state.history.write().apply(project, command)?;
+    }
+    respond(&state)
+}
+
+/// Make several clips move, trim and delete as one.
+#[tauri::command]
+pub fn timeline_link(
+    state: State<'_, Arc<AppState>>,
+    segment_ids: Vec<String>,
+) -> Result<EditResponse, String> {
+    {
+        let mut project_guard = state.project.write();
+        let project = project_guard.as_mut().ok_or("no project is open")?;
+        let command = link(project, &segment_ids)?;
         state.history.write().apply(project, command)?;
     }
     respond(&state)

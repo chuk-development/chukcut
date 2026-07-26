@@ -44,6 +44,10 @@ beforeEach(() => {
   ipc.handle("workspace_settings_set", null);
   ipc.handle("workspace_cache_size", 1_500_000_000);
   ipc.handle("workspace_cache_clear", null);
+  ipc.handle("workspace_log_path", {
+    directory: "/home/u/.local/state/chukcut/logs",
+    file: "/home/u/.local/state/chukcut/logs/chukcut-2026-07-26.log",
+  });
   useWorkspaceStore.setState({
     settings: STORED,
     settingsStatus: "ready",
@@ -166,5 +170,39 @@ describe("the storage section", () => {
         settings: { ...STORED, cache_limit: 0 },
       }),
     );
+  });
+
+  it("names the log file and reveals it", async () => {
+    ipc.handle("plugin:opener|reveal_item_in_dir", null);
+    mount();
+    await userEvent.click(screen.getByRole("tab", { name: "Storage" }));
+
+    expect(
+      await screen.findByText("/home/u/.local/state/chukcut/logs/chukcut-2026-07-26.log"),
+    ).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: /Show log/ }));
+
+    await waitFor(() => expect(ipc.count("plugin:opener|reveal_item_in_dir")).toBe(1));
+    expect(ipc.lastCall("plugin:opener|reveal_item_in_dir")).toEqual({
+      paths: ["/home/u/.local/state/chukcut/logs/chukcut-2026-07-26.log"],
+    });
+  });
+
+  /**
+   * A machine where the log file could not be opened still gets an answer, and
+   * the button is not offered — revealing a file that is not there does
+   * nothing and reads as broken.
+   */
+  it("says where the log would be when there is no file to reveal", async () => {
+    ipc.handle("workspace_log_path", {
+      directory: "/home/u/.local/state/chukcut/logs",
+      file: null,
+    });
+    mount();
+    await userEvent.click(screen.getByRole("tab", { name: "Storage" }));
+
+    expect(await screen.findByText(/could not be opened this run/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Show log/ })).toBeDisabled();
   });
 });

@@ -7,7 +7,13 @@
 
 import { invoke } from "@tauri-apps/api/core";
 
-import type { HardwareReport, RecentProject, Settings } from "@/modules/workspace/types";
+import type {
+  HardwareReport,
+  LogLocation,
+  MenuState,
+  RecentProject,
+  Settings,
+} from "@/modules/workspace/types";
 
 export function workspaceSettingsGet(): Promise<Settings> {
   return invoke<Settings>("workspace_settings_get");
@@ -41,6 +47,39 @@ export function workspaceCacheSize(): Promise<number> {
 
 export function workspaceCacheClear(): Promise<void> {
   return invoke<void>("workspace_cache_clear");
+}
+
+/**
+ * Where this run is logging.
+ *
+ * Asked when the panel opens rather than held in the store: it cannot change
+ * while the app runs, and the only thing that reads it is the button that
+ * reveals the file.
+ */
+export function workspaceLogPath(): Promise<LogLocation> {
+  return invoke<LogLocation>("workspace_log_path");
+}
+
+/**
+ * Tell the native menu bar what the document looks like now.
+ *
+ * Pushed on every change to the stores that feed it rather than polled, because
+ * the alternative is a menu that is right a moment after the user opened it.
+ * `lib/menu.ts` owns the deduplication.
+ */
+export function workspaceMenuSync(state: MenuState): Promise<void> {
+  return invoke<void>("workspace_menu_sync", { state });
+}
+
+/**
+ * Answer the close request Rust is holding the window open for.
+ *
+ * `false` is not a failure and not a cancellation of anything: the window was
+ * prevented from closing before this was ever asked, so declining simply leaves
+ * it open.
+ */
+export function workspaceCloseAnswer(confirmed: boolean): Promise<void> {
+  return invoke<void>("workspace_close_answer", { confirmed });
 }
 
 /**

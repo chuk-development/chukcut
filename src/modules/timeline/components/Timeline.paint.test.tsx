@@ -70,6 +70,8 @@ function crowdedProject(count = CLIPS): Project {
       audios: [],
       images: [],
       texts: [],
+      links: [],
+      transitions: [],
       extras: {},
     },
     tracks: [makeTrack("track-video", { segments })],

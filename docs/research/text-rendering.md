@@ -240,105 +240,81 @@ editor. It would matter for animated *content* — a live word counter, a
 timecode burn-in — and that is when the outline cost above becomes worth
 attacking.
 
-## The patch `media/` needs
+## How a title reaches the screen, as built
 
-Nothing in `render/` changes. The compositor already takes a straight-alpha
-RGBA texture from a `SourceProvider` and `source.rs` already says in its own
-prose that "rasterizing a text layer" is `media`'s job — so a text layer that
-arrives as a canvas-sized texture is drawn by code that exists.
+Nothing in `render/` changed. The compositor already takes a straight-alpha RGBA
+texture from a `SourceProvider`, so a text layer that arrives as a canvas-sized
+texture is drawn by code that already existed.
 
-`media/provider.rs` is the one file that changes, and it was owned by other work
-while this landed. Four edits.
+```
+Text tab / preset            src/modules/text/components/TextPanel.tsx
+  └ text_add                 src-tauri/src/modules/text/commands.rs
+      ├ edit::default_material     size, colour, outline, shadow — pure
+      └ edit::insert_command       lane, instant, one Composite — pure
+          └ History::apply         an ordinary undoable edit
 
-**1. Carry the material and the canvas size in the snapshot** — the canvas is
-needed because font sizes are in document pixels and the preview renders at a
-fraction of them.
+Inspector panel              src/modules/inspector/components/TextInspector.tsx
+  └ text_set (debounced 140 ms)    replaces the material in the pool
 
-```rust
-// enum MaterialSource
-    /// Text is rasterised rather than decoded, at canvas size, so the
-    /// compositor's fit is the identity and the segment's transform places it.
-    Text(TextMaterial),
-
-// struct MediaSourceProvider
-    /// The project's canvas, so a preview rendered at 540x960 knows that a
-    /// 72-pixel title is 36 device pixels tall there.
-    canvas: (u32, u32),
-
-// MediaSourceProvider::from_project
-    for text in &project.materials.texts {
-        sources.insert(text.id.clone(), MaterialSource::Text(text.clone()));
-    }
-
-    Self {
-        sources,
-        canvas: (project.canvas.width.max(1), project.canvas.height.max(1)),
-        forced,
-        decoders: Mutex::new(HashMap::new()),
-        textures: Mutex::new(HashMap::new()),
-    }
+Every frame                  media/provider.rs::text_frame
+  └ TextRenderer::rasterize_material   cache hit: ~0.5 µs
+      └ upload_rgba → the compositor's ordinary quad
 ```
 
-**2. The rasterise-and-upload path**, next to `image_frame`:
+Three things about that chain are load-bearing and easy to undo by accident:
 
-```rust
-    /// Rasterise a text layer and upload it.
-    ///
-    /// The layer is the size of the frame being rendered rather than of the
-    /// text, because `render::layout::fit_size` scales a source to fit the
-    /// canvas: a tightly cropped title would be stretched to fill the frame.
-    /// At frame size the fit is the identity and the segment's own transform
-    /// positions it, exactly as for a clip.
-    ///
-    /// `TextRenderer` caches by content hash, so the call this makes on every
-    /// frame costs a hash lookup rather than a rasterisation — half a
-    /// microsecond against five milliseconds, measured in
-    /// `docs/research/text-rendering.md`.
-    fn text_frame(
-        &self,
-        ctx: &RenderContext,
-        material_id: &str,
-        material: &TextMaterial,
-        size: (u32, u32),
-    ) -> anyhow::Result<SourceFrame> {
-        let size = (size.0.max(1), size.1.max(1));
-        // A title does not vary with time, so any cached upload at the right
-        // size is valid whatever instant was asked for.
-        if let Some(cached) = self.textures.lock().get(material_id) {
-            if (cached.frame.width, cached.frame.height) == size {
-                return Ok(cached.frame.clone());
-            }
-        }
+- **`text_frame` caches per material *and per size*.** A title does not vary
+  with time, so any cached upload at the right size is valid whatever instant
+  was asked for — but the size check is what stops an export reusing the
+  preview's smaller raster, which is a visibly soft title in the delivered file.
+  `tests/text_clip.rs::one_provider_does_not_serve_the_preview_raster_to_the_export`
+  is that check, from the outside.
+- **The generic `self.cached(...)` lookup at the top of `SourceProvider::frame`
+  compares `source_time`, and a title has none.** It misses and falls through to
+  `text_frame`, whose own lookup ignores time. That is correct today; if the
+  generic check is ever changed to serve text as well, it must not key on the
+  instant.
+- **The scale is `frame.width / canvas.width`, computed in the provider.** Both
+  the preview and the export go through it, which is why they agree. See below.
 
-        let scale = size.0 as f32 / self.canvas.0 as f32;
-        let rastered = TextRenderer::shared().rasterize_material(material, size, scale);
-        let frame = upload_rgba(ctx, &rastered.pixels, rastered.width, rastered.height);
-        self.store(material_id, 0, &frame);
-        Ok(frame)
-    }
-```
+### The identity between preview and export, and how it is proved
 
-**3. Dispatch to it** in `SourceProvider::frame`:
+`src-tauri/tests/text_clip.rs`. The preview and the exporter build the same
+`MediaSourceProvider` and call the same `Compositor::render_frame`; the only
+difference between `preview/server.rs::render_one` and `export/job.rs` is the
+size they pass. So:
 
-```rust
--            MaterialSource::Text => Ok(None),
-+            MaterialSource::Text(material) => self
-+                .text_frame(ctx, request.material_id, material, request.max_size)
-+                .map(Some),
-```
+- Same size — every project up to 1920 on the long edge — must be
+  **byte-identical**, and is: 0 of 921,600 pixels differ.
+- Smaller preview — a 4K canvas previews at 1920 — must put the title's ink in
+  the same place proportionally, within **2 preview pixels**. Glyphs are shaped
+  at the size they are drawn rather than shaped once and scaled, deliberately
+  (see "Font size is in *document* pixels" above), so hinting and rounding do
+  differ between the two and an exact match is not the right assertion.
+- Through the real exporter, decoded back out of the H.264 file and scored
+  against the preview frame: above 30 dB, with a blank frame and a title-free
+  frame as controls.
 
-**4. The imports:**
+## What the document still cannot say
 
-```rust
-use crate::modules::project::document::TextMaterial;
-use crate::modules::text::TextRenderer;
-```
+"What could not be honoured from `TextMaterial`" above is unchanged by the UI
+work: the inspector exposes every field the document has, and the three gaps
+listed there — line height, letter spacing, background geometry, stacked
+outlines — are still gaps. Building the panel found one more:
 
-One thing to check when applying it: the generic `self.cached(...)` call at the
-top of `frame` compares `source_time`, and a text layer has none. It will
-usually miss and fall through to `text_frame`, whose own lookup ignores time —
-so the behaviour is right, but if that generic check is ever changed to serve
-text as well, it must not key on the instant.
+- **Vertical alignment inside the canvas is not document state.** The raster is
+  always vertically centred and the segment's `Transform` moves it, which is why
+  the inspector's quick placements write `transform.position` rather than a text
+  field. That is the right factoring — it keyframes for free — but it does mean
+  a title cannot be "anchored to the bottom" independently of its transform.
+
+## Changing a title is not undoable
+
+`text_set` writes the material pool directly, because there is no `EditCommand`
+variant carrying a `TextMaterial` and `timeline/ops.rs` was owned by other work.
+Adding and deleting a title *are* undoable; the words, font and colours are not.
+The fix is an `EditCommand::SetTextMaterial { id, before, after }` mirroring
+`SetTransition`. Reasoning in `src-tauri/src/modules/text/commands.rs`.
 
 ## Traps found while building this
 

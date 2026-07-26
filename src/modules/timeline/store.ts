@@ -10,6 +10,7 @@ import { create } from "zustand";
 
 import { clamp } from "@/lib/time";
 import type { Id, Micros } from "@/modules/project/types";
+import type { ClipboardEntry } from "@/modules/timeline/lib/clipboard";
 
 /** Pixels per microsecond. 1e-4 is 100 px per second — a comfortable default. */
 export const DEFAULT_ZOOM = 1e-4;
@@ -33,7 +34,38 @@ interface TimelineState {
   /** Horizontal scroll offset of the lane viewport, in pixels. */
   scrollX: number;
   playhead: Micros;
-  selectedSegmentId: Id | null;
+  /**
+   * The selected clips, in the order they were added.
+   *
+   * A list rather than a `Set` because the order carries meaning — the last
+   * entry is what a shift-click extends from — and because an array compares by
+   * identity in a `useStore` selector, which a rebuilt `Set` would too but
+   * without giving anything back.
+   *
+   * Empty is the ordinary "nothing selected". Every consumer that used to read
+   * one id now asks for the sole selection ([`soleSelection`]) and gets `null`
+   * when the answer is ambiguous, which is what keeps the inspector from
+   * silently editing one of four clips.
+   */
+  selection: Id[];
+  /**
+   * Where a shift-click measures from: the clip whose selection was the last
+   * deliberate act. Null once the selection is emptied.
+   */
+  selectionAnchor: Id | null;
+  /**
+   * Clips that were cut or copied, detached from any document.
+   *
+   * Deliberately *not* part of the project: a clipboard is not something the
+   * user is editing, it must survive closing the document it came from, and
+   * putting it in the document would put it in the undo history and in the file
+   * on disk. It sits here, with the zoom and the playhead, for the same reason
+   * they do — it belongs to the session, and Rust never sends it back.
+   *
+   * The entries carry whole `Segment`s, so a paste keeps the source range, the
+   * transform, the effects and the keyframes of what was copied.
+   */
+  clipboard: ClipboardEntry[];
   tool: TimelineTool;
   snapping: boolean;
   /**
@@ -50,7 +82,15 @@ interface TimelineState {
   zoomBy: (factor: number) => void;
   setScrollX: (scrollX: number) => void;
   setPlayhead: (playhead: Micros) => void;
+  /** Select exactly this clip, or clear the selection. The plain click. */
   select: (segmentId: Id | null) => void;
+  /** Replace the selection wholesale: Select All, and a rubber band's release. */
+  selectMany: (segmentIds: readonly Id[]) => void;
+  /** Ctrl/Cmd+click: add the clip, or take it out if it was already in. */
+  toggleSelection: (segmentId: Id) => void;
+  /** Shift+click: add a run of clips without disturbing what is already there. */
+  extendSelection: (segmentIds: readonly Id[]) => void;
+  setClipboard: (entries: ClipboardEntry[]) => void;
   setTool: (tool: TimelineTool) => void;
   toggleSnapping: () => void;
   setRazorTarget: (target: RazorTarget | null) => void;
@@ -60,7 +100,9 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
   zoom: DEFAULT_ZOOM,
   scrollX: 0,
   playhead: 0,
-  selectedSegmentId: null,
+  selection: [],
+  selectionAnchor: null,
+  clipboard: [],
   tool: "select",
   snapping: true,
   razorTarget: null,
@@ -69,7 +111,45 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
   zoomBy: (factor) => set({ zoom: clamp(get().zoom * factor, MIN_ZOOM, MAX_ZOOM) }),
   setScrollX: (scrollX) => set({ scrollX }),
   setPlayhead: (playhead) => set({ playhead: Math.max(0, Math.round(playhead)) }),
-  select: (selectedSegmentId) => set({ selectedSegmentId }),
+  select: (segmentId) =>
+    set(
+      segmentId === null
+        ? { selection: [], selectionAnchor: null }
+        : { selection: [segmentId], selectionAnchor: segmentId },
+    ),
+
+  selectMany: (segmentIds) => {
+    const selection = unique(segmentIds);
+    // A click on empty space and a rubber band over empty space are the same
+    // thing to everything downstream, so both leave the anchor cleared.
+    set({ selection, selectionAnchor: selection[selection.length - 1] ?? null });
+  },
+
+  toggleSelection: (segmentId) => {
+    const current = get().selection;
+    if (current.includes(segmentId)) {
+      const selection = current.filter((id) => id !== segmentId);
+      // The anchor has to leave with the clip it named, or the next shift-click
+      // extends from something that is no longer selected.
+      const anchor = get().selectionAnchor;
+      set({
+        selection,
+        selectionAnchor: anchor === segmentId ? (selection[selection.length - 1] ?? null) : anchor,
+      });
+      return;
+    }
+    set({ selection: [...current, segmentId], selectionAnchor: segmentId });
+  },
+
+  extendSelection: (segmentIds) => {
+    const selection = unique([...get().selection, ...segmentIds]);
+    // The anchor stays where it was: shift-clicking twice extends from the
+    // original clip both times, which is what every list in every OS does.
+    set({ selection });
+  },
+
+  setClipboard: (clipboard) => set({ clipboard }),
+
   setTool: (tool) => set({ tool, razorTarget: tool === "razor" ? get().razorTarget : null }),
   toggleSnapping: () => set({ snapping: !get().snapping }),
 
@@ -91,6 +171,23 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
     set({ razorTarget: target });
   },
 }));
+
+function unique(ids: readonly Id[]): Id[] {
+  return [...new Set(ids)];
+}
+
+/**
+ * The one selected clip, or null when nothing is selected — or when several
+ * are.
+ *
+ * Every panel that edits *a* clip asks for this rather than for the first entry
+ * of the selection. With four clips selected there is no such thing as "the"
+ * clip, and answering with one of them would let the inspector change a
+ * property on a clip the user is not looking at.
+ */
+export function soleSelection(selection: readonly Id[]): Id | null {
+  return selection.length === 1 ? selection[0] : null;
+}
 
 /** Width of the track-header gutter. Shared by the ruler so ticks line up. */
 export const TRACK_HEADER_WIDTH = 150;

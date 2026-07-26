@@ -82,11 +82,62 @@ export interface TextMaterial {
   background: Rgba | null;
 }
 
+export type TransitionKind = "dissolve" | "dip_to_color" | "wipe" | "slide" | "zoom";
+
+export type TransitionDirection = "left" | "right" | "up" | "down";
+
+/**
+ * One transition's parameters, in the pool like every other material.
+ *
+ * The id sits in the `extras` of the **incoming** segment — the transition
+ * describes how that clip is entered — and the effect is centred on the cut
+ * rather than overlapping the two clips, so neither clip moves when its
+ * duration changes. Both decisions are argued at `TransitionMaterial` in
+ * `document.rs`; nothing on this side may assume otherwise, because the window
+ * a user drags is derived from the cut and this duration and is stored nowhere.
+ */
+export interface TransitionMaterial {
+  id: Id;
+  kind: TransitionKind;
+  /** Total length of the effect, half of it either side of the cut. */
+  duration: Micros;
+  easing: Easing;
+  /** Wipe and slide only. */
+  direction: TransitionDirection;
+  /** Dip only. Linear RGBA. */
+  color: Rgba;
+  /** Wipe only: width of the softened edge as a fraction of the frame. */
+  softness: number;
+  /** Zoom only: extra scale the push adds. */
+  zoom: number;
+}
+
 export interface MaterialPool {
   videos: VideoMaterial[];
   audios: AudioMaterial[];
   images: ImageMaterial[];
   texts: TextMaterial[];
+  /**
+   * Transition parameter blocks, referenced from the incoming segment's
+   * `extras`.
+   *
+   * Required, because Rust serializes it unconditionally: a document that
+   * crossed IPC always has it. It was briefly `?` while two test fixtures still
+   * built a `MaterialPool` literal without it — an optional field on a type
+   * that is never actually optional pushes a `?.` or a `?? []` into every
+   * consumer, so the fixtures were fixed instead.
+   */
+  transitions: TransitionMaterial[];
+  /**
+   * Every link group id some segment belongs to.
+   *
+   * Membership itself lives on the segment — a group id in `Segment.extras` —
+   * and this is only what makes such an id recognisable as a link rather than
+   * an effect. A `BTreeSet` in Rust, so it arrives sorted and without
+   * duplicates. See `MaterialPool::links` in `document.rs` for why it is shaped
+   * this way.
+   */
+  links: Id[];
   /** Effect / transition / animation parameter blocks, keyed by id. */
   extras: Record<Id, unknown>;
 }
@@ -236,6 +287,32 @@ export function findSegment(
     }
   }
   return null;
+}
+
+/**
+ * The link group a clip belongs to, if any.
+ *
+ * Mirrors `MaterialPool::link_of`: `extras` carries no type tag, so an id is a
+ * link when the pool says it is one.
+ */
+export function linkGroupOf(project: Project, segment: Segment): Id | null {
+  const links = project.materials.links;
+  return segment.extras.find((id) => links.includes(id)) ?? null;
+}
+
+/** Everything that moves when this clip moves, excluding the clip itself. */
+export function linkedPartners(project: Project, segmentId: Id): Segment[] {
+  const found = findSegment(project, segmentId);
+  if (!found) return [];
+  const group = linkGroupOf(project, found.segment);
+  if (!group) return [];
+  const partners: Segment[] = [];
+  for (const track of project.tracks) {
+    for (const segment of track.segments) {
+      if (segment.id !== segmentId && segment.extras.includes(group)) partners.push(segment);
+    }
+  }
+  return partners;
 }
 
 /** What to write on a clip. Falls back to the material id so a broken reference is visible rather than blank. */

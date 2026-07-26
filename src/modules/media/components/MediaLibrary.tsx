@@ -4,7 +4,6 @@ import {
   ImportIcon,
   Loader2Icon,
   MusicIcon,
-  TypeIcon,
 } from "lucide-react";
 import { useCallback, useState } from "react";
 
@@ -16,6 +15,7 @@ import { MediaItem } from "@/modules/media/components/MediaItem";
 import { useMediaStore } from "@/modules/media/store";
 import { describeError } from "@/modules/project/store";
 import type { ImportedMaterial } from "@/modules/project/types";
+import { TextPanel } from "@/modules/text/components/TextPanel";
 
 function EmptyState({
   message,
@@ -170,11 +170,7 @@ export function MediaLibrary() {
         </TabsContent>
 
         <TabsContent value="text">
-          <EmptyState
-            icon={TypeIcon}
-            message="Titles arrive with the text module"
-            hint="Phase 2 on the roadmap."
-          />
+          <TextPanel />
         </TabsContent>
       </Tabs>
     </section>

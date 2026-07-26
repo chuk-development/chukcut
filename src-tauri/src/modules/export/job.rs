@@ -496,6 +496,14 @@ pub fn run_export(job: &ExportJob, sink: &dyn ProgressSink) -> Result<ExportOutc
     ) {
         Ok(writer) => writer,
         Err(error) => {
+            // Before the start block exists, so this is the only record that
+            // this export was ever attempted.
+            tracing::error!(
+                output = %settings.output_path.display(),
+                encoder = %settings.video.encoder_name,
+                %error,
+                "the export could not open its output file"
+            );
             let mut failed = tracker.snapshot(ExportStage::Failed, 0, Instant::now());
             failed.message = Some(error.to_string());
             sink.send(failed);
@@ -582,7 +590,15 @@ fn encode_all(
             spec.sample_rate,
             spec.channels,
             &job.cancel,
-        )?;
+        )
+        // The mix runs before the block below, so a failure here would
+        // otherwise leave a log with no trace of the export at all.
+        .map_err(|error| {
+            if !error.is_cancellation() {
+                tracing::error!(%error, "the audio mix failed; no frame was encoded");
+            }
+            error
+        })?;
     }
 
     let audio_rate = settings.audio.as_ref().map(|a| a.sample_rate).unwrap_or(0);
@@ -594,7 +610,13 @@ fn encode_all(
     // and it needs a compute pass that a very old device might not build. So:
     // ask for it when it helps, and drop back to the RGBA path for the whole
     // export the first time it does not work, rather than per frame.
-    let mut gpu_nv12 = writer.wants_nv12() && gpu_color_convert();
+    //
+    // The two conditions are named rather than inlined because the log block
+    // below has to say *which* of them ruled the faster path out. A machine we
+    // cannot see is the normal case for a bug report.
+    let encoder_wants_nv12 = writer.wants_nv12();
+    let gpu_convert_allowed = gpu_color_convert();
+    let mut gpu_nv12 = encoder_wants_nv12 && gpu_convert_allowed;
 
     // And whether the frame can skip system memory entirely. This needs three
     // things at once — a Vulkan device that exports DMA-BUF memory, a VAAPI
@@ -602,14 +624,30 @@ fn encode_all(
     // established by trying and it degrades to the NV12-readback path above,
     // which itself degrades to swscale. Three tiers, each a strict improvement
     // on the one below, and an export happens on whichever the machine reaches.
-    let mut zero_copy = (gpu_nv12 && zero_copy_enabled())
+    let zero_copy_allowed = zero_copy_enabled();
+    let mut zero_copy = (gpu_nv12 && zero_copy_allowed)
         .then(|| ZeroCopy::new(job, size))
         .flatten();
-    if zero_copy.is_some() {
-        tracing::info!("exporting zero-copy: the encoder reads what the compositor wrote");
-    }
 
-    walk_frames(fps, settings.total_frames, &job.cancel, |index, time| {
+    let chosen = FramePathChoice::of(
+        zero_copy.is_some(),
+        gpu_nv12,
+        encoder_wants_nv12,
+        gpu_convert_allowed,
+        zero_copy_allowed,
+        &settings.video.encoder_name,
+    );
+    tracing::info!("{}", describe_export(settings, &chosen));
+
+    // What the frame loop had to give up on halfway through, if anything. Both
+    // fallbacks below are silent in the finished file — a demoted export is
+    // slower and otherwise identical — so the only place they can ever be seen
+    // is here.
+    let mut fallbacks: Vec<String> = Vec::new();
+    let mut written = 0u64;
+    let mut observed_nv12: Option<(usize, usize, usize, usize)> = None;
+
+    let walk = walk_frames(fps, settings.total_frames, &job.cancel, |index, time| {
         if let Some(state) = zero_copy.as_mut() {
             match state.frame(job, writer, size, index, time) {
                 Ok(()) => {
@@ -622,6 +660,7 @@ fn encode_all(
                         index,
                         &mut audio_cursor,
                     )?;
+                    written = index + 1;
                     let now = Instant::now();
                     if tracker.should_emit(index, now) {
                         sink.send(tracker.snapshot(ExportStage::Encoding, index + 1, now));
@@ -635,6 +674,10 @@ fn encode_all(
                         "the zero-copy path failed; falling back to a readback for the rest \
                          of this export"
                     );
+                    fallbacks.push(format!(
+                        "zero-copy gave up at frame {index} ({source}); the rest of the export \
+                         read frames back"
+                    ));
                     zero_copy = None;
                 }
             }
@@ -647,6 +690,11 @@ fn encode_all(
                 Ok(nv12) => {
                     let (y_stride, uv_stride) = (nv12.y_stride, nv12.uv_stride);
                     let offset = nv12.uv_offset();
+                    // Measured rather than predicted, once: what the block
+                    // above printed is what `Nv12Layout` says this size should
+                    // be, and the whole reason to log strides is that the two
+                    // can disagree.
+                    observed_nv12.get_or_insert((y_stride, uv_stride, offset, nv12.data.len()));
                     writer.write_video_frame_nv12(
                         &nv12.data[..offset],
                         y_stride,
@@ -666,6 +714,10 @@ fn encode_all(
                         "the GPU colour conversion failed; falling back to swscale for the \
                          rest of this export"
                     );
+                    fallbacks.push(format!(
+                        "the GPU NV12 conversion gave up at frame {index} ({source}); the rest \
+                         of the export went through swscale"
+                    ));
                     gpu_nv12 = false;
                 }
             }
@@ -691,12 +743,30 @@ fn encode_all(
             &mut audio_cursor,
         )?;
 
+        written = index + 1;
         let now = Instant::now();
         if tracker.should_emit(index, now) {
             sink.send(tracker.snapshot(ExportStage::Encoding, index + 1, now));
         }
         Ok(())
-    })?;
+    });
+
+    // Before the `?`, so a cancelled or failed export says how far it got
+    // rather than saying nothing at all — which is the case somebody is most
+    // likely to be reading the log for.
+    tracing::info!(
+        "{}",
+        describe_outcome(
+            settings,
+            walk.as_ref().err(),
+            written,
+            tracker.elapsed(Instant::now()),
+            final_path_label(zero_copy.is_some(), gpu_nv12),
+            observed_nv12,
+            &fallbacks,
+        )
+    );
+    walk?;
 
     // Whatever the last frame boundary did not cover — a mix is exactly as long
     // as the project, and the last frame starts before the project ends.
@@ -705,6 +775,241 @@ fn encode_all(
     }
 
     Ok(settings.total_frames)
+}
+
+// ---------------------------------------------------------------------------
+// The export log
+// ---------------------------------------------------------------------------
+//
+// An export that comes out wrong is reported by someone who cannot see any of
+// this, and the three frame paths produce the same file when they work — so
+// when one of them does not, nothing in the output says which ran. These two
+// blocks are the only record. They are formatted as a block rather than as
+// fields because they are read by a person scrolling a log, and every number in
+// them was chosen because it has at some point been the answer: strides
+// especially, since a stride disagreement is invisible in every other
+// symptom except the picture.
+
+/// Which of the three frame paths an export took, and why not a better one.
+struct FramePathChoice {
+    label: &'static str,
+    /// `None` on the top tier. Prose, because whoever reads it is diagnosing a
+    /// machine they cannot log into.
+    demoted_because: Option<String>,
+    /// Whether frames reach the encoder as NV12 at all. The swscale tier hands
+    /// over RGBA and the conversion happens inside `encoder.rs`.
+    nv12: bool,
+}
+
+impl FramePathChoice {
+    fn of(
+        zero_copy: bool,
+        gpu_nv12: bool,
+        encoder_wants_nv12: bool,
+        gpu_convert_allowed: bool,
+        zero_copy_allowed: bool,
+        encoder_name: &str,
+    ) -> Self {
+        if zero_copy {
+            return Self {
+                label: "zero-copy DMA-BUF (tier 1 of 3)",
+                demoted_because: None,
+                nv12: true,
+            };
+        }
+        if gpu_nv12 {
+            return Self {
+                label: "GPU NV12 readback (tier 2 of 3)",
+                demoted_because: Some(
+                    if zero_copy_allowed {
+                        "no zero-copy: the compositor could not export a DMA-BUF ring this \
+                         encoder can import"
+                    } else {
+                        "no zero-copy: switched off for this process (set_zero_copy)"
+                    }
+                    .to_string(),
+                ),
+                nv12: true,
+            };
+        }
+        Self {
+            label: "swscale (tier 3 of 3)",
+            demoted_because: Some(if !encoder_wants_nv12 {
+                format!(
+                    "no GPU colour conversion: {encoder_name} is fed YUV420P, so NV12 from the \
+                     GPU would move the conversion rather than remove it"
+                )
+            } else if !gpu_convert_allowed {
+                "no GPU colour conversion: switched off for this process (set_gpu_color_convert)"
+                    .to_string()
+            } else {
+                "no GPU colour conversion: the device has no RGBA to NV12 compute pass".to_string()
+            }),
+            nv12: false,
+        }
+    }
+}
+
+/// What the frame loop ended up on, which is not always what it started on.
+fn final_path_label(zero_copy: bool, gpu_nv12: bool) -> &'static str {
+    match (zero_copy, gpu_nv12) {
+        (true, _) => "zero-copy DMA-BUF (tier 1 of 3)",
+        (false, true) => "GPU NV12 readback (tier 2 of 3)",
+        (false, false) => "swscale (tier 3 of 3)",
+    }
+}
+
+/// The block logged before the first frame.
+fn describe_export(settings: &ExportSettings, chosen: &FramePathChoice) -> String {
+    let (width, height) = settings.size();
+    let fps = settings.fps();
+    let quality = match settings.video.quality {
+        Quality::Crf(crf) => format!("crf {crf}"),
+        Quality::Bitrate(bits) => format!("{} target", bitrate(bits)),
+    };
+    // What a rate-control mode that insists on a number is given. Every VAAPI
+    // mode does, whatever the preset says, so this is the bitrate a hardware
+    // export actually runs at — see `hwaccel::fallback_bitrate`.
+    let effective = hwaccel::fallback_bitrate(width, height, fps, settings.video.quality);
+
+    let audio = match &settings.audio {
+        Some(spec) => format!(
+            "{} · {} · {} Hz · {} ch",
+            spec.encoder_name,
+            bitrate(u64::from(spec.bitrate)),
+            spec.sample_rate,
+            spec.channels
+        ),
+        None => "none".to_string(),
+    };
+
+    let layout = crate::modules::render::Nv12Layout::for_size(width, height);
+    let nv12 = if chosen.nv12 {
+        format!(
+            "y_stride {} B · uv_stride {} B · uv_offset {} B · total {} B",
+            layout.y_stride,
+            layout.uv_stride,
+            layout.uv_offset(),
+            layout.total_bytes()
+        )
+    } else {
+        // Not omitted even here: knowing that nothing in this process chose the
+        // strides is itself the answer when a picture comes out sheared.
+        format!(
+            "not used — RGBA leaves the compositor and libswscale converts inside the encoder \
+             (an NV12 frame of this size would be y_stride {} B · uv_stride {} B · uv_offset \
+             {} B · total {} B)",
+            layout.y_stride,
+            layout.uv_stride,
+            layout.uv_offset(),
+            layout.total_bytes()
+        )
+    };
+
+    let mut block = format!(
+        "export starting\n  \
+           output     {}\n  \
+           container  {}\n  \
+           video      {}x{} @ {:.3} fps · {} · {} (≈ {})\n  \
+           encoder    {} · {}\n  \
+           audio      {}\n  \
+           length     {} frames, {:.3} s\n  \
+           path       {}\n  \
+           nv12       {}",
+        settings.output_path.display(),
+        settings.preset.container.extension(),
+        width,
+        height,
+        fps.as_f64(),
+        settings.preset.video_codec.label(),
+        quality,
+        bitrate(effective),
+        settings.video.encoder_name,
+        accel_label(settings.video.accel),
+        audio,
+        settings.total_frames,
+        settings.duration as f64 / 1_000_000.0,
+        chosen.label,
+        nv12,
+    );
+    if let Some(reason) = &chosen.demoted_because {
+        block.push_str(&format!("\n  why        {reason}"));
+    }
+    block
+}
+
+/// The block logged after the last frame, or after the one that stopped it.
+#[allow(clippy::too_many_arguments)]
+fn describe_outcome(
+    settings: &ExportSettings,
+    error: Option<&ExportError>,
+    frames: u64,
+    elapsed: Duration,
+    path: &str,
+    observed_nv12: Option<(usize, usize, usize, usize)>,
+    fallbacks: &[String],
+) -> String {
+    let seconds = elapsed.as_secs_f64();
+    let headline = match error {
+        None => "export finished",
+        Some(error) if error.is_cancellation() => "export cancelled",
+        Some(_) => "export failed",
+    };
+
+    let mut block = format!(
+        "{headline}\n  \
+           output     {}\n  \
+           frames     {} of {} written\n  \
+           wall       {:.2} s ({:.1} fps mean)\n  \
+           path       {} at the end",
+        settings.output_path.display(),
+        frames,
+        settings.total_frames,
+        seconds,
+        if seconds > 0.0 {
+            frames as f64 / seconds
+        } else {
+            0.0
+        },
+        path,
+    );
+
+    if let Some((y_stride, uv_stride, uv_offset, total)) = observed_nv12 {
+        block.push_str(&format!(
+            "\n  nv12       as rendered: y_stride {y_stride} B · uv_stride {uv_stride} B · \
+             uv_offset {uv_offset} B · total {total} B"
+        ));
+    }
+
+    if fallbacks.is_empty() {
+        block.push_str("\n  fallbacks  none");
+    } else {
+        for (index, fallback) in fallbacks.iter().enumerate() {
+            let label = if index == 0 { "fallbacks" } else { "         " };
+            block.push_str(&format!("\n  {label}  {fallback}"));
+        }
+    }
+
+    if let Some(error) = error {
+        block.push_str(&format!("\n  error      {error}"));
+    }
+    block
+}
+
+fn accel_label(accel: HwAccel) -> String {
+    match accel {
+        HwAccel::Software => "software".to_string(),
+        other => format!("hardware ({})", other.label()),
+    }
+}
+
+/// A bit rate at the precision anyone reads it at.
+fn bitrate(bits_per_second: u64) -> String {
+    if bits_per_second >= 1_000_000 {
+        format!("{:.1} Mb/s", bits_per_second as f64 / 1_000_000.0)
+    } else {
+        format!("{} kb/s", bits_per_second / 1_000)
+    }
 }
 
 /// Hand the muxer the audio that belongs *before* the next video frame.
@@ -1106,6 +1411,135 @@ mod tests {
             Ok(settings) => assert_eq!(settings.video.encoder_name, "h264_nvenc"),
             Err(error) => assert!(error.to_string().contains("nvenc_h264")),
         }
+    }
+
+    // -- the export log ---------------------------------------------------
+
+    /// The block is what a bug report is diagnosed from, so every fact in it is
+    /// asserted here rather than trusted to survive an edit.
+    #[test]
+    fn the_start_block_states_what_this_export_is() {
+        let project = project(2 * MICROS_PER_SECOND);
+        let mut req = request("/tmp/out.mp4");
+        req.preset_id = Some("youtube_1080p".into());
+        let settings = resolve_settings(&project, &req).unwrap();
+
+        let chosen = FramePathChoice::of(true, true, true, true, true, "h264_vaapi");
+        let block = describe_export(&settings, &chosen);
+
+        assert!(block.contains("/tmp/out.mp4"), "{block}");
+        assert!(block.contains("1920x1080"), "{block}");
+        assert!(block.contains("30.000 fps"), "{block}");
+        assert!(block.contains("H.264"), "{block}");
+        assert!(block.contains("crf 20"), "{block}");
+        assert!(block.contains("libx264 · software"), "{block}");
+        assert!(block.contains("mp4"), "{block}");
+        assert!(block.contains("zero-copy DMA-BUF (tier 1 of 3)"), "{block}");
+        // The strides are the reason this exists.
+        assert!(
+            block.contains("y_stride 1920 B · uv_stride 1920 B · uv_offset 2073600 B · total 3110400 B"),
+            "{block}"
+        );
+        // Nothing to explain on the top tier.
+        assert!(!block.contains("why "), "{block}");
+    }
+
+    #[test]
+    fn a_demoted_export_says_which_tier_and_why() {
+        let project = project(MICROS_PER_SECOND);
+        let settings = resolve_settings(&project, &request("/tmp/out.mp4")).unwrap();
+
+        // Tier 2: zero-copy was allowed and the ring could not be built.
+        let ring_failed = FramePathChoice::of(false, true, true, true, true, "h264_vaapi");
+        let block = describe_export(&settings, &ring_failed);
+        assert!(block.contains("GPU NV12 readback (tier 2 of 3)"), "{block}");
+        assert!(block.contains("could not export a DMA-BUF ring"), "{block}");
+        // Still NV12, so the strides are the ones in use — and for this canvas
+        // they are wider than the frame. 1080 pads to 1152: see
+        // `render::nv12::ROW_ALIGN`, which exists because the hardware encoder
+        // misreads any plane whose pitch is not aligned. Printing the padded
+        // number is the point of logging it at all.
+        assert!(block.contains("y_stride 1152 B"), "{block}");
+
+        // Tier 2 for the other reason.
+        let switched_off = FramePathChoice::of(false, true, true, true, false, "h264_vaapi");
+        assert!(describe_export(&settings, &switched_off).contains("set_zero_copy"));
+
+        // Tier 3: a software encoder wants YUV420P, so neither GPU path helps.
+        let software = FramePathChoice::of(false, false, false, true, true, "libx264");
+        let block = describe_export(&settings, &software);
+        assert!(block.contains("swscale (tier 3 of 3)"), "{block}");
+        assert!(block.contains("libx264 is fed YUV420P"), "{block}");
+        // The layout is labelled as not in use, and the numbers are still
+        // there — "what would this size be" is the first question asked when a
+        // swscale export comes out sheared.
+        assert!(block.contains("not used"), "{block}");
+        assert!(block.contains("y_stride 1152 B"), "{block}");
+
+        // Tier 3 because the compute pass would not build on this device.
+        let no_compute = FramePathChoice::of(false, false, true, true, true, "h264_vaapi");
+        assert!(describe_export(&settings, &no_compute).contains("no RGBA to NV12 compute pass"));
+    }
+
+    #[test]
+    fn the_end_block_reports_the_run_and_any_fallback() {
+        let project = project(2 * MICROS_PER_SECOND);
+        let settings = resolve_settings(&project, &request("/tmp/out.mp4")).unwrap();
+
+        let clean = describe_outcome(
+            &settings,
+            None,
+            60,
+            Duration::from_secs(3),
+            final_path_label(true, true),
+            None,
+            &[],
+        );
+        assert!(clean.starts_with("export finished"), "{clean}");
+        assert!(clean.contains("60 of 60 written"), "{clean}");
+        assert!(clean.contains("3.00 s (20.0 fps mean)"), "{clean}");
+        assert!(clean.contains("fallbacks  none"), "{clean}");
+
+        let demoted = describe_outcome(
+            &settings,
+            None,
+            60,
+            Duration::from_secs(6),
+            final_path_label(false, true),
+            Some((1088, 1088, 2088960, 3133440)),
+            &["zero-copy gave up at frame 12 (the encoder is still holding …)".to_string()],
+        );
+        assert!(demoted.contains("GPU NV12 readback (tier 2 of 3) at the end"), "{demoted}");
+        assert!(demoted.contains("zero-copy gave up at frame 12"), "{demoted}");
+        // What the compositor really produced, not what the layout predicted.
+        assert!(
+            demoted.contains("as rendered: y_stride 1088 B · uv_stride 1088 B · uv_offset 2088960 B · total 3133440 B"),
+            "{demoted}"
+        );
+
+        let cancelled = describe_outcome(
+            &settings,
+            Some(&ExportError::Cancelled),
+            7,
+            Duration::from_secs(1),
+            final_path_label(false, false),
+            None,
+            &[],
+        );
+        assert!(cancelled.starts_with("export cancelled"), "{cancelled}");
+        assert!(cancelled.contains("7 of 60 written"), "{cancelled}");
+
+        let failed = describe_outcome(
+            &settings,
+            Some(&ExportError::Settings("the muxer refused the packet".into())),
+            7,
+            Duration::from_secs(1),
+            final_path_label(false, false),
+            None,
+            &[],
+        );
+        assert!(failed.starts_with("export failed"), "{failed}");
+        assert!(failed.contains("the muxer refused the packet"), "{failed}");
     }
 
     // -- progress and ETA -------------------------------------------------

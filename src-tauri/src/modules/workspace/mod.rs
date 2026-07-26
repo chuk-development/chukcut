@@ -11,6 +11,8 @@
 
 pub mod commands;
 pub mod hardware;
+pub mod logging;
+pub mod menu;
 pub mod paths;
 pub mod settings;
 

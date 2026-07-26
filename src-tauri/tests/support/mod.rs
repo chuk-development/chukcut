@@ -73,10 +73,7 @@ macro_rules! require_gpu {
 
 /// Best-effort name of the running test, for skip messages.
 pub fn test_name() -> String {
-    std::thread::current()
-        .name()
-        .unwrap_or("test")
-        .to_string()
+    std::thread::current().name().unwrap_or("test").to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -372,8 +369,7 @@ fn once(out: &Path, generate: impl FnOnce(&Path) -> Result<(), String>) -> Resul
     let staging = out.with_extension(format!("partial.{extension}"));
     let _ = std::fs::remove_file(&staging);
     generate(&staging)?;
-    std::fs::rename(&staging, out)
-        .map_err(|e| format!("cannot publish {}: {e}", out.display()))?;
+    std::fs::rename(&staging, out).map_err(|e| format!("cannot publish {}: {e}", out.display()))?;
     Ok(())
 }
 
@@ -692,14 +688,13 @@ pub fn probe_output(file: &Path) -> Result<Probed, String> {
     let (num, den) = rate.split_once('/').unwrap_or((rate.as_str(), "1"));
 
     Ok(Probed {
-        width: get(&video, "width").and_then(|v| v.parse().ok()).unwrap_or(0),
+        width: get(&video, "width")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0),
         height: get(&video, "height")
             .and_then(|v| v.parse().ok())
             .unwrap_or(0),
-        avg_frame_rate: (
-            num.parse().unwrap_or(0),
-            den.parse().unwrap_or(1).max(1),
-        ),
+        avg_frame_rate: (num.parse().unwrap_or(0), den.parse().unwrap_or(1).max(1)),
         duration: get(&video, "duration")
             .and_then(|v| v.parse().ok())
             .unwrap_or(0.0),

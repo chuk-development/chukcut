@@ -80,6 +80,12 @@ pub struct PlannedSegment {
 /// hidden one still does (people mute a lane they are comparing against and
 /// hide the one they are not looking at), and a video material only counts
 /// when its container actually carries an audio stream.
+///
+/// One rule is newer than the others: a clip whose sound has been given its own
+/// linked segment on an audio lane does not also play it here. Without that,
+/// importing a file with both streams — which now puts the picture on a video
+/// lane and the sound on an audio lane — would mix the same waveform with
+/// itself. See `Project::sound_is_on_a_linked_lane`.
 pub fn plan(project: &Project) -> Vec<PlannedSegment> {
     let mut planned = Vec::new();
     for track in &project.tracks {
@@ -88,6 +94,9 @@ pub fn plan(project: &Project) -> Vec<PlannedSegment> {
         }
         for segment in &track.segments {
             if segment.target_range.duration <= 0 {
+                continue;
+            }
+            if project.sound_is_on_a_linked_lane(track, segment) {
                 continue;
             }
             let Some(path) = audio_path(project, segment) else {
@@ -571,6 +580,36 @@ mod tests {
         lane.hidden = true;
         project.tracks.push(lane);
         assert_eq!(plan(&project).len(), 1);
+    }
+
+    #[test]
+    fn a_clip_whose_sound_has_its_own_linked_lane_is_heard_exactly_once() {
+        // What an import of a file with both streams produces. Both segments
+        // name the same video material, and the mixer's ordinary rule — "a
+        // video material whose container carries audio makes sound, wherever it
+        // sits" — would plan both and sum the same waveform with itself.
+        let mut project = project();
+        let mut picture = segment("v1", 0, MICROS_PER_SECOND);
+        picture.id = "picture".into();
+        picture.extras.push("group-1".into());
+        let mut sound = segment("v1", 0, MICROS_PER_SECOND);
+        sound.id = "sound".into();
+        sound.extras.push("group-1".into());
+        project.materials.links.insert("group-1".into());
+        project.tracks.push(track(TrackKind::Video, vec![picture]));
+        project.tracks.push(track(TrackKind::Audio, vec![sound]));
+
+        let planned = plan(&project);
+        assert_eq!(planned.len(), 1, "the file plays once, not twice");
+        assert_eq!(
+            planned[0].segment_id, "sound",
+            "and it is the clip on the audio lane that plays it"
+        );
+
+        // Unlink and both are heard again, because they are now two ordinary
+        // clips that happen to share a file.
+        project.materials.links.clear();
+        assert_eq!(plan(&project).len(), 2);
     }
 
     #[test]

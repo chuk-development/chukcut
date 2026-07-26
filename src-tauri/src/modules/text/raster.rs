@@ -125,7 +125,6 @@ impl<'a> Layer<'a> {
             pad: visible + 1.0,
         }
     }
-
 }
 
 /// An 8-bit coverage mask covering part of the image.
@@ -167,7 +166,12 @@ impl Coverage {
             ];
             bounds = Some(match bounds {
                 None => b,
-                Some(a) => [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])],
+                Some(a) => [
+                    a[0].min(b[0]),
+                    a[1].min(b[1]),
+                    a[2].max(b[2]),
+                    a[3].max(b[3]),
+                ],
             });
         }
         let b = bounds?;
@@ -246,7 +250,8 @@ impl Coverage {
             // The source row may hang off either end of the destination, so the
             // overlap is computed rather than assumed.
             let source_x0 = (-(self.x0 + dx - x0)).max(0);
-            let count = (self.width as i32 - source_x0).min(width as i32 - (self.x0 + dx - x0).max(0));
+            let count =
+                (self.width as i32 - source_x0).min(width as i32 - (self.x0 + dx - x0).max(0));
             if count <= 0 {
                 continue;
             }
@@ -303,7 +308,6 @@ impl Coverage {
             box_blur_axis(&tmp, &mut self.alpha, w, h, r, false);
         }
     }
-
 }
 
 fn box_blur_axis(src: &[u8], dst: &mut [u8], w: usize, h: usize, r: usize, horizontal: bool) {
@@ -461,7 +465,8 @@ impl Canvas {
                 }
                 let scale = 255.0 / a as f32;
                 for c in 0..3 {
-                    self.px[i + c] = (self.px[i + c] as f32 * scale).round().clamp(0.0, 255.0) as u8;
+                    self.px[i + c] =
+                        (self.px[i + c] as f32 * scale).round().clamp(0.0, 255.0) as u8;
                 }
             }
         }
@@ -484,11 +489,7 @@ impl Canvas {
                 'search: for dy in -1i32..=1 {
                     for dx in -1i32..=1 {
                         let (nx, ny) = (x as i32 + dx, y as i32 + dy);
-                        if nx < x0 as i32
-                            || ny < y0 as i32
-                            || nx >= x1 as i32
-                            || ny >= y1 as i32
-                        {
+                        if nx < x0 as i32 || ny < y0 as i32 || nx >= x1 as i32 || ny >= y1 as i32 {
                             continue;
                         }
                         let j = at(nx as usize, ny as usize);
@@ -803,7 +804,10 @@ impl<'a> RunFont<'a> {
     fn open(style: &'a GlyphRunStyle) -> Option<Self> {
         let data: &'a [u8] = style.font.data.as_ref();
         let font = FontRef::from_index(data, style.font.index).ok()?;
-        let units_per_em = font.head().map(|h| h.units_per_em() as f32).unwrap_or(1000.0);
+        let units_per_em = font
+            .head()
+            .map(|h| h.units_per_em() as f32)
+            .unwrap_or(1000.0);
         Some(Self {
             outlines: font.outline_glyphs(),
             strikes: font.bitmap_strikes(),
@@ -830,10 +834,7 @@ impl<'a> RunFont<'a> {
         };
         glyph
             .draw(
-                DrawSettings::unhinted(
-                    Size::new(self.font_size),
-                    LocationRef::new(&self.coords),
-                ),
+                DrawSettings::unhinted(Size::new(self.font_size), LocationRef::new(&self.coords)),
                 &mut pen_sink,
             )
             .ok()?;
@@ -873,12 +874,7 @@ impl<'a> RunFont<'a> {
             rgba,
             src_width: glyph.width,
             src_height: glyph.height,
-            rect: [
-                x,
-                top,
-                x + glyph.width as f32 * pixel_scale,
-                top + height,
-            ],
+            rect: [x, top, x + glyph.width as f32 * pixel_scale, top + height],
         })
     }
 }

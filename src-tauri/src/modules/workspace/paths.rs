@@ -33,6 +33,48 @@ pub fn config_root() -> PathBuf {
         .join(APP_DIR)
 }
 
+/// Where the log files go.
+///
+/// Neither cache nor config: a log is not derived data the app can regenerate,
+/// and it is not something the user would miss if it vanished. That is exactly
+/// what the XDG *state* directory is for, so on Linux this is
+/// `$XDG_STATE_HOME/chukcut/logs`, or `~/.local/state/chukcut/logs` when the
+/// variable is unset. macOS and Windows have their own conventions for the same
+/// idea and get them.
+///
+/// It matters that this is not under [`cache_root`]: "clear cache" must not
+/// delete the log of the export the user is about to ask us about.
+#[cfg(target_os = "linux")]
+pub fn logs_dir() -> PathBuf {
+    std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| home().map(|h| h.join(".local/state")))
+        .unwrap_or_else(std::env::temp_dir)
+        .join(APP_DIR)
+        .join("logs")
+}
+
+/// See the Linux version. `~/Library/Logs/chukcut` is where a macOS user — and
+/// Console.app — expects to find this.
+#[cfg(target_os = "macos")]
+pub fn logs_dir() -> PathBuf {
+    home()
+        .map(|h| h.join("Library/Logs"))
+        .unwrap_or_else(std::env::temp_dir)
+        .join(APP_DIR)
+}
+
+/// See the Linux version.
+#[cfg(target_os = "windows")]
+pub fn logs_dir() -> PathBuf {
+    std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join(APP_DIR)
+        .join("logs")
+}
+
 /// Thumbnail strips for a media file, keyed by a hash of its path so two files
 /// with the same name in different folders do not collide.
 pub fn thumbnails_dir(media_path: &Path) -> PathBuf {
@@ -210,5 +252,13 @@ mod tests {
     #[test]
     fn cache_and_config_are_separate_trees() {
         assert_ne!(cache_root(), config_root());
+    }
+
+    /// The point of putting logs in the state directory: "clear cache" is
+    /// allowed to delete everything under [`cache_root`], and the log of the
+    /// export somebody is about to report must not be in there.
+    #[test]
+    fn logs_are_not_inside_the_cache() {
+        assert!(!logs_dir().starts_with(cache_root()));
     }
 }

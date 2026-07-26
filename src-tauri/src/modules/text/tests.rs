@@ -241,7 +241,10 @@ fn alignment_moves_the_short_line_and_not_the_long_one() {
     // Both lines shift, because the alignment box is the wrap width rather than
     // the longest line — but the short one has further to travel, and its right
     // edge should end up level with the long one's.
-    assert!(centre_short > left_short + 1.0, "centring indents the short line");
+    assert!(
+        centre_short > left_short + 1.0,
+        "centring indents the short line"
+    );
     assert!(
         centre_short - centre_long > (long_width - short_width) / 2.0 - 1.0,
         "the short line moves by half the difference in length"
@@ -278,7 +281,10 @@ fn a_missing_font_falls_back_instead_of_panicking() {
         &request("Fallback works", "Definitely Not Installed 9000", 48.0),
         &RasterOptions::tight(),
     );
-    assert!(image.pixels.iter().any(|&byte| byte != 0), "it drew something");
+    assert!(
+        image.pixels.iter().any(|&byte| byte != 0),
+        "it drew something"
+    );
 }
 
 #[test]
@@ -287,11 +293,12 @@ fn an_empty_string_produces_an_empty_but_valid_image() {
     let layout = renderer.layout(&request("", "sans-serif", 48.0), &RasterOptions::tight());
     assert!(layout.is_empty());
 
-    let tight = renderer.rasterize_uncached(
-        &request("", "sans-serif", 48.0),
-        &RasterOptions::tight(),
+    let tight =
+        renderer.rasterize_uncached(&request("", "sans-serif", 48.0), &RasterOptions::tight());
+    assert!(
+        tight.width >= 1 && tight.height >= 1,
+        "never a zero-size texture"
     );
-    assert!(tight.width >= 1 && tight.height >= 1, "never a zero-size texture");
     assert_eq!(
         tight.pixels.len(),
         tight.width as usize * tight.height as usize * 4
@@ -350,7 +357,11 @@ fn a_string_of_only_emoji_renders_or_at_least_survives() {
         .filter(|px| px[3] > 200)
         .map(|px| [px[0], px[1], px[2]])
         .collect();
-    assert!(distinct.len() > 4, "expected many colours, got {}", distinct.len());
+    assert!(
+        distinct.len() > 4,
+        "expected many colours, got {}",
+        distinct.len()
+    );
 }
 
 #[test]
@@ -386,7 +397,10 @@ fn the_layer_is_canvas_sized_and_the_text_sits_inside_it() {
     assert!(!ink.is_empty());
     let top = ink.iter().fold(f32::MAX, |a, r| a.min(r[1]));
     let bottom = ink.iter().fold(f32::MIN, |a, r| a.max(r[3]));
-    assert!(top > 100.0 && bottom < 260.0, "vertically centred: {top}..{bottom}");
+    assert!(
+        top > 100.0 && bottom < 260.0,
+        "vertically centred: {top}..{bottom}"
+    );
 }
 
 #[test]
@@ -400,7 +414,10 @@ fn a_background_box_fills_behind_the_text() {
     // The corner of a tight raster is inside the padded box and outside the
     // glyphs, so it is background and nothing else.
     let corner = image.pixel(image.width / 2, 2);
-    assert!(corner[3] > 200, "the box should be opaque there: {corner:?}");
+    assert!(
+        corner[3] > 200,
+        "the box should be opaque there: {corner:?}"
+    );
     assert!(corner[0] > 200 && corner[1] < 60, "and red: {corner:?}");
 }
 
@@ -445,7 +462,10 @@ fn a_shadow_darkens_pixels_the_glyph_does_not_cover() {
         .chunks_exact(4)
         .filter(|px| px[3] > 10 && px[3] < 200)
         .count();
-    assert!(semi > 200, "a blur has soft edges; found {semi} partial pixels");
+    assert!(
+        semi > 200,
+        "a blur has soft edges; found {semi} partial pixels"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -485,10 +505,17 @@ fn the_cache_stays_inside_its_budget() {
     let renderer = TextRenderer::with_budget(200 * 200 * 4);
     let options = RasterOptions::canvas(200, 200);
     for i in 0..6 {
-        renderer.rasterize(&request(&format!("title {i}"), "sans-serif", 24.0), &options);
+        renderer.rasterize(
+            &request(&format!("title {i}"), "sans-serif", 24.0),
+            &options,
+        );
     }
     let stats = renderer.cache_stats();
-    assert!(stats.entries <= 2, "evicted down to {} entries", stats.entries);
+    assert!(
+        stats.entries <= 2,
+        "evicted down to {} entries",
+        stats.entries
+    );
     assert!(stats.bytes <= 200 * 200 * 4 * 2);
 }
 

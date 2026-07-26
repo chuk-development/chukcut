@@ -218,6 +218,17 @@ pub fn mix_timeline(
             if segment.target_range.duration <= 0 {
                 continue;
             }
+            // The same rule the preview mixer applies, and it has to be applied
+            // in both places or an export sounds different from what was
+            // monitored. A file imported with both streams becomes two linked
+            // segments of one material — picture on a video lane, sound on an
+            // audio lane — and `audio_path` above resolves for both, because a
+            // video material carrying audio contributes sound wherever it sits.
+            // Mixing both is the same waveform summed with itself: 6 dB up and
+            // phasing with every microsecond they are out by.
+            if project.sound_is_on_a_linked_lane(track, segment) {
+                continue;
+            }
 
             // A speed factor changes how much source a segment consumes; the
             // document keeps both ranges, but `source_range.duration` is the
@@ -547,6 +558,77 @@ mod tests {
     fn resampling_degenerate_input_gives_silence_of_the_right_length() {
         assert_eq!(resample_linear(&[], 2, 3), vec![0.0; 6]);
         assert_eq!(resample_linear(&[1.0, 1.0], 2, 0), Vec::<f32>::new());
+    }
+
+    /// An import puts a clip's picture and its sound on two lanes as one linked
+    /// pair. Both segments name the same video material, and `audio_path`
+    /// resolves for both — so without the linked-lane rule the export mixes the
+    /// waveform with itself and comes out 6 dB hotter than the preview.
+    ///
+    /// The assertion is on the *level*, not on a boolean, because that is the
+    /// symptom: heard once at the source level, twice at double it.
+    ///
+    /// The source is deliberately quiet. `AudioMixer::finish` clamps to full
+    /// scale, so at 1.0 both the correct and the doubled mix peak at exactly
+    /// 1.0 and this test passes either way — it was written that way first, and
+    /// only the negative case below exposed it.
+    #[test]
+    fn a_linked_pair_is_heard_once_and_at_the_level_the_preview_gave_it() {
+        let mut project = project();
+        let group = "link-1".to_string();
+        project.materials.links.insert(group.clone());
+
+        let mut picture = segment("v1", 0, MICROS_PER_SECOND);
+        picture.id = "picture".into();
+        picture.extras.push(group.clone());
+        let mut sound = segment("v1", 0, MICROS_PER_SECOND);
+        sound.id = "sound".into();
+        sound.extras.push(group.clone());
+
+        project
+            .tracks
+            .push(track(TrackKind::Video, vec![picture.clone()]));
+        project
+            .tracks
+            .push(track(TrackKind::Audio, vec![sound.clone()]));
+
+        let mixed = mix_timeline(
+            &project,
+            &Constant { value: 0.25 },
+            RATE,
+            2,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let peak = mixed.iter().fold(0.0f32, |acc, s| acc.max(s.abs()));
+        assert!(
+            (peak - 0.25).abs() < 1e-6,
+            "a linked pair peaked at {peak}, want 0.25 — at 0.5 it was mixed twice"
+        );
+
+        // And the deferral is about where the partner *sits*, not about a
+        // stored role: with the sound on its own audio lane and nothing linked,
+        // the same two segments are two independent sources and both are heard.
+        let mut unlinked = project.clone();
+        unlinked.materials.links.clear();
+        for lane in &mut unlinked.tracks {
+            for seg in &mut lane.segments {
+                seg.extras.clear();
+            }
+        }
+        let mixed = mix_timeline(
+            &unlinked,
+            &Constant { value: 0.25 },
+            RATE,
+            2,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let peak = mixed.iter().fold(0.0f32, |acc, s| acc.max(s.abs()));
+        assert!(
+            (peak - 0.5).abs() < 1e-6,
+            "two unlinked segments of the same material should sum to 0.5, peaked at {peak}"
+        );
     }
 
     #[test]

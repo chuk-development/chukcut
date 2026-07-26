@@ -43,7 +43,7 @@ use parking_lot::Mutex;
 use turbojpeg::{Compressor, Image, PixelFormat, Subsamp};
 
 use super::error::{PreviewError, Result};
-use super::vaapi::{size_is_encodable, VaapiJpegEncoder};
+use super::vaapi::{self, size_is_encodable, VaapiJpegEncoder};
 
 /// Bytes per RGBA8 pixel.
 const BYTES_PER_PIXEL: usize = 4;
@@ -80,29 +80,24 @@ enum Preference {
 
 /// What an unset [`BACKEND_ENV`] means.
 ///
-/// **Software, for now, and this is a deliberate step back from a measured
-/// win.** The hardware encoder is genuinely faster — 6.2 ms against 10.2 ms at
-/// 1080×1920 — but on an otherwise idle machine it makes the preview *stop*:
+/// **Hardware where it works, software everywhere else.** This was briefly
+/// `ForceSoftware`, because the hardware path made the preview *stop* — the
+/// renderer produced five frames and then nothing for thirty seconds with
+/// `playing=true`, and `cargo test -j 4 --lib preview::server` took 30 s and
+/// failed two tests where the software path took 0.15 s.
 ///
-/// ```text
-/// cargo test -j 4 --lib preview::server                          → 30 s, 2 failed
-/// CHUKCUT_PREVIEW_JPEG=software cargo test -j 4 --lib preview::server → 0.15 s, 1 failed
-/// ```
+/// The cause was not the encoder. Encoding had been moved onto the rayon pool,
+/// and the conversion inside [`vaapi::rgba_to_nv12`] is *itself* a rayon
+/// parallel loop that ran while the mutex below was held — so a worker blocked
+/// in that loop stole another queued encode, asked for the lock it was already
+/// holding, and the pool deadlocked. That is why the benchmark could not see
+/// it: one encode at a time cannot reach the state.
 ///
-/// In the failing run the renderer produced five frames and then made no
-/// further progress for thirty seconds with `playing=true` and the playhead at
-/// frame 0 — a stall, not slowness. What distinguishes it from the benchmark
-/// that measured 6.2 ms is concurrency: encoding was moved off the render
-/// thread onto a worker pool, so several encodes now run at once against one
-/// non-reentrant hardware encoder. The benchmark encodes one frame at a time
-/// and cannot see it.
-///
-/// Four milliseconds of a 9.4 ms frame is not worth a preview that can hang, so
-/// the default reverts until the interaction is understood. `CHUKCUT_PREVIEW_JPEG=hardware`
-/// turns it back on for whoever picks this up; the thing to establish is whether
-/// the encoder needs serialising, a pool of its own, or to go back on the render
-/// thread now that it is fast enough to belong there.
-const DEFAULT_PREFERENCE: Preference = Preference::ForceSoftware;
+/// The conversion now happens **before** the lock is taken, into
+/// [`vaapi::Nv12Scratch`], so nothing under the lock touches rayon at all.
+/// Measured with `CHUKCUT_PREVIEW_JPEG=hardware` on `tests/preview.rs`: 7 hangs
+/// in 7 runs before, 0 in 30 after.
+const DEFAULT_PREFERENCE: Preference = Preference::Auto;
 
 fn preference() -> Preference {
     static CACHED: std::sync::OnceLock<Preference> = std::sync::OnceLock::new();
@@ -128,25 +123,41 @@ const FAILURES_BEFORE_GIVING_UP: u32 = 3;
 
 /// The one hardware encoder in the process.
 ///
-/// One, not one per thread: encodes run on rayon workers and up to
-/// `MAX_PENDING_ENCODES` of them can be in flight, but a VAAPI JPEG encode is
-/// a few milliseconds and the driver serialises submissions anyway. A mutex is
-/// cheaper than N devices, N surface pools and N codec contexts — and
-/// `export::hwframes` already opens a device of its own, so the count matters.
+/// One, not one per thread: a VAAPI JPEG encode is a few milliseconds and the
+/// driver serialises submissions anyway, so a mutex is cheaper than N devices,
+/// N surface pools and N codec contexts.
 ///
-/// **The lock is held across a rayon parallel loop**, because
-/// `VaapiJpegEncoder::encode` converts the frame with one. That is a shape
-/// worth being deliberate about:
+/// ## The rule, and the hang that established it
 ///
-/// - It cannot deadlock. A worker blocked here is blocked on a plain mutex and
-///   is not holding a piece of the inner loop's work — nothing under
-///   `rgba_to_nv12` takes a lock — so the thread holding the lock always makes
-///   progress, running the conversion itself if no worker can be stolen from.
-///   `tests::concurrent_encodes_all_finish` exercises it.
-/// - It can lose the conversion's parallelism under contention, which costs a
-///   couple of milliseconds. That is not worth restructuring for: with one
-///   hardware encoder, contention means queueing whatever the lock covers, so
-///   throughput is the same either way.
+/// **Nothing dispatched onto rayon may run while this lock is held.**
+/// [`encode_staged`] is the whole of what the lock covers, and it converts
+/// nothing: the RGBA→NV12 pass, which *is* a rayon parallel loop, happens in
+/// [`encode_hardware`] before the lock is taken.
+///
+/// It used to happen inside, and the argument for why that was safe is worth
+/// keeping, because it is plausible and it is wrong:
+///
+/// > It cannot deadlock. A worker blocked here is blocked on a plain mutex and
+/// > is not holding a piece of the inner loop's work — nothing under
+/// > `rgba_to_nv12` takes a lock.
+///
+/// It missed two things, and each on its own is a hang:
+///
+/// - **From a rayon worker.** A worker blocked inside a parallel iterator does
+///   not idle; it joins the work-stealing loop and runs *any* job in the pool.
+///   The job it steals is not a piece of the inner loop's work — it is another
+///   encode, which asks for this very mutex on the thread that is holding it.
+///   `parking_lot::Mutex` is not reentrant, so that thread parks forever.
+/// - **From any other thread.** The dispatch waits for a free rayon worker. If
+///   the pool is meanwhile full of jobs blocked on this mutex, no worker will
+///   ever be free and the lock holder waits behind the threads waiting for it.
+///   This is the one that hung the unit-test binary at default parallelism,
+///   with the preview's own encode thread holding the lock.
+///
+/// `tests::concurrent_encodes_all_finish` could not see either, because
+/// `std::thread::spawn` gives a thread nothing to steal and nothing to wait
+/// for. `tests::encodes_dispatched_onto_the_rayon_pool_all_finish` is the one
+/// that can.
 struct Hardware {
     /// Rebuilt when the size or the quality changes, because `avcodec_open2`
     /// reads `global_quality` and cannot be repeated on the same context.
@@ -216,11 +227,79 @@ pub fn reset_hardware() {
     hw.disabled = false;
 }
 
+thread_local! {
+    /// The NV12 staging frame this thread converts into before it takes the
+    /// encoder's lock.
+    ///
+    /// Per thread rather than inside the encoder, because the whole point is
+    /// that the conversion happens **outside** [`HARDWARE`] — see
+    /// [`vaapi::Nv12Scratch`] for the two deadlocks that buys off. In the
+    /// shipped preview there is one encoding thread and therefore one of these,
+    /// 3 MB at 1080p; a test that encodes from a dozen threads pays for a dozen,
+    /// which is the only cost of doing it this way.
+    static SCRATCH: std::cell::RefCell<Option<vaapi::Nv12Scratch>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 fn encode_hardware(rgba: &[u8], width: u32, height: u32, quality: u8) -> Option<Vec<u8>> {
     if preference() == Preference::ForceSoftware || !size_is_encodable(width, height) {
         return None;
     }
+    // Asked before the conversion, so a machine that has already given up on
+    // the hardware does not pay two milliseconds per frame to find out again.
+    if hardware().lock().disabled {
+        return None;
+    }
 
+    SCRATCH.with(|cell| match cell.try_borrow_mut() {
+        Ok(mut slot) => {
+            if !slot.as_ref().is_some_and(|s| s.matches(width, height)) {
+                *slot = Some(vaapi::Nv12Scratch::new(width, height));
+            }
+            stage_and_encode(slot.as_mut().expect("just allocated"), rgba, width, height, quality)
+        }
+        // Re-entered on this thread, which is not a bug and is not rare enough
+        // to ignore: `Nv12Scratch::fill` dispatches onto rayon, and a rayon
+        // worker that blocks there runs another job while it waits. If that job
+        // is another encode it arrives back here, on this thread, with the
+        // frame above still borrowed.
+        //
+        // It gets its own, which costs one allocation. `try_borrow_mut` rather
+        // than `borrow_mut` is the whole difference between that and a panic —
+        // and note that this is only ever a *panic* and never a deadlock,
+        // because nothing here is a lock: reuse is an optimisation and the
+        // fallback is always available.
+        Err(_) => {
+            let mut scratch = vaapi::Nv12Scratch::new(width, height);
+            stage_and_encode(&mut scratch, rgba, width, height, quality)
+        }
+    })
+}
+
+/// Convert into `scratch` and hand the result to the one hardware encoder.
+fn stage_and_encode(
+    scratch: &mut vaapi::Nv12Scratch,
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    quality: u8,
+) -> Option<Vec<u8>> {
+    if let Err(error) = scratch.fill(rgba) {
+        tracing::debug!(%error, width, height, "cannot stage the frame for the GPU");
+        return None;
+    }
+    encode_staged(scratch, width, height, quality)
+}
+
+/// Everything that needs the one hardware encoder, with the frame already
+/// converted. **Nothing in here may dispatch onto rayon**; that is the rule
+/// [`vaapi::Nv12Scratch`] exists to keep.
+fn encode_staged(
+    nv12: &vaapi::Nv12Scratch,
+    width: u32,
+    height: u32,
+    quality: u8,
+) -> Option<Vec<u8>> {
     let mut hw = hardware().lock();
     if hw.disabled {
         return None;
@@ -250,7 +329,7 @@ fn encode_hardware(rgba: &[u8], width: u32, height: u32, quality: u8) -> Option<
     }
 
     let encoder = hw.encoder.as_mut()?;
-    match encoder.encode(rgba) {
+    match encoder.encode_nv12(nv12) {
         Ok(bytes) => {
             hw.failures = 0;
             Some(bytes)
@@ -533,6 +612,34 @@ mod tests {
         for thread in threads {
             thread.join().expect("a thread panicked or deadlocked");
         }
+    }
+
+    /// The shape that actually hung the preview: encodes on the rayon pool.
+    ///
+    /// [`concurrent_encodes_all_finish`] above uses `std::thread::spawn` and
+    /// therefore cannot reproduce it — an OS thread blocked on a mutex has
+    /// nothing to steal. A *rayon worker* blocked inside `rgba_to_nv12`'s
+    /// parallel loop, with this module's mutex held, runs another job from the
+    /// pool while it waits; that job asks for the same mutex; the thread parks
+    /// holding the lock it is waiting for, and the pool never recovers.
+    ///
+    /// It fails by hanging rather than by asserting, which is the one thing
+    /// wrong with it and is unavoidable: a deadlock has no other symptom. If
+    /// this test stops returning, that is the bug and not a slow machine.
+    #[test]
+    fn encodes_dispatched_onto_the_rayon_pool_all_finish() {
+        use rayon::prelude::*;
+
+        let _guard = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        reset_hardware();
+        let rgba = gradient(256, 192);
+        (0..32).into_par_iter().for_each(|i| {
+            // Alternating quality, so the encoder is rebuilt underneath the
+            // contention as well.
+            let quality = if i % 2 == 0 { 88 } else { 94 };
+            let (bytes, _) = encode_preview_jpeg(&rgba, 256, 192, quality).expect("encode");
+            assert!(is_jpeg(&bytes));
+        });
     }
 
     /// The point of the whole exercise: the hardware encoder has to produce

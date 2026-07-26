@@ -24,6 +24,7 @@ import { ShortcutsDialog } from "@/modules/workspace/components/ShortcutsDialog"
 import { StartScreen } from "@/modules/workspace/components/StartScreen";
 import { UnsavedChangesDialog } from "@/modules/workspace/components/UnsavedChangesDialog";
 import { chooseAndOpenProject, guardUnsaved, saveProject } from "@/modules/workspace/lib/lifecycle";
+import { installNativeMenu } from "@/modules/workspace/lib/menu";
 import { type RecoveryNotice, restoredFromWorkingCopy } from "@/modules/workspace/lib/recovery";
 import { useWorkspaceStore } from "@/modules/workspace/store";
 
@@ -126,6 +127,26 @@ export function App() {
   const openProject = useCallback(async () => {
     if (await guardUnsaved("opening another project")) await chooseAndOpenProject();
   }, []);
+
+  /**
+   * The native menu bar.
+   *
+   * Mounted here because this is where the dialogs it opens live; everything
+   * else it does — saving, undo, zoom, fullscreen — it drives through the same
+   * functions the buttons and shortcuts use. The bar itself is built in Rust,
+   * and this keeps its enabled state in step with the stores. See
+   * `workspace/lib/menu.ts`.
+   */
+  useEffect(
+    () =>
+      installNativeMenu({
+        newProject: () => void startNewProject(),
+        openProject: () => void openProject(),
+        showExport: () => setExportOpen(true),
+        showShortcuts: () => setShortcutsOpen(true),
+      }),
+    [openProject, startNewProject],
+  );
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {

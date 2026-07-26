@@ -21,6 +21,39 @@ person works belongs here, not in a conversation:
 The test: if this session's transcript vanished, would the next person be able
 to continue without rediscovering it? If not, it is not written down yet.
 
+## Working in parallel: use a git worktree
+
+When more than one agent works at once, **each one gets its own git worktree**:
+
+```bash
+git worktree add ../chukcut-<task> -b agent/<task>
+```
+
+This is not tidiness. A night of twelve concurrent agents in one checkout cost
+real time in ways worth naming, because each one looks like a code problem and
+is not:
+
+- Two agents' test code broke the shared `lib test` profile, so **six agents
+  could not run a single test** until someone fixed files they did not own.
+- A compositor patch was written against a struct that a different agent
+  changed before it could be applied. It now renders a hardware-decoded clip as
+  its luma plane — a convincing greyscale picture — and had to be re-derived.
+- A preview test failed in three different ways across three runs while another
+  agent was mid-refactor underneath it. Two of the three diagnoses were wrong,
+  and the investigation was worthless until the tree stopped moving.
+- `cargo` serialises on one build lock per target directory, so twelve agents
+  did not build twelve times faster. A single `cargo check` reached 47 minutes.
+
+The trade to understand before reaching for it: **a worktree has its own
+`target/`, so the first build in each is a full one.** That is minutes of CPU
+against hours of untangling. Take the worktree whenever two agents' file scopes
+could plausibly touch, and share a checkout only for genuinely disjoint work —
+one agent in `src/`, one in `src-tauri/`, and nothing shared between them.
+
+Merge back with an ordinary branch merge, and **run the whole suite after the
+merge**, not only in the worktree. Every collision listed above was invisible
+inside the worktree that caused it.
+
 ## The rule that matters
 
 **Rust owns the machine, the webview owns the pixels.** No file system access,
@@ -99,6 +132,19 @@ cd src-tauri && cargo run --release --bin chukcut-bench -- --all
 
 - **`cargo check` with default parallelism gets OOM-killed** on this machine
   while compiling wgpu and the Tauri macro crates. Use `-j 4`.
+- **Never hold a lock across a rayon dispatch, and never block a rayon worker.**
+  A worker blocked inside a parallel iterator runs other jobs from the pool
+  while it waits, so it can steal one that wants the lock it holds; and a
+  non-rayon thread dispatching under a lock waits for a worker the pool cannot
+  free. Both deadlocked the preview for thirty seconds at a time and looked
+  like a lost wakeup. `docs/STATUS.md`, "The hang that was not the device".
+- **Never open a GPU or VAAPI device.** `modules::gpu` owns one of each for the
+  process and hands out references: `gpu::render_context()` for wgpu,
+  `gpu::vaapi_device()` for VAAPI. `RenderContext::open` and `VaapiDevice::open`
+  are crate-private and called only from there. Concurrent Vulkan instances crash
+  this driver, and a VAAPI driver has a finite number of contexts. The evidence,
+  and the two bugs that sharing one device exposed in the preview server, are in
+  `docs/STATUS.md` under "One GPU device and one VAAPI device".
 - **`ffmpeg-next`'s version is not the system FFmpeg's version.** This note
   previously claimed the crate had to match the system libraries. It does not:
   `ffmpeg-sys-next/build.rs` probes the installed libavcodec and emits

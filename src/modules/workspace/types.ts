@@ -25,6 +25,52 @@ export interface Settings {
 }
 
 /**
+ * Where this run is writing its log. Mirrors `commands::LogLocation`.
+ *
+ * `file` is null when the log file could not be opened — a read-only home
+ * directory, most likely. The app still runs and still logs to stdout, so the
+ * panel says the directory and offers nothing to reveal, rather than a button
+ * that opens a folder with nothing in it.
+ */
+export interface LogLocation {
+  directory: string;
+  file: string | null;
+}
+
+/**
+ * What the native menu bar is told about the document. Mirrors
+ * `workspace::menu::MenuState`.
+ *
+ * Facts, not decisions: which of these greys out which item is decided in one
+ * pure function on the Rust side, so there is a single place to read when an
+ * item is unavailable and no chance of the two halves disagreeing about it.
+ */
+export interface MenuState {
+  /** A document is open at all. */
+  has_project: boolean;
+  /** It has edits that are not on disk. */
+  dirty: boolean;
+  can_undo: boolean;
+  can_redo: boolean;
+  /** At least one clip is selected, so there is something to delete or copy. */
+  has_selection: boolean;
+  /** The playhead is inside a clip, so there is something to cut. */
+  can_split: boolean;
+  /** There is a timeline with a span worth fitting the viewport to. */
+  can_fit: boolean;
+  /**
+   * Something has been cut or copied in this session.
+   *
+   * The clipboard itself never crosses the boundary — it is a list of detached
+   * segments in the timeline store, see `timeline/lib/clipboard.ts` — and this
+   * one bit is all the bar needs to decide whether Paste is worth offering.
+   */
+  has_clipboard: boolean;
+  /** There is at least one clip anywhere, so Select All would select something. */
+  has_clips: boolean;
+}
+
+/**
  * What Rust hands back before the user has ever opened the settings panel.
  *
  * Duplicated from `Settings::default()` on purpose: the panel has to render

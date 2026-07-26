@@ -19,8 +19,8 @@
 //!
 //! ## The layout that comes out
 //!
-//! One buffer, luma then chroma, each plane's rows padded to a multiple of four
-//! bytes because the shader writes whole `u32`s:
+//! One buffer, luma then chroma, each plane's rows padded out to
+//! [`ROW_ALIGN`]:
 //!
 //! ```text
 //!   0                        y_stride * height
@@ -29,9 +29,11 @@
 //!       y_stride bytes each      uv_stride bytes each
 //! ```
 //!
-//! Both strides are `align4(width)`, so for the even widths every video encoder
-//! demands they are simply `width`, and the copy into an `AVFrame` is one
-//! `copy_from_slice` per row.
+//! Both strides are the same, and both are wider than the frame for most sizes,
+//! so a row is `width` bytes of picture followed by padding nobody reads.
+//! Everything downstream is handed the stride explicitly and none of it may
+//! assume `stride == width` — that assumption is what [`ROW_ALIGN`] documents
+//! the cost of.
 
 use std::sync::atomic::AtomicU64;
 
@@ -105,9 +107,39 @@ pub struct Nv12Layout {
     pub uv_rows: usize,
 }
 
+/// What a row of either plane is padded to.
+///
+/// Four would be enough for the shader (one aligned word per luma write) and
+/// enough for libavutil, and that is what this was for months. It is not enough
+/// for the **encoder**. A VAAPI surface imported from a DMA-BUF whose pitch is
+/// not a multiple of 64 encodes as vertical strips displaced against each
+/// other, on Intel, silently — a 4:3 clip gives a 1440-wide canvas, and that is
+/// how this was found.
+///
+/// The subtle part, and the reason it took a while: the *importer* honours
+/// whatever pitch it is handed. `av_hwframe_transfer_data` reads such a surface
+/// back byte-for-byte correct, so a round-trip test proves nothing about it —
+/// `export::hwframes`' own tests pass at 1440x1080 while real exports at that
+/// size were destroyed. Only the encode engine cares, and it does not complain;
+/// it reads the plane with the pitch it wanted and encodes the result.
+///
+/// Measured on this hardware, zero-copy against the readback path, luma PSNR,
+/// before and after this constant existed:
+///
+/// | size      | width mod 64 | before   | after    |
+/// |-----------|--------------|----------|----------|
+/// | 1920x1080 | 0            | 79.6 dB  | 79.6 dB  |
+/// | 1408x1080 | 0            | 78.2 dB  | —        |
+/// | 1440x1080 | 32           | 19.2 dB  | 78.1 dB  |
+/// | 1360x768  | 16           | 17.9 dB  | infinite |
+///
+/// 128 rather than 64 because it costs at most 127 bytes a row — 0.1% of a
+/// 1440x1080 frame — and covers drivers that ask for more than 64.
+const ROW_ALIGN: usize = 128;
+
 impl Nv12Layout {
     pub fn for_size(width: u32, height: u32) -> Self {
-        let stride = width.div_ceil(4) as usize * 4;
+        let stride = (width as usize).div_ceil(ROW_ALIGN) * ROW_ALIGN;
         Self {
             width,
             height,
@@ -483,6 +515,56 @@ mod tests {
     use super::*;
     use crate::modules::render::texture_pool::{TextureKey, TexturePool};
 
+    /// The invariant a hardware export depends on, checked without a GPU.
+    ///
+    /// This is deliberately an assertion about *alignment* and not about a
+    /// particular number of bytes: the failure it guards against is somebody
+    /// tightening `ROW_ALIGN` back down to save memory, at which point exports
+    /// at any width that is not a multiple of it come out as displaced vertical
+    /// strips, on hardware, silently, and only at some resolutions. See
+    /// [`ROW_ALIGN`] for the measurements.
+    #[test]
+    fn every_stride_is_aligned_for_the_encoder() {
+        // Real canvases: adopted from 4:3, 16:9 and vertical sources, plus odd
+        // and prime-ish widths that no alignment rule can accidentally satisfy.
+        for (width, height) in [
+            (1920, 1080),
+            (1440, 1080),
+            (1360, 768),
+            (1080, 1920),
+            (1616, 1080),
+            (720, 540),
+            (2, 2),
+            (1, 1),
+            (1919, 1079),
+            (997, 601),
+        ] {
+            let layout = Nv12Layout::for_size(width, height);
+            assert_eq!(
+                layout.y_stride % ROW_ALIGN,
+                0,
+                "{width}x{height} luma stride {} is not {ROW_ALIGN}-aligned",
+                layout.y_stride
+            );
+            assert_eq!(
+                layout.uv_stride % ROW_ALIGN,
+                0,
+                "{width}x{height} chroma stride {} is not {ROW_ALIGN}-aligned",
+                layout.uv_stride
+            );
+            // A stride narrower than the picture would truncate every row, and
+            // the plane offset has to stay aligned too or the chroma plane
+            // starts mid-row.
+            assert!(
+                layout.y_stride >= width as usize,
+                "{width}x{height} stride {} is narrower than the frame",
+                layout.y_stride
+            );
+            assert_eq!(layout.uv_offset() % ROW_ALIGN, 0);
+            assert!(layout.total_bytes() >= layout.uv_offset() + layout.uv_stride * layout.uv_rows);
+        }
+    }
+
     /// Convert a solid `width` x `height` block of one colour, on the GPU.
     ///
     /// Uses a `Rgba8Unorm` texture rather than the compositor's sRGB one so the
@@ -721,19 +803,26 @@ mod tests {
 
     #[test]
     fn the_layout_pads_rows_to_whole_words() {
-        // An even width, which is every width a video encoder accepts, needs no
-        // padding at all.
+        // 1920 is already a multiple of `ROW_ALIGN`, so this one size still
+        // needs no padding — which is exactly why it was the only size the
+        // hardware export was ever tested at, and why the bug survived.
         let hd = Nv12Layout::for_size(1920, 1080);
         assert_eq!(hd.y_stride, 1920);
         assert_eq!(hd.uv_stride, 1920);
         assert_eq!(hd.uv_rows, 540);
         assert_eq!(hd.total_bytes(), 1920 * 1080 * 3 / 2);
 
+        // The size a 4:3 clip produces. Padded up from 1440, and the whole
+        // reason `ROW_ALIGN` exists.
+        let four_three = Nv12Layout::for_size(1440, 1080);
+        assert_eq!(four_three.y_stride, 1536);
+        assert_eq!(four_three.total_bytes(), 1536 * 1080 + 1536 * 540);
+
         // 101 is the awkward case the RGBA readback test uses.
         let odd = Nv12Layout::for_size(101, 37);
-        assert_eq!(odd.y_stride, 104);
+        assert_eq!(odd.y_stride, 128);
         assert_eq!(odd.uv_rows, 19);
-        assert_eq!(odd.total_bytes(), 104 * 37 + 104 * 19);
+        assert_eq!(odd.total_bytes(), 128 * 37 + 128 * 19);
     }
 
     #[test]

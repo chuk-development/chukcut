@@ -11,7 +11,7 @@
  * only where the consequence of a setting is not obvious from its name.
  */
 
-import { AlertTriangleIcon, Loader2Icon, Trash2Icon } from "lucide-react";
+import { AlertTriangleIcon, Loader2Icon, ScrollTextIcon, Trash2Icon } from "lucide-react";
 import type * as React from "react";
 import { useEffect, useState } from "react";
 
@@ -34,9 +34,12 @@ import {
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { revealInFileManager } from "@/lib/opener";
 import { HardwarePanel } from "@/modules/workspace/components/HardwarePanel";
+import { workspaceLogPath } from "@/modules/workspace/lib/api";
 import { formatBytes } from "@/modules/workspace/lib/format";
 import { useWorkspaceStore } from "@/modules/workspace/store";
+import type { LogLocation } from "@/modules/workspace/types";
 
 const GIB = 1024 * 1024 * 1024;
 
@@ -74,6 +77,22 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
   useEffect(() => {
     if (open) void refreshCacheSize();
   }, [open, refreshCacheSize]);
+
+  // Where this run is logging. Local rather than in the store: it cannot change
+  // while the app runs and nothing else needs it. A build whose Rust half does
+  // not answer leaves it null and the row says so, rather than throwing away
+  // the whole panel.
+  const [log, setLog] = useState<LogLocation | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    let live = true;
+    workspaceLogPath()
+      .then((location) => live && setLog(location))
+      .catch(() => live && setLog(null));
+    return () => {
+      live = false;
+    };
+  }, [open]);
 
   const disabled = status === "loading";
 
@@ -252,6 +271,41 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
                 >
                   {cacheBusy ? <Loader2Icon className="animate-spin" /> : <Trash2Icon />}
                   {cacheBusy ? "Clearing…" : "Clear cache"}
+                </Button>
+              </div>
+
+              {/*
+                The log is not cache and is not deleted with it, which is the
+                whole reason it lives in the state directory — see
+                `workspace::paths::logs_dir`. It is here rather than in its own
+                tab because "where does the app write things" is one question.
+              */}
+              <div className="flex items-center justify-between gap-3 rounded-md border border-border bg-surface/50 px-3 py-2.5">
+                <div className="min-w-0">
+                  <p className="text-[12px] font-medium">Log file</p>
+                  <p
+                    className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground"
+                    title={log?.file ?? log?.directory ?? undefined}
+                  >
+                    {log === null
+                      ? "Looking…"
+                      : (log.file ?? `${log.directory} — could not be opened this run`)}
+                  </p>
+                  <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">
+                    One file a day, the last week kept. What an export chose — encoder, frame path,
+                    strides — is in here, and it is what to attach to a bug report.
+                  </p>
+                </div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={!log?.file}
+                  onClick={() => {
+                    if (log?.file) void revealInFileManager(log.file).catch(() => {});
+                  }}
+                >
+                  <ScrollTextIcon />
+                  Show log
                 </Button>
               </div>
             </TabsContent>

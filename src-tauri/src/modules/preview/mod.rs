@@ -52,6 +52,11 @@
 //!   full-range NV12 because that is what the encoder eats.
 //!   [`encoder::encode_preview_jpeg`] picks, and falls back without telling
 //!   the caller.
+//! - **The evidence that playback is or is not smooth.** [`stats`] folds the
+//!   per-frame numbers into one INFO line a second — frames shown, dropped,
+//!   mean and p99 frame time, decode path, resolution — because the per-frame
+//!   lines are DEBUG and the file log is INFO, so without it a stutter the
+//!   owner reports leaves nothing on disk to investigate.
 //!
 //! ## What it deliberately does not own
 //!
@@ -77,6 +82,7 @@ pub mod encoder;
 pub mod error;
 pub mod server;
 pub mod session;
+pub mod stats;
 pub mod vaapi;
 
 pub use cache::{CachedFrame, FrameCache, Lookup, DEFAULT_CAPACITY};
@@ -95,4 +101,8 @@ pub use server::{
 pub use session::{
     proxy_long_edge, proxy_size, PreviewOptions, PreviewSession, DEFAULT_JPEG_QUALITY,
     SCRUB_JPEG_QUALITY,
+};
+pub use stats::{
+    decode_path, DecodePath, Histogram, PlaybackStats, SeekKind, SeekWatch, SessionFacts, SlowSeek,
+    Summary, SLOW_SEEK, SUMMARY_INTERVAL,
 };

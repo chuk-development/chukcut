@@ -34,6 +34,8 @@ enum EditCommand {
     SetSpeed     { segment_id, before, after },
     SetVolume    { segment_id, before, after },
 
+    SetLinkGroup { segment_id, before: Option<Id>, after: Option<Id> },
+
     AddKeyframe       { segment_id, property, keyframe },
     RemoveKeyframe    { segment_id, property, keyframe },
     MoveKeyframe      { segment_id, property, from_time, to_time,
@@ -66,6 +68,44 @@ is one entry in the undo stack even though it touched two segments.
 If applying a composite fails partway, the parts that already applied are
 inverted before returning the error. A failed edit leaves the document exactly
 as it was.
+
+## Expansions: the two things that depend on more than one segment
+
+A command names one segment, and two things in the document do not fit in one.
+Both are handled the same way — the command is expanded into a `Composite`
+inside `History::apply`, before it is recorded — because that is the single
+point every edit passes through, so no caller can forget.
+
+- **Linked clips.** A file imported with sound is two segments on two lanes
+  (decision `0005`). `ops::mirror_linked_edits` adds the partners' move, trim or
+  delete. One gesture stays one undo step, and undoing it puts every member
+  back. Split is not expanded here: `split_at` builds its own composite, because
+  the new right-hand halves need a link group of their own.
+- **Transitions.** A structural edit can leave a transition describing a cut
+  that no longer exists, and the primitive that broke it cannot put it back.
+  `ops::detach_broken_transitions` prepends the removals. It runs *after* the
+  link expansion, so it judges the whole edit rather than half of it.
+
+Neither recurses into a `Composite`. The composites the app builds — a split, an
+import — already know about both.
+
+**That last sentence is why a multi-clip edit cannot simply be a `Composite` the
+webview built.** A selection dragged as one gesture is one command per clip, and
+if it arrived as a composite the link expansion above would skip it entirely —
+the sound of a linked pair would stay where it was. So a batch goes through
+`timeline_apply_many` → `ops::compose_edits`, which is the one place that:
+
+1. expands the link partners of every part, and **drops any partner the batch
+   already names**, so a selection holding both halves of a pair moves it once
+   rather than twice;
+2. orders the parts so that no intermediate state overlaps — a block moving
+   later is applied right-to-left, a block moving earlier left-to-right, because
+   a composite whose first part is refused rolls the whole gesture back;
+3. returns a batch of one *unwrapped*, so single-clip editing stays on the path
+   above with its own mirroring intact.
+
+A mirrored edit that cannot apply fails the whole composite, so a linked pair
+moves as one thing or not at all. Half a move is a pair that no longer lines up.
 
 ## Invariants
 
@@ -135,6 +175,11 @@ frontend means the drag is smooth and Rust still validates the result.
 One command per completed gesture, not per mouse-move. A drag emits a single
 `MoveSegment` on release with `from_start` and `to_start`. The intermediate
 positions are local UI state and never reach Rust.
+
+A gesture that touches several clips — a multi-selection dragged, trimmed or
+deleted — is still one gesture, and sends one `timeline_apply_many` carrying one
+primitive per clip plus a label for the undo menu. It sends nothing for a clip's
+link partners: those are a fact about the document, and Rust adds them.
 
 The response (`EditResponse`) carries the whole updated project plus the undo
 and redo labels, and the frontend store replaces itself with it.

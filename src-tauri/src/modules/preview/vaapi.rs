@@ -121,9 +121,13 @@ pub struct VaapiJpegEncoder {
     /// order — which is safe either way, because the codec context holds its
     /// own reference to the pool.
     frames: HwFramesContext,
-    /// Reused across frames so a 3 MB allocation does not happen thirty times
-    /// a second.
-    nv12: frame::Video,
+    /// Staging for [`Self::encode`], which converts and encodes in one call.
+    ///
+    /// The preview does **not** use this one: it converts into a scratch frame
+    /// of its own before taking the encoder's lock, for the reason in
+    /// [`Nv12Scratch`]. This exists so a benchmark or a test can still hand the
+    /// encoder plain RGBA.
+    nv12: Nv12Scratch,
     width: u32,
     height: u32,
     quality: u8,
@@ -250,7 +254,7 @@ impl VaapiJpegEncoder {
         Ok(Self {
             encoder,
             frames,
-            nv12: frame::Video::new(Pixel::NV12, width, height),
+            nv12: Nv12Scratch::new(width, height),
             width,
             height,
             quality,
@@ -276,46 +280,87 @@ impl VaapiJpegEncoder {
         self.quality
     }
 
-    /// Encode one tightly packed RGBA frame.
+    /// Convert one tightly packed RGBA frame and encode it.
+    ///
+    /// **The preview does not call this.** It converts first, outside the
+    /// encoder's mutex, and then calls [`Self::encode_nv12`] — see
+    /// [`Nv12Scratch`] for why that separation is load-bearing. This is the
+    /// convenient version, for benchmarks and tests that hold no lock.
     pub fn encode(&mut self, rgba: &[u8]) -> Result<Vec<u8>> {
-        let want = self.width as usize * self.height as usize * BYTES_PER_PIXEL;
-        if rgba.len() < want {
-            return Err(PreviewError::FrameData {
-                got: rgba.len(),
-                want,
-            });
+        let started = std::time::Instant::now();
+        self.nv12.fill(rgba)?;
+        let convert_micros = started.elapsed().as_micros() as u64;
+
+        // Two disjoint field borrows rather than `self.encode_nv12(...)`, which
+        // would borrow all of `self` mutably and the staging frame immutably at
+        // the same time.
+        let out = Self::encode_surface(
+            &mut self.encoder,
+            &self.frames,
+            &mut self.pts,
+            &mut self.stages,
+            self.nv12.frame(),
+        );
+        self.stages.convert_micros = convert_micros;
+        out
+    }
+
+    /// Encode a frame the caller has already converted to NV12.
+    ///
+    /// `nv12` must be the size this encoder was opened for; an encoder is fixed
+    /// to one size, so a mismatch is a caller bug rather than something to
+    /// scale.
+    pub fn encode_nv12(&mut self, nv12: &Nv12Scratch) -> Result<Vec<u8>> {
+        if !nv12.matches(self.width, self.height) {
+            let (width, height) = nv12.size();
+            return Err(PreviewError::FrameSize { width, height });
         }
+        self.stages.convert_micros = 0;
+        Self::encode_surface(
+            &mut self.encoder,
+            &self.frames,
+            &mut self.pts,
+            &mut self.stages,
+            nv12.frame(),
+        )
+    }
 
+    /// Upload one NV12 frame to a surface and run the fixed-function encoder.
+    ///
+    /// Free-standing over the fields it needs so both entry points above can
+    /// call it without borrowing all of `self`.
+    fn encode_surface(
+        encoder: &mut ffmpeg::encoder::video::Encoder,
+        frames: &HwFramesContext,
+        pts: &mut i64,
+        stages: &mut Stages,
+        nv12: &frame::Video,
+    ) -> Result<Vec<u8>> {
         let started = std::time::Instant::now();
-        self.convert(rgba)?;
-        self.stages.convert_micros = started.elapsed().as_micros() as u64;
-
-        let started = std::time::Instant::now();
-        let mut surface = self
-            .frames
+        let mut surface = frames
             .empty_frame()
             .map_err(|e| PreviewError::Encode(e.to_string()))?;
-        self.frames
-            .upload(&self.nv12, &mut surface)
+        frames
+            .upload(nv12, &mut surface)
             .map_err(|e| PreviewError::Encode(e.to_string()))?;
-        self.stages.upload_micros = started.elapsed().as_micros() as u64;
-        surface.set_pts(Some(self.pts));
-        self.pts += 1;
+        stages.upload_micros = started.elapsed().as_micros() as u64;
+        surface.set_pts(Some(*pts));
+        *pts += 1;
 
         let started = std::time::Instant::now();
-        self.encoder
+        encoder
             .send_frame(&surface)
             .map_err(|e| ffmpeg_error("sending a frame to the hardware JPEG encoder", e))?;
 
         let mut packet = ffmpeg::Packet::empty();
-        self.encoder.receive_packet(&mut packet).map_err(|e| {
+        encoder.receive_packet(&mut packet).map_err(|e| {
             // EAGAIN here means the encoder is holding the frame back, which
             // `async_depth=1` is supposed to prevent. If a driver ever does it
             // anyway the caller falls back to software, so say which it was.
             ffmpeg_error("the hardware JPEG encoder produced no picture", e)
         })?;
 
-        self.stages.encode_micros = started.elapsed().as_micros() as u64;
+        stages.encode_micros = started.elapsed().as_micros() as u64;
 
         let data = packet
             .data()
@@ -327,8 +372,59 @@ impl VaapiJpegEncoder {
         }
         Ok(data.to_vec())
     }
+}
 
-    /// RGBA straight from the caller's slice into [`Self::nv12`].
+/// One reusable NV12 frame, and the conversion into it.
+///
+/// **This exists so that the conversion happens outside the encoder's mutex**,
+/// and that is not a tidiness argument. [`rgba_to_nv12`] dispatches onto the
+/// rayon pool. Doing so while holding a lock that rayon workers also want is a
+/// deadlock with two distinct routes into it:
+///
+/// - From a rayon worker, the thread holding the lock joins the work-stealing
+///   loop while it waits and runs another job that asks for the same lock.
+/// - From any other thread, the dispatch waits for a free worker — and if the
+///   pool is full of jobs blocked on that same lock, nobody can finish.
+///
+/// The second one is not hypothetical: it hung the unit-test binary at default
+/// parallelism, with the preview's encode thread holding the lock and waiting
+/// for a worker while twelve workers waited for the lock. Converting first and
+/// locking second removes the class rather than one route into it. `encoder.rs`
+/// keeps one of these per encoding thread.
+///
+/// Not `Send`: an `AVFrame` may be moved between threads safely, but there is
+/// no reason to and `ffmpeg-next` does not say so, so this stays where it was
+/// made.
+pub struct Nv12Scratch {
+    frame: frame::Video,
+    width: u32,
+    height: u32,
+}
+
+impl Nv12Scratch {
+    /// Allocate for one size. Reused across frames, so a 3 MB allocation does
+    /// not happen thirty times a second.
+    pub fn new(width: u32, height: u32) -> Self {
+        Self {
+            frame: frame::Video::new(Pixel::NV12, width, height),
+            width,
+            height,
+        }
+    }
+
+    pub fn matches(&self, width: u32, height: u32) -> bool {
+        self.width == width && self.height == height
+    }
+
+    pub fn size(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
+    pub fn frame(&self) -> &frame::Video {
+        &self.frame
+    }
+
+    /// RGBA straight from the caller's slice into the staging frame.
     ///
     /// Not swscale. `sws_scale` was the obvious thing and was measured at 37 ms
     /// for a 1080x1920 frame — on its own, more than the whole frame budget and
@@ -336,10 +432,17 @@ impl VaapiJpegEncoder {
     /// NV12 has no SIMD path in libswscale; it goes through the generic
     /// per-pixel C converter. [`rgba_to_nv12`] is a plain integer transform
     /// spread over rayon and is roughly twenty times faster.
-    fn convert(&mut self, rgba: &[u8]) -> Result<()> {
+    pub fn fill(&mut self, rgba: &[u8]) -> Result<()> {
         let (width, height) = (self.width as usize, self.height as usize);
+        let want = width * height * BYTES_PER_PIXEL;
+        if rgba.len() < want {
+            return Err(PreviewError::FrameData {
+                got: rgba.len(),
+                want,
+            });
+        }
 
-        // SAFETY: `self.nv12` was allocated by `frame::Video::new(NV12, w, h)`
+        // SAFETY: `self.frame` was allocated by `frame::Video::new(NV12, w, h)`
         // and is never reallocated, so plane 0 is at least `linesize[0] * h`
         // bytes and plane 1 at least `linesize[1] * h/2` — libavutil's
         // guarantee for a buffer it allocated. `&mut self` means no other
@@ -347,7 +450,7 @@ impl VaapiJpegEncoder {
         // disjoint slices over its two planes cannot alias: NV12's planes are
         // separate entries in `data[]` and libavutil never overlaps them.
         let (y, y_stride, uv, uv_stride) = unsafe {
-            let frame = self.nv12.as_mut_ptr();
+            let frame = self.frame.as_mut_ptr();
             let y_stride = (*frame).linesize[0] as usize;
             let uv_stride = (*frame).linesize[1] as usize;
             (
@@ -389,6 +492,17 @@ const V_B: i32 = -21; // -0.081312 * 256
 /// Chroma is averaged over each 2x2 block **in RGB, before the transform**
 /// rather than after. The transform is linear, so the two are the same value up
 /// to rounding, and doing it first is a quarter of the multiplies.
+///
+/// ## The one rule for calling this
+///
+/// **No lock may be held across it**, and in particular not the one in
+/// `encoder.rs` around the hardware encoder. This dispatches onto the rayon
+/// pool, and a rayon dispatch under a lock that rayon workers also want
+/// deadlocks — from a worker, because a thread blocked in a parallel iterator
+/// steals other jobs; and from any thread, because the dispatch waits for a
+/// worker the saturated pool will never free. Both were observed. That is what
+/// [`Nv12Scratch`] is for, and the full account is on
+/// `preview::server::encode_queue`.
 pub fn rgba_to_nv12(
     rgba: &[u8],
     width: usize,
@@ -404,42 +518,47 @@ pub fn rgba_to_nv12(
     debug_assert!(rgba.len() >= src_stride * height);
     debug_assert!(width % 2 == 0 && height % 2 == 0);
 
-    // A row *pair* is the unit of work: one line of chroma covers two lines of
-    // luma, so splitting anywhere else would make neighbouring tasks share a
-    // chroma row.
-    rgba[..src_stride * height]
-        .par_chunks(src_stride * 2)
-        .zip(y[..y_stride * height].par_chunks_mut(y_stride * 2))
-        .zip(uv[..uv_stride * (height / 2)].par_chunks_mut(uv_stride))
-        .for_each(|((src, y_rows), uv_row)| {
-            let (top, bottom) = src.split_at(src_stride);
-            let (y_top, y_bottom) = y_rows.split_at_mut(y_stride);
+    // One row pair: the unit of work either way. A row *pair* rather than a row
+    // because one line of chroma covers two lines of luma, so splitting
+    // anywhere else would make neighbouring tasks share a chroma row.
+    let pair = move |src: &[u8], y_rows: &mut [u8], uv_row: &mut [u8]| {
+        let (top, bottom) = src.split_at(src_stride);
+        let (y_top, y_bottom) = y_rows.split_at_mut(y_stride);
 
-            for x in 0..width {
-                let i = x * BYTES_PER_PIXEL;
-                let (r0, g0, b0) = (top[i] as i32, top[i + 1] as i32, top[i + 2] as i32);
-                let (r1, g1, b1) = (bottom[i] as i32, bottom[i + 1] as i32, bottom[i + 2] as i32);
-                y_top[x] = ((Y_R * r0 + Y_G * g0 + Y_B * b0 + 128) >> 8) as u8;
-                y_bottom[x] = ((Y_R * r1 + Y_G * g1 + Y_B * b1 + 128) >> 8) as u8;
-            }
+        for x in 0..width {
+            let i = x * BYTES_PER_PIXEL;
+            let (r0, g0, b0) = (top[i] as i32, top[i + 1] as i32, top[i + 2] as i32);
+            let (r1, g1, b1) = (bottom[i] as i32, bottom[i + 1] as i32, bottom[i + 2] as i32);
+            y_top[x] = ((Y_R * r0 + Y_G * g0 + Y_B * b0 + 128) >> 8) as u8;
+            y_bottom[x] = ((Y_R * r1 + Y_G * g1 + Y_B * b1 + 128) >> 8) as u8;
+        }
 
-            for x in (0..width).step_by(2) {
-                let i = x * BYTES_PER_PIXEL;
-                let j = i + BYTES_PER_PIXEL;
-                // Sum of the 2x2 block, so the shift below carries the divide
-                // by four along with the fixed-point one.
-                let r = top[i] as i32 + top[j] as i32 + bottom[i] as i32 + bottom[j] as i32;
-                let g =
-                    top[i + 1] as i32 + top[j + 1] as i32 + bottom[i + 1] as i32 + bottom[j + 1] as i32;
-                let b =
-                    top[i + 2] as i32 + top[j + 2] as i32 + bottom[i + 2] as i32 + bottom[j + 2] as i32;
+        for x in (0..width).step_by(2) {
+            let i = x * BYTES_PER_PIXEL;
+            let j = i + BYTES_PER_PIXEL;
+            // Sum of the 2x2 block, so the shift below carries the divide
+            // by four along with the fixed-point one.
+            let r = top[i] as i32 + top[j] as i32 + bottom[i] as i32 + bottom[j] as i32;
+            let g =
+                top[i + 1] as i32 + top[j + 1] as i32 + bottom[i + 1] as i32 + bottom[j + 1] as i32;
+            let b =
+                top[i + 2] as i32 + top[j + 2] as i32 + bottom[i + 2] as i32 + bottom[j + 2] as i32;
 
-                let u = ((U_R * r + U_G * g + U_B * b + 512) >> 10) + 128;
-                let v = ((V_R * r + V_G * g + V_B * b + 512) >> 10) + 128;
-                uv_row[x] = u.clamp(0, 255) as u8;
-                uv_row[x + 1] = v.clamp(0, 255) as u8;
-            }
-        });
+            let u = ((U_R * r + U_G * g + U_B * b + 512) >> 10) + 128;
+            let v = ((V_R * r + V_G * g + V_B * b + 512) >> 10) + 128;
+            uv_row[x] = u.clamp(0, 255) as u8;
+            uv_row[x + 1] = v.clamp(0, 255) as u8;
+        }
+    };
+
+    let src = &rgba[..src_stride * height];
+    let y = &mut y[..y_stride * height];
+    let uv = &mut uv[..uv_stride * (height / 2)];
+
+    src.par_chunks(src_stride * 2)
+        .zip(y.par_chunks_mut(y_stride * 2))
+        .zip(uv.par_chunks_mut(uv_stride))
+        .for_each(|((src, y_rows), uv_row)| pair(src, y_rows, uv_row));
 }
 
 impl std::fmt::Debug for VaapiJpegEncoder {

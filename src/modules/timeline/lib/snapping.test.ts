@@ -46,7 +46,15 @@ function projectWith(...lanes: Segment[][]): Project {
     updated_at: 0,
     canvas: { width: 1080, height: 1920, background: [0, 0, 0, 1] },
     fps: 30,
-    materials: { videos: [], audios: [], images: [], texts: [], extras: {} },
+    materials: {
+      videos: [],
+      audios: [],
+      images: [],
+      texts: [],
+      links: [],
+      transitions: [],
+      extras: {},
+    },
     tracks: lanes.map((segments, index) => ({
       id: `t${index}`,
       kind: "video" as const,

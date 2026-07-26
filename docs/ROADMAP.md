@@ -32,7 +32,13 @@ that plays correctly in another player.
 
 ## Phase 2 — The editor people expect
 
-- Text rendering with the full `TextMaterial` surface (stroke, shadow, box)
+- ✅ **Text rendering with the full `TextMaterial` surface (stroke, shadow,
+  box)**, and the UI over it: a Text tab that puts a title at the playhead, an
+  inspector for its words, font, size, colour, alignment, outline, shadow and
+  box, and a test suite proving it draws the same in the preview and the export.
+  `docs/STATUS.md`, "Titles, end to end". What is left is one thing: changing a
+  title's parameters is not on the undo stack, for want of an
+  `EditCommand::SetTextMaterial`.
 - Transitions between adjacent clips
 - Keyframe editing UI with an easing picker
 - Audio: per-clip volume envelopes, fades, waveform-accurate trimming

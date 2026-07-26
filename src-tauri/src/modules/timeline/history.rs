@@ -26,11 +26,16 @@ impl History {
     /// Apply a command and record it. On failure nothing is recorded, so a
     /// rejected edit never shows up in the undo menu.
     pub fn apply(&mut self, project: &mut Project, command: EditCommand) -> Result<(), String> {
-        // A structural edit can leave a transition describing a cut that no
-        // longer exists, and the primitive that broke it cannot put it back on
-        // undo. So the removals it implies are folded in here, before the
-        // command is recorded — the user gets one undo step and the transition
-        // comes back with it. See `ops::detach_broken_transitions`.
+        // Two expansions, in this order, and both for the same reason: an edit
+        // command names one segment, and there are things in the document that
+        // depend on more than one.
+        //
+        // First the links — a clip imported with sound is two segments that
+        // move, trim and delete as one, so the partners' commands are added
+        // here. Then the transitions, which have to see the *whole* expanded
+        // edit before they can tell whether a cut they describe still exists.
+        // Either way the result is one `Composite`, which is one undo step.
+        let command = super::ops::mirror_linked_edits(project, command);
         let command = super::ops::detach_broken_transitions(project, command);
         command.apply(project)?;
         self.redo_stack.clear();

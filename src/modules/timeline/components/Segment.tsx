@@ -1,4 +1,12 @@
-import { CopyIcon, LockIcon, ScissorsIcon, Trash2Icon, VolumeXIcon } from "lucide-react";
+import {
+  CopyIcon,
+  LinkIcon,
+  LockIcon,
+  ScissorsIcon,
+  Trash2Icon,
+  Unlink2Icon,
+  VolumeXIcon,
+} from "lucide-react";
 import type React from "react";
 import { memo, useEffect } from "react";
 
@@ -90,6 +98,19 @@ interface SegmentProps {
   muted: boolean;
   /** The razor tool is active: this clip is something to cut, not to drag. */
   razor: boolean;
+  /**
+   * This clip moves, trims and deletes with another one — normally the sound it
+   * was imported with. Worth a badge: the clip is about to behave differently
+   * from how it looks, and a drag that moves two clips when the user grabbed
+   * one is otherwise indistinguishable from a bug.
+   */
+  linked: boolean;
+  /**
+   * Several clips are selected and this is one of them, so "Link" is worth
+   * offering. It is a property of the selection rather than of the clip, but
+   * the clip is where the context menu is.
+   */
+  linkable: boolean;
   zoom: number;
   /** Live drag position. Local until the gesture ends; Rust never sees it. */
   preview: { start: Micros; duration: Micros } | null;
@@ -102,10 +123,18 @@ interface SegmentProps {
   /** Visible time window, so only the pixels on screen are drawn. */
   viewport: { from: Micros; to: Micros };
   onGesture: (event: React.PointerEvent, gesture: SegmentGesture, segmentId: string) => void;
-  onSelect: (segmentId: string) => void;
+  /**
+   * The event comes along because what a click means depends on which keys are
+   * down: plain replaces the selection, Ctrl/Cmd adds or removes this one,
+   * Shift takes the run between it and the last one. The clip does not decide
+   * any of that — the timeline does, because only it knows what is selected.
+   */
+  onSelect: (segmentId: string, event: React.PointerEvent) => void;
   onSplit: (segmentId: string) => void;
   onDuplicate: (segmentId: string) => void;
   onDelete: (segmentId: string) => void;
+  onUnlink: (segmentId: string) => void;
+  onLink: () => void;
 }
 
 function ClipBody({
@@ -116,6 +145,8 @@ function ClipBody({
   locked,
   muted,
   razor,
+  linked,
+  linkable,
   zoom,
   preview,
   ghosted,
@@ -127,6 +158,8 @@ function ClipBody({
   onSplit,
   onDuplicate,
   onDelete,
+  onUnlink,
+  onLink,
 }: SegmentProps) {
   clipPaintCount.set(segment.id, (clipPaintCount.get(segment.id) ?? 0) + 1);
 
@@ -263,7 +296,11 @@ function ClipBody({
                 if (!locked) onGesture(event, "move", segment.id);
                 return;
               }
-              onSelect(segment.id);
+              onSelect(segment.id, event);
+              // A modifier click is about the selection and nothing else.
+              // Dragging on the same press would move a clip the user was in
+              // the middle of adding to — or had just taken out of — the set.
+              if (event.ctrlKey || event.metaKey || event.shiftKey) return;
               if (!locked) onGesture(event, "move", segment.id);
             }}
             className={cn(
@@ -302,6 +339,12 @@ function ClipBody({
               </span>
             ) : null}
             <span className="ml-auto flex shrink-0 items-center gap-1">
+              {linked && width >= 52 ? (
+                <LinkIcon
+                  className="size-3 text-foreground/70"
+                  aria-label="Linked to another clip"
+                />
+              ) : null}
               {muted && width >= 52 ? (
                 <VolumeXIcon className="size-3 text-foreground/70" aria-label="Silent" />
               ) : null}
@@ -341,7 +384,7 @@ function ClipBody({
                 onPointerDown={(event) => {
                   event.stopPropagation();
                   if (event.button !== 0) return;
-                  onSelect(segment.id);
+                  onSelect(segment.id, event);
                   onGesture(event, "trim-start", segment.id);
                 }}
                 className="absolute inset-y-0 left-0 z-10 w-2 cursor-ew-resize border-none bg-transparent p-0 opacity-0 transition-opacity group-hover:opacity-100 data-[shown=true]:opacity-100"
@@ -355,7 +398,7 @@ function ClipBody({
                 onPointerDown={(event) => {
                   event.stopPropagation();
                   if (event.button !== 0) return;
-                  onSelect(segment.id);
+                  onSelect(segment.id, event);
                   onGesture(event, "trim-end", segment.id);
                 }}
                 className="absolute inset-y-0 right-0 z-10 w-2 cursor-ew-resize border-none bg-transparent p-0 opacity-0 transition-opacity group-hover:opacity-100 data-[shown=true]:opacity-100"
@@ -378,6 +421,31 @@ function ClipBody({
           <CopyIcon />
           Duplicate
         </ContextMenuItem>
+        {linked || linkable ? (
+          <>
+            <ContextMenuSeparator />
+            {/* Offered on any multi-selection, including one that is already
+                linked in part: linking is how a group is *re*-formed, and
+                Rust's `link` takes each clip out of whatever group it was in
+                first. */}
+            {linkable ? (
+              <ContextMenuItem onSelect={onLink}>
+                <LinkIcon />
+                Link
+              </ContextMenuItem>
+            ) : null}
+            {/* "Unlink" rather than "Detach audio": the pair is usually a clip
+                and its own sound, but a group can hold anything the user linked
+                by hand, and a menu item that names the wrong thing is worse
+                than one that names the general one. */}
+            {linked ? (
+              <ContextMenuItem onSelect={() => onUnlink(segment.id)}>
+                <Unlink2Icon />
+                Unlink
+              </ContextMenuItem>
+            ) : null}
+          </>
+        ) : null}
         <ContextMenuSeparator />
         <ContextMenuItem onSelect={() => onDelete(segment.id)}>
           <Trash2Icon />

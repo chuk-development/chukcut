@@ -28,6 +28,9 @@
 //!   crate does them. See [`raster`].
 //! - **A cache keyed on content.** A title does not change between frames, so
 //!   it is rasterised once and held; see `cache.rs`.
+//! - **Placing a title on the timeline.** How long a new title is, which lane
+//!   it lands on, what happens when that instant is taken — see [`edit`], which
+//!   is pure, and [`commands`], which is the IPC surface over it.
 //!
 //! ## What it deliberately does not own
 //!
@@ -54,6 +57,8 @@
 //!   set them.
 
 mod cache;
+pub mod commands;
+pub mod edit;
 mod font;
 pub mod layout;
 pub mod raster;
@@ -67,6 +72,7 @@ use std::sync::{Arc, OnceLock};
 use parking_lot::Mutex;
 
 pub use cache::CacheStats;
+pub use edit::{default_material, insert_command, TextPlacement};
 pub use layout::{GlyphRunStyle, LineBox, PositionedGlyph, TextLayout};
 pub use raster::RasteredText;
 pub use request::{RasterOptions, RasterTarget, TextRequest, VerticalAlign};
@@ -141,11 +147,7 @@ impl TextRenderer {
     }
 
     /// Rasterise, using the cache.
-    pub fn rasterize(
-        &self,
-        request: &TextRequest,
-        options: &RasterOptions,
-    ) -> Arc<RasteredText> {
+    pub fn rasterize(&self, request: &TextRequest, options: &RasterOptions) -> Arc<RasteredText> {
         let key = cache::cache_key(request, options);
         if let Some(hit) = self.cache.lock().get(key) {
             return hit;

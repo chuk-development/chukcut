@@ -221,6 +221,34 @@ fn full_document() -> Project {
         project.tracks.push(track);
     }
 
+    // A linked pair, as an import of a file with both streams produces: the
+    // picture on a video lane, the sound on an audio lane, the same material
+    // under both, and a link group id in each one's `extras`. Both halves of
+    // that — the membership on the segments and the group in the pool — have to
+    // come back or the two clips stop moving together when the file is reopened.
+    let group = "link-0".to_string();
+    project.materials.links.insert(group.clone());
+    let mut picture = Segment {
+        id: "linked-picture".into(),
+        material_id: "video-0".into(),
+        target_range: TimeRange::new(40_000_000, 2_000_000),
+        source_range: TimeRange::new(0, 2_000_000),
+        render_index: 0,
+        speed: 1.0,
+        volume: 1.0,
+        transform: Transform::default(),
+        crop: None,
+        extras: vec![group.clone()],
+        keyframes: Vec::new(),
+    };
+    let mut sound = picture.clone();
+    sound.id = "linked-sound".into();
+    // The picture also carries an effect, so the round trip proves the link id
+    // survives *alongside* an ordinary extra rather than instead of it.
+    picture.extras.insert(0, "effect-0".into());
+    project.tracks[0].segments.push(picture);
+    project.tracks[2].segments.push(sound);
+
     project
 }
 
@@ -229,8 +257,8 @@ fn a_document_using_every_field_survives_a_save_and_load_unchanged() {
     let original = full_document();
     assert_eq!(
         original.tracks.iter().map(|t| t.segments.len()).sum::<usize>(),
-        50,
-        "the fixture is supposed to be fifty segments"
+        52,
+        "the fixture is supposed to be fifty segments plus one linked pair"
     );
 
     let first = save(&original);
@@ -276,6 +304,33 @@ fn a_reloaded_document_is_the_same_document() {
     assert_eq!(
         reloaded.materials.video("video-1").map(|m| m.rotation),
         Some(90)
+    );
+
+    // Linkage, whose two halves live in different parts of the file: the group
+    // id in the pool, and the membership in each segment's `extras`. Losing
+    // either one leaves two clips that no longer move together, which the user
+    // only discovers on the next drag.
+    assert_eq!(reloaded.materials.links.len(), 1);
+    assert_eq!(
+        reloaded.link_group_of("linked-picture"),
+        reloaded.link_group_of("linked-sound"),
+    );
+    assert_eq!(
+        reloaded.link_group_of("linked-picture").map(String::as_str),
+        Some("link-0")
+    );
+    assert_eq!(reloaded.link_members("link-0").len(), 2);
+    assert_eq!(
+        reloaded
+            .segment("linked-picture")
+            .map(|(_, s)| s.extras.clone()),
+        Some(vec!["effect-0".to_string(), "link-0".to_string()]),
+        "the link id sits alongside the clip's effects, in order"
+    );
+    assert_eq!(
+        reloaded.link_group_of("segment-0-0"),
+        None,
+        "and a clip that carries effects but no link is not linked to anything"
     );
 
     let text = reloaded.materials.texts[0].clone();
@@ -368,6 +423,10 @@ fn a_document_with_no_optional_fields_loads_with_the_documented_defaults() {
 
     assert!(project.materials.videos.is_empty());
     assert!(project.materials.extras.is_empty());
+    assert!(
+        project.materials.links.is_empty(),
+        "a file written before links existed has none, rather than failing to open"
+    );
 
     // And once loaded it saves and reloads stably like any other document.
     assert_eq!(save(&project), save(&load(&save(&project))));

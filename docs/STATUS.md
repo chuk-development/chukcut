@@ -5,7 +5,8 @@ Sessions are long and are not reopened, so nothing important is allowed to live
 only in a conversation. If you learn something that would change how the next
 person works, it belongs in this repository, not in a chat log.
 
-Last updated: 2026-07-26.
+Last updated: 2026-07-26 (second pass: the preview hang, and the last of the
+VAAPI device consolidation).
 
 ## What this is
 
@@ -37,8 +38,10 @@ Each of these was measured or checked against an independent tool, not assumed.
 | Preview playback | `chukcut-bench --filter preview-frame` — **10.7 ms** for a whole 1920×1080 frame (decode, composite, readback, JPEG), i.e. 32% of the 30 fps budget and 64% of the 60 fps one, measured serially at native resolution on a quiet machine |
 | Audio playback | cpal, 48 kHz stereo; the device's played-sample count is the clock master |
 | Timeline editing | Magnetic docking, razor at the pointer, undo/redo via invertible commands |
+| Multi-selection and the clipboard | Ctrl/Cmd+click, Shift+click along a lane, a rubber band over the lanes, Ctrl+A; cut, copy, paste and duplicate. Moving, trimming and deleting a selection is **one** undo step — `timeline_apply_many` → `ops::compose_edits`, which also expands link partners exactly once and orders the parts so no intermediate state overlaps. Paste lands at the playhead on the clip's own lane, or the next free one, and never overlaps. Tests: `ops.rs` (batch composition, links, ordering), `timeline/lib/clipboard.test.ts`, `selection.test.ts`, `batch.test.ts` |
+| Linked audio and video | An imported file with both streams lands as two clips on two lanes that move, trim, split and delete as one, and can be unlinked. `modules/timeline/ops.rs` — the mirrored move, trim, split and delete each undo in one step, and `tests/round_trip.rs` proves the linkage survives a save. Decision `docs/decisions/0005-linked-audio-and-video.md` |
 | Export | `examples/export_smoke.rs` — 240 declared **and** 240 decodable frames, exact 4.000 s duration, AAC track at −18.2 dB mean, −1.7 dB peak |
-| Hardware preview JPEG (VAAPI) | `mjpeg_vaapi` on the Intel iGPU. A 1080x1920 preview frame encodes in 6.2 ms against 31 ms for the old pure-Rust encoder, and matches the software encoder's picture at 37 dB PSNR. Falls back to libjpeg-turbo on any machine or frame size the device refuses |
+| Hardware preview JPEG (VAAPI) | `mjpeg_vaapi` on the Intel iGPU. A 1080x1920 preview frame encodes in 6.2 ms against 31 ms for the old pure-Rust encoder, and matches the software encoder's picture at 37 dB PSNR. Falls back to libjpeg-turbo on any machine or frame size the device refuses. **On by default**, after the deadlock that had it switched off — see "The hang that was not the device" |
 | Hardware export (VAAPI) | `h264_vaapi` and `hevc_vaapi` on the Intel iGPU. 240 declared and 240 decodable frames, exact 8.000 s, audio identical to the software export at −17.7 dB mean. Frames match the software encode at 51–53 dB PSNR on luma and 60–62 dB on chroma |
 | Hardware decode (VAAPI) | H.264, HEVC, VP9 **and AV1**, each probed by decoding a real embedded frame. `tests/decode.rs` — 34 tests, 22 of them run against both the software and hardware decoders and pass identically, including every seek, VFR and rotation case. The two decoders produce the same picture to a mean channel difference under 2 |
 | Zero-copy decode into wgpu | `examples/dmabuf_import.rs` — a decoded VA surface exported as DMA-BUF and imported as two wgpu textures reconstructs the software decode's picture to a mean channel difference of **0.32**, with a deliberately chroma-swapped control at 41.9 |
@@ -50,12 +53,72 @@ bug), and its audio is **not** silent.
 
 ## What is known to be rough
 
+- **Playback and the timeline still stutter, and it is not yet diagnosed.**
+  Reported by the owner on 2026-07-26 against the build that fixed the export
+  stride, in his words "total... leckt immer noch geisteskrank rum". Deferred
+  deliberately, not forgotten — he chose to spend the next work on features.
+
+  What is already known, so the next person does not start from zero:
+  - The per-frame numbers do not obviously explain it. The last DEBUG session
+    logged composite 5–10 ms and encode 6–19 ms against a 33.3 ms budget, with
+    `over_budget=false` throughout. So the *mean* is fine and whatever is wrong
+    is in the tail, in the pacing, or in the webview — not in raw throughput.
+  - Three known contributors, each measured and each insufficient alone:
+    backward seeks discard the ring (130–227 ms, the entry below), the frame
+    cache is keyed to the session rather than the document (Task #9), and the
+    webview decodes a JPEG per frame on the UI thread.
+  - **The file log now shows it. This was the first step and it is done.**
+    `preview frame ready` is still DEBUG — promoting it would be one unbuffered
+    `write` syscall per frame on the encode thread, i.e. measurement that
+    changes what it measures — so `preview/stats.rs` aggregates instead and
+    emits one INFO line a second while playback runs, plus one when it stops.
+    Nothing has to be reproduced under `RUST_LOG` any more: **ask him for
+    `~/.local/state/chukcut/logs/chukcut-YYYY-MM-DD.log` and grep
+    `preview playback`.**
+
+    ```text
+    INFO …preview::stats: preview playback shown=30 dropped=2 rendered=30 scrubs=0
+      over_budget=1 mean_ms=12.7 p99_ms=120.25 max_ms=120.0 budget_ms=33.333
+      window_ms=1000.0 decode="vaapi" encode="vaapi" width=1080 height=1920
+      downscaled=false
+    ```
+
+    How to read it, because the whole point is that the mean already looked
+    fine: `shown` far above `rendered` is a **stalled renderer** — the clock
+    moved and the picture did not. `mean_ms` inside `budget_ms` with `max_ms`
+    far outside it is a **tail**, which is where this bug was always going to
+    be. `window_ms` much above 1000 means the **pacer itself** was blocked.
+    `dropped` above zero is the renderer losing the race outright. Three more
+    lines, each once per occurrence: `preview decode path` (with the reason,
+    once per run), `preview seek was slow` (over 50 ms, with the direction —
+    backwards is the expensive one), and `preview JPEG encoder changed backend`.
+
+    Two things about it that will otherwise cost time. **The decode path is
+    inferred, not asked**: `media::provider::acceleration` is private and the
+    provider reaches the preview as an opaque `dyn SourceProvider`, so
+    `stats::decode_path` reproduces that function's rule from the same two
+    public inputs (`CHUKCUT_DECODE`, `RenderContext::can_import_dmabuf`). It is
+    exact today and is the one thing here that can silently go stale. And
+    **`downscaled` is not `modules::proxy`**: it means the preview is rendering
+    below the canvas. Proxy *media* is not wired into the preview at all yet;
+    when it is, it belongs in `DecodePath` as a third value.
 - **Seeking backwards during playback stalls briefly.** The ring buffer is
   discarded on every seek, so a backward seek into a region just played costs a
   full decoder seek (130–227 ms measured). Task #9: key the cache to document
   identity rather than to the session id.
 - **Speed changes shift pitch.** Both in preview and export. A phase vocoder is
   its own piece of work.
+- **An export doubles the audio of a linked clip.** An imported file with both
+  streams is now two segments naming the same material — the picture on a video
+  lane, the sound on an audio lane — and the mixer's rule is "a video material
+  whose container carries audio makes sound, wherever it sits", so both are
+  planned unless something says otherwise. `Project::sound_is_on_a_linked_lane`
+  is that something and `audio::mixer::plan` asks it, so **the preview is
+  right**. `export/audio.rs` holds its own copy of the same resolution and does
+  not, because that file was being edited by other work when this landed. One
+  call in `export/audio.rs`, next to its `audio_path`, against the same document
+  method. Until then an export of such a project sums that clip's audio twice:
+  6 dB louder, and phasing with any microsecond the two are out by.
 - **The first `play` after launch can lead the sound** by up to one audio
   buffer, because the queue origin is marked before the stream exists. Every
   subsequent play and seek is exact.
@@ -584,6 +647,10 @@ now. The three *stage* columns are ratios measured inside a single run and are
 stable; the fps column is one quiet triple and should not be quoted to three
 figures. Take medians, and only compare runs taken back to back.
 
+Which tier a *user's* export took is no longer a guess: every export logs it,
+with the reason the tier above was not reached and the strides in use. See
+"The log file, and what an export writes into it".
+
 ### The isolated readback, which nobody had measured
 
 `Compositor::render_frame`'s map-and-copy costs **4.4–5.7 ms per 1080p frame**
@@ -727,10 +794,10 @@ test left behind, so `cargo test` is green despite them.
   the commands are small, 1000 of them cost 2.7 ms in total to apply, so depth is
   not what makes this expensive — or the UI has to say that history has been
   truncated. Silently is the one option that is wrong.
-- **The app opens two GPU devices** — the preview's render loop and the export's
-  lazily-initialised compositor. Given that concurrent Vulkan instances were
-  observed crashing this driver during testing, these should be collapsed into
-  one shared context.
+The preview hang that used to be listed here is **fixed**, and it was not the
+shared device. It was a rayon reentrancy deadlock in the hardware JPEG path;
+the account is under "The hang that was not the device" below, and hardware
+JPEG is on by default again as a result.
 
 ## The document layer's defects, fixed
 
@@ -888,6 +955,166 @@ Three things worth carrying forward:
   `Join::Miter` was **4× slower** than `Join::Round` (54–62 ms against 15 ms).
   The next idea is to dilate the fill mask rather than to stroke faster.
 
+## Titles, end to end
+
+Added 2026-07-26. `modules/text/` already turned a `TextMaterial` into pixels;
+what did not exist was any way for a user to make one. Now:
+
+- **`Text` tab in the media library** — one button plus four word presets.
+  `text_add` mints the material, chooses the lane and applies an
+  `InsertSegment` through the history, so a title appears at the playhead,
+  selected, with a placeholder in it and an outline already on.
+- **The lane is a `TrackKind::Text` one, appended to the track list.**
+  `ops::reindex` derives `render_index` from track order and lower tracks paint
+  first, so appending is what puts the title *on top* of the picture. A second
+  title reuses the lane and slides to the first free instant rather than being
+  refused — a button press aims at "now", not at a microsecond.
+- **Inspector panel** (`src/modules/inspector/components/TextInspector.tsx`) —
+  multi-line content, the machine's own font list, size, colour with alpha,
+  bold, italic, alignment, outline, shadow, background box, and three quick
+  placements. Writes are debounced 140 ms into one `text_set`; the preview's own
+  restart debounce (160 ms) then turns a typed sentence into one re-render.
+- **The placement policy is in Rust** (`text/edit.rs`, pure, 9 unit tests):
+  duration, the size as a fraction of the canvas's short edge, the default
+  outline, which lane, and the free-slot search. Policy in the webview is policy
+  in two places.
+
+### What is not undoable, and why
+
+**Changing a title's words, font or colour is not on the undo stack.** There is
+no `EditCommand` variant carrying a `TextMaterial`, and `timeline/ops.rs` was
+owned by other work while this landed, so `text_set` writes the material pool
+directly and schedules an autosave. *Adding* and *deleting* a title are ordinary
+undoable edits; only the parameters are not.
+
+The fix is small and known: an `EditCommand::SetTextMaterial { id, before,
+after }`, mirroring `SetTransition` exactly — which is the variant `transitions`
+already has for this shape of edit. Note when doing it that a per-keystroke undo
+step is not wanted; the debounce above is the natural granularity.
+
+### Preview and export are the same pixels, proved
+
+`src-tauri/tests/text_clip.rs`, 14 tests, no fixtures needed and no `ffmpeg`
+binary — it draws its own title and encodes with libavcodec in process.
+
+- At the same target size the two paths are **byte-identical**: 0 of 921,600
+  pixels differ between a frame composited the way `preview/server.rs` does and
+  one composited the way `export/job.rs` does. Both build a
+  `MediaSourceProvider::from_project` and call `Compositor::render_frame`; the
+  only difference is the size, which is what makes this the whole claim.
+- When the preview *is* smaller — a 4K canvas previews at 1920 — the title's ink
+  rectangle lands within **2 preview pixels** of the same normalised position.
+  That is the property "font size is in document pixels" exists to give, and its
+  failure mode (a preview that looks right and an export with a half-size title)
+  is invisible to any test that renders one path only.
+- Through the **real exporter**: `run_export` to H.264, decoded by
+  `VideoDecoder`, scored against the preview's frame at the same instant. Above
+  30 dB, with two controls scored the same way (a blank frame, and the same
+  timeline with the title moved off the playhead) both far below it.
+- A title **does not vary with time** — two instants of one clip are the same
+  bytes — which is what stops it flickering during playback if the provider's
+  generic cache ever starts serving text.
+
+### And it is a segment, verified rather than assumed
+
+`split_at` does arithmetic on `source_range` and a title has no source to read
+from, so it is checked directly: both halves keep the material, the durations
+sum, the right half reads from where the left stopped, `validate()` is clean,
+the split undoes in one step, and **both halves draw the same pixels**. Trim,
+move, copy and delete go through `History` in one test and each undoes back to
+the original range. Deleting the last clip using a title leaves the material in
+the pool, deliberately — `RemoveSegment` carries the segment, not the material,
+so undo needs it to still be there.
+
+## Multi-selection, the clipboard and multi-clip edits
+
+Added 2026-07-26. `useTimelineStore.selectedSegmentId` held one id, there was no
+clipboard for clips at all, and four items in the Edit menu were
+`Gate::Unimplemented` because of it. All four are now gated on real state.
+
+What exists:
+
+- **A selection, not a selected clip.** `selection: Id[]` plus a
+  `selectionAnchor`. Ctrl/Cmd+click toggles, Shift+click takes the run between
+  the anchor and the clip *along the one lane they share*, a rubber band over
+  the lanes takes everything it touches, Ctrl+A takes everything on every
+  unlocked lane. Every consumer that used to read the one id now calls
+  `soleSelection(selection)`, which answers `null` when there are several —
+  deliberately, because with four clips selected there is no "the" clip and the
+  inspector would otherwise edit one the user is not looking at.
+- **Cut, Copy, Paste, Duplicate**, on `Ctrl+X`/`C`/`V`/`D`, and in the Edit
+  menu.
+- **Moving, trimming and deleting a selection is one undo step**, through the
+  new `timeline_apply_many` command.
+- **Link** is offered on any multi-selection, from the clip's context menu and
+  from the toolbar. It drives the `timeline_link` that already existed.
+
+### Four decisions worth not re-litigating
+
+**The clipboard is in the webview store, not in the document.** A cut clip is a
+`Segment` with nowhere to be: a segment belongs to a track, and every
+`EditCommand` that touches one names the track it is on. Giving the document a
+holding pen for detached segments would reach the file format, the validator and
+the exporter in order to store something the user does not think of as part of
+their project — and would put copying on the undo stack and in the saved file.
+It lives in `timeline/store.ts` with the zoom and the playhead instead, which is
+also what makes it survive closing one project and opening the next. Rust learns
+one bit about it, `MenuState::has_clipboard`, which is all the bar needs.
+`src/modules/timeline/lib/clipboard.ts` has the full argument.
+
+**A batch is a new command, not a `Composite` the webview built.** `timeline_apply`
+would have taken one. The reason it must not is in `ops::mirror_linked_edits`:
+`History::apply` mirrors a bare command onto its link partners and deliberately
+does **not** recurse into a composite, because the two composites the app
+already builds — a split and an import — place their own links. So a batch
+arriving as a composite would silently stop mirroring. `ops::compose_edits` is
+the one place that expands the partners of every part *and* drops the ones the
+batch already names, which is what stops a selection holding both halves of a
+linked pair from moving the sound twice.
+
+**The parts of a batch are ordered, and this is not cosmetic.** Segments on a
+track may not overlap even for the instant between two commands of one
+composite. A block of clips moving one second later has to be applied
+right-to-left; the same block moving earlier, left-to-right. Applied naively the
+first command is refused, the composite rolls the whole thing back, and the user
+sees a drag that did nothing.
+`a_block_of_clips_moving_together_does_not_trip_over_itself` is that test.
+
+**A batch of one is returned unwrapped.** `compose_edits` hands back the single
+command untouched, so single-clip editing stays on exactly the path it has
+always taken — including `History::apply`'s own link mirroring, which a
+composite would have taken away.
+
+### One behaviour that changed
+
+**Dragging across empty lane space now draws a rubber band instead of
+scrubbing.** A click on a lane still seeks and clears the selection; only the
+drag is new. There was nowhere else a band could start, and scrubbing still has
+the ruler strip and the playhead handle.
+
+### Where a paste lands
+
+At the playhead, keeping each clip's offset from the earliest one in the batch,
+on the lane it was copied from when that space is free, on the next free lane of
+the same kind when it is not, and on a lane created for it when every one of
+them is busy. It never overlaps: `planPaste` checks each destination against the
+lane *including the clips the same paste has already placed*, which a per-clip
+check misses when a batch is pasted onto itself. Copies keep their source range,
+speed, transform, effects and keyframes; a pair copied whole is relinked into a
+group of its own, and half a pair pastes as a plain clip — the same rule
+Duplicate has always had.
+
+**Pasting into a different project brings the file over.** A material id
+identifies a file inside one document and nothing in the next, so a clip pasted
+across projects would reference a material that document has never heard of —
+an error in `validate()` and nothing to draw for the renderer. So the clipboard
+carries the material's *path* as well, and `edits.ts::adopt` imports it through
+`project_import_media`, which is keyed by path and returns the existing material
+when there already is one. Nothing is imported in the ordinary same-project
+case. The one thing that cannot cross yet is a **title**: a `TextMaterial` has
+no file, and carrying one would need an edit command that writes the material
+pool. Those clips are dropped from the paste rather than pasted broken.
+
 ## Not built yet
 
 Both keyframe editing and audio waveforms landed overnight and this line was
@@ -901,34 +1128,53 @@ Rust side of the keyframe edit commands — `AddKeyframe`, `RemoveKeyframe`,
 `MoveKeyframe` and `SetKeyframeEasing` — so those payloads are currently
 rejected as an unknown variant. Everything else about the feature is done.
 
-**Titles now render; there is still no UI for making one.** `modules/text/`
-turns a `TextMaterial` into an RGBA layer with system font fallback, real
-shaping (ligatures, kerning, CJK, Arabic, Hebrew, colour emoji), outline, drop
-shadow and background box, measured above and covered by 30 tests, and
-`media/provider.rs::text_frame` now calls it — `MaterialSource::Text` carries
-the material, rasterises at the size of the frame being rendered so the
-compositor's fit is the identity, and caches per size so an export does not
-reuse the preview's smaller raster. The patch that was written out at the bottom
-of `docs/research/text-rendering.md` is applied. What is missing is any way for
-the user to create or edit a title.
+**Titles are built end to end.** This line used to say "titles render; there is
+still no UI for making one". There is one now: see "Titles, end to end" below
+for what exists, the one gap, and what the identity between preview and export
+is proved by.
 
-**Transitions are built except for the compositor** —
-`src-tauri/src/modules/transitions/`, and the data model, edit commands,
-validation and five WGSL shaders are all in and tested. What is missing is the
-thirty lines in `render/compositor.rs` that draw a transition instead of a
-single quad; that module was owned by other work while this landed, so the exact
-patch is written out at the bottom of `docs/architecture/transitions.md` rather
-than left half-applied. Until it is applied a transition is stored, undone,
-retimed and validated correctly and renders as nothing — the cut plays as a hard
-cut.
+**Transitions render**, in the preview and in the export, on
+software-decoded and hardware-decoded clips alike. The compositor hook that this
+section used to say was missing is applied: `collect_draws` asks
+`transitions::instant_for` per visible segment, draws each side into a
+canvas-sized pooled layer with the **same** quad pipeline and `QuadUniform` — so
+`planar`, `matrix`, `range` and `turns` travel through untouched and an NV12
+surface blends like anything else — and the blend is one fullscreen draw inside
+the composite pass, at the place in the painter's order the segment would have
+had. `docs/architecture/transitions.md` has the shape and the reasoning; the
+stale patch that used to live at the bottom of it is gone, because a patch that
+no longer applies is worse than none.
 
-**That patch now needs adjusting before it will apply.** The hardware-decode work
-changed the two things it touches: `QuadUniform` grew `planar`, `matrix`, `range`
-and `turns` fields, and the source bind group grew a third entry for the chroma
-plane. A transition pass has to carry both through or a transitioned clip will
-render as though every frame were RGBA and upright, which for a hardware-decoded
-source means the luma plane alone — a plausible-looking greyscale picture, which
-is the worst way for it to be wrong.
+Three things there that will otherwise cost an afternoon:
+
+- **The layer pipeline has blending switched off, and it must.** A layer holds
+  one clip over a transparent clear, and `ALPHA_BLENDING` over a transparent
+  destination leaves *premultiplied* colour, which `transition.wgsl` then
+  premultiplies again. Two opaque clips look perfect; a clip at 50% opacity
+  darkens the instant the window opens.
+  `a_half_transparent_clip_does_not_change_brightness_when_the_window_opens`
+  fails by exactly a factor of two if it is switched back.
+- **A quad's uniform slot is explicit, not positional.** A transition is one
+  draw and two quads, so "the nth draw reads the nth uniform block" stopped
+  being true. Getting it wrong draws the right clips with each other's
+  transforms.
+- **Preview and export agree because the hook is inside `render_to_texture`**,
+  which `render_frame`, `render_nv12` and `render_nv12_into` all call.
+  `the_preview_and_the_export_agree_on_a_frame_mid_transition` renders three
+  instants of one crossfade — one side hardware-decoded, one software — through
+  both entry points and compares the pixels.
+
+**What is still missing is one element in the timeline.** The transition UI is
+`src/modules/transitions/`: the geometry mirror of `resolve.rs`, the marker and
+`+` button (`TransitionLane`), the parameter panel (wired into the inspector),
+and the drag-a-clip-over-its-neighbour arithmetic in `lib/edits.ts`. Mounting
+`<TransitionLane>` inside the timeline's lane, and calling `applyOverlap` from
+its drag handler, are the two lines left; `src/modules/timeline/` was owned by
+other work when this landed. Until then a transition is created from the
+inspector and from the commands, and renders correctly, but the timeline draws
+nothing at the cut. `MaterialPool.transitions` is also `?`-optional in
+`src/modules/project/types.ts` only because two timeline test fixtures build a
+pool as a literal and predate it.
 
 Two things in that document are worth reading before touching either
 `project/document.rs` or `render/`: a transition is centred on the cut and
@@ -951,8 +1197,225 @@ measured" above. It loads packages, compiles their shaders and runs their Lua,
 and it cannot open a package that ships its assets in the binary encoding,
 which is nearly all of them.
 
+## One GPU device and one VAAPI device, per process
+
+`src-tauri/src/modules/gpu/` owns both, and nothing else may open either. The
+constructors that would let it — `render::RenderContext::open` and
+`media::hwdecode::VaapiDevice::open` — are crate-private and called from exactly
+one place each, which is that module.
+
+| | opened one before | asks `gpu` now |
+|---|---|---|
+| wgpu device | `preview::server`'s render loop, `export::commands`' lazy compositor, `workspace::hardware`'s report, two `texture_pool` tests, `tests/support`, three examples and `chukcut-bench` | `gpu::render_context()` |
+| VAAPI display | `preview::vaapi` (a fresh one per JPEG encoder, and the encoder is rebuilt on every size or quality change), `export::encoder` (one per rate-control rung it tried), `media::hwdecode` | `gpu::vaapi_device()` |
+
+Both halves are done: **no non-test path opens either device.** The last VAAPI
+holdouts went with them — `preview::vaapi` takes its display through
+`export::hwframes::HwDeviceContext::shared_vaapi`, and `export::encoder`
+through `HwDeviceContext::for_kind`, both of which are `gpu::vaapi_device()`
+underneath. `HwDeviceContext::vaapi` survives as `#[cfg(test)]` only, because
+the tests that check what a bad device node does have to try to open one.
+
+The wgpu device is handed out as an `Arc`, because wgpu's `Device` and `Queue`
+are `Sync` and internally counted. The VAAPI display is handed out **by value**,
+each hand-out a fresh `av_buffer_ref` on one `AVBufferRef` — the shape
+`media::hwdecode` already had, and the reason it works is that libavutil's
+refcount is atomic, so a caller can pass its handle to a codec context, clone it
+or drop it without coordinating with anyone.
+
+Each has a tripwire, and they count different things on purpose.
+`render::context::LIVE_DEVICES` counts devices *alive* and decrements on drop;
+`hwdecode::LIVE_DISPLAYS` counts displays *opened* and never decrements, because
+a `VaapiDevice` is `Clone` and an ordinary hand-out would otherwise look like a
+close. Either logs an error the moment a second one appears.
+
+Two devices were not a theoretical problem. Measured on the unit-test binary
+with the preview-server timing tests skipped (`--skip modules::preview::server`,
+319 tests, the render, export, media and VAAPI ones), 500 runs of each build,
+interleaved so that a machine getting busier cannot flatter one of them:
+
+| | runs | hard crashes |
+|---|---|---|
+| Two or more devices (before) | 500 | **9** — seven `SIGSEGV`, two `SIGABRT` |
+| One device (after) | 500 | **3** — two `SIGSEGV`, one `SIGABRT` |
+
+That is 1.8% against 0.6%, and it is a direction rather than a proof: nine events
+against three is not significant at this sample size (Fisher's exact ≈ 0.08), and
+one device is evidently **not** sufficient on its own. Every remaining crash is
+mid-run in the `render::dmabuf` and `render::context` tests, which is where a
+DMA-BUF is exported and a device is interrogated from several test threads at
+once. The same 30-run comparison on `tests/compositor.rs`, `tests/export.rs` and
+`tests/decode.rs` found no failure in either build, so what is left is specific
+to the unit binary's parallelism.
+
+### The ordering bug a slow path was hiding
+
+`tests/preview.rs::position_updates_arrive_in_order_as_the_playhead_advances`
+began failing on nearly every run, and it was right to. The render thread
+announces a *scrub* frame the moment its JPEG exists, off the render thread, and
+the parked frame of a new session is a scrub. Press play immediately and the
+pacer announces frames 1 and 2 before frame 0's announcement is emitted — the
+frontend's playhead jumps backwards for one frame. Opening a device per server
+took long enough that the scrub always won the race.
+
+For calibration on how latent this was: that test failed **24 runs in 25** when
+run on its own against the *old* code. It was already broken and only passed in a
+full run because of the ordering a device open imposed.
+
+The first fix compared the frame against the clock and then emitted, and **that
+is a check the other thread can invalidate before the send happens**. Both
+threads reach `Channel::send` through an `RwLock` *read* guard, so nothing
+serialises them: the window between deciding and sending is exactly the window
+the pacer needs to overtake. It is narrow, and a narrow window on something that
+runs thirty times a second is a bug that shows up in a bug report and not in a
+test.
+
+`Shared::emit_position` now decides and sends under one lock. It also says which
+announcements are *authoritative* — the pacer's and the transport commands',
+which always go out and reset the mark — and which are subordinate, which is
+only the scrub. That distinction is what keeps a backwards seek and a replay
+from the end announceable while still dropping an overtaken scrub, and it is
+why the rule is not simply "frame numbers never decrease".
+
+### The hang that was not the device
+
+`tests/preview.rs` used to hang in about half its runs, and this file blamed the
+shared wgpu device: every thread parked in `futex_wait` with no GPU work in
+flight, so a lost wakeup rather than a driver stall. That was the wrong
+suspect. It is a **deadlock in the rayon pool**, it belongs entirely to the
+hardware JPEG encoder, and it is now fixed.
+
+`preview::encoder` holds one process-wide mutex around the one hardware
+encoder. The RGBA→NV12 conversion used to run inside that lock — and that
+conversion is a rayon parallel iterator. There are two ways in, and each on its
+own is a hang:
+
+- **From a rayon worker.** A rayon worker that blocks inside a parallel iterator
+  does not idle; it joins the work-stealing loop and runs *any* other job in the
+  pool. Encodes were dispatched with `rayon::spawn`, so the job it steals is
+  another encode, which asks for the mutex that very thread is holding.
+  `parking_lot::Mutex` is not reentrant, so it parks forever and never releases
+  the lock. Every other worker queues behind it.
+- **From any other thread.** The dispatch waits for a free worker. If the pool
+  is meanwhile full of jobs blocked on that mutex, no worker will ever be free,
+  and the lock holder waits behind the threads that are waiting for it. This is
+  the one that survived the first fix and hung the unit-test binary at default
+  parallelism, with the preview's own encode thread holding the lock.
+
+The argument this file and the code both used — "nothing under `rgba_to_nv12`
+takes a lock, so the thread holding the lock always makes progress" — is
+plausible and wrong. **The job a blocked worker steals is not a piece of the
+inner loop's work.** It is an unrelated task that happened to be in the same
+pool.
+
+Three changes, and the first is the one that closes the class:
+
+- The conversion happens **before** the lock is taken, into
+  `vaapi::Nv12Scratch`. Nothing under the mutex touches rayon at all now.
+- Encodes go to `server::encode_queue`'s own thread rather than to the rayon
+  pool, so the pool cannot fill with jobs that want that lock. One thread, not
+  several: the encoder is one non-reentrant device whose mutex serialised them
+  anyway, and one encode is 6 ms against a 33 ms budget.
+- Frame-URL requests get their own small pool, for the same reason one level
+  down. `serve_uri` parks on a condition variable for up to 60 ms when a frame
+  is not ready; answering those on the global pool means that *exactly* when the
+  renderer falls behind, every miss takes a worker away from the conversion that
+  would let it catch up. Bounded, so never a deadlock — but it is the same
+  feedback loop `request_frame` documents, arrived at through the scheduler.
+
+Measured on this machine, `CHUKCUT_PREVIEW_JPEG=hardware`, one binary run per
+row:
+
+| | before | after |
+|---|---|---|
+| `tests/preview.rs` | **7 hangs in 7** | 0 in 25 |
+| unit binary, default parallelism | **6 hangs in 6** | 0 in 25 |
+| unit binary, `preview::` only | — | 0 in 30 |
+| `tests/compositor.rs`, `tests/export.rs` | 0 in 25 | 0 in 25 |
+| `tests/decode.rs` | 0 in 25 | 1 in 25, and it is a timing assertion |
+
+**So `CHUKCUT_PREVIEW_JPEG` is back to hardware by default.** The 4 ms it saves
+on a 9.4 ms frame is worth having, and it is no longer bought with a preview
+that can stop.
+
+Two things to carry forward from it, because they generalise past this module:
+
+- **A benchmark cannot see a scheduling deadlock.** `preview_jpeg_bench` and
+  `chukcut-bench` both encode one frame at a time and measured this path at
+  6.2 ms for months. The state needs two encodes at once and it is not
+  reachable serially.
+- **`std::thread::spawn` in a test does not exercise a rayon hazard.**
+  `concurrent_encodes_all_finish` ran eight threads through the encoder and
+  passed throughout, because an OS thread has nothing to steal and nothing to
+  wait for. `encodes_dispatched_onto_the_rayon_pool_all_finish` is the test that
+  can reach it, and it is the one that found the second deadlock above.
+
+## The log file, and what an export writes into it
+
+Until 2026-07-26 the app logged to stdout and nowhere else, which is fine when
+it is started from a shell and useless when it is started from a launcher — and
+a launcher is how everyone but us starts it. A broken export was reported and
+neither the user nor anyone reading over their shoulder could say which of the
+three frame paths had run, because the three produce the same file when they
+work. That is the gap the file closes.
+
+- **Where.** `$XDG_STATE_HOME/chukcut/logs`, or `~/.local/state/chukcut/logs`.
+  Not under the cache root, deliberately: "clear cache" must not delete the log
+  of the export somebody is about to ask about. One file a day,
+  `chukcut-YYYY-MM-DD.log`, the newest seven kept.
+- **What.** stdout keeps its old behaviour exactly — `RUST_LOG` still works and
+  still defaults to `chukcut=debug,warn`. The **file** is fixed at
+  `chukcut=info,warn` and deliberately ignores `RUST_LOG`, so a log somebody
+  mails us has the same shape whatever their profile says. `RUST_LOG=error`
+  silently emptying the file is the exact failure this exists to prevent.
+- **Nothing is buffered.** Every event is one `write`, so the log ends at the
+  last thing that happened rather than a few kilobytes before it, which is the
+  only property that matters when the process died.
+- Settings → Storage names the current file and reveals it in the file manager.
+  `workspace_log_path` is the command; `revealItemInDir` needs no capability
+  beyond the `opener:default` we already have.
+
+Every export now writes two blocks, in `export::job`. The first, before the
+first frame: output path, container, canvas, fps, codec, quality **and the
+bitrate a rate-control mode that insists on a number would be given**, the
+encoder and whether it is hardware or software, which of the three tiers was
+chosen, **why the tier above it was not**, and the NV12 `y_stride`,
+`uv_stride`, `uv_offset` and `total_bytes`. The second, after the last frame or
+the one that stopped it: frames written, wall clock, mean fps, the tier it
+*ended* on, the strides the compositor really produced, and any mid-export
+fallback with the frame number it happened at.
+
+The strides are in there because a stride disagreement is invisible in every
+other symptom except the picture, and the picture is the thing being described
+over a support channel by someone who cannot run a debugger. The start block
+prints what `Nv12Layout` says the size should be; the end block prints what the
+first rendered frame actually had. Those two being different is a bug, and
+nothing else in the system would say so.
+
 ## Traps that have already cost time
 
+- **A GTK menu accelerator shadows typing, and a bare letter therefore cannot be
+  one.** `gtk_window_key_press_event` consults the window's `GtkAccelGroup`
+  *before* it propagates the key to the focused widget, so registering `C` for
+  Split Clip would stop the letter `c` reaching a text field, and registering
+  `Delete` would stop it deleting characters. Both keys are already bound by the
+  timeline, so the native menu shows them in the item's label — `Split Clip (C)`
+  — and does not claim them.
+
+  **This bit the clipboard items, and the fix is worth knowing before adding a
+  menu item.** While Cut/Copy/Paste/Select All were permanently disabled they
+  could safely carry `Ctrl+X`/`C`/`V`/`A`, because
+  `gtk_widget_can_activate_accel` refuses an insensitive widget and reports the
+  key unhandled, so it fell through to the webview and text editing kept
+  working. The moment they became clickable that stopped being true: an enabled
+  item with `Ctrl+C` in the accel group takes the key away from every text field
+  in the app, and copy in the project-name box would break as soon as a clip was
+  selected. So all five Edit items now advertise their key in the label —
+  `Copy (Ctrl+C)` — and register nothing, and `Timeline.tsx` binds them in a
+  `keydown` handler that already declines to act when the focus is in an input.
+  `modules::workspace::menu` has both rules as unit tests —
+  `every_accelerator_carries_a_modifier` and
+  `keys_the_app_already_binds_are_shown_and_not_claimed`.
 - **A busy machine is not a slow machine, it is a different machine.** The same
   suite, same binary, same commit, measured minutes apart: at load 2 a whole
   preview frame is 25 ms; at load 44 it is 258 ms. Not 2× — **ten times**. Worse,
@@ -1059,6 +1522,26 @@ which is nearly all of them.
 - **Do not set `bit_rate` on a VAAPI context in CQP mode.** It is treated as a
   target and the QP is ignored, which is how a hardware export comes out at a
   bitrate nobody asked for. The ladder's first rung deliberately leaves it zero.
+- **Never hold a lock across a rayon dispatch.** Not "try not to" — it is a
+  deadlock, twice over, and both were observed here. A rayon worker that blocks
+  inside a parallel iterator runs *other jobs from the pool* while it waits, so
+  it can steal a job that wants the lock it is holding; and a non-rayon thread
+  that dispatches under a lock waits for a worker the pool may never free,
+  because the pool is full of jobs waiting for that lock. The symptom is every
+  thread in `futex_wait` with no work in flight, which reads as a lost wakeup
+  and is not one. The corollary is just as important: **do not block a rayon
+  worker on I/O or a condition variable either** — a pool whose workers are
+  parked is a pool that cannot run the work somebody is waiting for. Full
+  account under "The hang that was not the device".
+- **Never open a GPU or a VAAPI device.** `modules::gpu` owns one of each and
+  hands out references; the two constructors are crate-private and called from
+  there and nowhere else. Concurrent Vulkan instances crash this driver,
+  `vaInitialize` costs tens of milliseconds, and a VAAPI driver has a finite
+  number of contexts. Both constructors log an error if a second one is ever
+  created in a process — `RenderContext::open` counts live devices,
+  `VaapiDevice::open` counts opens — which is the cheapest available tripwire
+  for whoever adds one by accident. See "One GPU device and one VAAPI device"
+  above for what two of them measured, and for the bugs that sharing exposed.
 
 ## The effect runtime (Phase 3), measured
 

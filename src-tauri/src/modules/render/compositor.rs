@@ -8,10 +8,17 @@
 //!
 //! Per frame it walks the segments live at `time` back-to-front, asks the
 //! [`SourceProvider`] for each one's texture, and draws it as one quad. There
-//! is no render graph, no intermediate pass and no per-segment target: a
-//! straight painter's-algorithm loop into a single attachment, because that is
-//! what source-over compositing is and anything more elaborate would only be
-//! there for effects we have not built yet.
+//! is no render graph and no per-segment target: a straight
+//! painter's-algorithm loop into a single attachment, because that is what
+//! source-over compositing is and anything more elaborate would only be there
+//! for effects we have not built yet.
+//!
+//! The one exception is a transition, which by definition needs two clips at
+//! once and blends them against the *frame* rather than against either clip's
+//! quad. Those two clips are drawn into two full-canvas layers first — with the
+//! same quad pipeline, so a hardware-decoded NV12 source needs no special case
+//! anywhere — and the blend then lands in the painter's order where the segment
+//! would have. See `modules/transitions/`.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -25,7 +32,8 @@ use super::layout::{self, QuadPlacement};
 use super::nv12::{Nv12Converter, Nv12Frame, READ_FORMAT};
 use super::source::{SourceFrame, SourceProvider, SourceRequest};
 use super::texture_pool::{PooledTexture, TextureKey, TexturePool, DEFAULT_BUDGET_BYTES};
-use crate::modules::project::document::{MaterialKind, Micros, Project};
+use crate::modules::project::document::{MaterialKind, Micros, Project, Segment};
+use crate::modules::transitions::{self, TransitionParams, TransitionPipeline};
 
 /// Alignment every `copy_texture_to_buffer` row must satisfy.
 const COPY_ALIGN: u32 = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
@@ -247,6 +255,8 @@ pub struct Compositor {
     config: CompositorConfig,
     pool: TexturePool,
     pipeline: wgpu::RenderPipeline,
+    /// [`Self::pipeline`] with blending disabled, for transition layers.
+    layer_pipeline: wgpu::RenderPipeline,
     uniform_layout: wgpu::BindGroupLayout,
     texture_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
@@ -271,6 +281,15 @@ pub struct Compositor {
     /// compile: a machine that only ever previews should not pay for the
     /// export path's pipeline.
     nv12: OnceLock<Option<Nv12Converter>>,
+    /// The transition pipelines, built on first use.
+    ///
+    /// Lazy for the same reason `nv12` is: it is five shader compiles, and a
+    /// project with no transitions in it should not pay for them. Built once
+    /// the first frame containing a transition is rendered, which is a stutter
+    /// on that frame and never again — `TransitionPipeline::new` builds every
+    /// kind at once precisely so scrubbing into a second kind does not compile
+    /// anything.
+    transitions: OnceLock<TransitionPipeline>,
 }
 
 /// A reusable GPU buffer that only ever grows.
@@ -381,54 +400,74 @@ impl Compositor {
             immediate_size: 0,
         });
 
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("chukcut quad pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x2,
-                            offset: 0,
-                            shader_location: 0,
-                        },
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x2,
-                            offset: 8,
-                            shader_location: 1,
-                        },
-                    ],
-                })],
-            },
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                // A horizontal or vertical flip reverses the winding order, so
-                // culling would make flipped clips vanish. Two triangles are
-                // not worth the trouble.
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
-                    // Straight-alpha source-over. Matches what the shader emits.
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
+        let quad_pipeline = |label: &str, blend: Option<wgpu::BlendState>| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[Some(wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &[
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x2,
+                                offset: 0,
+                                shader_location: 0,
+                            },
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x2,
+                                offset: 8,
+                                shader_location: 1,
+                            },
+                        ],
+                    })],
+                },
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    // A horizontal or vertical flip reverses the winding order,
+                    // so culling would make flipped clips vanish. Two triangles
+                    // are not worth the trouble.
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: config.format,
+                        blend,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+
+        // Straight-alpha source-over. Matches what the shader emits.
+        let pipeline = quad_pipeline(
+            "chukcut quad pipeline",
+            Some(wgpu::BlendState::ALPHA_BLENDING),
+        );
+
+        // The same quad with the blend switched off, for a transition layer.
+        //
+        // A layer holds exactly one clip over a transparent clear, so there is
+        // nothing to blend with — and blending would be actively wrong here.
+        // `ALPHA_BLENDING` over a transparent destination leaves *premultiplied*
+        // colour behind, while `transition.wgsl` samples its layers as straight
+        // alpha and premultiplies them itself. A half-transparent clip would
+        // then be multiplied by its own opacity twice, which reads as a dark
+        // halo creeping in from the edges of anything that does not cover the
+        // canvas. Writing the fragment through untouched is what makes the two
+        // agree.
+        let layer_pipeline = quad_pipeline("chukcut quad layer pipeline", None);
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("chukcut quad sampler"),
@@ -508,6 +547,7 @@ impl Compositor {
             pool: TexturePool::new(config.texture_budget_bytes),
             config,
             pipeline,
+            layer_pipeline,
             uniform_layout,
             texture_layout,
             sampler,
@@ -519,6 +559,7 @@ impl Compositor {
             uniform_stride: uniform_stride as u32,
             stats: StatCounters::default(),
             nv12: OnceLock::new(),
+            transitions: OnceLock::new(),
         }
     }
 
@@ -698,25 +739,27 @@ impl Compositor {
         let stride = self.uniform_stride as u64;
         let uniform_buffer = uniforms.ensure(
             device,
-            stride * draws.len().max(1) as u64,
+            stride * draws.slots.max(1) as u64,
             wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             "chukcut quad uniforms",
         );
 
-        for (i, draw) in draws.iter().enumerate() {
+        for quad in draws.quads() {
             let block = QuadUniform {
-                mvp: draw.placement.mvp,
-                crop: draw.placement.crop,
-                opacity: draw.placement.opacity,
-                planar: u32::from(draw.frame.is_planar()),
-                matrix: draw.frame.matrix as u32,
-                range: draw.frame.range as u32,
-                turns: draw.frame.turns % 4,
+                mvp: quad.placement.mvp,
+                crop: quad.placement.crop,
+                opacity: quad.placement.opacity,
+                planar: u32::from(quad.frame.is_planar()),
+                matrix: quad.frame.matrix as u32,
+                range: quad.frame.range as u32,
+                turns: quad.frame.turns % 4,
                 _pad: [0; 3],
             };
-            self.ctx
-                .queue()
-                .write_buffer(uniform_buffer, i as u64 * stride, bytemuck::bytes_of(&block));
+            self.ctx.queue().write_buffer(
+                uniform_buffer,
+                quad.slot as u64 * stride,
+                bytemuck::bytes_of(&block),
+            );
         }
 
         let uniform_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -732,39 +775,56 @@ impl Compositor {
             }],
         });
 
-        let source_groups: Vec<wgpu::BindGroup> = draws
-            .iter()
-            .map(|draw| {
-                device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("chukcut quad source bind group"),
-                    layout: &self.texture_layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(&draw.frame.view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::Sampler(&self.sampler),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: wgpu::BindingResource::TextureView(
-                                draw.frame
-                                    .chroma_view
-                                    .as_deref()
-                                    .unwrap_or(&self.chroma_placeholder),
-                            ),
-                        },
-                    ],
-                })
-            })
-            .collect();
+        // Indexed by uniform slot, so a transition layer and an ordinary quad
+        // are looked up the same way.
+        let mut source_groups: Vec<Option<wgpu::BindGroup>> =
+            (0..draws.slots).map(|_| None).collect();
+        for quad in draws.quads() {
+            source_groups[quad.slot as usize] = Some(self.source_group(device, &quad.frame));
+        }
 
         let bg = project.canvas.background;
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("chukcut frame"),
         });
+
+        // Every transition's two layers, drawn into full-canvas targets of
+        // their own before the frame is composited. They have to be complete
+        // passes rather than draws inside the composite pass: a render pass
+        // cannot sample the attachment it is writing.
+        let mut layer_targets: Vec<PooledTexture> = Vec::new();
+        let mut layer_groups: Vec<Option<wgpu::BindGroup>> = Vec::with_capacity(draws.items.len());
+        for item in &draws.items {
+            let Draw::Transition { from, to, .. } = item else {
+                layer_groups.push(None);
+                continue;
+            };
+            let pipeline = self.transition_pipeline();
+            let from_target = self.pool.acquire(device, self.target_key(size));
+            let to_target = self.pool.acquire(device, self.target_key(size));
+            self.draw_layer(
+                &mut encoder,
+                &uniform_group,
+                &source_groups,
+                from.as_ref(),
+                from_target.view(),
+            );
+            self.draw_layer(
+                &mut encoder,
+                &uniform_group,
+                &source_groups,
+                to.as_ref(),
+                to_target.view(),
+            );
+            layer_groups.push(Some(pipeline.bind_layers(
+                &self.ctx,
+                from_target.view(),
+                to_target.view(),
+            )));
+            layer_targets.push(from_target);
+            layer_targets.push(to_target);
+        }
+
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("chukcut composite"),
@@ -785,36 +845,178 @@ impl Compositor {
                 ..Default::default()
             });
 
-            pass.set_pipeline(&self.pipeline);
             pass.set_vertex_buffer(0, self.vertices.slice(..));
             pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint16);
 
-            for (i, group) in source_groups.iter().enumerate() {
-                pass.set_bind_group(0, &uniform_group, &[i as u32 * self.uniform_stride]);
-                pass.set_bind_group(1, group, &[]);
-                pass.draw_indexed(0..QUAD_INDICES.len() as u32, 0, 0..1);
+            let mut transition_slot = 0u32;
+            for (i, item) in draws.items.iter().enumerate() {
+                match item {
+                    Draw::Quad(quad) => {
+                        let Some(group) = source_groups[quad.slot as usize].as_ref() else {
+                            continue;
+                        };
+                        pass.set_pipeline(&self.pipeline);
+                        pass.set_bind_group(0, &uniform_group, &[quad.slot * self.uniform_stride]);
+                        pass.set_bind_group(1, group, &[]);
+                        pass.draw_indexed(0..QUAD_INDICES.len() as u32, 0, 0..1);
+                    }
+                    Draw::Transition { params, .. } => {
+                        let Some(layers) = layer_groups[i].as_ref() else {
+                            continue;
+                        };
+                        self.transition_pipeline().draw(
+                            &self.ctx,
+                            &mut pass,
+                            transition_slot,
+                            params,
+                            layers,
+                        );
+                        transition_slot += 1;
+                    }
+                }
             }
         }
         self.ctx.queue().submit(Some(encoder.finish()));
         drop(uniforms);
+        for layer in layer_targets {
+            self.pool.release(layer);
+        }
         add(&self.stats.composite_ns, composited);
         self.stats.frames.fetch_add(1, Ordering::Relaxed);
 
         Ok(target)
     }
 
-    /// One segment's texture and where it goes.
+    /// The transition pipelines, built on first use. See [`Self::transitions`].
+    fn transition_pipeline(&self) -> &TransitionPipeline {
+        self.transitions
+            .get_or_init(|| TransitionPipeline::new(&self.ctx, self.config.format))
+    }
+
+    fn source_group(&self, device: &wgpu::Device, frame: &SourceFrame) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("chukcut quad source bind group"),
+            layout: &self.texture_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&frame.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(
+                        frame
+                            .chroma_view
+                            .as_deref()
+                            .unwrap_or(&self.chroma_placeholder),
+                    ),
+                },
+            ],
+        })
+    }
+
+    /// Draw one side of a transition into its own full-canvas target.
+    ///
+    /// Cleared to transparent and drawn with [`Self::layer_pipeline`], so what
+    /// lands in the texture is the clip's own straight-alpha colour where it
+    /// covers the canvas and nothing at all where it does not. That is what
+    /// `transition.wgsl` expects to sample; the letterbox bars around a clip
+    /// have to be *transparent* rather than background-coloured, or a
+    /// transition on an upper track would punch a hole in the tracks below it.
+    ///
+    /// `quad` is `None` when that side has no picture — a source that failed, a
+    /// clip faded fully out, a still-empty layer — and the transparent clear is
+    /// then the whole layer, so the transition fades from or to nothing rather
+    /// than the frame going missing.
+    fn draw_layer(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        uniform_group: &wgpu::BindGroup,
+        source_groups: &[Option<wgpu::BindGroup>],
+        quad: Option<&QuadDraw>,
+        view: &wgpu::TextureView,
+    ) {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("chukcut transition layer"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            ..Default::default()
+        });
+        let Some(quad) = quad else {
+            return;
+        };
+        let Some(group) = source_groups[quad.slot as usize].as_ref() else {
+            return;
+        };
+        pass.set_pipeline(&self.layer_pipeline);
+        pass.set_vertex_buffer(0, self.vertices.slice(..));
+        pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint16);
+        pass.set_bind_group(0, uniform_group, &[quad.slot * self.uniform_stride]);
+        pass.set_bind_group(1, group, &[]);
+        pass.draw_indexed(0..QUAD_INDICES.len() as u32, 0, 0..1);
+    }
+
+    /// What the frame is made of: one entry per thing that gets drawn, in
+    /// painter's order.
     fn collect_draws(
         &self,
         project: &Project,
         time: Micros,
         size: (u32, u32),
         sources: &dyn SourceProvider,
-    ) -> Result<Vec<Draw>> {
+    ) -> Result<DrawList> {
         let canvas = (project.canvas.width, project.canvas.height);
-        let mut draws = Vec::new();
+        let mut draws = DrawList::default();
 
-        for (_, segment) in layout::visible_segments(project, time) {
+        for (track, segment) in layout::visible_segments(project, time) {
+            // A transition claims the segment the compositor was about to draw
+            // and replaces it with a blend of two. Exactly one of the two clips
+            // contains any instant of the window — the cut is the boundary
+            // between them — so no transition is ever drawn twice, and the
+            // segment on the far side of the cut is not separately visible.
+            if let Some(instant) = transitions::instant_for(track, &project.materials, segment, time)
+            {
+                let from = self.quad(
+                    canvas,
+                    size,
+                    sources,
+                    instant.from.segment,
+                    instant.from.kind,
+                    instant.from.source_time,
+                    time,
+                    &mut draws,
+                )?;
+                let to = self.quad(
+                    canvas,
+                    size,
+                    sources,
+                    instant.to.segment,
+                    instant.to.kind,
+                    instant.to.source_time,
+                    time,
+                    &mut draws,
+                )?;
+                if from.is_some() || to.is_some() {
+                    draws.items.push(Draw::Transition {
+                        params: TransitionParams::from(&instant),
+                        from,
+                        to,
+                    });
+                }
+                continue;
+            }
+
             let Some(kind) = project.materials.kind_of(&segment.material_id) else {
                 // `Project::validate` reports this as an error; refusing to
                 // render because of it would make a broken document
@@ -826,54 +1028,85 @@ impl Compositor {
                 );
                 continue;
             };
-            if kind == MaterialKind::Audio {
-                continue;
-            }
 
             let Some(source_time) = segment.source_time_at(time) else {
                 continue;
             };
 
-            let request = SourceRequest {
-                material_id: &segment.material_id,
-                kind,
-                source_time,
-                segment_id: &segment.id,
-                max_size: size,
-            };
-
-            let frame = match sources.frame(&self.ctx, &request) {
-                Ok(Some(frame)) => frame,
-                Ok(None) => continue,
-                Err(e) => {
-                    if self.config.strict_sources {
-                        return Err(RenderError::Source {
-                            material_id: segment.material_id.clone(),
-                            source_time,
-                            source: e,
-                        });
-                    }
-                    tracing::warn!(
-                        segment = %segment.id,
-                        material = %segment.material_id,
-                        error = %e,
-                        "skipping segment: source unavailable"
-                    );
-                    continue;
-                }
-            };
-
-            let transform = layout::animated_transform(segment, time);
-            let Some(placement) =
-                layout::place_quad(canvas, frame.size(), &transform, segment.crop)
-            else {
-                continue;
-            };
-
-            draws.push(Draw { frame, placement });
+            let quad = self.quad(
+                canvas, size, sources, segment, kind, source_time, time, &mut draws,
+            )?;
+            if let Some(quad) = quad {
+                draws.items.push(Draw::Quad(quad));
+            }
         }
 
         Ok(draws)
+    }
+
+    /// One segment's texture and where it goes, with a uniform slot reserved.
+    ///
+    /// `None` when there is nothing to draw: an audio material, a source that
+    /// had no frame, a clip faded fully out. On the transition path that is a
+    /// transparent layer rather than a missing frame — see [`Self::draw_layer`].
+    #[allow(clippy::too_many_arguments)]
+    fn quad(
+        &self,
+        canvas: (u32, u32),
+        size: (u32, u32),
+        sources: &dyn SourceProvider,
+        segment: &Segment,
+        kind: MaterialKind,
+        source_time: Micros,
+        time: Micros,
+        draws: &mut DrawList,
+    ) -> Result<Option<QuadDraw>> {
+        if kind == MaterialKind::Audio {
+            return Ok(None);
+        }
+
+        let request = SourceRequest {
+            material_id: &segment.material_id,
+            kind,
+            source_time,
+            segment_id: &segment.id,
+            max_size: size,
+        };
+
+        let frame = match sources.frame(&self.ctx, &request) {
+            Ok(Some(frame)) => frame,
+            Ok(None) => return Ok(None),
+            Err(e) => {
+                if self.config.strict_sources {
+                    return Err(RenderError::Source {
+                        material_id: segment.material_id.clone(),
+                        source_time,
+                        source: e,
+                    });
+                }
+                tracing::warn!(
+                    segment = %segment.id,
+                    material = %segment.material_id,
+                    error = %e,
+                    "skipping segment: source unavailable"
+                );
+                return Ok(None);
+            }
+        };
+
+        let transform = layout::animated_transform(segment, time);
+        let Some(placement) = layout::place_quad(canvas, frame.size(), &transform, segment.crop)
+        else {
+            return Ok(None);
+        };
+
+        let slot = draws.slots as u32;
+        draws.slots += 1;
+        Ok(Some(QuadDraw {
+            frame,
+            placement,
+            slot,
+        }))
     }
 
     /// Copy a render target back to the CPU, unpadding the rows.
@@ -981,16 +1214,59 @@ impl std::fmt::Debug for Compositor {
     }
 }
 
-struct Draw {
+/// One textured quad: a segment's frame, where it goes, and which uniform
+/// block holds that.
+///
+/// The slot is explicit rather than positional because a transition contributes
+/// two quads that are *not* drawn in the composite pass — they are drawn into
+/// layers beforehand — so "the nth draw" and "the nth uniform block" stopped
+/// being the same number.
+struct QuadDraw {
     frame: SourceFrame,
     placement: QuadPlacement,
+    slot: u32,
+}
+
+/// One thing the composite pass draws.
+enum Draw {
+    Quad(QuadDraw),
+    /// Two clips blended against the frame. Either side may be `None`, which is
+    /// a transparent layer; both being `None` is not built at all.
+    Transition {
+        params: TransitionParams,
+        from: Option<QuadDraw>,
+        to: Option<QuadDraw>,
+    },
+}
+
+/// Everything a frame draws, plus how many uniform blocks it needs.
+#[derive(Default)]
+struct DrawList {
+    items: Vec<Draw>,
+    /// Number of uniform slots handed out. Not `items.len()`: a transition is
+    /// one item and up to two quads.
+    slots: usize,
+}
+
+impl DrawList {
+    /// Every quad, in the order the slots were handed out.
+    fn quads(&self) -> impl Iterator<Item = &QuadDraw> {
+        self.items
+            .iter()
+            .flat_map(|item| match item {
+                Draw::Quad(quad) => [Some(quad), None],
+                Draw::Transition { from, to, .. } => [from.as_ref(), to.as_ref()],
+            })
+            .flatten()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::modules::project::document::{
-        CanvasConfig, Segment, TimeRange, Track, TrackKind, Transform,
+        CanvasConfig, Easing, Segment, TimeRange, Track, TrackKind, Transform, TransitionDirection,
+        TransitionKind, TransitionMaterial,
     };
     use crate::modules::render::source::{SolidColorProvider, SolidSource, YuvMatrix, YuvRange};
 
@@ -1519,6 +1795,509 @@ mod tests {
             [0, 0, 255, 255],
             "right band is background"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Transitions
+    // -----------------------------------------------------------------------
+
+    /// One test material: either an ordinary RGBA texture, as a software
+    /// decoder produces, or two NV12 planes, as a hardware one does.
+    ///
+    /// Both cases exist here rather than in two providers because the thing
+    /// most worth pinning about a transition is that it does not care which it
+    /// gets. A transition that blends only software-decoded clips is not a
+    /// feature, it is a bug that waits for a file the machine can decode on the
+    /// GPU — which, since `DEFAULT_ACCELERATION` is `Auto`, is most of them.
+    #[derive(Clone, Copy)]
+    enum TestSource {
+        Rgba([u8; 4], u32, u32),
+        /// Full-range NV12, so a luma of 255 is white and 0 is black with no
+        /// rescale to reason about.
+        Planar(u8, u8, u8, u32, u32),
+    }
+
+    #[derive(Default)]
+    struct MixedProvider {
+        materials: std::collections::HashMap<String, TestSource>,
+        calls: AtomicU64,
+    }
+
+    impl MixedProvider {
+        fn with(mut self, id: &str, source: TestSource) -> Self {
+            self.materials.insert(id.into(), source);
+            self
+        }
+
+        fn calls(&self) -> u64 {
+            self.calls.load(Ordering::Relaxed)
+        }
+
+        fn plane(
+            ctx: &RenderContext,
+            w: u32,
+            h: u32,
+            format: wgpu::TextureFormat,
+            texel: &[u8],
+        ) -> Arc<wgpu::Texture> {
+            let texture = ctx.device().create_texture(&wgpu::TextureDescriptor {
+                label: Some("mixed provider plane"),
+                size: wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let mut data = Vec::with_capacity((w * h) as usize * texel.len());
+            for _ in 0..(w * h) {
+                data.extend_from_slice(texel);
+            }
+            ctx.queue().write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &data,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(w * texel.len() as u32),
+                    rows_per_image: Some(h),
+                },
+                wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+            );
+            Arc::new(texture)
+        }
+    }
+
+    impl SourceProvider for MixedProvider {
+        fn frame(
+            &self,
+            ctx: &RenderContext,
+            request: &SourceRequest<'_>,
+        ) -> anyhow::Result<Option<SourceFrame>> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            let Some(source) = self.materials.get(request.material_id).copied() else {
+                return Ok(None);
+            };
+            Ok(Some(match source {
+                TestSource::Rgba(color, w, h) => SourceFrame::from_texture(Self::plane(
+                    ctx,
+                    w,
+                    h,
+                    wgpu::TextureFormat::Rgba8Unorm,
+                    &color,
+                )),
+                TestSource::Planar(y, cb, cr, w, h) => SourceFrame::from_planes(
+                    Self::plane(ctx, w, h, wgpu::TextureFormat::R8Unorm, &[y]),
+                    Self::plane(ctx, w / 2, h / 2, wgpu::TextureFormat::Rg8Unorm, &[cb, cr]),
+                    YuvMatrix::Bt709,
+                    YuvRange::Full,
+                    0,
+                    None,
+                ),
+            }))
+        }
+    }
+
+    /// Two abutting four-second clips with a transition at the cut.
+    ///
+    /// The window is centred on 4 s and `Easing::Linear` is set explicitly, so
+    /// progress at the cut is exactly 0.5 and every assertion below is about
+    /// the blend rather than about the easing curve.
+    fn cut_project(
+        kind: TransitionKind,
+        duration: Micros,
+        size: (u32, u32),
+    ) -> Project {
+        let mut project = project([0.0, 0.0, 0.0, 1.0]);
+        for id in ["left", "right"] {
+            project
+                .materials
+                .videos
+                .push(crate::modules::project::document::VideoMaterial {
+                    id: id.into(),
+                    path: format!("/nonexistent/{id}.mp4"),
+                    width: size.0,
+                    height: size.1,
+                    duration: 10_000_000,
+                    fps: 30.0,
+                    has_audio: false,
+                    rotation: 0,
+                });
+        }
+
+        let mut track = Track::new(TrackKind::Video, "V1");
+        track.segments.push(segment("left", 0, 4_000_000));
+        // The incoming clip starts two seconds into its file, so the first half
+        // of the window has a real head handle to borrow from.
+        let mut right = segment("right", 4_000_000, 4_000_000);
+        right.source_range = TimeRange::new(2_000_000, 4_000_000);
+        track.segments.push(right);
+
+        let mut material = TransitionMaterial::new(kind, duration);
+        material.easing = Easing::Linear;
+        track.segments[1].extras.push(material.id.clone());
+        project.materials.transitions.push(material);
+        project.tracks.push(track);
+        project
+    }
+
+    /// The transition on the project built above, for a test that wants to
+    /// change one of its parameters.
+    fn transition_mut(project: &mut Project) -> &mut TransitionMaterial {
+        &mut project.materials.transitions[0]
+    }
+
+    const RED: TestSource = TestSource::Rgba([255, 0, 0, 255], 640, 480);
+    const BLUE: TestSource = TestSource::Rgba([0, 0, 255, 255], 640, 480);
+
+    #[test]
+    fn a_crossfade_runs_from_one_clip_to_the_other_across_its_window() {
+        let Some(c) = compositor() else {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        };
+        // A one-second dissolve at a cut on 4 s: the window is [3.5 s, 4.5 s).
+        let project = cut_project(TransitionKind::Dissolve, 1_000_000, (640, 480));
+        let provider = MixedProvider::default().with("left", RED).with("right", BLUE);
+
+        // Before and after the window there is no transition at all, just the
+        // clip that owns the instant.
+        assert_eq!(frame(&c, &project, 3_000_000, &provider).pixel(320, 240), [255, 0, 0, 255]);
+        assert_eq!(frame(&c, &project, 5_000_000, &provider).pixel(320, 240), [0, 0, 255, 255]);
+
+        // At the very start of the window the outgoing clip is still whole.
+        assert_eq!(frame(&c, &project, 3_500_000, &provider).pixel(320, 240), [255, 0, 0, 255]);
+
+        // At the cut, half way: the two clips in equal measure. This is the
+        // number the whole feature is about.
+        let middle = frame(&c, &project, 4_000_000, &provider).pixel(320, 240);
+        assert!(
+            (middle[0] as i32 - 128).abs() <= 2 && (middle[2] as i32 - 128).abs() <= 2,
+            "half way through a dissolve should be half of each clip, got {middle:?}"
+        );
+        assert_eq!(middle[1], 0, "nothing green went in, so nothing comes out");
+        assert_eq!(middle[3], 255, "the frame is opaque throughout");
+
+        // A quarter of the way through, the outgoing clip still dominates.
+        let quarter = frame(&c, &project, 3_750_000, &provider).pixel(320, 240);
+        assert!(
+            (quarter[0] as i32 - 191).abs() <= 3 && (quarter[2] as i32 - 64).abs() <= 3,
+            "a quarter through should be three parts outgoing, got {quarter:?}"
+        );
+
+        // And at the last microsecond of the window it is all but arrived.
+        let end = frame(&c, &project, 4_499_999, &provider).pixel(320, 240);
+        assert!(end[2] > 250 && end[0] < 5, "{end:?}");
+    }
+
+    /// The blend must not care which decoder produced either side.
+    ///
+    /// Hardware decode is the default on any machine that can import a decoded
+    /// surface as a texture, so a transition that only works on the software
+    /// path is one that fails on most real footage — and fails *plausibly*, as
+    /// a wrong-looking mix rather than as an error. White and black are used
+    /// because they land on the same code values through both paths, so the one
+    /// expected number covers all four combinations.
+    #[test]
+    fn a_crossfade_is_the_same_however_each_side_was_decoded() {
+        let Some(c) = srgb_compositor() else {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        };
+        let project = cut_project(TransitionKind::Dissolve, 1_000_000, (640, 480));
+
+        let white_sw = TestSource::Rgba([255, 255, 255, 255], 640, 480);
+        let black_sw = TestSource::Rgba([0, 0, 0, 255], 640, 480);
+        let white_hw = TestSource::Planar(255, 128, 128, 640, 480);
+        let black_hw = TestSource::Planar(0, 128, 128, 640, 480);
+
+        for (name, left, right) in [
+            ("software over software", white_sw, black_sw),
+            ("hardware over software", white_hw, black_sw),
+            ("software over hardware", white_sw, black_hw),
+            ("hardware over hardware", white_hw, black_hw),
+        ] {
+            let provider = MixedProvider::default().with("left", left).with("right", right);
+
+            let start = frame(&c, &project, 3_500_000, &provider).pixel(320, 240);
+            assert!(start[0] > 250, "{name}: the window opens on white, got {start:?}");
+            let end = frame(&c, &project, 4_499_999, &provider).pixel(320, 240);
+            assert!(end[0] < 5, "{name}: the window closes on black, got {end:?}");
+
+            // Half white and half black *in linear light* is 0.5, which an sRGB
+            // target stores as 188 — not 128. Asserting the linear number is
+            // the point: a crossfade computed on the encoded bytes would give
+            // 128 here, and it is the classic dark-through-the-middle
+            // dissolve that everyone can see and nobody can name.
+            let middle = frame(&c, &project, 4_000_000, &provider).pixel(320, 240);
+            for (channel, value) in [("r", middle[0]), ("g", middle[1]), ("b", middle[2])] {
+                assert!(
+                    (value as i32 - 188).abs() <= 3,
+                    "{name}: {channel} is {value}, expected the linear-light midpoint"
+                );
+            }
+            assert_eq!(middle[3], 255, "{name}: the frame is opaque");
+        }
+    }
+
+    /// The bars around a letterboxed clip have to stay background.
+    ///
+    /// This is the assertion that pins the straight-alpha layer: a layer drawn
+    /// with ordinary source-over blending over a transparent clear holds
+    /// *premultiplied* colour, the transition shader premultiplies it a second
+    /// time, and the visible symptom is a dark halo creeping in from wherever
+    /// the clip does not cover the canvas. Here that would show as the blue
+    /// background going dark for the duration of the transition.
+    #[test]
+    fn a_transition_between_letterboxed_clips_leaves_the_background_alone() {
+        let Some(c) = compositor() else {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        };
+        // 16:9 sources on a 4:3 canvas: 60 rows of background top and bottom.
+        let mut project = cut_project(TransitionKind::Dissolve, 1_000_000, (1920, 1080));
+        project.canvas.background = [0.0, 0.0, 1.0, 1.0];
+        let provider = MixedProvider::default()
+            .with("left", TestSource::Rgba([255, 0, 0, 255], 1920, 1080))
+            .with("right", TestSource::Rgba([0, 255, 0, 255], 1920, 1080));
+
+        let f = frame(&c, &project, 4_000_000, &provider);
+        assert_eq!(f.pixel(320, 5), [0, 0, 255, 255], "top band");
+        assert_eq!(f.pixel(320, 474), [0, 0, 255, 255], "bottom band");
+        let middle = f.pixel(320, 240);
+        assert!(
+            (middle[0] as i32 - 128).abs() <= 2 && (middle[1] as i32 - 128).abs() <= 2,
+            "and the picture itself still crossfades, got {middle:?}"
+        );
+    }
+
+    /// A half-transparent clip must look the same just inside the window as
+    /// just outside it.
+    ///
+    /// This is the assertion the letterbox one above cannot make, because two
+    /// opaque clips hide the bug: a layer drawn with ordinary source-over
+    /// blending over a transparent clear holds *premultiplied* colour, and
+    /// `transition.wgsl` premultiplies what it samples a second time. At
+    /// opacity 0.5 that is half the brightness it should be — and it appears
+    /// the instant the window opens, so the clip visibly darkens as the
+    /// transition begins and brightens again as it ends.
+    #[test]
+    fn a_half_transparent_clip_does_not_change_brightness_when_the_window_opens() {
+        let Some(c) = compositor() else {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        };
+        let mut project = cut_project(TransitionKind::Dissolve, 1_000_000, (640, 480));
+        project.tracks[0].segments[0].transform.opacity = 0.5;
+        let provider = MixedProvider::default().with("left", RED).with("right", BLUE);
+
+        // Outside the window: half of red over black, through the ordinary
+        // quad path.
+        let outside = frame(&c, &project, 3_000_000, &provider).pixel(320, 240);
+        assert!((outside[0] as i32 - 128).abs() <= 2, "{outside:?}");
+
+        // The first instant of the window is progress 0, which is the outgoing
+        // clip and nothing else — so it has to be the same pixel.
+        let inside = frame(&c, &project, 3_500_000, &provider).pixel(320, 240);
+        assert!(
+            (inside[0] as i32 - outside[0] as i32).abs() <= 2,
+            "the clip darkened when the transition began: {outside:?} became {inside:?}"
+        );
+        assert_eq!(inside[3], 255, "the frame stays opaque over the background");
+    }
+
+    #[test]
+    fn a_dip_reaches_its_colour_at_the_midpoint_and_neither_clip_shows_through() {
+        let Some(c) = compositor() else {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        };
+        let mut project = cut_project(TransitionKind::DipToColor, 1_000_000, (640, 480));
+        transition_mut(&mut project).color = [0.0, 1.0, 0.0, 1.0];
+        let provider = MixedProvider::default().with("left", RED).with("right", BLUE);
+
+        assert_eq!(
+            frame(&c, &project, 4_000_000, &provider).pixel(320, 240),
+            [0, 255, 0, 255],
+            "the middle of a dip is the colour and nothing else"
+        );
+        // A quarter of the way in, the colour is half laid over the outgoing
+        // clip: half red, half green, no blue at all.
+        let quarter = frame(&c, &project, 3_750_000, &provider).pixel(320, 240);
+        assert!(
+            (quarter[0] as i32 - 128).abs() <= 2
+                && (quarter[1] as i32 - 128).abs() <= 2
+                && quarter[2] == 0,
+            "{quarter:?}"
+        );
+    }
+
+    #[test]
+    fn a_wipe_puts_the_edge_where_the_progress_says() {
+        let Some(c) = compositor() else {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        };
+        let mut project = cut_project(TransitionKind::Wipe, 1_000_000, (640, 480));
+        {
+            let transition = transition_mut(&mut project);
+            transition.direction = TransitionDirection::Right;
+            transition.softness = 0.0;
+        }
+        let provider = MixedProvider::default().with("left", RED).with("right", BLUE);
+
+        let f = frame(&c, &project, 4_000_000, &provider);
+        assert_eq!(f.pixel(4, 240), [0, 0, 255, 255], "the left half has arrived");
+        assert_eq!(f.pixel(635, 240), [255, 0, 0, 255], "the right half has not");
+    }
+
+    /// A transition costs two source lookups and no more.
+    ///
+    /// Worth pinning because the obvious wrong implementation — resolving the
+    /// transition per segment rather than per instant — asks for both sides
+    /// twice, and on the export path a source lookup is a decode.
+    #[test]
+    fn a_transition_asks_for_each_side_exactly_once() {
+        let Some(c) = compositor() else {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        };
+        let project = cut_project(TransitionKind::Dissolve, 1_000_000, (640, 480));
+        let provider = MixedProvider::default().with("left", RED).with("right", BLUE);
+
+        frame(&c, &project, 4_000_000, &provider);
+        assert_eq!(provider.calls(), 2, "inside the window, both sides");
+
+        let outside = MixedProvider::default().with("left", RED).with("right", BLUE);
+        frame(&c, &project, 3_000_000, &outside);
+        assert_eq!(outside.calls(), 1, "outside it, only the live clip");
+    }
+
+    /// A transition whose neighbours no longer touch renders as an ordinary
+    /// cut rather than as anything at all.
+    ///
+    /// `timeline::ops::detach_broken_transitions` removes the material when an
+    /// edit breaks the join, but the compositor must not depend on that having
+    /// happened — a document opened from disk, or one mid-edit, can carry a
+    /// transition whose cut has gone.
+    #[test]
+    fn a_transition_whose_cut_has_gone_does_not_render() {
+        let Some(c) = compositor() else {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        };
+        let mut project = cut_project(TransitionKind::Dissolve, 1_000_000, (640, 480));
+        // Trim the outgoing clip so the two no longer meet.
+        project.tracks[0].segments[0].target_range.duration = 3_000_000;
+        let provider = MixedProvider::default().with("left", RED).with("right", BLUE);
+
+        // The gap shows the background, and the clip on each side is whole.
+        assert_eq!(frame(&c, &project, 2_500_000, &provider).pixel(320, 240), [255, 0, 0, 255]);
+        assert_eq!(frame(&c, &project, 3_500_000, &provider).pixel(320, 240), [0, 0, 0, 255]);
+        assert_eq!(frame(&c, &project, 4_100_000, &provider).pixel(320, 240), [0, 0, 255, 255]);
+    }
+
+    /// A missing source on one side fades to nothing rather than losing the
+    /// frame.
+    #[test]
+    fn a_transition_with_one_side_missing_still_renders_the_other() {
+        let Some(c) = compositor() else {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        };
+        let project = cut_project(TransitionKind::Dissolve, 1_000_000, (640, 480));
+        // Only the outgoing clip has a source; the incoming one answers `None`.
+        let provider = MixedProvider::default().with("left", RED);
+
+        let middle = frame(&c, &project, 4_000_000, &provider).pixel(320, 240);
+        assert!(
+            (middle[0] as i32 - 128).abs() <= 2 && middle[3] == 255,
+            "half the outgoing clip over the background, got {middle:?}"
+        );
+    }
+
+    /// Turn one NV12 frame back into RGB the way a decoder would.
+    ///
+    /// The forward direction is `yuv.wgsl`'s `luma`/`chroma`, which are BT.601
+    /// limited; this is their inverse, spelled out rather than reused so a
+    /// change to one of them fails this test rather than cancelling out in it.
+    fn nv12_pixel(frame: &Nv12Frame, x: u32, y: u32) -> [u8; 3] {
+        let (cb, cr) = frame.chroma(x, y);
+        let y = (frame.luma(x, y) as f32 - 16.0) * (255.0 / 219.0) / 255.0;
+        let cb = (cb as f32 - 128.0) * (255.0 / 224.0) / 255.0;
+        let cr = (cr as f32 - 128.0) * (255.0 / 224.0) / 255.0;
+        let r = y + 1.402 * cr;
+        let g = y - 0.344136 * cb - 0.714136 * cr;
+        let b = y + 1.772 * cb;
+        [
+            (r.clamp(0.0, 1.0) * 255.0).round() as u8,
+            (g.clamp(0.0, 1.0) * 255.0).round() as u8,
+            (b.clamp(0.0, 1.0) * 255.0).round() as u8,
+        ]
+    }
+
+    /// The preview and the export must show the same transition.
+    ///
+    /// They do not share a code path all the way down: the preview reads the
+    /// composited target back as RGBA and JPEG-encodes it, while a hardware
+    /// export runs the RGBA→NV12 compute pass over the same target and never
+    /// touches system memory in between. Both call `render_to_texture`, which
+    /// is where this work went in — so this test is really the claim that the
+    /// transition went in *there* and not into one of the two callers.
+    ///
+    /// The frame is deliberately taken mid-transition, where the two paths have
+    /// the most to disagree about, and at three points across it.
+    #[test]
+    fn the_preview_and_the_export_agree_on_a_frame_mid_transition() {
+        let Some(c) = srgb_compositor() else {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        };
+        let project = cut_project(TransitionKind::Dissolve, 1_000_000, (640, 480));
+        let provider = MixedProvider::default()
+            // One side hardware-decoded and one side software, so the
+            // comparison covers the planar path too.
+            .with("left", TestSource::Planar(255, 128, 128, 640, 480))
+            .with("right", TestSource::Rgba([0, 0, 255, 255], 640, 480));
+
+        for at in [3_600_000, 4_000_000, 4_400_000] {
+            let preview = c
+                .render(&project, at, (640, 480), &provider)
+                .expect("preview render");
+            let Ok(export) = c.render_nv12(&project, at, (640, 480), &provider) else {
+                eprintln!("skipping: no RGBA to NV12 compute pass on this device");
+                return;
+            };
+
+            for (x, y) in [(0, 0), (320, 240), (639, 479), (17, 300)] {
+                let expected = preview.pixel(x, y);
+                let actual = nv12_pixel(&export, x, y);
+                for channel in 0..3 {
+                    assert!(
+                        (expected[channel] as i32 - actual[channel] as i32).abs() <= 3,
+                        "at {at} µs, ({x},{y}): preview {expected:?} against export {actual:?}"
+                    );
+                }
+            }
+
+            // And the two are genuinely mid-transition rather than agreeing on
+            // a frame where nothing is happening.
+            let [r, _, b, _] = preview.pixel(320, 240);
+            assert!(r > 10 && b > 10, "expected both clips at {at} µs, got {:?}", preview.pixel(320, 240));
+        }
     }
 
     #[test]

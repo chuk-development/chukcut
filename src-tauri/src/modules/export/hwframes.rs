@@ -733,9 +733,29 @@ mod tests {
     /// libavutil. Round-tripping the *pixels* is the point — an import that
     /// succeeds and hands back a green frame is the failure mode this whole
     /// area is prone to, and it looks identical to success in a log.
+    /// 1920 is a multiple of 64, 128 and 256, so it satisfies every alignment
+    /// rule a driver might have without anyone having to think about it. That
+    /// made this test pass for months while exports at other sizes came out
+    /// scrambled: a user exporting a 720x540 clip gets a 1440x1080 canvas, and
+    /// 1440 is a multiple of 32 but not of 64.
+    ///
+    /// So the sizes below are chosen for their *remainders*, not their
+    /// resolutions. Every one of them is a real canvas the editor produces.
     #[test]
     #[cfg(target_os = "linux")]
     fn a_dmabuf_the_compositor_allocated_can_be_imported_as_a_surface() {
+        for (width, height) in [
+            (1920, 1080), // every alignment satisfied — the original case
+            (1440, 1080), // 32 but not 64: a 4:3 source, and the reported bug
+            (1080, 1920), // the vertical default canvas, 8 but not 16
+            (1616, 1080), // 16 but not 32: adopted from a 3234x2160 clip
+        ] {
+            dmabuf_roundtrip(width, height);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn dmabuf_roundtrip(width: u32, height: u32) {
         use crate::modules::render::dmabuf::{ExportableBuffer, DRM_FORMAT_MOD_LINEAR};
         use crate::modules::render::Nv12Layout;
 
@@ -745,10 +765,7 @@ mod tests {
             return;
         };
 
-        // Full HD, because that is the size an export actually runs at and
-        // because a plane offset that a driver silently re-aligns only shows up
-        // at a size whose luma plane is not a round number of pages.
-        let (width, height) = (1920u32, 1080u32);
+        eprintln!("--- {width}x{height} ---");
         let layout = Nv12Layout::for_size(width, height);
         let size = layout.total_bytes();
 
@@ -856,17 +873,218 @@ mod tests {
             None
         };
 
+        // The strides on both sides, because when this fails the whole question
+        // is whether the driver kept the pitch we handed it.
+        let (ours, theirs) = (layout.y_stride, back.stride(0));
         assert_eq!(
             mismatch(0, layout.y_stride, height as usize, 0),
             None,
-            "the luma plane of the imported surface is not what the GPU wrote"
+            "at {width}x{height} the luma plane of the imported surface is not what the GPU \
+             wrote (we declared a pitch of {ours}, the surface came back with {theirs})"
         );
         assert_eq!(
             mismatch(1, layout.uv_stride, layout.uv_rows, layout.uv_offset()),
             None,
-            "the chroma plane of the imported surface is not what the GPU wrote \
-             (the driver may have re-aligned the plane offset)"
+            "at {width}x{height} the chroma plane of the imported surface is not what the GPU \
+             wrote (the driver may have re-aligned the plane offset)"
         );
+    }
+
+    /// The export path the previous test does *not* cover.
+    ///
+    /// That one fills the DMA-BUF with `copy_buffer_to_buffer` and proves the
+    /// import is faithful. A real export fills it with the **compute shader**,
+    /// and that is a different kind of write to the same memory: a different
+    /// queue, a different cache, and an external consumer that never sees a
+    /// Vulkan barrier. A user reported a 1440x1080 export coming back split
+    /// into vertical strips displaced against each other, while the readback
+    /// path at the same size was clean — so the difference between those two
+    /// writes is the whole question.
+    ///
+    /// The check runs in two halves deliberately, because they accuse different
+    /// components and a single combined assertion could not tell them apart:
+    ///
+    /// 1. shader → exported buffer, read back through **wgpu**. A failure here
+    ///    is the shader or the buffer binding.
+    /// 2. the same buffer → VAAPI surface → read back through **libavutil**. A
+    ///    failure only here is the DMA-BUF sharing itself: coherency, or a
+    ///    write the driver never saw.
+    ///
+    /// Both are compared against `Nv12Converter::convert`, the readback path
+    /// that ships working output today.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn the_compute_shader_writes_a_dmabuf_the_encoder_reads_back_identically() {
+        use crate::modules::render::dmabuf::{ExportableBuffer, DRM_FORMAT_MOD_LINEAR};
+        use crate::modules::render::nv12::READ_FORMAT;
+        use crate::modules::render::{Nv12Converter, Nv12Layout, TextureKey, TexturePool};
+
+        let Some(device) = device() else { return };
+        let Some(ctx) = crate::modules::render::test_context() else {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        };
+
+        // The reported size. Not a round one, and that is the point.
+        let (width, height) = (1440u32, 1080u32);
+
+        // A pattern that changes every pixel in both axes. A gradient would
+        // survive a horizontal displacement of a few pixels looking almost
+        // right, which is exactly the failure being hunted.
+        let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                pixels.extend_from_slice(&[
+                    (x % 251) as u8,
+                    (y % 241) as u8,
+                    ((x ^ y) % 239) as u8,
+                    255,
+                ]);
+            }
+        }
+
+        let pool = TexturePool::default();
+        let target = pool.acquire(
+            ctx.device(),
+            TextureKey::new(
+                width,
+                height,
+                READ_FORMAT,
+                wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            ),
+        );
+        ctx.queue().write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: target.texture(),
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &pixels,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(width * 4),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        let converter = Nv12Converter::new(&ctx);
+        let reference = converter.convert(&ctx, &target).expect("readback convert");
+        let layout = Nv12Layout::for_size(width, height);
+        assert_eq!(reference.data.len(), layout.total_bytes());
+
+        let Some(exported) = ExportableBuffer::new(&ctx, layout.total_bytes() as u64, "shader test")
+        else {
+            eprintln!("skipping: this device cannot export DMA-BUF memory");
+            return;
+        };
+        converter
+            .convert_into(&ctx, &target, exported.buffer())
+            .expect("convert into the exported buffer");
+
+        // Half one: the same memory, read back the way it was written.
+        let staging = ctx.device().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("shader test readback"),
+            size: layout.total_bytes() as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = ctx
+            .device()
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        encoder.copy_buffer_to_buffer(
+            exported.buffer(),
+            0,
+            &staging,
+            0,
+            layout.total_bytes() as u64,
+        );
+        ctx.queue().submit(Some(encoder.finish()));
+        let (tx, rx) = std::sync::mpsc::channel();
+        staging.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        ctx.device()
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("poll");
+        rx.recv().expect("map callback").expect("mapped");
+        let through_wgpu = staging
+            .slice(..)
+            .get_mapped_range()
+            .expect("mapped range")
+            .to_vec();
+        staging.unmap();
+
+        let first_difference = |a: &[u8], b: &[u8]| -> Option<(usize, u8, u8)> {
+            a.iter()
+                .zip(b.iter())
+                .enumerate()
+                .find(|(_, (x, y))| x != y)
+                .map(|(i, (x, y))| (i, *x, *y))
+        };
+        if let Some((at, want, got)) = first_difference(&reference.data, &through_wgpu) {
+            let (row, col) = (at / layout.y_stride, at % layout.y_stride);
+            panic!(
+                "the compute shader wrote different bytes into the exported buffer than into \
+                 the ordinary one: first difference at byte {at} (luma row {row}, column \
+                 {col}), want {want}, got {got}"
+            );
+        }
+
+        // Half two: what the encoder actually sees.
+        let pool = device
+            .frames(Pixel::VAAPI, Pixel::NV12, width, height)
+            .expect("a VAAPI pool");
+        let imported = match pool.import_nv12_dmabuf(&Nv12Dmabuf {
+            fd: exported.fd(),
+            size: layout.total_bytes(),
+            width,
+            height,
+            y_offset: 0,
+            y_stride: layout.y_stride,
+            uv_offset: layout.uv_offset(),
+            uv_stride: layout.uv_stride,
+            modifier: DRM_FORMAT_MOD_LINEAR,
+        }) {
+            Ok(surface) => surface,
+            Err(e) => {
+                eprintln!("skipping: this driver refuses the DMA-BUF import: {e}");
+                return;
+            }
+        };
+
+        let mut back = frame::Video::empty();
+        // SAFETY: as in the test above — an empty destination frame, which
+        // `av_hwframe_transfer_data` allocates into, and a live mapped surface.
+        let code = unsafe {
+            ffmpeg::ffi::av_hwframe_transfer_data(back.as_mut_ptr(), imported.as_ptr(), 0)
+        };
+        assert!(code >= 0, "reading the imported surface back: {code}");
+
+        for (plane, stride, rows, base) in [
+            (0, layout.y_stride, height as usize, 0),
+            (1, layout.uv_stride, layout.uv_rows, layout.uv_offset()),
+        ] {
+            let got = back.data(plane);
+            let got_stride = back.stride(plane);
+            for row in 0..rows {
+                for col in 0..width as usize {
+                    let want = reference.data[base + row * stride + col];
+                    let have = got[row * got_stride + col];
+                    assert_eq!(
+                        want, have,
+                        "plane {plane} row {row} column {col}: the encoder does not see what \
+                         the compute shader wrote (we declared a pitch of {stride}, the \
+                         surface came back with {got_stride})"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

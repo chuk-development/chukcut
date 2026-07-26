@@ -20,12 +20,11 @@ use state::AppState;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "chukcut=debug,warn".into()),
-        )
-        .init();
+    // stdout as before — `RUST_LOG` still works — plus a file under the
+    // platform's state directory, because an app started from a launcher has no
+    // stdout and "which export path ran" is not answerable without one. See
+    // `modules::workspace::logging`.
+    modules::workspace::logging::init();
 
     // Frames left over from a previous run describe a document that no longer
     // exists, so the cache starts empty every time.
@@ -56,6 +55,19 @@ pub fn run() {
         // wait briefly for a frame that is mid-render, and that wait must never
         // sit on a webview thread.
         .register_asynchronous_uri_scheme_protocol(SCHEME, frame_protocol_async)
+        // The native menu bar. Everything about it — the items, which of them
+        // are clickable, and why the rest are not — lives in
+        // `modules::workspace::menu`.
+        .menu(modules::workspace::menu::build)
+        .on_menu_event(modules::workspace::menu::handle_event)
+        // The close button is the same action as File → Quit and is guarded the
+        // same way: nothing closes until the webview has answered.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                modules::workspace::menu::request_close(window);
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             // project
             modules::project::commands::project_new,
@@ -67,7 +79,10 @@ pub fn run() {
             modules::project::commands::project_path,
             // timeline
             modules::timeline::commands::timeline_apply,
+            modules::timeline::commands::timeline_apply_many,
             modules::timeline::commands::timeline_split,
+            modules::timeline::commands::timeline_link,
+            modules::timeline::commands::timeline_unlink,
             modules::timeline::commands::timeline_undo,
             modules::timeline::commands::timeline_redo,
             // transitions
@@ -77,6 +92,10 @@ pub fn run() {
             modules::transitions::commands::transitions_remove,
             modules::transitions::commands::transitions_retime,
             modules::transitions::commands::transitions_set,
+            // text
+            modules::text::commands::text_fonts,
+            modules::text::commands::text_add,
+            modules::text::commands::text_set,
             // media
             modules::media::commands::media_probe,
             modules::media::commands::media_thumbnails,
@@ -114,6 +133,9 @@ pub fn run() {
             modules::workspace::commands::workspace_cache_size,
             modules::workspace::commands::workspace_cache_clear,
             modules::workspace::commands::workspace_hardware,
+            modules::workspace::commands::workspace_log_path,
+            modules::workspace::commands::workspace_menu_sync,
+            modules::workspace::commands::workspace_close_answer,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

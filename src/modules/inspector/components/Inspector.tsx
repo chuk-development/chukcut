@@ -13,12 +13,15 @@ import { formatDuration, formatTimecode } from "@/lib/time";
 import { KeyframeEditor } from "@/modules/inspector/components/KeyframeEditor";
 import { KeyframeRow } from "@/modules/inspector/components/KeyframeRow";
 import { PropertySlider } from "@/modules/inspector/components/PropertySlider";
+import { TextInspector } from "@/modules/inspector/components/TextInspector";
 import { TRANSFORM_PROPERTIES, VOLUME } from "@/modules/inspector/lib/properties";
 import { runEdit, useProjectStore } from "@/modules/project/store";
 import type { Transform } from "@/modules/project/types";
 import { findSegment, projectDuration, segmentLabel } from "@/modules/project/types";
+import { textMaterialOf } from "@/modules/text/lib/material";
 import { timelineApply } from "@/modules/timeline/lib/api";
-import { useTimelineStore } from "@/modules/timeline/store";
+import { soleSelection, useTimelineStore } from "@/modules/timeline/store";
+import { TransitionInspector } from "@/modules/transitions/components/TransitionInspector";
 
 const DEFAULT_TRANSFORM: Transform = {
   position: [0, 0],
@@ -53,12 +56,19 @@ function Field({ label, value }: { label: string; value: string }) {
 
 export function Inspector() {
   const project = useProjectStore((s) => s.project);
-  const selectedSegmentId = useTimelineStore((s) => s.selectedSegmentId);
+  // The sole selection, not the first of several: with four clips selected
+  // there is no "the" clip, and editing one of them would change something the
+  // user is not looking at. See `soleSelection`.
+  const selection = useTimelineStore((s) => s.selection);
+  const selectedSegmentId = soleSelection(selection);
   const playhead = useTimelineStore((s) => s.playhead);
 
   const found = project && selectedSegmentId ? findSegment(project, selectedSegmentId) : null;
   const segment = found?.segment ?? null;
   const hasAudio = found?.track.kind === "video" || found?.track.kind === "audio";
+  // A title is a segment like any other; what makes it one is the kind of
+  // material it names, not the lane it happens to sit on.
+  const title = project && segment ? textMaterialOf(project, segment) : null;
 
   const commitTransform = useCallback(
     (patch: Partial<Transform>) => {
@@ -121,9 +131,21 @@ export function Inspector() {
             <Field label="Tracks" value={String(project.tracks.length)} />
           </Section>
           <Separator />
-          <p className="px-3 py-3 text-[11px] leading-relaxed text-muted-foreground">
-            Select a clip on the timeline to edit its transform, speed and volume.
-          </p>
+          {/* Several clips selected is not "nothing selected", and saying so is
+              the difference between the panel looking broken and it saying what
+              it can and cannot do. The multi-clip edits live on the timeline —
+              move, trim, delete, link — and are all one undo step; per-property
+              editing needs one clip, because a slider has one value. */}
+          {selection.length > 1 ? (
+            <p className="px-3 py-3 text-[11px] leading-relaxed text-muted-foreground">
+              {selection.length} clips selected. Move, trim, copy, delete or link them together on
+              the timeline; select a single clip to edit its transform, speed and volume.
+            </p>
+          ) : (
+            <p className="px-3 py-3 text-[11px] leading-relaxed text-muted-foreground">
+              Select a clip on the timeline to edit its transform, speed and volume.
+            </p>
+          )}
         </ScrollArea>
       ) : (
         <ScrollArea className="flex-1">
@@ -139,6 +161,21 @@ export function Inspector() {
               value={formatTimecode(segment.source_range.start, project.fps)}
             />
           </Section>
+
+          {title ? (
+            <>
+              <Separator />
+              <Section title="Text">
+                <TextInspector project={project} segment={segment} material={title} />
+              </Section>
+            </>
+          ) : null}
+
+          {/* A transition belongs to the clip it is the entrance to, so it is
+              edited from that clip's panel and renders nothing when there is
+              none. Selecting the marker on the timeline selects the same clip,
+              which is what makes the two routes land in one place. */}
+          <TransitionInspector project={project} segmentId={segment.id} />
 
           <Separator />
 

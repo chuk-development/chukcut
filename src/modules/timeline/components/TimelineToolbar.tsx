@@ -1,5 +1,6 @@
 import {
   CopyIcon,
+  LinkIcon,
   MagnetIcon,
   MousePointer2Icon,
   Redo2Icon,
@@ -27,7 +28,8 @@ interface TimelineToolbarProps {
   snapping: boolean;
   canUndo: boolean;
   canRedo: boolean;
-  hasSelection: boolean;
+  /** How many clips are selected. Two or more is what makes Link worth offering. */
+  selectionCount: number;
   /** Whether there is anything on the timeline at all. */
   hasClips: boolean;
   onZoom: (zoom: number) => void;
@@ -39,6 +41,8 @@ interface TimelineToolbarProps {
   onSplit: () => void;
   onDuplicate: () => void;
   onDelete: () => void;
+  /** Make the selected clips move, trim and delete as one. */
+  onLink: () => void;
 }
 
 /** Zoom is exponential, so the slider works in log space or it is useless. */
@@ -60,7 +64,7 @@ export function TimelineToolbar({
   snapping,
   canUndo,
   canRedo,
-  hasSelection,
+  selectionCount,
   hasClips,
   onZoom,
   onZoomToFit,
@@ -71,7 +75,9 @@ export function TimelineToolbar({
   onSplit,
   onDuplicate,
   onDelete,
+  onLink,
 }: TimelineToolbarProps) {
+  const hasSelection = selectionCount > 0;
   return (
     <div
       data-slot="timeline-toolbar"
@@ -120,14 +126,21 @@ export function TimelineToolbar({
           <ScissorsIcon />
         </Button>
       </IconTooltip>
-      <IconTooltip label="Duplicate clip">
+      <IconTooltip label={selectionCount > 1 ? "Duplicate clips" : "Duplicate clip"} hint="Ctrl+D">
         <Button size="icon" onClick={onDuplicate} disabled={!hasSelection}>
           <CopyIcon />
         </Button>
       </IconTooltip>
-      <IconTooltip label="Delete clip" hint="Del">
+      <IconTooltip label={selectionCount > 1 ? "Delete clips" : "Delete clip"} hint="Del">
         <Button size="icon" onClick={onDelete} disabled={!hasSelection}>
           <Trash2Icon />
+        </Button>
+      </IconTooltip>
+      {/* Linking is only meaningful for a set, so the button appears with one.
+          Greyed for a single clip would be a permanent grey button. */}
+      <IconTooltip label="Link the selected clips so they move together">
+        <Button size="icon" onClick={onLink} disabled={selectionCount < 2}>
+          <LinkIcon />
         </Button>
       </IconTooltip>
 

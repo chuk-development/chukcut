@@ -48,6 +48,7 @@ use super::clock::{
 use super::encoder::encode_preview_jpeg;
 use super::error::{PreviewError, Result};
 use super::session::{PreviewOptions, PreviewSession};
+use super::stats::{self, PlaybackStats, SeekKind, SeekWatch, SessionFacts};
 use crate::modules::audio::AudioEngine;
 use crate::modules::project::document::{Micros, Project};
 use crate::modules::render::{Compositor, EmptySourceProvider, RenderContext, SourceProvider};
@@ -186,6 +187,17 @@ struct Shared {
     /// machine with no output device.
     audio: RwLock<Option<Arc<AudioEngine>>>,
     events: RwLock<Option<Channel<PreviewEvent>>>,
+    /// `(session, frame)` of the last position announced to the frontend.
+    ///
+    /// Exists so that [`Shared::emit_position`] can decide and send under one
+    /// lock. See that function for why a decision taken outside it is not
+    /// enough.
+    announced: Mutex<Option<(u64, i64)>>,
+    /// What the log says about playback when nobody has `RUST_LOG` set. See
+    /// [`stats`].
+    stats: PlaybackStats,
+    /// How long the picture takes to catch up with a moved playhead.
+    seeks: SeekWatch,
 }
 
 #[derive(Default)]
@@ -216,6 +228,65 @@ impl Shared {
                 tracing::warn!(%error, "preview event channel is gone");
             }
         }
+    }
+
+    /// Announce where the playhead is, without ever moving it backwards by
+    /// accident.
+    ///
+    /// Two threads announce positions and they do not agree about time. The
+    /// **pacer** says where playback is, at the frame rate. The **render
+    /// thread** announces a *scrub* frame the moment its JPEG exists, from the
+    /// encode thread, after the encode — because a parked frame is the one
+    /// somebody is waiting to look at and it should not have to wait for the
+    /// pacer's next tick.
+    ///
+    /// The parked frame of a new session is a scrub. Press play immediately and
+    /// the pacer can announce frames 1 and 2 before frame 0's announcement is
+    /// emitted, and the frontend's playhead jumps backwards for one frame.
+    /// That was latent for as long as opening a render device per server cost
+    /// enough to order the two; `gpu::render_context` made it free, and
+    /// `tests/preview.rs::position_updates_arrive_in_order_as_the_playhead_advances`
+    /// began failing almost every run.
+    ///
+    /// The first fix compared the frame against the clock and then emitted.
+    /// **That is a check the pacer can invalidate before the send happens**:
+    /// both threads reach `Channel::send` through an `RwLock` *read* guard, so
+    /// nothing serialises them and the window between deciding and sending is
+    /// exactly the window the pacer needs. Deciding and sending under one lock
+    /// is what closes it.
+    ///
+    /// `authoritative` marks an announcement that *defines* the playhead — the
+    /// pacer's, and a transport command's. Those always go out and reset the
+    /// mark, so a backwards seek or a replay from the end is still announced. A
+    /// scrub is subordinate: it is dropped if a later frame of the same session
+    /// has already been sent, because the pacer has already said everything it
+    /// could add. A different session id is never compared against, since a
+    /// seek supersedes the session and starts the ordering again.
+    fn emit_position(
+        &self,
+        session: u64,
+        frame: i64,
+        time: Micros,
+        playing: bool,
+        authoritative: bool,
+    ) {
+        let mut announced = self.announced.lock();
+        if !authoritative {
+            if let Some((last_session, last_frame)) = *announced {
+                if last_session == session && last_frame > frame {
+                    return;
+                }
+            }
+        }
+        *announced = Some((session, frame));
+        // Inside the lock on purpose: the order these reach the channel has to
+        // be the order they were decided in, or the guard above is decoration.
+        self.emit(PreviewEvent::Position {
+            session,
+            frame,
+            time,
+            playing,
+        });
     }
 
     fn emit_error_once(&self, message: String) {
@@ -271,6 +342,9 @@ impl PreviewServer {
                 sources: RwLock::new(Arc::new(EmptySourceProvider)),
                 audio: RwLock::new(None),
                 events: RwLock::new(None),
+                announced: Mutex::new(None),
+                stats: PlaybackStats::new(),
+                seeks: SeekWatch::new(),
             }),
             threads: Mutex::new(Vec::new()),
         })
@@ -325,7 +399,7 @@ impl PreviewServer {
         }
 
         let session = Arc::new(PreviewSession::new(project, options));
-        self.adopt(session, at, false)
+        self.adopt(session, at, false, SeekKind::SessionStart)
     }
 
     /// Move the playhead. Supersedes the session so no frame rendered for the
@@ -336,7 +410,7 @@ impl PreviewServer {
             let session = work.session.clone().ok_or(PreviewError::NoSession)?;
             (session, work.playing)
         };
-        Ok(self.adopt(Arc::new(previous.superseded()), to, playing))
+        Ok(self.adopt(Arc::new(previous.superseded()), to, playing, SeekKind::Seek))
     }
 
     pub fn play(&self) -> Result<PreviewInfo> {
@@ -357,6 +431,11 @@ impl PreviewServer {
             audio.play(self.shared.clock.position());
         }
         self.shared.clock.play();
+
+        // The window starts here, not when the session opened: a session that
+        // sat parked for a minute would otherwise put that minute in the first
+        // summary's `window_ms`.
+        self.shared.stats.start_window(std::time::Instant::now());
 
         let mut work = self.shared.work.lock();
         work.playing = true;
@@ -386,13 +465,16 @@ impl PreviewServer {
         }
         self.shared.wake.notify_all();
 
+        // The last word on the run that just ended. Emitted with no lock held —
+        // `finish` folds and resets under its own and hands the numbers back.
+        if let Some(summary) = self.shared.stats.finish(std::time::Instant::now()) {
+            stats::emit(&summary, stats::Reason::Stopped);
+        }
+
         let info = self.info(&session);
-        self.shared.emit(PreviewEvent::Position {
-            session: session.id,
-            frame: info.frame,
-            time: info.position,
-            playing: false,
-        });
+        // Authoritative: pausing *is* where the playhead is now.
+        self.shared
+            .emit_position(session.id, info.frame, info.position, false, true);
         Ok(info)
     }
 
@@ -420,6 +502,13 @@ impl PreviewServer {
         self.shared.clock.pause();
         *self.shared.events.write() = None;
         self.shared.work.lock().shutdown = false;
+
+        // After the threads have joined, so nothing can still be counting into
+        // the window this summarises.
+        self.shared.seeks.clear();
+        if let Some(summary) = self.shared.stats.finish(std::time::Instant::now()) {
+            stats::emit(&summary, stats::Reason::Stopped);
+        }
     }
 
     pub fn status(&self) -> PreviewStatus {
@@ -564,7 +653,18 @@ impl PreviewServer {
 
     /// Install a session, invalidate the ring, and queue the frame under the
     /// playhead.
-    fn adopt(&self, session: Arc<PreviewSession>, at: Micros, keep_playing: bool) -> PreviewInfo {
+    fn adopt(
+        &self,
+        session: Arc<PreviewSession>,
+        at: Micros,
+        keep_playing: bool,
+        kind: SeekKind,
+    ) -> PreviewInfo {
+        // Read before anything moves the clock: this is where the playhead was,
+        // and the *direction* is what makes a seek expensive — a backward one
+        // discards the ring and costs the decoder a real seek.
+        let from = self.shared.clock.position();
+
         // The ring is reset before the session is installed so a render already
         // in flight for the old session cannot land in the new one's ring.
         self.shared.cache.reset(session.id);
@@ -582,6 +682,27 @@ impl PreviewServer {
         self.shared.clock.seek(at);
 
         let frame = self.shared.clock.frame();
+
+        // Armed before the render thread is woken, or a decoder that is already
+        // warm could deliver the frame before there is anything timing it.
+        self.shared.seeks.arm(
+            session.id,
+            frame,
+            from,
+            self.shared.clock.position(),
+            kind,
+            std::time::Instant::now(),
+        );
+        self.shared.stats.begin_session(
+            SessionFacts {
+                width: session.width(),
+                height: session.height(),
+                canvas: (session.project.canvas.width, session.project.canvas.height),
+            },
+            session.fps,
+            std::time::Instant::now(),
+        );
+
         {
             let mut work = self.shared.work.lock();
             work.session = Some(Arc::clone(&session));
@@ -693,6 +814,16 @@ fn render_loop(shared: Arc<Shared>) {
     };
     let compositor = Compositor::new(Arc::clone(&ctx));
 
+    // The decode path, once, from the only thread that has a device to ask.
+    //
+    // At INFO with its reason because "software" here is a 20× per-frame
+    // regression (`docs/research/hardware-decode.md`) and it is invisible from
+    // the outside: the preview looks identical, it is only slower. A log that
+    // does not say which decoder ran cannot answer "why was it slow".
+    let (path, why) = stats::decode_path(ctx.can_import_dmabuf());
+    shared.stats.set_decode_path(path);
+    tracing::info!(decode = path.label(), reason = why, "preview decode path");
+
     while let Some(job) = next_job(&shared) {
         render_one(&shared, &ctx, &compositor, job);
     }
@@ -750,6 +881,11 @@ fn next_job(shared: &Shared) -> Option<Job> {
                     to,
                     "renderer fell behind; dropping late frames"
                 );
+                // Counted under the `work` guard, which is safe because the
+                // stats mutex is a leaf: nothing under it takes another lock,
+                // so there is no order to invert. It is a single add and it
+                // never logs — the count reaches the file in the next summary.
+                shared.stats.record_dropped(to - from);
                 work.cursor = to;
             }
             Pacing::Idle => {
@@ -770,6 +906,65 @@ fn next_job(shared: &Shared) -> Option<Job> {
 const MAX_PENDING_ENCODES: usize = 3;
 
 static PENDING_ENCODES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// One encode, ready to run on the encode thread.
+type EncodeJob = Box<dyn FnOnce() + Send + 'static>;
+
+/// The thread that turns composited frames into JPEG, and the queue into it.
+///
+/// **This used to be `rayon::spawn`, and that is what made the preview hang.**
+/// The symptom pointed nowhere near the cause, so it is worth the space:
+///
+/// - `encoder.rs` holds one process-wide mutex around the one hardware JPEG
+///   encoder, and the RGBA→NV12 conversion used to run *inside* it — and that
+///   conversion is a **rayon parallel iterator**.
+/// - A rayon worker that blocks inside a parallel iterator does not idle. It
+///   joins the work-stealing loop and runs *any* other job in the pool —
+///   including another encode `rayon::spawn`ed here, which asks for the mutex
+///   the very same thread is holding. `parking_lot::Mutex` is not reentrant, so
+///   the thread parks forever and never releases the lock.
+///
+/// From the outside: five frames and then nothing for thirty seconds with
+/// `playing=true`, every thread in `futex_wait`, no GPU work in flight.
+/// `PENDING_ENCODES` never falls, so [`render_one`] switches to encoding inline
+/// and the render thread blocks on the same lock too.
+/// `CHUKCUT_PREVIEW_JPEG=hardware` on `tests/preview.rs` hung 7 runs out of 7.
+///
+/// The conversion has since moved out from under the lock, which is the fix
+/// that actually closes the class — see `encoder.rs`'s `HARDWARE`. **This
+/// change is still worth having on its own**, and the reason is the second
+/// deadlock that one revealed: a *non*-rayon thread that dispatches under the
+/// lock waits for a worker, and if the pool is meanwhile full of jobs waiting
+/// for that lock, nobody moves. Keeping encodes out of the pool means the pool
+/// cannot fill with them.
+///
+/// One thread, not several: the hardware encoder is one non-reentrant device
+/// whose mutex serialised these encodes anyway, and one encode is 6 ms hardware
+/// or 10 ms software against a 33 ms budget, so a second thread would only wait
+/// for the first.
+///
+/// The queue is bounded at [`MAX_PENDING_ENCODES`]; a full queue means the
+/// caller encodes inline, which is the same back-pressure as before.
+fn encode_queue() -> &'static std::sync::mpsc::SyncSender<EncodeJob> {
+    static QUEUE: std::sync::OnceLock<std::sync::mpsc::SyncSender<EncodeJob>> =
+        std::sync::OnceLock::new();
+    QUEUE.get_or_init(|| {
+        let (sender, receiver) = std::sync::mpsc::sync_channel::<EncodeJob>(MAX_PENDING_ENCODES);
+        std::thread::Builder::new()
+            .name("chukcut-preview-encode".into())
+            .spawn(move || {
+                // Ends when the sender is dropped, which only happens at
+                // process exit: the queue outlives any one session, exactly as
+                // rayon's pool did.
+                while let Ok(job) = receiver.recv() {
+                    job();
+                    PENDING_ENCODES.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            })
+            .expect("spawn the preview encode thread");
+        sender
+    })
+}
 
 fn render_one(shared: &Arc<Shared>, ctx: &Arc<RenderContext>, compositor: &Compositor, job: Job) {
     let session = &job.session;
@@ -836,7 +1031,32 @@ fn render_one(shared: &Arc<Shared>, ctx: &Arc<RenderContext>, compositor: &Compo
             // The two halves are reported separately because they now run in
             // parallel: what fits in the budget is the larger of them, not the
             // sum. `over_budget` is judged on that.
-            let slowest_ms = composite_micros.max(encode_micros) as f64 / 1000.0;
+            let slowest = composite_micros.max(encode_micros) as i64;
+            let slowest_ms = slowest as f64 / 1000.0;
+
+            // Three integer adds and a bucket increment. Everything that costs
+            // anything — the divisions, the percentile, the formatting —
+            // happens once a second in the pacer, not here.
+            if let Some(fallback) = shared.stats.record_frame(scrub, slowest, backend) {
+                // The encoder changed backend under us. `encode_preview_jpeg`
+                // falls back silently by design, and on a 1080x1920 frame that
+                // is 31 ms of CPU against 6.2 ms of GPU — enough on its own to
+                // turn smooth playback into a stutter, and otherwise invisible.
+                tracing::info!(
+                    from = fallback.from.label(),
+                    to = fallback.to.label(),
+                    width = size.0,
+                    height = size.1,
+                    quality,
+                    reason = if super::vaapi::size_is_encodable(size.0, size.1) {
+                        "the hardware encoder refused the frame or has been written off"
+                    } else {
+                        "NV12 cannot represent this frame size"
+                    },
+                    "preview JPEG encoder changed backend"
+                );
+            }
+
             tracing::debug!(
                 session = session_id,
                 frame = frame_no,
@@ -859,45 +1079,56 @@ fn render_one(shared: &Arc<Shared>, ctx: &Arc<RenderContext>, compositor: &Compo
                 bytes: Arc::from(bytes.into_boxed_slice()),
             });
 
+            // The picture has caught up with wherever the playhead was moved
+            // to. This — and not how long `seek` took to return — is the wait
+            // the user experienced; the command itself returns in microseconds
+            // because the decoder seek happens here, on another thread.
+            if let Some(slow) =
+                shared
+                    .seeks
+                    .complete(session_id, frame_no, std::time::Instant::now())
+            {
+                stats::emit_slow_seek(&slow);
+            }
+
             // A scrub frame is the one somebody is waiting to look at, so say so
             // the moment it exists. Playback frames are announced by the pacer
             // when they come due, not when they are made.
             //
-            // Unless the playhead has already gone past it, which this has to
-            // check because it runs on a rayon worker *after* the encode: the
-            // parked frame of a new session is a scrub, and if the user presses
-            // play immediately, the pacer can announce frames 1 and 2 before
-            // this announcement of frame 0 is emitted. The frontend then sees
-            // the playhead jump backwards for one frame. The pacer has already
-            // said where playback is, so there is nothing here to add.
-            //
-            // Latent until the render device stopped being opened per server:
-            // opening one cost long enough that a session's first scrub was
-            // always announced before playback could start. `gpu` made it free,
-            // and `tests/preview.rs::position_updates_arrive_in_order_as_the_\
-            // playhead_advances` began failing almost every run — a real
-            // ordering bug that a slow path had been hiding.
-            let overtaken = shared.clock.is_playing()
-                && frame_at(shared.clock.position(), fps) > frame_no;
-            if stored && scrub && !overtaken {
-                shared.emit(PreviewEvent::Position {
-                    session: session_id,
-                    frame: frame_no,
+            // Subordinate, not authoritative: this runs on the encode thread
+            // *after* the encode, so the pacer may already have announced a
+            // later frame — `Shared::emit_position` drops it if so, and that
+            // decision is taken under the same lock as the send. The whole
+            // account, and why the obvious version of the check is not enough,
+            // is on that function.
+            if stored && scrub {
+                shared.emit_position(
+                    session_id,
+                    frame_no,
                     time,
-                    playing: shared.clock.is_playing(),
-                });
+                    shared.clock.is_playing(),
+                    false,
+                );
             }
         }
     };
 
     if inline {
         finish();
-    } else {
-        PENDING_ENCODES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        rayon::spawn(move || {
-            finish();
-            PENDING_ENCODES.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-        });
+        return;
+    }
+
+    PENDING_ENCODES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if let Err(rejected) = encode_queue().try_send(Box::new(finish)) {
+        PENDING_ENCODES.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        // A full queue is the back-pressure `inline` above provides, arrived at
+        // one frame later; a disconnected one means the encode thread is gone,
+        // and dropping the frame silently would be worse than a stall.
+        let job = match rejected {
+            std::sync::mpsc::TrySendError::Full(job) => job,
+            std::sync::mpsc::TrySendError::Disconnected(job) => job,
+        };
+        job();
     }
 }
 
@@ -935,12 +1166,21 @@ fn pace_loop(shared: Arc<Shared>) {
         let frame = frame_at(position, session.fps);
         if last != Some((session.id, frame)) {
             last = Some((session.id, frame));
-            shared.emit(PreviewEvent::Position {
-                session: session.id,
-                frame,
-                time: position,
-                playing: true,
-            });
+            // The pacer is the authority on where playback is, which also makes
+            // it the authority on how many frames the user actually saw.
+            shared.stats.record_shown();
+            shared.emit_position(session.id, frame, position, true, true);
+        }
+
+        // The summary is driven from here rather than from the render thread on
+        // purpose. This loop runs every few milliseconds for as long as playback
+        // is running, whatever the renderer is doing — so a renderer that has
+        // stalled completely still produces a line, and that line says
+        // `shown=30 rendered=0`, which is the clearest possible statement of
+        // what went wrong. Driven from the render thread, a stall would produce
+        // no line at all: silence exactly when there is something to say.
+        if let Some(summary) = shared.stats.tick(std::time::Instant::now()) {
+            stats::emit(&summary, stats::Reason::Tick);
         }
 
         if session.duration > 0 && position >= session.duration {
@@ -953,6 +1193,9 @@ fn pace_loop(shared: Arc<Shared>) {
                 work.playing = false;
             }
             shared.wake.notify_all();
+            if let Some(summary) = shared.stats.finish(std::time::Instant::now()) {
+                stats::emit(&summary, stats::Reason::Stopped);
+            }
             shared.emit(PreviewEvent::Ended {
                 session: session.id,
             });
@@ -1041,6 +1284,26 @@ pub fn frame_protocol<R: tauri::Runtime>(
     }
 }
 
+/// Threads that answer frame-URL requests.
+///
+/// Small on purpose: these threads spend their time parked on a condition
+/// variable, not working, so the count is "how many frame requests may be
+/// waiting at once" and not "how many cores are there". Four covers a webview
+/// that has several images in flight during a stall; a fifth request runs on
+/// whichever thread frees up first, a few milliseconds later.
+const FRAME_REQUEST_THREADS: usize = 4;
+
+fn frame_request_pool() -> &'static rayon::ThreadPool {
+    static POOL: std::sync::OnceLock<rayon::ThreadPool> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(FRAME_REQUEST_THREADS)
+            .thread_name(|i| format!("chukcut-frame-request-{i}"))
+            .build()
+            .expect("build the frame request pool")
+    })
+}
+
 /// [`frame_protocol`], for `register_asynchronous_uri_scheme_protocol`.
 ///
 /// Answers on a scratch thread so that the brief wait for a frame that is
@@ -1058,15 +1321,25 @@ pub fn frame_protocol_async<R: tauri::Runtime>(
         .try_state::<Arc<PreviewServer>>()
         .map(|state| Arc::clone(&state));
 
-    // A rayon task rather than a fresh OS thread.
+    // A pooled task rather than a fresh OS thread.
     //
     // Every displayed frame is one request, so at 30 fps this path ran thirty
     // thread spawns a second, each of which then went on to wait on a condition
     // variable. Thread creation is cheap but not free, and the jitter it adds
-    // lands directly on the frame the user is waiting to see. Rayon's pool is
-    // already a dependency and already sized to the machine.
+    // lands directly on the frame the user is waiting to see.
+    //
+    // **Its own pool, not rayon's global one**, and that is the whole reason
+    // this function is not two lines shorter. `serve_uri` parks on a condition
+    // variable for up to `FRAME_WAIT` when the frame is not ready yet, and
+    // `vaapi::rgba_to_nv12` — the first stage of every preview encode — is a
+    // job *in* the global pool. Answering requests there means that exactly
+    // when the renderer falls behind, every miss takes a worker out of the pool
+    // the encode needs, which slows the encode, which produces more misses.
+    // That is the same feedback loop `request_frame` documents, arrived at
+    // through the scheduler instead of the decoder. A separate registry cannot
+    // starve the one doing the work.
     let started = std::time::Instant::now();
-    rayon::spawn(move || {
+    frame_request_pool().spawn(move || {
         let response = match server {
             Some(server) => server.serve_uri(&uri),
             None => text_response(
@@ -1326,6 +1599,7 @@ mod tests {
             Arc::new(PreviewSession::new(project(), PreviewOptions::default())),
             1_000_000,
             false,
+            SeekKind::SessionStart,
         );
         // Native, because the proxy table stops reducing anything at or below
         // a 1920 long edge. This assertion previously expected 960x540 and was
@@ -1470,6 +1744,7 @@ mod tests {
             Arc::new(PreviewSession::new(project(), PreviewOptions::default())),
             0,
             false,
+            SeekKind::SessionStart,
         );
         server.play().expect("session is open");
 
@@ -1525,6 +1800,89 @@ mod tests {
         server.stop();
     }
 
+    /// The wiring, not the arithmetic: the arithmetic is covered in
+    /// `stats::tests`, but nothing there proves that the render thread, the
+    /// encode thread and the pacer are actually counting into it. Without this
+    /// the whole module could be correct and never called.
+    #[test]
+    fn playback_leaves_numbers_a_log_line_can_be_built_from() {
+        if crate::modules::render::test_context().is_none() {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        }
+        let (server, _time, _exclusive) = shared_server();
+        server.set_source_provider(Arc::new(EmptySourceProvider));
+        let info = server.adopt(
+            Arc::new(PreviewSession::new(project(), PreviewOptions::default())),
+            0,
+            false,
+            SeekKind::SessionStart,
+        );
+        server.play().expect("session is open");
+
+        // Synchronises on the ring, so every frame below has been through
+        // `record_frame` by the time this returns.
+        let lead = DEFAULT_READ_AHEAD as i64;
+        await_frames(&server, info.session, 0..lead);
+
+        let summary = server
+            .shared
+            .stats
+            .finish(std::time::Instant::now())
+            .expect("playback rendered frames, so there is something to say");
+
+        assert!(
+            summary.rendered >= lead as u64,
+            "the render thread counted {} frames against {lead} in the ring",
+            summary.rendered
+        );
+        assert_eq!(
+            summary.dropped, 0,
+            "the clock never moved, so nothing can have been late"
+        );
+        assert_eq!((summary.width, summary.height), (info.width, info.height));
+        assert!(
+            summary.decode.is_some(),
+            "the render thread reports the decode path before its first frame"
+        );
+        assert!(summary.encode.is_some(), "and the encode thread reports its backend");
+        assert!(
+            summary.mean_ms > 0.0 && summary.mean_ms.is_finite(),
+            "mean {}",
+            summary.mean_ms
+        );
+        assert!(
+            summary.p99_ms >= summary.mean_ms,
+            "p99 {} is below the mean {}",
+            summary.p99_ms,
+            summary.mean_ms
+        );
+        // One bucket of slack: the maximum is exact and the percentile is the
+        // upper edge of the bucket its sample fell in, so p99 may legitimately
+        // sit up to `BUCKET_MICROS` above the largest sample.
+        let bucket_ms = super::stats::BUCKET_MICROS as f64 / 1000.0;
+        assert!(
+            summary.max_ms + bucket_ms >= summary.p99_ms,
+            "max {} is more than one bucket below p99 {}",
+            summary.max_ms,
+            summary.p99_ms
+        );
+        assert!(
+            (summary.budget_ms - 33.333).abs() < 0.01,
+            "a 30 fps project has a 33.3 ms budget, not {}",
+            summary.budget_ms
+        );
+
+        // Draining is not idempotent by accident: `finish` resets, so a stop
+        // straight after a final summary must not print a second empty one.
+        assert!(
+            server.shared.stats.finish(std::time::Instant::now()).is_none(),
+            "the window was drained"
+        );
+
+        server.stop();
+    }
+
     #[test]
     fn seeking_supersedes_the_session_and_the_old_url_stops_working() {
         if crate::modules::render::test_context().is_none() {
@@ -1536,6 +1894,7 @@ mod tests {
             Arc::new(PreviewSession::new(project(), PreviewOptions::default())),
             0,
             false,
+            SeekKind::SessionStart,
         );
         let second = server.seek(1_000_000).expect("session is open");
         assert!(second.session > first.session);

@@ -42,6 +42,8 @@ function renderClip(over: Partial<Parameters<typeof Segment>[0]> = {}) {
       locked={false}
       muted={false}
       razor={false}
+      linked={false}
+      linkable={false}
       zoom={1e-4}
       preview={null}
       ghosted={false}
@@ -53,6 +55,8 @@ function renderClip(over: Partial<Parameters<typeof Segment>[0]> = {}) {
       onSplit={noop}
       onDuplicate={noop}
       onDelete={noop}
+      onUnlink={noop}
+      onLink={noop}
       {...over}
     />,
   );
@@ -300,5 +304,29 @@ describe("audio on a clip", () => {
 
     expect(document.querySelector('[data-slot="waveform"]')).toBeNull();
     expect(filmstrip()).toBeNull();
+  });
+
+  it("gives a clip on an audio lane the full waveform, not a band", () => {
+    // What the sound of an imported file looks like once it has a lane of its
+    // own: the material is still the video, and the lane is what decides.
+    renderClip({ kind: "audio" });
+
+    const waveform = document.querySelector('[data-slot="waveform"]');
+    expect(waveform).toBeInTheDocument();
+    expect(filmstrip()).toBeNull();
+  });
+});
+
+describe("a linked clip", () => {
+  it("says so, because it is about to behave differently from how it looks", () => {
+    // A drag that moves two clips when the user grabbed one is otherwise
+    // indistinguishable from a bug.
+    renderClip({ linked: true });
+    expect(screen.getByLabelText("Linked to another clip")).toBeInTheDocument();
+  });
+
+  it("says nothing when it is on its own", () => {
+    renderClip();
+    expect(screen.queryByLabelText("Linked to another clip")).toBeNull();
   });
 });

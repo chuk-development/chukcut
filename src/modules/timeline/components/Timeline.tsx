@@ -5,10 +5,21 @@ import { clamp, MICROS_PER_SECOND } from "@/lib/time";
 import { useMediaStore } from "@/modules/media/store";
 import { preview } from "@/modules/preview/lib/session";
 import { usePreviewStore } from "@/modules/preview/store";
-import { runEdit, useProjectStore } from "@/modules/project/store";
-import type { Id, Micros, TimeRange, Track } from "@/modules/project/types";
+import { useProjectStore } from "@/modules/project/store";
+import type {
+  Id,
+  Micros,
+  Project,
+  // The component below is also called `Segment`; the document's one is the
+  // model.
+  Segment as SegmentModel,
+  TimeRange,
+  Track,
+} from "@/modules/project/types";
 import {
   findSegment,
+  linkedPartners,
+  linkGroupOf,
   materialDuration,
   projectDuration,
   rangeEnd,
@@ -20,21 +31,35 @@ import { Segment, type SegmentGesture } from "@/modules/timeline/components/Segm
 import { TimelineToolbar } from "@/modules/timeline/components/TimelineToolbar";
 import { TimeRuler } from "@/modules/timeline/components/TimeRuler";
 import { TrackHeader, TrackLane } from "@/modules/timeline/components/Track";
-import { timelineApply } from "@/modules/timeline/lib/api";
 import { registerTimelineDropTarget } from "@/modules/timeline/lib/dropTarget";
 import {
-  deleteSegment,
-  duplicateSegment,
+  copySegments,
+  deleteSegments,
+  duplicateSegments,
   insertMaterial,
+  linkSegments,
   minClipDuration,
+  moveSegments,
+  pasteEntries,
   redo,
+  type SegmentMove,
+  type SegmentTrim,
   segmentUnderPlayhead,
   splitAt,
   toggleTrackFlag,
+  trimSegments,
   undo,
+  unlinkSegment,
 } from "@/modules/timeline/lib/edits";
 import { buildMaterialIndex } from "@/modules/timeline/lib/materials";
 import { freeSpan, nearestFreeStart } from "@/modules/timeline/lib/placement";
+import {
+  allSelectableIds,
+  liveSelection,
+  runBetween,
+  type SelectionBand,
+  segmentsInBand,
+} from "@/modules/timeline/lib/selection";
 import {
   buildSnapContext,
   type SnapContext,
@@ -47,10 +72,13 @@ import {
   MIN_ZOOM,
   type RazorTarget,
   RULER_HEIGHT,
+  soleSelection,
   TRACK_HEADER_WIDTH,
   trackHeight,
   useTimelineStore,
 } from "@/modules/timeline/store";
+import { TransitionLane } from "@/modules/transitions/components/TransitionLane";
+import { applyOverlap, overlapGesture } from "@/modules/transitions/lib/edits";
 
 /** Empty timeline still shows this much time, so the ruler is never a stub. */
 const MIN_VISIBLE_SPAN = 20 * MICROS_PER_SECOND;
@@ -68,6 +96,84 @@ const TRAILING_PX = 480;
  */
 const VIEWPORT_QUANTUM = 256;
 const VIEWPORT_OVERSCAN = 512;
+/**
+ * How far the pointer has to travel on an empty lane before the press stops
+ * being a click and becomes a rubber band. Below this, a click that wobbles by
+ * a pixel would flash a selection box.
+ */
+const BAND_THRESHOLD_PX = 4;
+
+/**
+ * Clips that will move with the one being dragged, and where they are now.
+ *
+ * Two kinds of them, and the difference is who builds the edit:
+ *
+ * - **Link partners.** The edit is Rust's — `History::apply` expands a move of
+ *   a linked clip into a move of the whole group — so the gesture sends nothing
+ *   for these. `selected` is false.
+ * - **The rest of the selection.** Four clips dragged together are four
+ *   commands in one batch, and the gesture has to send all four.
+ *
+ * Either way the *drag* has to show them moving, or the timeline reads as one
+ * clip moving until the mouse comes up and the others jump. Captured when the
+ * gesture starts, because the document does not change during one.
+ */
+interface Partner {
+  id: Id;
+  trackId: Id;
+  target: TimeRange;
+  source: TimeRange;
+  speed: number;
+  /** For the source limit a trim may not pull past. */
+  materialId: Id;
+  /** In the selection, so this gesture owns its command. */
+  selected: boolean;
+}
+
+/**
+ * Everyone who moves when `grabbedId` moves, except `grabbedId` itself.
+ *
+ * The selection first, in document order, then the link partners of everything
+ * in it — and a clip is only listed once, because a selection that holds both
+ * halves of a linked pair must not move the sound twice. (Rust guards the same
+ * thing on the edit itself, in `compose_edits`; this is the preview's copy of
+ * the rule, and the two have to agree or the drag lies about where things will
+ * land.)
+ */
+function travellers(project: Project, movingIds: readonly Id[], grabbedId: Id): Partner[] {
+  const moving = new Set(movingIds);
+  const claimed = new Set(movingIds);
+  const partners: Partner[] = [];
+
+  const describe = (track: Track, segment: SegmentModel, isSelected: boolean): Partner => ({
+    id: segment.id,
+    trackId: track.id,
+    target: segment.target_range,
+    source: segment.source_range,
+    speed: segment.speed > 0 ? segment.speed : 1,
+    materialId: segment.material_id,
+    selected: isSelected,
+  });
+
+  for (const track of project.tracks) {
+    for (const segment of track.segments) {
+      if (segment.id !== grabbedId && moving.has(segment.id)) {
+        partners.push(describe(track, segment, true));
+      }
+    }
+  }
+
+  for (const id of movingIds) {
+    for (const partner of linkedPartners(project, id)) {
+      if (claimed.has(partner.id)) continue;
+      claimed.add(partner.id);
+      const track = project.tracks.find((lane) => lane.segments.some((s) => s.id === partner.id));
+      if (track) partners.push(describe(track, partner, false));
+    }
+  }
+
+  return partners;
+}
 
 type DragState =
   | {
@@ -77,7 +183,18 @@ type DragState =
       toTrackId: Id;
       originStart: Micros;
       start: Micros;
+      /**
+       * Where the pointer asked the clip to go, before the clamp that keeps it
+       * from overlapping its neighbours.
+       *
+       * Kept because the difference between this and `start` is the whole
+       * transition gesture: dragging a clip back over the neighbour it already
+       * touches leaves `start` unchanged — the clamp refuses the overlap — and
+       * the overlap the user drew survives only here.
+       */
+      proposedStart: Micros;
       duration: Micros;
+      partners: Partner[];
       /** Position of the live snap, for the guide line. Null when nothing is docked. */
       snapAt: Micros | null;
     }
@@ -89,9 +206,48 @@ type DragState =
       beforeSource: TimeRange;
       afterTarget: TimeRange;
       afterSource: TimeRange;
+      partners: Partner[];
       snapAt: Micros | null;
     }
   | null;
+
+/**
+ * A rubber band, while it is being dragged.
+ *
+ * In pixels relative to the scrolling content rather than in microseconds,
+ * because it is a rectangle on screen: the vertical extent has no time in it at
+ * all, and converting back and forth twice per pointer move to draw a box would
+ * be arithmetic for its own sake. It becomes a time range and a set of lanes
+ * once, on release, in `segmentsInBand`.
+ */
+interface BandState {
+  fromX: number;
+  fromY: number;
+  toX: number;
+  toY: number;
+  /** Client coordinates, kept for the lane hit test, which works in those. */
+  fromClientY: number;
+  toClientY: number;
+}
+
+/** Where a partner sits while its group is being dragged by the same deltas. */
+function partnerPreview(
+  drag: NonNullable<DragState>,
+  segmentId: Id,
+): { start: Micros; duration: Micros } | null {
+  const partner = drag.partners.find((candidate) => candidate.id === segmentId);
+  if (!partner) return null;
+  if (drag.kind === "move") {
+    const delta = drag.start - drag.originStart;
+    return { start: partner.target.start + delta, duration: partner.target.duration };
+  }
+  const head = drag.afterTarget.start - drag.beforeTarget.start;
+  const tail = rangeEnd(drag.afterTarget) - rangeEnd(drag.beforeTarget);
+  return {
+    start: partner.target.start + head,
+    duration: partner.target.duration + tail - head,
+  };
+}
 
 export function Timeline() {
   const project = useProjectStore((s) => s.project);
@@ -102,13 +258,14 @@ export function Timeline() {
   const zoom = useTimelineStore((s) => s.zoom);
   const scrollX = useTimelineStore((s) => s.scrollX);
   const playhead = useTimelineStore((s) => s.playhead);
-  const selectedSegmentId = useTimelineStore((s) => s.selectedSegmentId);
+  const selection = useTimelineStore((s) => s.selection);
   const tool = useTimelineStore((s) => s.tool);
   const snapping = useTimelineStore((s) => s.snapping);
   const setZoom = useTimelineStore((s) => s.setZoom);
   const setScrollX = useTimelineStore((s) => s.setScrollX);
   const setPlayhead = useTimelineStore((s) => s.setPlayhead);
   const select = useTimelineStore((s) => s.select);
+  const selectMany = useTimelineStore((s) => s.selectMany);
   const setTool = useTimelineStore((s) => s.setTool);
   const toggleSnapping = useTimelineStore((s) => s.toggleSnapping);
   // Deliberately not subscribed to `razorTarget`: it moves with the pointer,
@@ -122,6 +279,16 @@ export function Timeline() {
   const pendingScrollRef = useRef<number | null>(null);
   const [viewportWidth, setViewportWidth] = useState(0);
   const [drag, setDrag] = useState<DragState>(null);
+  const [band, setBand] = useState<BandState | null>(null);
+
+  /**
+   * Membership, as a set, rebuilt only when the selection is.
+   *
+   * Every clip on the timeline asks whether it is in there on every render, and
+   * the answer has to be a stable boolean or `React.memo` stops working — see
+   * `Timeline.paint.test.tsx`.
+   */
+  const selected = useMemo(() => new Set(selection), [selection]);
 
   const fps = project?.fps ?? 30;
   const duration = project ? projectDuration(project) : 0;
@@ -210,6 +377,18 @@ export function Timeline() {
       if (clientY >= rect.top && clientY <= rect.bottom) return trackId;
     }
     return null;
+  }, []);
+
+  /** Every lane a vertical drag crossed, ends included. */
+  const lanesBetween = useCallback((fromClientY: number, toClientY: number): Id[] => {
+    const top = Math.min(fromClientY, toClientY);
+    const bottom = Math.max(fromClientY, toClientY);
+    const hit: Id[] = [];
+    for (const [trackId, element] of lanesRef.current) {
+      const rect = element.getBoundingClientRect();
+      if (rect.top <= bottom && top <= rect.bottom) hit.push(trackId);
+    }
+    return hit;
   }, []);
 
   // ---------------------------------------------------------------------
@@ -324,6 +503,49 @@ export function Timeline() {
 
       event.preventDefault();
       const { segment, track } = found;
+
+      // The clips that will travel with this one, and the material already on
+      // their lanes. Both matter: the first so the drag *shows* the group
+      // moving, the second so it never comes to rest somewhere the group does
+      // not fit. Rust refuses a move whose mirror lands on an occupied range,
+      // and refuses the whole thing — so a drop the audio lane cannot take
+      // leaves the picture where it was, which reads as the drag having done
+      // nothing at all.
+      //
+      // Grabbing a clip that is part of a multi-selection drags the whole
+      // selection; grabbing one that is not drags it alone, whatever else is
+      // selected. That is the rule everywhere else a list can be dragged.
+      const chosen = liveSelection(current, useTimelineStore.getState().selection);
+      const dragsTheSelection = chosen.length > 1 && chosen.includes(segmentId);
+      const partners = travellers(current, dragsTheSelection ? chosen : [segmentId], segmentId);
+      const travellingIds = new Set([segmentId, ...partners.map((partner) => partner.id)]);
+      const partnerOccupants = partners.length
+        ? current.tracks
+            .filter((lane) => lane.segments.some((s) => travellingIds.has(s.id)))
+            .flatMap((lane) => lane.segments)
+            .filter((s) => !travellingIds.has(s.id))
+        : [];
+
+      /** What is on a lane that is not going anywhere. */
+      const stationaryOn = (trackId: Id) =>
+        (current.tracks.find((lane) => lane.id === trackId)?.segments ?? []).filter(
+          (s) => !travellingIds.has(s.id),
+        );
+
+      /** Everything the gesture moves, the grabbed clip included. */
+      const movers: Partner[] = [
+        {
+          id: segmentId,
+          trackId: track.id,
+          target: segment.target_range,
+          source: segment.source_range,
+          speed: segment.speed > 0 ? segment.speed : 1,
+          materialId: segment.material_id,
+          selected: true,
+        },
+        ...partners,
+      ];
+
       const startClientX = event.clientX;
       const { zoom: zoom0, snapping: snapping0 } = useTimelineStore.getState();
       const radius = snapRadius(zoom0);
@@ -335,8 +557,51 @@ export function Timeline() {
       const minDuration = minClipDuration(current.fps);
       const speed = segment.speed > 0 ? segment.speed : 1;
       const sourceLimit = materialDuration(current, segment.material_id);
-      // How far the trim handles can travel before they overlap a neighbour.
-      const room = freeSpan(track.segments, segmentId, segment.target_range);
+      // How far the trim handles can travel before they overlap a neighbour —
+      // on this lane or on a linked clip's.
+      const room = freeSpan(
+        [...track.segments, ...partnerOccupants],
+        segmentId,
+        segment.target_range,
+      );
+
+      /**
+       * How far the whole convoy may travel, at each edge.
+       *
+       * A group gesture applies *one* delta to every clip in it — that is what
+       * makes it one gesture — so the delta it may use is the intersection of
+       * what each clip can take. Anything looser and the batch is refused as a
+       * whole, which reads as the drag having done nothing.
+       */
+      const convoy = movers.map((mover) => {
+        const span = freeSpan(stationaryOn(mover.trackId), null, mover.target);
+        const limit = materialDuration(current, mover.materialId);
+        return {
+          moveMin: span.min - mover.target.start,
+          moveMax: span.max - rangeEnd(mover.target),
+          headMin: Math.max(
+            -Math.floor(mover.source.start / mover.speed),
+            span.min - mover.target.start,
+          ),
+          headMax: mover.target.duration - minDuration,
+          tailMin: minDuration - mover.target.duration,
+          tailMax: Math.min(
+            span.max - rangeEnd(mover.target),
+            limit === null
+              ? Number.POSITIVE_INFINITY
+              : Math.floor((limit - rangeEnd(mover.source)) / mover.speed),
+          ),
+        };
+      });
+      const together = (
+        pick: (limits: (typeof convoy)[number]) => number,
+        how: "min" | "max",
+      ): number =>
+        convoy.reduce(
+          (best, limits) =>
+            how === "min" ? Math.max(best, pick(limits)) : Math.min(best, pick(limits)),
+          how === "min" ? Number.NEGATIVE_INFINITY : Number.POSITIVE_INFINITY,
+        );
 
       let live: DragState = null;
 
@@ -352,11 +617,44 @@ export function Timeline() {
           const hit = magnetic ? snapRange(wanted, duration, context, radius) : null;
           const start = Math.max(0, Math.round(hit?.value ?? wanted));
 
+          // A selection travels in time only, and every clip in it stays on its
+          // own lane. Dropping four clips from four lanes onto the one under
+          // the pointer is not a gesture anyone means to make.
+          if (dragsTheSelection) {
+            const wantedDelta = start - segment.target_range.start;
+            const delta = clamp(
+              wantedDelta,
+              together((limits) => limits.moveMin, "min"),
+              together((limits) => limits.moveMax, "max"),
+            );
+            const landedTogether = segment.target_range.start + delta;
+            live = {
+              kind: "move",
+              segmentId,
+              fromTrackId: track.id,
+              toTrackId: track.id,
+              originStart: segment.target_range.start,
+              start: landedTogether,
+              proposedStart: start,
+              duration,
+              partners,
+              // Only claim the snap the clamp did not take back.
+              snapAt: landedTogether === start ? (hit?.at ?? null) : null,
+            };
+            setDrag(live);
+            return;
+          }
+
           const laneId = laneAtClientY(moveEvent.clientY);
           const lane = current.tracks.find((t) => t.id === laneId && !t.locked) ?? track;
           // A drag never ends in "target range is occupied": if the drop lands
           // on material, it butts up against the side it was dropped on.
-          const landed = nearestFreeStart(lane.segments, start, duration, segmentId);
+          const landed = nearestFreeStart(
+            [...lane.segments, ...partnerOccupants],
+            start,
+            duration,
+            segmentId,
+          );
 
           live = {
             kind: "move",
@@ -365,7 +663,9 @@ export function Timeline() {
             toTrackId: lane.id,
             originStart: segment.target_range.start,
             start: landed,
+            proposedStart: start,
             duration,
+            partners,
             snapAt:
               landed === start
                 ? (hit?.at ?? null)
@@ -380,10 +680,21 @@ export function Timeline() {
           const wanted = Math.max(0, originalStart + deltaMicros);
           const hit = magnetic ? snapInstant(wanted, context, radius) : null;
           let delta = Math.round((hit?.value ?? wanted) - originalStart);
-          // Cannot swallow the whole clip, and cannot run off the head of the source.
-          delta = Math.min(delta, segment.target_range.duration - minDuration);
-          delta = Math.max(delta, -Math.floor(segment.source_range.start / speed));
-          delta = Math.max(delta, room.min - originalStart);
+          if (dragsTheSelection) {
+            // Every clip in the selection gives up the same amount of head, so
+            // the limit is whichever of them runs out of material or of room
+            // first.
+            delta = clamp(
+              delta,
+              together((limits) => limits.headMin, "min"),
+              together((limits) => limits.headMax, "max"),
+            );
+          } else {
+            // Cannot swallow the whole clip, and cannot run off the head of the source.
+            delta = Math.min(delta, segment.target_range.duration - minDuration);
+            delta = Math.max(delta, -Math.floor(segment.source_range.start / speed));
+            delta = Math.max(delta, room.min - originalStart);
+          }
           const start = originalStart + delta;
           live = {
             kind: "trim",
@@ -399,6 +710,7 @@ export function Timeline() {
               start: Math.round(segment.source_range.start + delta * speed),
               duration: Math.round(segment.source_range.duration - delta * speed),
             },
+            partners,
             // Only claim a snap the clamps did not take back.
             snapAt: hit && hit.at === start ? hit.at : null,
           };
@@ -407,12 +719,20 @@ export function Timeline() {
           const wanted = originalEnd + deltaMicros;
           const hit = magnetic ? snapInstant(wanted, context, radius) : null;
           let delta = Math.round((hit?.value ?? wanted) - originalEnd);
-          delta = Math.max(delta, minDuration - segment.target_range.duration);
-          if (sourceLimit !== null) {
-            const spare = sourceLimit - rangeEnd(segment.source_range);
-            delta = Math.min(delta, Math.floor(spare / speed));
+          if (dragsTheSelection) {
+            delta = clamp(
+              delta,
+              together((limits) => limits.tailMin, "min"),
+              together((limits) => limits.tailMax, "max"),
+            );
+          } else {
+            delta = Math.max(delta, minDuration - segment.target_range.duration);
+            if (sourceLimit !== null) {
+              const spare = sourceLimit - rangeEnd(segment.source_range);
+              delta = Math.min(delta, Math.floor(spare / speed));
+            }
+            delta = Math.min(delta, room.max - originalEnd);
           }
-          delta = Math.min(delta, room.max - originalEnd);
           const end = originalEnd + delta;
           live = {
             kind: "trim",
@@ -428,6 +748,7 @@ export function Timeline() {
               start: segment.source_range.start,
               duration: Math.round(segment.source_range.duration + delta * speed),
             },
+            partners,
             snapAt: hit && hit.at === end ? hit.at : null,
           };
         }
@@ -441,19 +762,52 @@ export function Timeline() {
         const final = live;
         if (!final) return;
 
+        // Only the selected travellers get a command. A link partner is Rust's
+        // to move — `compose_edits` mirrors it — and sending one as well would
+        // move it twice.
+        const alsoMoving = final.partners.filter((partner) => partner.selected);
+
         if (final.kind === "move") {
+          // Dragging a clip back over the neighbour it already touches is not a
+          // move at all: the document forbids the overlap, so the clamp holds
+          // the clip still and `moved` below is false. What the user drew is
+          // the length of a transition, and this is the only place that reading
+          // is still available.
+          //
+          // Single clip, same lane, dragged leftwards — a batch drag has no one
+          // unambiguous join to attach to, so it stays an ordinary move.
+          if (
+            alsoMoving.length === 0 &&
+            final.toTrackId === final.fromTrackId &&
+            final.proposedStart < final.originStart
+          ) {
+            const document = useProjectStore.getState().project;
+            if (document && overlapGesture(document, final.segmentId, final.proposedStart)) {
+              void applyOverlap(document, final.segmentId, final.proposedStart);
+              return;
+            }
+          }
+
           const moved = final.start !== final.originStart || final.toTrackId !== final.fromTrackId;
           if (!moved) return;
-          void runEdit(() =>
-            timelineApply({
-              type: "move_segment",
-              segment_id: final.segmentId,
-              from_track: final.fromTrackId,
-              to_track: final.toTrackId,
-              from_start: final.originStart,
-              to_start: final.start,
-            }),
-          );
+          const delta = final.start - final.originStart;
+          const moves: SegmentMove[] = [
+            {
+              segmentId: final.segmentId,
+              fromTrackId: final.fromTrackId,
+              toTrackId: final.toTrackId,
+              fromStart: final.originStart,
+              toStart: final.start,
+            },
+            ...alsoMoving.map((partner) => ({
+              segmentId: partner.id,
+              fromTrackId: partner.trackId,
+              toTrackId: partner.trackId,
+              fromStart: partner.target.start,
+              toStart: partner.target.start + delta,
+            })),
+          ];
+          void moveSegments(moves);
           return;
         }
 
@@ -461,16 +815,41 @@ export function Timeline() {
           final.afterTarget.start === final.beforeTarget.start &&
           final.afterTarget.duration === final.beforeTarget.duration;
         if (unchanged) return;
-        void runEdit(() =>
-          timelineApply({
-            type: "trim_segment",
-            segment_id: final.segmentId,
-            before_target: final.beforeTarget,
-            before_source: final.beforeSource,
-            after_target: final.afterTarget,
-            after_source: final.afterSource,
+
+        // The same two deltas every clip in the selection takes, which is what
+        // the drag has been drawing all along.
+        const head = final.afterTarget.start - final.beforeTarget.start;
+        const tail = rangeEnd(final.afterTarget) - rangeEnd(final.beforeTarget);
+        const trims: SegmentTrim[] = [
+          {
+            segmentId: final.segmentId,
+            beforeTarget: final.beforeTarget,
+            beforeSource: final.beforeSource,
+            afterTarget: final.afterTarget,
+            afterSource: final.afterSource,
+          },
+          ...alsoMoving.map((partner) => {
+            const target = {
+              start: partner.target.start + head,
+              duration: partner.target.duration + tail - head,
+            };
+            return {
+              segmentId: partner.id,
+              beforeTarget: partner.target,
+              beforeSource: partner.source,
+              afterTarget: target,
+              // Each clip's source follows at its own speed: a head trim of
+              // 100 ms on a 2x clip consumes 200 ms of file. The same
+              // arithmetic as `mirror_trim` in Rust, which has to agree with
+              // this or the edit is refused for breaking the speed invariant.
+              afterSource: {
+                start: Math.round(partner.source.start + head * partner.speed),
+                duration: Math.round(target.duration * partner.speed),
+              },
+            };
           }),
-        );
+        ];
+        void trimSegments(trims);
       };
 
       window.addEventListener("pointermove", onMove);
@@ -486,8 +865,11 @@ export function Timeline() {
   const handleSplit = useCallback(() => {
     const current = useProjectStore.getState().project;
     if (!current) return;
-    const { playhead: at, selectedSegmentId: preferred } = useTimelineStore.getState();
-    const hit = segmentUnderPlayhead(current, at, preferred);
+    const { playhead: at, selection: chosen } = useTimelineStore.getState();
+    // With several clips selected there is no "the" selected clip to prefer, so
+    // the razor falls back to what is under the playhead — which is the same
+    // answer it gives with nothing selected at all.
+    const hit = segmentUnderPlayhead(current, at, soleSelection(chosen));
     if (!hit) {
       setError("Nothing to split: put the playhead over a clip first.");
       return;
@@ -497,17 +879,63 @@ export function Timeline() {
 
   const handleDelete = useCallback(() => {
     const current = useProjectStore.getState().project;
-    const id = useTimelineStore.getState().selectedSegmentId;
-    if (!current || !id) return;
+    const ids = liveSelection(current, useTimelineStore.getState().selection);
+    if (!current || ids.length === 0) return;
     select(null);
-    void deleteSegment(current, id);
+    void deleteSegments(current, ids);
   }, [select]);
 
   const handleDuplicate = useCallback(() => {
     const current = useProjectStore.getState().project;
-    const id = useTimelineStore.getState().selectedSegmentId;
-    if (!current || !id) return;
-    void duplicateSegment(current, id);
+    const ids = liveSelection(current, useTimelineStore.getState().selection);
+    if (!current || ids.length === 0) return;
+    void duplicateSegments(current, ids);
+  }, []);
+
+  // ---------------------------------------------------------------------
+  // The clipboard
+  //
+  // Copying is not an edit: it takes nothing from the document and puts
+  // nothing in the history. It only fills the store. Pasting is one edit, and
+  // one undo step, however many clips it puts down.
+  // ---------------------------------------------------------------------
+
+  const handleCopy = useCallback(() => {
+    const current = useProjectStore.getState().project;
+    const ids = liveSelection(current, useTimelineStore.getState().selection);
+    if (!current || ids.length === 0) return;
+    useTimelineStore.getState().setClipboard(copySegments(current, ids));
+  }, []);
+
+  const handleCut = useCallback(() => {
+    const current = useProjectStore.getState().project;
+    const ids = liveSelection(current, useTimelineStore.getState().selection);
+    if (!current || ids.length === 0) return;
+    useTimelineStore.getState().setClipboard(copySegments(current, ids));
+    select(null);
+    void deleteSegments(current, ids);
+  }, [select]);
+
+  const handlePaste = useCallback(() => {
+    const current = useProjectStore.getState().project;
+    const { clipboard, playhead: at } = useTimelineStore.getState();
+    if (!current || clipboard.length === 0) return;
+    void pasteEntries(current, clipboard, at).then((ids) => {
+      // Selecting what landed is half the feature: a paste onto a lane that was
+      // not on screen is otherwise indistinguishable from nothing happening.
+      if (ids.length > 0) selectMany(ids);
+    });
+  }, [selectMany]);
+
+  const handleSelectAll = useCallback(() => {
+    selectMany(allSelectableIds(useProjectStore.getState().project));
+  }, [selectMany]);
+
+  const handleLink = useCallback(() => {
+    const current = useProjectStore.getState().project;
+    const ids = liveSelection(current, useTimelineStore.getState().selection);
+    if (ids.length < 2) return;
+    void linkSegments(ids);
   }, []);
 
   const handleToggleFlag = useCallback((track: Track, flag: "muted" | "locked" | "hidden") => {
@@ -551,7 +979,40 @@ export function Timeline() {
         void redo();
         return;
       }
-      if (event.ctrlKey || event.metaKey || event.altKey) return;
+
+      // The clipboard four are bound here rather than as menu accelerators, and
+      // that is not an oversight: a GTK accelerator is consulted before the key
+      // reaches the focused widget, so an enabled Edit → Copy carrying Ctrl+C
+      // would take the key away from every text field in the app. The handler
+      // above has already declined to act when the focus is in one. See the
+      // module docs in `workspace/menu.rs`.
+      if (event.ctrlKey || event.metaKey) {
+        switch (event.key.toLowerCase()) {
+          case "a":
+            event.preventDefault();
+            handleSelectAll();
+            return;
+          case "c":
+            event.preventDefault();
+            handleCopy();
+            return;
+          case "x":
+            event.preventDefault();
+            handleCut();
+            return;
+          case "v":
+            event.preventDefault();
+            handlePaste();
+            return;
+          case "d":
+            event.preventDefault();
+            handleDuplicate();
+            return;
+          default:
+            return;
+        }
+      }
+      if (event.altKey) return;
 
       switch (event.key.toLowerCase()) {
         case "delete":
@@ -582,7 +1043,18 @@ export function Timeline() {
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [handleDelete, handleSplit, select, setTool, toggleSnapping]);
+  }, [
+    handleCopy,
+    handleCut,
+    handleDelete,
+    handleDuplicate,
+    handlePaste,
+    handleSelectAll,
+    handleSplit,
+    select,
+    setTool,
+    toggleSnapping,
+  ]);
 
   // ---------------------------------------------------------------------
   // Media drop
@@ -695,7 +1167,7 @@ export function Timeline() {
 
   const handleDuplicateSegment = useCallback((segmentId: Id) => {
     const current = useProjectStore.getState().project;
-    if (current) void duplicateSegment(current, segmentId);
+    if (current) void duplicateSegments(current, [segmentId]);
   }, []);
 
   const handleDeleteSegment = useCallback(
@@ -703,9 +1175,121 @@ export function Timeline() {
       const current = useProjectStore.getState().project;
       if (!current) return;
       select(null);
-      void deleteSegment(current, segmentId);
+      void deleteSegments(current, [segmentId]);
     },
     [select],
+  );
+
+  /**
+   * What a click on a clip does to the selection.
+   *
+   * Three gestures, and the third one is why the anchor exists:
+   *
+   * - **Plain.** Selects that clip alone — *unless* it is already selected,
+   *   which leaves the selection as it is so that a group can be picked up and
+   *   dragged. Narrowing a group back down to one clip is a click on empty
+   *   space and then a click on the clip.
+   * - **Ctrl/Cmd.** Adds it, or takes it out if it was in.
+   * - **Shift.** Takes the run between the anchor and this clip, along the one
+   *   lane they share. Across lanes there is no run, so it takes the one clip.
+   */
+  const handleSelectSegment = useCallback((segmentId: Id, event: React.PointerEvent) => {
+    const store = useTimelineStore.getState();
+    if (event.ctrlKey || event.metaKey) {
+      store.toggleSelection(segmentId);
+      return;
+    }
+    if (event.shiftKey) {
+      const current = useProjectStore.getState().project;
+      store.extendSelection(runBetween(current, store.selectionAnchor, segmentId));
+      return;
+    }
+    if (store.selection.includes(segmentId)) return;
+    store.select(segmentId);
+  }, []);
+
+  const handleUnlinkSegment = useCallback((segmentId: Id) => {
+    void unlinkSegment(segmentId);
+  }, []);
+
+  // ---------------------------------------------------------------------
+  // The rubber band
+  // ---------------------------------------------------------------------
+
+  /**
+   * Press on empty lane space.
+   *
+   * A click seeks and clears the selection, which is what it always did. A
+   * *drag* is a rubber band — dragging across the lanes no longer scrubs, and
+   * that is the trade: scrubbing has the ruler strip and the playhead handle,
+   * and there is nowhere else a band could start. Selecting as the band moves
+   * rather than only on release is what makes it possible to tell what it has
+   * caught before letting go.
+   */
+  const beginBand = useCallback(
+    (event: React.PointerEvent) => {
+      if (useTimelineStore.getState().tool === "razor") return;
+      const element = scrollRef.current;
+      if (!element) return;
+      event.preventDefault();
+
+      const rect = element.getBoundingClientRect();
+      const toContent = (clientX: number, clientY: number) => ({
+        x: clientX - rect.left + element.scrollLeft,
+        y: clientY - rect.top + element.scrollTop,
+      });
+      const origin = toContent(event.clientX, event.clientY);
+      const originClientY = event.clientY;
+      const zoom0 = useTimelineStore.getState().zoom;
+
+      // A modifier means "as well as what is already selected", the same as it
+      // does on a clip.
+      const additive = event.shiftKey || event.ctrlKey || event.metaKey;
+      const kept = additive ? useTimelineStore.getState().selection : [];
+      if (!additive) select(null);
+
+      const at = timeAtClientX(event.clientX);
+      setPlayhead(at);
+      void preview.seek(at);
+
+      let live: BandState | null = null;
+      const onMove = (moveEvent: PointerEvent) => {
+        const point = toContent(moveEvent.clientX, moveEvent.clientY);
+        if (
+          !live &&
+          Math.abs(point.x - origin.x) < BAND_THRESHOLD_PX &&
+          Math.abs(point.y - origin.y) < BAND_THRESHOLD_PX
+        ) {
+          // Still a click. A band that appeared on a one-pixel wobble would
+          // flash on every click on an empty lane.
+          return;
+        }
+        live = {
+          fromX: origin.x,
+          fromY: origin.y,
+          toX: point.x,
+          toY: point.y,
+          fromClientY: originClientY,
+          toClientY: moveEvent.clientY,
+        };
+        setBand(live);
+
+        const band: SelectionBand = {
+          from: Math.min(live.fromX, live.toX) / zoom0,
+          to: Math.max(live.fromX, live.toX) / zoom0,
+          trackIds: lanesBetween(live.fromClientY, live.toClientY),
+        };
+        selectMany([...kept, ...segmentsInBand(useProjectStore.getState().project, band)]);
+      };
+
+      const onUp = () => {
+        window.removeEventListener("pointermove", onMove);
+        setBand(null);
+      };
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onUp, { once: true });
+    },
+    [lanesBetween, select, selectMany, setPlayhead, timeAtClientX],
   );
 
   // ---------------------------------------------------------------------
@@ -748,7 +1332,7 @@ export function Timeline() {
         snapping={snapping}
         canUndo={canUndo}
         canRedo={canRedo}
-        hasSelection={selectedSegmentId !== null}
+        selectionCount={selection.length}
         hasClips={hasClips}
         onZoom={setZoom}
         onZoomToFit={zoomToFit}
@@ -759,6 +1343,7 @@ export function Timeline() {
         onSplit={handleSplit}
         onDuplicate={handleDuplicate}
         onDelete={handleDelete}
+        onLink={handleLink}
       />
 
       <div className="relative flex min-h-0 flex-1">
@@ -827,18 +1412,15 @@ export function Timeline() {
                     registerLane={registerLane}
                   >
                     {/* Empty lane space: clicking it deselects and moves the
-                        playhead — except under the razor, where a click on a
-                        gap is a cut that has nothing to cut. */}
+                        playhead, dragging draws a rubber band — except under
+                        the razor, where a click on a gap is a cut that has
+                        nothing to cut. */}
                     <button
                       type="button"
                       tabIndex={-1}
                       aria-label={`${track.name} lane`}
                       className="absolute inset-0 cursor-default border-none bg-transparent p-0 outline-none"
-                      onPointerDown={(event) => {
-                        if (tool === "razor") return;
-                        select(null);
-                        scrub(event);
-                      }}
+                      onPointerDown={beginBand}
                     />
 
                     {track.segments.map((segment) => {
@@ -851,17 +1433,23 @@ export function Timeline() {
                               start: drag.afterTarget.start,
                               duration: drag.afterTarget.duration,
                             }
-                          : null;
+                          : // A clip linked to the one under the pointer moves
+                            // with it, so it has to be drawn moving with it.
+                            drag
+                            ? partnerPreview(drag, segment.id)
+                            : null;
                       return (
                         <Segment
                           key={segment.id}
                           segment={segment}
                           kind={track.kind}
                           label={segmentLabel(project, segment)}
-                          selected={selectedSegmentId === segment.id}
+                          selected={selected.has(segment.id)}
                           locked={track.locked}
                           muted={track.muted || segment.volume <= 0}
                           razor={tool === "razor"}
+                          linked={linkGroupOf(project, segment) !== null}
+                          linkable={selection.length > 1 && selected.has(segment.id)}
                           zoom={zoom}
                           preview={dragging && drag.toTrackId !== track.id ? null : preview}
                           ghosted={Boolean(dragging && drag.toTrackId !== track.id)}
@@ -869,10 +1457,12 @@ export function Timeline() {
                           material={materials.get(segment.material_id) ?? null}
                           viewport={viewport}
                           onGesture={beginGesture}
-                          onSelect={select}
+                          onSelect={handleSelectSegment}
                           onSplit={handleSplitSegment}
                           onDuplicate={handleDuplicateSegment}
                           onDelete={handleDeleteSegment}
+                          onUnlink={handleUnlinkSegment}
+                          onLink={handleLink}
                         />
                       );
                     })}
@@ -887,6 +1477,8 @@ export function Timeline() {
                         locked={false}
                         muted={track.muted || external.segment.volume <= 0}
                         razor={false}
+                        linked={linkGroupOf(project, external.segment) !== null}
+                        linkable={false}
                         zoom={zoom}
                         preview={{ start: drag.start, duration: drag.duration }}
                         ghosted={false}
@@ -894,10 +1486,26 @@ export function Timeline() {
                         material={materials.get(external.segment.material_id) ?? null}
                         viewport={viewport}
                         onGesture={beginGesture}
-                        onSelect={select}
+                        onSelect={handleSelectSegment}
                         onSplit={handleSplitSegment}
                         onDuplicate={handleDuplicateSegment}
                         onDelete={handleDeleteSegment}
+                        onUnlink={handleUnlinkSegment}
+                        onLink={handleLink}
+                      />
+                    ) : null}
+
+                    {/* Transitions sit above the clips they join: the marker
+                        straddles the cut, so it cannot belong to either
+                        neighbour's box. Drawn after the segments so its drag
+                        handles win the pointer over the clip edges beneath. */}
+                    {project ? (
+                      <TransitionLane
+                        project={project}
+                        track={track}
+                        zoom={zoom}
+                        laneHeight={trackHeight(track.kind)}
+                        timeAtClientX={timeAtClientX}
                       />
                     ) : null}
 
@@ -912,6 +1520,23 @@ export function Timeline() {
                 </p>
               ) : null}
             </div>
+
+            {/* The rubber band. Drawn over the lanes and under the playhead,
+                and never a pointer target itself — the press that started it is
+                still being tracked on the window. */}
+            {band ? (
+              <span
+                aria-hidden
+                data-slot="selection-band"
+                className="pointer-events-none absolute z-20 rounded-[2px] border border-timeline-clip-selected bg-timeline-clip-selected/15"
+                style={{
+                  left: Math.min(band.fromX, band.toX),
+                  top: Math.min(band.fromY, band.toY),
+                  width: Math.abs(band.toX - band.fromX),
+                  height: Math.abs(band.toY - band.fromY),
+                }}
+              />
+            ) : null}
 
             {/* Snap guide: without it, magnetism reads as the drag fighting
                 back. It marks the candidate, not the clip, so it stays put

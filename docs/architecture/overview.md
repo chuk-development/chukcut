@@ -69,6 +69,7 @@ operations over the document, once as the lane UI that issues them.
 | `project` | Document model, load/save, validation | Project store, open/save dialogs |
 | `timeline` | Edit commands, undo/redo | Lanes, clips, drag/trim/split, ruler |
 | `media` | FFmpeg probe/decode, thumbnails, waveforms | Media library, import |
+| `gpu` | The process's one wgpu device and one VAAPI display | — |
 | `render` | wgpu compositor: project + time → frame | — |
 | `preview` | Frame server, playback clock | Canvas player, transport controls |
 | `export` | Full-res render + encode, progress | Export dialog, presets, progress |

@@ -1,7 +1,37 @@
 //! IPC commands for settings, recent projects and cache management.
 
-use super::paths;
+use super::menu::{self, MenuState};
 use super::settings::{RecentProjects, Settings};
+use super::{logging, paths};
+
+/// Tell the native menu bar what the document looks like now.
+///
+/// The frontend's stores are the only authority on this, so the menu is pushed
+/// rather than polled: every field here is read straight out of Zustand, and
+/// Rust keeps no copy of it beyond the enabled flags it sets. Which items that
+/// state lights up is decided in one pure function, `menu::enablement`.
+#[tauri::command]
+pub fn workspace_menu_sync(app: tauri::AppHandle, state: MenuState) {
+    menu::apply(&app, &state);
+}
+
+/// The webview's answer to the close request raised by File → Quit or by the
+/// window's close button.
+///
+/// `false` is the answer that matters: the window was never closed, so
+/// cancelling is simply not closing it. This is why the close is prevented
+/// first and confirmed second — once a window has begun closing there is
+/// nothing left to cancel.
+#[tauri::command]
+pub fn workspace_close_answer(window: tauri::Window, confirmed: bool) {
+    if confirmed {
+        if let Err(error) = window.destroy() {
+            tracing::error!(%error, "the window refused to close");
+        }
+    } else {
+        menu::end_close();
+    }
+}
 
 #[tauri::command]
 pub fn workspace_settings_get() -> Settings {
@@ -30,6 +60,29 @@ pub fn workspace_recent_record(path: String, name: String, now: i64) -> Result<(
 #[tauri::command]
 pub fn workspace_cache_size() -> u64 {
     paths::cache_size()
+}
+
+/// Where this run is writing its log, and where the logs live in general.
+///
+/// The directory is always answered and the file only when one was opened, so
+/// the UI can still show a person where to look on the machine where opening it
+/// failed. `file` is what a "show me" button reveals: revealing the file
+/// selects it in the file manager, which is strictly more useful than opening a
+/// directory of seven.
+#[tauri::command]
+pub fn workspace_log_path() -> LogLocation {
+    LogLocation {
+        directory: paths::logs_dir().display().to_string(),
+        file: logging::log_file().map(|path| path.display().to_string()),
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LogLocation {
+    pub directory: String,
+    /// `None` when file logging could not start — a read-only home directory,
+    /// most likely. The app runs anyway; see `logging::init`.
+    pub file: Option<String>,
 }
 
 #[tauri::command]
