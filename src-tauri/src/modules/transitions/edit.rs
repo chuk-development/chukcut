@@ -111,7 +111,17 @@ pub fn add(
         return Err("this clip already has a transition; change it instead".into());
     }
 
-    project.materials.transitions.push(material.clone());
+    // Kept in a canonical order rather than in the order they were added.
+    // Nothing reads the pool positionally — a transition is found by id — and
+    // pinning the order is what makes `remove` and `add` exact inverses:
+    // pushing meant that removing the first of two transitions and undoing it
+    // put it back second, and the fuzzer's byte-exact undo check found it
+    // (`tests/edit_fuzz.rs::transitions_survive_the_edits_that_move_the_clips_they_join`).
+    let at = project
+        .materials
+        .transitions
+        .partition_point(|t| t.id < material.id);
+    project.materials.transitions.insert(at, material.clone());
     project
         .segment_mut(segment_id)
         .expect("checked above")

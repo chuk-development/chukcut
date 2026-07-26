@@ -5,20 +5,31 @@
 //! until now nothing wrote to. Everything here is disposable by construction —
 //! deleting the whole tree costs the user nothing but the time to rebuild.
 //!
-//! ## The key, and why it is three things
+//! ## The key, and why it is four things
 //!
-//! A proxy is keyed on the source's **absolute path, byte size and
-//! modification time together**. Path alone is the obvious choice and it is
-//! wrong in the one case that matters: a source re-exported over its own
-//! filename — a colour grade redone, a clip re-rendered out of another tool —
-//! is a different picture at the same path, and a path-keyed cache would go on
-//! serving the old one. The symptom is an editor showing footage that no longer
-//! exists on disk, which is impossible to diagnose from the outside.
+//! A proxy is keyed on the source's **absolute path, byte size, modification
+//! time, and eight kilobytes from each end of the file**. Path alone is the
+//! obvious choice and it is wrong in the one case that matters: a source
+//! re-exported over its own filename — a colour grade redone, a clip
+//! re-rendered out of another tool — is a different picture at the same path,
+//! and a path-keyed cache would go on serving the old one. The symptom is an
+//! editor showing footage that no longer exists on disk, which is impossible to
+//! diagnose from the outside.
 //!
-//! Size and mtime are what every build system uses for the same reason, and
-//! they fail the same way: a rewrite that preserves both is invisible. Content
-//! hashing a 40 GB source at import is not a trade worth making, so this is a
-//! deliberate, documented limit rather than an oversight.
+//! Size and mtime are what every build system uses, and on their own they are
+//! **not enough**: the kernel stamps mtime at clock-tick granularity, so two
+//! writes microseconds apart get the same one, and a file rewritten in place
+//! without changing length keeps its key forever. That is not a theory — it is
+//! what `media::thumbnails::fingerprint` was changed to fix, with a unit test
+//! that writes `one` then `two` and watches both land in the same tick. The
+//! same technique is used here (that function is `pub(super)` to `media`, so
+//! this is the same idea rather than the same code) and the same test is below.
+//!
+//! What sixteen kilobytes still cannot catch is a same-length change confined to
+//! the middle of a file whose mtime also did not move — a re-mux of identical
+//! duration written inside one clock tick. Content-hashing a 40 GB source at
+//! import costs more than that mistake, so this is a deliberate, documented
+//! limit rather than an oversight.
 //!
 //! ## The cap
 //!
@@ -56,6 +67,14 @@ pub const DEFAULT_CAP_BYTES: u64 = 20 * 1024 * 1024 * 1024;
 
 const INDEX_FILE: &str = "index.json";
 
+/// Bytes read from each end of a file to identify its contents.
+///
+/// Enough to cover a container header — moov atom, EBML head, RIFF chunk table
+/// — which is where an edit that keeps a file's length still shows up, and the
+/// tail as well because an encoder that appends an index or a trailing moov
+/// leaves the first kilobytes untouched.
+const FINGERPRINT_SAMPLE: usize = 8 * 1024;
+
 /// What identifies a source file's content, for cache purposes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceKey {
@@ -64,14 +83,23 @@ pub struct SourceKey {
     pub size: u64,
     /// Modification time in nanoseconds since the Unix epoch. `0` when the
     /// filesystem does not report one, which is rare and simply weakens the
-    /// key to path-plus-size.
+    /// key to path-plus-size-plus-content.
     pub mtime_nanos: u128,
+    /// FNV-1a over [`FINGERPRINT_SAMPLE`] bytes from each end of the file.
+    ///
+    /// The field that makes this key work, rather than merely look like it
+    /// works — see the module documentation. `0` for a file that cannot be
+    /// read, which cannot happen on the path that builds one of these but is
+    /// the honest answer if it ever does.
+    #[serde(default)]
+    pub content: u64,
 }
 
 impl SourceKey {
     /// Read the key of a file that exists.
     pub fn of(path: &Path) -> Result<Self> {
-        let metadata = std::fs::metadata(path).map_err(ProxyError::io(path))?;
+        let mut file = std::fs::File::open(path).map_err(ProxyError::io(path))?;
+        let metadata = file.metadata().map_err(ProxyError::io(path))?;
         let mtime_nanos = metadata
             .modified()
             .ok()
@@ -82,6 +110,7 @@ impl SourceKey {
             path: path.to_string_lossy().into_owned(),
             size: metadata.len(),
             mtime_nanos,
+            content: head_and_tail(&mut file, metadata.len()),
         })
     }
 
@@ -105,6 +134,7 @@ impl SourceKey {
         eat(self.path.as_bytes());
         eat(&self.size.to_le_bytes());
         eat(&self.mtime_nanos.to_le_bytes());
+        eat(&self.content.to_le_bytes());
 
         let stem: String = Path::new(&self.path)
             .file_stem()
@@ -398,6 +428,41 @@ fn drop_file(root: &Path, entry: &ProxyEntry) {
     }
 }
 
+/// FNV-1a over the first and last [`FINGERPRINT_SAMPLE`] bytes of `file`.
+///
+/// Reading 16 KB costs nothing measurable against the transcode it guards, and
+/// it is what turns "size and mtime" from a guess into an answer for every
+/// container that has a header — which is all of them.
+fn head_and_tail(file: &mut std::fs::File, length: u64) -> u64 {
+    use std::io::{Read, Seek, SeekFrom};
+
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    fn fnv1a(mut hash: u64, bytes: &[u8]) -> u64 {
+        for byte in bytes {
+            hash ^= *byte as u64;
+            hash = hash.wrapping_mul(PRIME);
+        }
+        hash
+    }
+
+    let mut hash = OFFSET;
+    let head = FINGERPRINT_SAMPLE.min(length as usize);
+    let mut buffer = vec![0u8; head];
+    if file.read_exact(&mut buffer).is_ok() {
+        hash = fnv1a(hash, &buffer);
+    }
+    if length > FINGERPRINT_SAMPLE as u64 {
+        let mut tail = vec![0u8; FINGERPRINT_SAMPLE];
+        if file.seek(SeekFrom::End(-(FINGERPRINT_SAMPLE as i64))).is_ok()
+            && file.read_exact(&mut tail).is_ok()
+        {
+            hash = fnv1a(hash, &tail);
+        }
+    }
+    hash
+}
+
 fn now_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -512,6 +577,39 @@ mod tests {
         // And the wrong file is gone, not merely unreferenced.
         assert_eq!(cache.stats().entries, 0);
         assert!(!cache.path_for(&key).exists());
+    }
+
+    /// The one size and mtime cannot catch, and the reason the key reads bytes.
+    ///
+    /// Two writes microseconds apart get the same mtime from the kernel, so a
+    /// source rewritten in place without changing length would otherwise keep
+    /// its key and serve the old proxy forever. `media::thumbnails` has the
+    /// same test for the same reason.
+    #[test]
+    fn a_rewrite_inside_one_clock_tick_still_invalidates() {
+        let scratch = Scratch::new("same-tick");
+        let cache = ProxyCache::open(scratch.path().join("cache"), DEFAULT_CAP_BYTES);
+        let source = scratch.file("clip.mp4", b"one");
+
+        let before = SourceKey::of(&source).expect("key");
+        place(&cache, &before, 128);
+        cache.insert(before.clone(), 1280, 720).expect("insert");
+        assert!(cache.lookup(&source).is_some());
+
+        // Same length, immediately after — no sleep, so the mtime very likely
+        // does not move at all.
+        std::fs::write(&source, b"two").expect("rewrite");
+        let after = SourceKey::of(&source).expect("key");
+        assert_eq!(after.size, before.size);
+        assert_ne!(
+            after.content, before.content,
+            "the content sample must notice a same-length rewrite"
+        );
+
+        assert!(
+            cache.lookup(&source).is_none(),
+            "a source rewritten in place must not keep serving the old proxy"
+        );
     }
 
     #[test]
@@ -640,6 +738,7 @@ mod tests {
             path: "/footage/clip.mp4".into(),
             size: 100,
             mtime_nanos: 5,
+            content: 7,
         };
         let same_path_new_content = SourceKey {
             mtime_nanos: 6,
@@ -650,8 +749,11 @@ mod tests {
             ..a.clone()
         };
 
+        let same_everything_but_content = SourceKey { content: 8, ..a.clone() };
+
         assert_ne!(a.digest(), same_path_new_content.digest());
         assert_ne!(a.digest(), other_file.digest());
+        assert_ne!(a.digest(), same_everything_but_content.digest());
         assert_eq!(a.digest(), a.clone().digest());
         // Readable in a file browser, and safe as a filename.
         assert!(a.digest().starts_with("clip-"));

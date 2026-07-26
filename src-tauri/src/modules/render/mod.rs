@@ -79,22 +79,16 @@ pub use source::{
 };
 pub use texture_pool::{PoolStats, PooledTexture, TextureKey, TexturePool};
 
-/// One GPU device for the whole test binary, or `None` on a machine with no
-/// adapter.
+/// The one GPU device, or `None` on a machine with no adapter.
 ///
-/// Shared rather than opened per test for two reasons. It is faster — opening
-/// an adapter costs tens of milliseconds and a dozen tests want one. And it is
-/// what the application does: there is exactly one `RenderContext` per process.
-/// Tests that each opened their own had a dozen devices alive at once under
-/// `cargo test`'s default parallelism, and creating and tearing down that many
-/// concurrently segfaults inside the Mesa driver often enough to make the suite
-/// unreliable — a failure that says nothing about the code under test.
+/// A name kept for the tests that read well with it; the device itself is
+/// [`crate::modules::gpu::render_context`]'s, which is the same one the
+/// application runs on. Tests that each opened their own had a dozen devices
+/// alive at once under `cargo test`'s default parallelism, and creating and
+/// tearing down that many concurrently segfaults inside the Mesa driver often
+/// enough to make the suite unreliable — a failure that says nothing about the
+/// code under test.
 #[cfg(test)]
 pub(crate) fn test_context() -> Option<std::sync::Arc<RenderContext>> {
-    use std::sync::{Arc, OnceLock};
-
-    static SHARED: OnceLock<Option<Arc<RenderContext>>> = OnceLock::new();
-    SHARED
-        .get_or_init(|| RenderContext::try_new().map(Arc::new))
-        .clone()
+    crate::modules::gpu::render_context()
 }

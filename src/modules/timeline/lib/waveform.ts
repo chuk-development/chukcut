@@ -9,6 +9,12 @@
  *
  * Kept pure and out of the component so it can be checked at several zoom
  * levels without a canvas.
+ *
+ * Rust guarantees `min <= 0 <= max` per bucket, so a column always spans the
+ * centre line. The aggregation below preserves that by starting both extremes
+ * at zero rather than at the first bucket it reads — a lane whose columns
+ * floated off the baseline would read as damaged audio, which is a worse lie
+ * than losing a DC offset nobody can hear.
  */
 
 import type { WaveformData } from "@/modules/media/lib/api";

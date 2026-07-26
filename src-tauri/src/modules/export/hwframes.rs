@@ -91,6 +91,12 @@ fn av_error(what: impl Into<String>, code: i32) -> ExportError {
 /// Opening one is the first thing that can fail on a machine whose `/dev/dri`
 /// exists but whose driver does not work, which is why [`super::hwaccel`] does
 /// it during detection rather than trusting the device node.
+///
+/// **A VAAPI one is not opened here.** [`Self::shared_vaapi`] takes a reference
+/// to the process's one display, which `gpu` owns and the decoder and the
+/// preview's JPEG encoder are using at the same time. The constructors below
+/// are crate-private for that reason; `vaInitialize` costs tens of milliseconds
+/// and a driver has a finite number of contexts.
 pub struct HwDeviceContext {
     /// Always non-null between construction and `Drop`.
     ptr: *mut ffmpeg::ffi::AVBufferRef,
@@ -99,15 +105,67 @@ pub struct HwDeviceContext {
 }
 
 impl HwDeviceContext {
+    /// A new reference to the process's one VAAPI display.
+    ///
+    /// This is what the encode path and the preview's JPEG encoder use. It is a
+    /// fresh `av_buffer_ref` on a display somebody else may already be
+    /// decoding with — sharing one is what FFmpeg's own CLI does when it
+    /// transcodes on VAAPI — so this value can be dropped, moved or handed to a
+    /// frame pool with no coordination.
+    pub fn shared_vaapi() -> Result<Self> {
+        let device = crate::modules::gpu::vaapi_device().ok_or_else(|| {
+            ExportError::Settings("this machine has no usable VAAPI device".into())
+        })?;
+        // SAFETY: `device` is a live handle for the duration of this function,
+        // so the buffer behind it cannot be freed underneath the call, and
+        // `av_buffer_ref` only reads it. What comes back is an independent
+        // reference that this value owns and unrefs exactly once in `Drop` —
+        // the rule the header of this file states for every reference that
+        // crosses a boundary.
+        let ptr = unsafe { ffmpeg::ffi::av_buffer_ref(device.as_ptr()) };
+        if ptr.is_null() {
+            return Err(ExportError::Settings(
+                "out of memory taking a reference to the VAAPI device".into(),
+            ));
+        }
+        Ok(Self {
+            ptr,
+            kind: ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI,
+            node: Some(device.node().to_owned()),
+        })
+    }
+
+    /// The device an encoder of this kind needs.
+    ///
+    /// VAAPI comes from the process's shared display; anything else — QSV is
+    /// the only other kind with a frame pool — is opened here, because there is
+    /// exactly one caller and nothing else in the process has one to share.
+    pub(crate) fn for_kind(
+        kind: ffmpeg::ffi::AVHWDeviceType,
+        node: Option<&str>,
+    ) -> Result<Self> {
+        if kind == ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI {
+            Self::shared_vaapi()
+        } else {
+            Self::open(kind, node)
+        }
+    }
+
     /// Open a VAAPI device on `node`, or on [`DEFAULT_RENDER_NODE`].
-    pub fn vaapi(node: Option<&str>) -> Result<Self> {
+    ///
+    /// Test-only, and that is the point: `gpu::vaapi_device` is the one caller
+    /// in the shipped binary that creates a display. This is kept because the
+    /// tests that check what a bad device node does have to open one that is
+    /// *not* the shared display to do it.
+    #[cfg(test)]
+    pub(crate) fn vaapi(node: Option<&str>) -> Result<Self> {
         Self::open(
             ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI,
             Some(node.unwrap_or(DEFAULT_RENDER_NODE)),
         )
     }
 
-    pub fn open(kind: ffmpeg::ffi::AVHWDeviceType, node: Option<&str>) -> Result<Self> {
+    pub(crate) fn open(kind: ffmpeg::ffi::AVHWDeviceType, node: Option<&str>) -> Result<Self> {
         crate::modules::media::ensure_initialized();
 
         // A NUL in a device path is not a real case, but turning it into a
@@ -614,7 +672,7 @@ mod tests {
     /// Tests that need one skip instead of failing, because CI has no GPU and a
     /// red build there would say nothing about the code.
     fn device() -> Option<HwDeviceContext> {
-        HwDeviceContext::vaapi(None).ok()
+        HwDeviceContext::shared_vaapi().ok()
     }
 
     #[test]

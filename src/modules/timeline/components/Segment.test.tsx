@@ -78,14 +78,11 @@ let ipc: IpcHarness;
 const running: (() => void)[] = [];
 
 function heldJob(payload: { path?: unknown }): string {
-  const jobId = `job-${String(payload.path)}`;
-  running.push(() => {
-    for (const call of ipc.calls("media_thumbnails")) {
-      if (call.path !== payload.path) continue;
-      ipc.channel("media_thumbnails").emit(terminal);
-    }
-  });
-  return jobId;
+  // The call this responder is answering, so the terminal batch later goes to
+  // this job's own channel rather than to whichever one happens to be last.
+  const call = ipc.count("media_thumbnails") - 1;
+  running.push(() => ipc.channel("media_thumbnails", call).emit(terminal));
+  return `job-${String(payload.path)}`;
 }
 
 /** The message every job ends with, whatever happened. */
@@ -101,15 +98,20 @@ const terminal = {
 
 beforeEach(() => {
   ipc = installIpc();
-  ipc.handle("media_thumbnails", "job-1");
+  // Every clip retains its strip on mount, so every `renderClip` starts a job.
+  // They are all held open and ended below, which keeps one test's decode from
+  // sitting at the head of the queue during the next one.
+  ipc.handle("media_thumbnails", heldJob);
   ipc.handle("media_waveform", { buckets: 0, duration: 0, min: [], max: [], rms: [] });
 });
 
 afterEach(async () => {
   for (const finish of running) finish();
   running.length = 0;
-  // Let the queue drain before the next test scripts its own answers.
-  await vi.waitFor(() => expect(true).toBe(true));
+  // A macrotask, not a microtask: the queue advances to the next file on the
+  // terminal batch, and the next test's answers must not be scripted until it
+  // has. `vi.waitFor` would be satisfied on its first synchronous attempt.
+  await new Promise((resolve) => setTimeout(resolve, 1));
   ipc.restore();
 });
 
@@ -123,11 +125,11 @@ describe("a clip whose thumbnails have not arrived", () => {
     return (await import("@/modules/media/lib/thumbnails")).useThumbnailStore;
   }
 
-  it("lays out placeholders before anything has even been asked for", () => {
+  it("lays out placeholders the moment it mounts", () => {
     renderClip();
 
-    // A clip that has just been dropped has no strip at all. It still has to
-    // look like a clip waiting for frames, not like one that failed to get any.
+    // A clip that has just been dropped has no tiles yet. It still has to look
+    // like a clip waiting for frames, not like one that failed to get any.
     expect(filmstrip()).toHaveAttribute("data-status", "pending");
     expect(placeholders().length).toBeGreaterThan(0);
   });

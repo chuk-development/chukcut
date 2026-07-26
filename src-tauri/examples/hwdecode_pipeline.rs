@@ -86,7 +86,7 @@ fn main() {
         std::process::exit(2);
     }
 
-    let Some(ctx) = RenderContext::try_new().map(Arc::new) else {
+    let Some(ctx) = chukcut_lib::modules::gpu::render_context() else {
         eprintln!("no GPU adapter; nothing here can run");
         std::process::exit(1);
     };

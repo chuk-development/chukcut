@@ -135,6 +135,24 @@ describe("mapping buckets onto pixels", () => {
     expect(columns.map((column) => Number(column.max.toFixed(4)))).toEqual([0.8, 0.8, 0.8, 0.8]);
   });
 
+  it("keeps every column spanning the centre line", () => {
+    // Rust guarantees `min <= 0 <= max`. Preserving that here rather than
+    // trusting it is what stops a lane's columns floating off the baseline if a
+    // bucket ever arrives one-sided — which reads as damaged audio, a worse lie
+    // than losing a DC offset nobody can hear.
+    const offset: WaveformData = {
+      buckets: 2,
+      min: Float32Array.from([0.3, 0.4]),
+      max: Float32Array.from([0.9, 0.8]),
+      rms: Float32Array.from([0.6, 0.6]),
+      duration: 8 * SECOND,
+    };
+
+    const columns = waveformColumns({ ...CLIP, data: offset, zoom: 1e-6, fromPx: 0, widthPx: 2 });
+
+    expect(columns.every((column) => column.min <= 0 && column.max >= 0)).toBe(true);
+  });
+
   it("draws an outline and no body when Rust sent peaks only", () => {
     const columns = waveformColumns({
       ...CLIP,

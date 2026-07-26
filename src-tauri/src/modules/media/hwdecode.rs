@@ -94,6 +94,11 @@ fn hw_error(what: impl Into<String>, code: i32) -> MediaError {
 /// Cloning takes a new libavutil reference rather than opening a second
 /// display, which matters: every `vaInitialize` costs tens of milliseconds and
 /// the driver has a finite number of contexts.
+///
+/// The process has one of these and [`crate::modules::gpu::vaapi_device`] hands
+/// out the references — to this decoder, to the export encoder and to the
+/// preview's hardware JPEG encoder alike. The constructor below is crate-private
+/// so that stays true.
 pub struct VaapiDevice {
     /// Always non-null between construction and `Drop`.
     ptr: *mut ffmpeg::ffi::AVBufferRef,
@@ -115,15 +120,23 @@ pub struct VaapiDevice {
 /// takes its own reference, or reads `node`; nothing mutates through `&self`.
 ///
 /// What this impl does *not* claim is that the VADisplay behind the pointer may
-/// be *driven* concurrently. It is shared by [`shared`] across decoders, and
-/// those decoders are serialised by `provider::MediaSourceProvider`'s mutex for
-/// the same reason `VideoDecoder`'s `Send` impl needs it.
+/// be *driven* concurrently. It is shared by
+/// [`crate::modules::gpu::vaapi_device`] across decoders, and those decoders are
+/// serialised by `provider::MediaSourceProvider`'s mutex for the same reason
+/// `VideoDecoder`'s `Send` impl needs it. The encoders on the other side of the
+/// process drive their own codec contexts on the same display, which is what
+/// FFmpeg's own CLI does when it transcodes on VAAPI.
 unsafe impl Send for VaapiDevice {}
 unsafe impl Sync for VaapiDevice {}
 
 impl VaapiDevice {
     /// Open a VAAPI device on `node`, or on [`DEFAULT_RENDER_NODE`].
-    pub fn open(node: Option<&str>) -> Result<Self> {
+    ///
+    /// Crate-private, and called from exactly one place:
+    /// [`crate::modules::gpu::vaapi_device`], which opens the process's only
+    /// display and hands out references to it. Everything else takes one of
+    /// those.
+    pub(crate) fn open(node: Option<&str>) -> Result<Self> {
         ensure_initialized();
 
         let node = node.unwrap_or(DEFAULT_RENDER_NODE);
@@ -161,31 +174,18 @@ impl VaapiDevice {
         })
     }
 
-    /// The process-wide device, opened at most once.
-    ///
-    /// `None` on a machine with no working VAAPI — a headless server, a laptop
-    /// whose GPU is claimed by something else — which is a normal outcome and
-    /// not an error. The reason is logged once rather than returned, because
-    /// every caller's response to it is the same: use software.
-    pub fn shared() -> Option<VaapiDevice> {
-        static SHARED: OnceLock<Option<VaapiDevice>> = OnceLock::new();
-        SHARED
-            .get_or_init(|| match Self::open(None) {
-                Ok(device) => {
-                    tracing::info!(node = %device.node, "VAAPI decode device ready");
-                    Some(device)
-                }
-                Err(error) => {
-                    tracing::info!(%error, "no VAAPI device; decoding in software");
-                    None
-                }
-            })
-            .as_ref()
-            .map(VaapiDevice::clone)
-    }
-
     pub fn node(&self) -> &str {
         &self.node
+    }
+
+    /// The libavutil reference this handle owns.
+    ///
+    /// Crate-private and deliberately not a `pub` accessor: the only correct
+    /// thing to do with it is `av_buffer_ref` it, which is what
+    /// `export::hwframes::HwDeviceContext::shared_vaapi` does. Storing the
+    /// pointer instead would outlive this handle.
+    pub(crate) fn as_ptr(&self) -> *mut ffmpeg::ffi::AVBufferRef {
+        self.ptr
     }
 
     /// Point a not-yet-opened codec context at this device.
@@ -576,7 +576,7 @@ fn declares_vaapi(decoder: &ffmpeg::Codec) -> bool {
 
 /// Decode one embedded frame and insist that a VA surface comes back.
 fn trial_decode(codec: HwCodec) -> Result<()> {
-    let device = VaapiDevice::shared()
+    let device = crate::modules::gpu::vaapi_device()
         .ok_or_else(|| MediaError::NoHardware("no VAAPI device on this machine".into()))?;
     let found = hardware_decoder(codec.id()).ok_or_else(|| {
         MediaError::NoHardware(format!("no {} decoder can drive VAAPI", codec.label()))
@@ -688,16 +688,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn the_shared_device_is_shared_rather_than_reopened() {
-        // Two handles to one display, not two displays. If this ever starts
-        // opening a second, the symptom is a driver running out of contexts on
-        // a timeline with many clips.
-        let Some(first) = VaapiDevice::shared() else {
-            eprintln!("skipping: no VAAPI device");
-            return;
-        };
-        let second = VaapiDevice::shared().expect("a second handle");
-        assert_eq!(first.node(), second.node());
-    }
+    // The device is shared rather than reopened: `gpu::tests` holds that one,
+    // because `gpu` is where the sharing now happens.
 }

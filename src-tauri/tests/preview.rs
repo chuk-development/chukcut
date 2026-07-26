@@ -154,12 +154,14 @@ impl Events {
 
 /// Only one preview server at a time in this process.
 ///
-/// `PreviewServer` opens its own `RenderContext` on its render thread, so N
-/// servers means N GPU devices — which segfaults inside the driver on this
-/// machine at eight of them. The app only ever has one, so serialising here
-/// costs nothing and tests what actually runs. The lock is deliberately
-/// poison-tolerant: one failing test must not turn the rest into a cascade of
-/// confusing secondary failures.
+/// This used to be load-bearing for a second reason: `PreviewServer` opened its
+/// own `RenderContext` on its render thread, so N servers meant N GPU devices —
+/// which segfaults inside the driver on this machine at eight of them. It no
+/// longer opens anything; `chukcut_lib::modules::gpu` owns the one device and
+/// every server shares it. The serialisation stays because the app only ever
+/// has one server, so testing them one at a time is testing what actually runs.
+/// The lock is deliberately poison-tolerant: one failing test must not turn the
+/// rest into a cascade of confusing secondary failures.
 static ONE_SERVER: Mutex<()> = Mutex::new(());
 
 struct Running {

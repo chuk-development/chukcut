@@ -669,27 +669,21 @@ struct Job {
     scrub: bool,
 }
 
-/// The device the render thread draws with.
+/// The device the render thread draws with: the process's, not its own.
 ///
-/// The application opens its own here: the preview is the first thing that
-/// wants a GPU, and opening it on this thread keeps the cost off the command
-/// that started the session.
-#[cfg(not(test))]
-fn render_device() -> Option<Arc<RenderContext>> {
-    RenderContext::try_new().map(Arc::new)
-}
-
-/// The unit-test binary's single shared device.
+/// This used to open one here, with a `cfg(test)` seam that shared instead,
+/// because two live Vulkan instances in one address space reach a state where a
+/// `write_buffer` on one of them segfaults — measured at four runs in forty,
+/// and not reproducible with a single instance. The seam has been removed
+/// because the *application* had the same shape the test binary did: an export
+/// builds its own compositor while this thread is running, so a preview and an
+/// export meant two devices. `gpu` owns the only one now and there is nothing
+/// left to keep in step.
 ///
-/// A test process runs the compositor tests and this server in one address
-/// space. With two live Vulkan instances there, the loader's validation layer
-/// reaches a state where a `write_buffer` on one of them segfaults — measured
-/// at four runs in forty, and not reproducible with a single instance. Since
-/// the shipped application only ever has one preview server, one instance is
-/// also what it does; this seam exists so the *test binary* matches it.
-#[cfg(test)]
+/// Still lazy and still opened from this thread the first time a session needs
+/// a frame, which keeps the cost off the command that started the session.
 fn render_device() -> Option<Arc<RenderContext>> {
-    crate::modules::render::test_context()
+    crate::modules::gpu::render_context()
 }
 
 fn render_loop(shared: Arc<Shared>) {
@@ -868,7 +862,24 @@ fn render_one(shared: &Arc<Shared>, ctx: &Arc<RenderContext>, compositor: &Compo
             // A scrub frame is the one somebody is waiting to look at, so say so
             // the moment it exists. Playback frames are announced by the pacer
             // when they come due, not when they are made.
-            if stored && scrub {
+            //
+            // Unless the playhead has already gone past it, which this has to
+            // check because it runs on a rayon worker *after* the encode: the
+            // parked frame of a new session is a scrub, and if the user presses
+            // play immediately, the pacer can announce frames 1 and 2 before
+            // this announcement of frame 0 is emitted. The frontend then sees
+            // the playhead jump backwards for one frame. The pacer has already
+            // said where playback is, so there is nothing here to add.
+            //
+            // Latent until the render device stopped being opened per server:
+            // opening one cost long enough that a session's first scrub was
+            // always announced before playback could start. `gpu` made it free,
+            // and `tests/preview.rs::position_updates_arrive_in_order_as_the_\
+            // playhead_advances` began failing almost every run — a real
+            // ordering bug that a slow path had been hiding.
+            let overtaken = shared.clock.is_playing()
+                && frame_at(shared.clock.position(), fps) > frame_no;
+            if stored && scrub && !overtaken {
                 shared.emit(PreviewEvent::Position {
                     session: session_id,
                     frame: frame_no,
@@ -1380,6 +1391,23 @@ mod tests {
         // clone of the binary's shared context, so stopping drops the
         // compositor and not the Vulkan instance.
         server.spawn_threads();
+
+        // Rewind the injected clock.
+        //
+        // The source is shared through the `OnceLock` along with the server,
+        // so a test that moves the playhead leaves it moved for every test
+        // after it in this process. That made these tests order-dependent:
+        // one of them asserts the ring settles at exactly the read-ahead
+        // limit, which is only true when the playhead is where the test
+        // thinks it is, and inheriting a position from a previous test put
+        // the window further out and produced one frame too many. It failed
+        // at two different assertions on two runs, which is the signature of
+        // shared state rather than of a race.
+        //
+        // A test that asserts the injected source is in control cannot start
+        // by inheriting somebody else's position.
+        time.set(0);
+
         (Arc::clone(server), Arc::clone(time), guard)
     }
 
@@ -1400,10 +1428,26 @@ mod tests {
     fn await_frames(server: &PreviewServer, session: u64, frames: std::ops::Range<i64>) {
         for frame in frames {
             let found = server.cache().wait(session, frame, RENDER_DEADLINE);
+            // The message carries the whole decision state, because "frame N
+            // never arrived" on its own says nothing about *why*. The renderer
+            // stops for exactly two reasons — it reached its read-ahead limit,
+            // or playback is no longer running — and telling those apart from
+            // the outside is otherwise guesswork. `pace` idles when
+            // `cursor >= frame_at(position) + read_ahead`, so with the position
+            // and the frame count printed the arithmetic is checkable by hand.
+            let status = server.status();
             assert!(
                 found.is_hit(),
-                "frame {frame} never arrived (ring holds {:?})",
-                server.cache().frames()
+                "frame {frame} never arrived (ring holds {:?}; \
+                 playing={} position={}µs playhead=frame {} session fps={} \
+                 cached={}/{})",
+                server.cache().frames(),
+                status.playing,
+                status.position,
+                status.frame,
+                status.fps,
+                status.cached,
+                status.capacity,
             );
         }
     }

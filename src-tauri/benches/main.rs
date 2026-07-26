@@ -45,7 +45,6 @@ mod fixtures;
 mod harness;
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use chukcut_lib::modules::export::hwaccel;
 use chukcut_lib::modules::media::hwdecode;
@@ -244,14 +243,17 @@ fn main() {
         }
     };
 
-    // One GPU device for the whole process. `docs/STATUS.md` notes the app
-    // opening two and that concurrent Vulkan instances were observed crashing
-    // this driver; a benchmark that opened one per group would be reproducing
-    // a known bug rather than measuring.
+    // One GPU device for the whole process — the library's own, which is the
+    // only one there is. Concurrent Vulkan instances were observed crashing this
+    // driver, so a benchmark that opened one per group would be reproducing a
+    // known bug rather than measuring. Asked for lazily so a run of the decode
+    // group alone still needs no adapter.
     let needs_gpu = wanted(bench_composite::GROUP)
         || wanted(bench_preview::FRAME_GROUP)
         || wanted(bench_export::GROUP);
-    let ctx = needs_gpu.then(RenderContext::try_new).flatten().map(Arc::new);
+    let ctx = needs_gpu
+        .then(chukcut_lib::modules::gpu::render_context)
+        .flatten();
 
     let mut results: Vec<Measurement> = Vec::new();
 
@@ -476,10 +478,18 @@ fn print_footer(report: &Report) {
         "{} rows, {skipped} skipped, {shaky} with a spread above 1.5x.",
         report.results.len()
     );
-    if report.load_after > report.load_before * 1.5 + 1.0 {
+    // Some of any rise is this process: the export group runs x264 on eight
+    // threads and the decode group is a busy loop, so a clean run typically ends
+    // a point or two above where it started. The threshold is set above that,
+    // and the wording says so, because "something else started" is a claim and
+    // the first version of this line made it wrongly.
+    if report.load_after > report.load_before * 2.0 + 2.0 {
         println!(
-            "The load average rose from {:.2} to {:.2} while this ran. Something else started; \
-             treat the later groups with suspicion.",
+            "The load average rose from {:.2} to {:.2} while this ran. Part of that is this \
+             process — the export group runs x264 on eight threads — but not this much: something \
+             else started, and the groups that ran last (export, project) are the ones to \
+             distrust. Take it again, and use --compare against this run: a group that moved and \
+             a group that did not is the signal.",
             report.load_before, report.load_after
         );
     }

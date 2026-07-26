@@ -6,7 +6,18 @@
 //! does not. Anything that needs a surface builds it on top of this device;
 //! nothing here knows that surfaces exist.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use super::error::{RenderError, Result};
+
+/// Devices alive in this process. One, unless somebody went around `gpu`.
+///
+/// Kept because the failure it guards against is intermittent and expensive to
+/// diagnose from scratch: two live Vulkan instances in one address space have
+/// been observed segfaulting inside the Mesa driver on this machine. A counter
+/// costs nothing and turns "the app crashed once in twenty runs" into a line in
+/// the log naming the cause.
+static LIVE_DEVICES: AtomicUsize = AtomicUsize::new(0);
 
 /// Backends we are willing to run on, in the order we want them.
 ///
@@ -20,6 +31,36 @@ const BACKEND_PREFERENCE: [wgpu::Backends; 3] = [
     wgpu::Backends::GL,
     wgpu::Backends::all(),
 ];
+
+/// Instance flags, which in a debug build are not the ones wgpu would pick.
+///
+/// wgpu turns the **Khronos validation layer** on for debug builds, and on this
+/// machine that layer segfaults inside the Intel Vulkan driver the moment a
+/// DMA-BUF image's memory is bound — `vkBindImageMemory` called through
+/// `VkLayer_khronos_validation` into `libvulkan_intel`, on the first
+/// hardware-decoded frame the compositor imports. With the layer out of the way
+/// the identical call succeeds and the imported picture is verified correct to a
+/// mean channel difference of 1.2 (`examples/hwdecode_pipeline --verify`), so the
+/// fault is in the layer or the driver rather than in the descriptor we hand
+/// them. It made `cargo test --test compositor` die with signal 11 and no other
+/// diagnostic, which is a long afternoon for whoever meets it next.
+///
+/// What is lost is small and what is kept is the important part: **wgpu's own
+/// validation is in wgpu-core and is always on**, so a wrong bind group or an
+/// out-of-range copy is still caught with a readable message, routed into
+/// `tracing` below. The Vulkan layer is a second, lower net.
+///
+/// `WGPU_VALIDATION=1` puts it back for anyone debugging something the layer
+/// would catch — and who is prepared for the crash on the decode path, or is
+/// running with `CHUKCUT_DECODE=software`.
+fn instance_flags() -> wgpu::InstanceFlags {
+    let mut flags = wgpu::InstanceFlags::from_build_config().with_env();
+    if std::env::var("WGPU_VALIDATION").as_deref() != Ok("1") {
+        flags.remove(wgpu::InstanceFlags::VALIDATION);
+        flags.remove(wgpu::InstanceFlags::GPU_BASED_VALIDATION);
+    }
+    flags
+}
 
 /// The GPU, and what it is willing to do.
 pub struct RenderContext {
@@ -35,11 +76,22 @@ impl RenderContext {
     /// Open a device, blocking. wgpu's request futures resolve on the calling
     /// thread for the native backends, so `pollster` here costs nothing and
     /// saves every caller from being async.
-    pub fn new() -> Result<Self> {
-        pollster::block_on(Self::new_async())
+    ///
+    /// **This is not how to get a device.** There is exactly one per process
+    /// and [`crate::modules::gpu::render_context`] owns it; this constructor is
+    /// crate-private, and called from exactly one place, so that stays true.
+    /// The reasoning is in the header of `modules/gpu`.
+    pub(crate) fn open() -> Result<Self> {
+        let context = pollster::block_on(Self::open_async())?;
+        if LIVE_DEVICES.fetch_add(1, Ordering::SeqCst) > 0 {
+            tracing::error!(
+                "a second GPU device was opened in this process; every caller should be                  going through gpu::render_context"
+            );
+        }
+        Ok(context)
     }
 
-    pub async fn new_async() -> Result<Self> {
+    async fn open_async() -> Result<Self> {
         let mut last_error = String::from("no backend was tried");
 
         for backends in BACKEND_PREFERENCE {
@@ -65,23 +117,10 @@ impl RenderContext {
         Err(RenderError::NoAdapter(last_error))
     }
 
-    /// Open a device, or `None` if this machine has no usable GPU.
-    ///
-    /// Tests and the "can this build even render?" probe use this; production
-    /// paths want [`Self::new`] so the reason ends up in a log.
-    pub fn try_new() -> Option<Self> {
-        match Self::new() {
-            Ok(ctx) => Some(ctx),
-            Err(e) => {
-                tracing::warn!(error = %e, "no render device available");
-                None
-            }
-        }
-    }
-
     async fn try_backend(backends: wgpu::Backends, force_fallback: bool) -> Result<Self> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends,
+            flags: instance_flags(),
             ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
 
@@ -217,6 +256,12 @@ impl RenderContext {
             return Err(RenderError::FrameTooLarge(width, height, max));
         }
         Ok(())
+    }
+}
+
+impl Drop for RenderContext {
+    fn drop(&mut self) {
+        LIVE_DEVICES.fetch_sub(1, Ordering::SeqCst);
     }
 }
 

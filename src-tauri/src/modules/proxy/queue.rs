@@ -788,6 +788,7 @@ mod tests {
                 path: source.to_string_lossy().into_owned(),
                 size: 1,
                 mtime_nanos: 1,
+                content: 1,
             },
             spec: spec(),
             reason: "because".into(),

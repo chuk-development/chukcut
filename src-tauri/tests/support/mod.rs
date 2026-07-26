@@ -83,16 +83,16 @@ pub fn test_name() -> String {
 // The GPU
 // ---------------------------------------------------------------------------
 
-static GPU: OnceLock<Option<Arc<RenderContext>>> = OnceLock::new();
-
-/// One device for the whole test binary.
+/// One device for the whole test binary — the library's own.
 ///
 /// Opening an adapter costs tens of milliseconds and several tests need one;
 /// `RenderContext` is `Sync`, so sharing it is both correct and much faster
-/// than a device per test.
+/// than a device per test. It is the same device the preview server and the
+/// exporter use, because `chukcut_lib::modules::gpu` only ever opens one and
+/// two live Vulkan instances in one address space have been observed crashing
+/// the driver.
 pub fn gpu() -> Option<Arc<RenderContext>> {
-    GPU.get_or_init(|| RenderContext::try_new().map(Arc::new))
-        .clone()
+    chukcut_lib::modules::gpu::render_context()
 }
 
 // ---------------------------------------------------------------------------

@@ -21,8 +21,8 @@
 use serde::Serialize;
 
 use crate::modules::export::hwaccel;
+use crate::modules::gpu;
 use crate::modules::media::hwdecode;
-use crate::modules::render::RenderContext;
 
 /// One encoder or decoder, as the settings panel shows it.
 #[derive(Debug, Clone, Serialize)]
@@ -95,12 +95,11 @@ pub fn report() -> HardwareReport {
         })
         .collect();
 
-    // Opening the render context here would be wasteful if one already exists
-    // and harmful if it does not — creating a second device is the bug
-    // `modules::gpu` was written to prevent. `try_new` is used rather than a
-    // shared accessor only because the consolidation is in flight; when it
-    // lands this becomes a read of the shared context.
-    match RenderContext::try_new() {
+    // The process's device, not one of this report's own: creating a second
+    // device is the bug `modules::gpu` exists to prevent. Asking for it here
+    // does open it if nothing has yet, which is the right trade — the user asked
+    // what their GPU is, and an answer needs an adapter.
+    match gpu::render_context() {
         Some(ctx) => {
             let info = ctx.adapter_info();
             HardwareReport {

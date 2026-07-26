@@ -8,12 +8,19 @@
 //!
 //! ## Why the clips look the way they do
 //!
-//! - **`testsrc2` plus noise, not a gradient.** A smooth synthetic source is a
-//!   best case for every entropy coder and would flatter the decoders by a
-//!   factor of two or more. The noise filter puts real high-frequency residual
-//!   in the picture so the bitrate — and therefore the decode cost — is in the
-//!   region real footage occupies. It is what makes fixture generation slow;
-//!   it is also what makes the numbers mean anything.
+//! - **`testsrc2` plus a little noise, not a gradient and not a blizzard.** A
+//!   smooth synthetic source is a best case for every entropy coder and would
+//!   flatter the decoders. But the first version of this file used
+//!   `noise=alls=10` and produced a **30 Mbit/s** 1080p30 clip against the
+//!   1.5 Mbit/s of the real phone footage the earlier measurements used — and
+//!   that one difference **reversed a conclusion in `docs/STATUS.md`**.
+//!   Near-incompressible noise buries the software decoder's entropy stage in
+//!   coefficients while the fixed-function decoder barely notices, so hardware
+//!   decode came out *faster* than software even with the download included,
+//!   which is the opposite of what real footage does. The noise is now light
+//!   and the target is the 5–15 Mbit/s band ordinary 1080p delivery occupies.
+//!   **A decode number is meaningless without the bitrate it was taken at**, so
+//!   [`Fixture::megabits`] is measured and printed next to every decode row.
 //! - **Half-second GOPs (`-g 15`).** Long GOPs would make the random-access
 //!   measurement dominated by one arbitrary encoder setting. Half a second is
 //!   what phone footage and most delivery encoders use.
@@ -38,12 +45,30 @@ pub struct Fixture {
     pub width: u32,
     pub height: u32,
     pub path: PathBuf,
+    /// Nominal duration in seconds, as asked of ffmpeg. Used only to turn the
+    /// file size into a bitrate, so it does not need to be exact.
+    pub seconds: f64,
 }
 
 impl Fixture {
     /// `h264 1920x1080`, which is what appears in the result table.
     pub fn label(&self) -> String {
         format!("{} {}x{}", self.codec, self.width, self.height)
+    }
+
+    /// Megabits per second, from the file size.
+    ///
+    /// From the size rather than from the container's declared bitrate because
+    /// WebM does not declare a per-stream one and this has to work for all four
+    /// codecs. It is a whole-file figure including the audio track, which is
+    /// ~0.1 Mbit/s and below the precision anybody reads this at.
+    ///
+    /// This exists because a decode benchmark with no bitrate next to it is a
+    /// trap: see the module documentation for the conclusion it already broke.
+    pub fn megabits(&self) -> f64 {
+        std::fs::metadata(&self.path)
+            .map(|m| m.len() as f64 * 8.0 / self.seconds.max(0.001) / 1_000_000.0)
+            .unwrap_or(f64::NAN)
     }
 }
 
@@ -223,8 +248,12 @@ pub fn ensure(dir: &Path, seconds: f64, fps: u32) -> std::io::Result<Fixtures> {
             continue;
         }
         for (width, height) in SIZES {
+            // `v2` in the name, not just `bench`: the recipe changed after the
+            // first version's bitrate was found to be unrepresentative, and a
+            // cache keyed only on codec and size would have silently kept
+            // serving the old clips forever.
             let path = dir.join(format!(
-                "bench_{}_{width}x{height}.{}",
+                "bench_v2_{}_{width}x{height}.{}",
                 recipe.codec, recipe.extension
             ));
             if !usable(&path) {
@@ -252,6 +281,7 @@ pub fn ensure(dir: &Path, seconds: f64, fps: u32) -> std::io::Result<Fixtures> {
                 width,
                 height,
                 path,
+                seconds,
             });
         }
     }
@@ -295,8 +325,11 @@ fn generate(
         "lavfi",
         "-i",
     ]);
+    // `alls=3` rather than the 10 this started at. See the module docs: 10 put
+    // the clip at 30 Mbit/s, twenty times real footage, and that alone flipped
+    // the software-versus-hardware decode verdict.
     command.arg(format!(
-        "testsrc2=size={width}x{height}:rate={fps}:duration={seconds},noise=alls=10:allf=t+u"
+        "testsrc2=size={width}x{height}:rate={fps}:duration={seconds},noise=alls=3:allf=t"
     ));
     command.args(["-f", "lavfi", "-i"]);
     command.arg(format!(

@@ -1,6 +1,11 @@
 [package]
 name = "chukcut"
 version = "0.1.0"
+# Two binaries exist — the app and `chukcut-bench` — so cargo has to be told
+# which one `cargo run` and `tauri build` mean. Without this the build fails
+# with "failed to find main binary", which names the symptom and not the
+# cause: a benchmark target was added and the app stopped being unambiguous.
+default-run = "chukcut"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"

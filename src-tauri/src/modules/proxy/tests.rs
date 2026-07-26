@@ -83,18 +83,31 @@ fn four_k_fixture() -> PathBuf {
     path
 }
 
-/// A diagonal gradient plus a moving bar. Cheap to compute, expensive to
-/// compress — which is the combination a fixture wants.
+/// Smooth gradients plus a moving hard-edged bar.
+///
+/// The content matters and the obvious choice is wrong. Per-pixel noise —
+/// `x ^ y` and friends — is cheap to write and behaves like nothing any camera
+/// produces: it does not compress at any resolution, so the *proxy* comes out
+/// larger and dearer to decode than the 4K source, and every conclusion drawn
+/// from it is backwards. Real footage is locally smooth with a few hard edges,
+/// so that is what this paints.
 fn paint(rgba: &mut [u8], width: u32, height: u32, index: u64) {
     let bar = ((index * 37) % width as u64) as u32;
     for y in 0..height {
         let row = (y * width * 4) as usize;
+        // Vertical component of the gradient, and the moving element that stops
+        // the encoder predicting every frame from the last one for nothing.
+        let green = ((y * 255) / height.max(1)) as u8;
         for x in 0..width {
             let offset = row + (x * 4) as usize;
-            let near_bar = x.abs_diff(bar) < 64;
-            rgba[offset] = if near_bar { 255 } else { (x ^ y) as u8 };
-            rgba[offset + 1] = ((x.wrapping_add(y)) >> 3) as u8;
-            rgba[offset + 2] = (y.wrapping_mul(3) ^ index as u32) as u8;
+            let near_bar = x.abs_diff(bar) < 96;
+            rgba[offset] = if near_bar {
+                255
+            } else {
+                ((x * 255) / width.max(1)) as u8
+            };
+            rgba[offset + 1] = green;
+            rgba[offset + 2] = (((x + y) as u64 / 8 + index * 4) % 200) as u8;
             rgba[offset + 3] = 255;
         }
     }
@@ -208,12 +221,21 @@ fn the_proxy_is_cheaper_to_decode_than_the_source() {
     let cancel = AtomicBool::new(false);
     generate::generate(&source, &dest, &spec, &cancel, &|_, _| {}).expect("build");
 
-    let source_ms = decode_cost_ms(&source, 1080);
-    let proxy_ms = decode_cost_ms(&dest, 1080);
+    // Interleaved and taken as the best of two, because this runs on whatever
+    // machine the suite runs on and the load can double between one measurement
+    // and the next — which is exactly how a real difference turns into a flaky
+    // test. Best-of cancels a slow moment; interleaving cancels a slow minute.
+    let mut source_ms = f64::INFINITY;
+    let mut proxy_ms = f64::INFINITY;
+    for _ in 0..2 {
+        source_ms = source_ms.min(decode_cost_ms(&source, 1080));
+        proxy_ms = proxy_ms.min(decode_cost_ms(&dest, 1080));
+    }
 
-    // A wide margin rather than a tight one: this runs on whatever machine the
-    // suite runs on, under whatever load. The claim being tested is "much
-    // cheaper", not a particular number.
+    // A wide margin rather than a tight one. The claim being tested is "much
+    // cheaper", not a particular number — the real figures are in
+    // `docs/STATUS.md` under "Proxy media, measured", where the 4K source is
+    // 8–11× the proxy.
     assert!(
         proxy_ms * 2.0 < source_ms,
         "the proxy decodes at {proxy_ms:.1} ms a frame against the source's \

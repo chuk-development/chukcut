@@ -88,6 +88,11 @@ pnpm build                # typecheck + bundle frontend
 pnpm biome check --write .
 cd src-tauri && cargo test
 cd src-tauri && cargo check -j 4    # -j 4: full parallelism OOMs on 32 GB
+
+# The performance suite. ~1 min, generates its own media, refuses to report if
+# /proc/loadavg is above 4 (pass --force to override, and then do not quote the
+# result). --filter <group>, --json <file>, --compare <file>. See docs/STATUS.md.
+cd src-tauri && cargo run --release --bin chukcut-bench -- --all
 ```
 
 ## Things that will bite you
@@ -108,16 +113,21 @@ cd src-tauri && cargo check -j 4    # -j 4: full parallelism OOMs on 32 GB
   driver's rather than FFmpeg's. Both are in `docs/STATUS.md` under "Traps".
   What is *not* built is zero-copy — the composited frame is still read back to
   the CPU and uploaded again; see `docs/research/zero-copy-encode.md`.
-- **Hardware decode is built, on VAAPI, and is deliberately not the default.**
-  `src-tauri/src/modules/media/hwdecode.rs` and `dmabuf.rs`; H.264, HEVC, VP9 and
-  AV1 all decode on this chip. It is off because it is *slower* than software
-  while the frame still has to arrive in system memory — the download out of a
-  tiled surface plus the swscale pass cost more than the decode — and only pays
-  once `render/` can import the surface as a texture. Measured both ways in
-  `docs/research/hardware-decode.md`, which also carries the patch `render/`
-  needs. Two things there that will otherwise cost you an afternoon:
-  `avcodec_find_decoder` returns a decoder that *cannot* drive the GPU for AV1,
-  and a decoder being in the build says nothing about the driver.
+- **Hardware decode is built, on VAAPI, and is now the default** — but only on a
+  device that can import the decoded surface as a texture.
+  `src-tauri/src/modules/media/hwdecode.rs` and `dmabuf.rs` decode; H.264, HEVC,
+  VP9 and AV1 all work on this chip. `render::dmabuf::import_plane` and the
+  compositor's two-plane case are what make it worth having: hardware decode
+  that still has to reach system memory is *slower* than software, because the
+  download out of a tiled surface plus the swscale pass cost more than the
+  decode. `media::provider::DEFAULT_ACCELERATION` is `Auto`, gated on
+  `RenderContext::can_import_dmabuf()`, with `CHUKCUT_DECODE=software|auto|vaapi`
+  still overriding it. Measured every way in
+  `docs/research/hardware-decode.md` and `docs/STATUS.md`. Three things there
+  that will otherwise cost you an afternoon: `avcodec_find_decoder` returns a
+  decoder that *cannot* drive the GPU for AV1, a decoder being in the build says
+  nothing about the driver, and **`sws_getContext` ignores the file's colour
+  tags** — it is BT.601 until you call `sws_setColorspaceDetails`.
 - **Preview frames do not go through `invoke()`.** They are served over the
   `chukcut-frame://` protocol. Read `docs/architecture/preview-pipeline.md`
   before touching the preview path; the reasoning there is load-bearing.

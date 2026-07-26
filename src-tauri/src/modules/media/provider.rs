@@ -35,8 +35,10 @@ use parking_lot::Mutex;
 use ffmpeg_next as ffmpeg;
 
 use super::decoder::{Acceleration, MappedFrame, VideoDecoder};
+use crate::modules::project::document::TextMaterial;
 use crate::modules::project::{Id, MaterialKind, Micros, Project};
 use crate::modules::render::{self, RenderContext, SourceFrame, SourceProvider, SourceRequest};
+use crate::modules::text::TextRenderer;
 
 /// Where a material's pixels come from.
 #[derive(Debug, Clone)]
@@ -49,10 +51,12 @@ enum MaterialSource {
         display: (u32, u32),
     },
     Image { path: PathBuf },
-    /// Text is rasterized rather than decoded. Not yet implemented; the
-    /// provider returns nothing for these so the rest of the frame still
-    /// composites.
-    Text,
+    /// Text is rasterised rather than decoded, at the size of the frame being
+    /// rendered, so the compositor's fit is the identity and the segment's own
+    /// transform is what places the title. The material travels with it because
+    /// rasterising needs the whole thing — string, font, size, colour, alignment
+    /// — and there is nothing to open.
+    Text(TextMaterial),
 }
 
 /// How close two requested times must be to reuse a cached texture.
@@ -190,6 +194,14 @@ fn acceleration(ctx: &RenderContext) -> Acceleration {
 pub struct MediaSourceProvider {
     /// Material id → where its pixels live. Built once from a project snapshot.
     sources: HashMap<Id, MaterialSource>,
+    /// The project's canvas, in document pixels.
+    ///
+    /// Only text needs it, and it needs it because font sizes are in document
+    /// pixels while a preview renders at a fraction of them: a 72-pixel title
+    /// in a 1080x1920 project is 36 device pixels tall in a 540x960 preview.
+    /// Everything else in this file scales by fitting a picture, which needs no
+    /// such reference.
+    canvas: (u32, u32),
     /// Overrides [`acceleration`] for this provider only.
     ///
     /// The application never sets it: the environment and the device decide,
@@ -248,11 +260,12 @@ impl MediaSourceProvider {
             );
         }
         for text in &project.materials.texts {
-            sources.insert(text.id.clone(), MaterialSource::Text);
+            sources.insert(text.id.clone(), MaterialSource::Text(text.clone()));
         }
 
         Self {
             sources,
+            canvas: (project.canvas.width.max(1), project.canvas.height.max(1)),
             forced,
             decoders: Mutex::new(HashMap::new()),
             textures: Mutex::new(HashMap::new()),
@@ -441,6 +454,44 @@ impl MediaSourceProvider {
         self.store(material_id, 0, &frame);
         Ok(frame)
     }
+
+    /// Rasterise a text layer and upload it.
+    ///
+    /// The layer is the size of the frame being rendered rather than of the
+    /// text, because `render::layout::fit_size` scales a source to fit the
+    /// canvas: a tightly cropped title would be stretched to fill the frame.
+    /// At frame size the fit is the identity and the segment's own transform
+    /// positions it, exactly as for a clip.
+    ///
+    /// `TextRenderer` caches by content hash, so the call this makes on every
+    /// frame costs a hash lookup rather than a rasterisation — half a
+    /// microsecond against five milliseconds, measured in
+    /// `docs/research/text-rendering.md`. `shared()` rather than a fresh
+    /// renderer, because constructing one scans the system's fonts.
+    fn text_frame(
+        &self,
+        ctx: &RenderContext,
+        material_id: &str,
+        material: &TextMaterial,
+        size: (u32, u32),
+    ) -> anyhow::Result<SourceFrame> {
+        let size = (size.0.max(1), size.1.max(1));
+        // A title does not vary with time, so any cached upload at the right
+        // size is valid whatever instant was asked for. The size check is what
+        // stops an export reusing the preview's smaller raster, which would be
+        // a visibly soft title in the delivered file.
+        if let Some(cached) = self.textures.lock().get(material_id) {
+            if (cached.frame.width, cached.frame.height) == size {
+                return Ok(cached.frame.clone());
+            }
+        }
+
+        let scale = size.0 as f32 / self.canvas.0 as f32;
+        let rastered = TextRenderer::shared().rasterize_material(material, size, scale);
+        let frame = upload_rgba(ctx, &rastered.pixels, rastered.width, rastered.height);
+        self.store(material_id, 0, &frame);
+        Ok(frame)
+    }
 }
 
 impl SourceProvider for MediaSourceProvider {
@@ -485,7 +536,9 @@ impl SourceProvider for MediaSourceProvider {
             MaterialSource::Image { path } => self
                 .image_frame(ctx, request.material_id, path)
                 .map(Some),
-            MaterialSource::Text => Ok(None),
+            MaterialSource::Text(material) => self
+                .text_frame(ctx, request.material_id, material, request.max_size)
+                .map(Some),
         }
     }
 }
@@ -693,6 +746,78 @@ mod tests {
     fn an_empty_project_yields_an_empty_provider() {
         let project = Project::new("t", CanvasConfig::default(), 30.0);
         assert!(MediaSourceProvider::from_project(&project).is_empty());
+    }
+
+    /// A title has to arrive as a texture the size of the frame, not the size of
+    /// the glyphs. `render::layout::fit_size` stretches a source to fill the
+    /// canvas, so a tightly cropped title would come out as a wall of letters —
+    /// and the segment's transform, which is what the user drags, would have
+    /// nothing left to position.
+    #[test]
+    fn a_text_material_rasterises_at_the_requested_frame_size() {
+        let Some(ctx) = crate::modules::render::test_context() else {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        };
+        let mut project = Project::new(
+            "t",
+            CanvasConfig {
+                width: 1080,
+                height: 1920,
+                background: [0.0, 0.0, 0.0, 1.0],
+            },
+            30.0,
+        );
+        project.materials.texts.push(TextMaterial {
+            id: "t1".into(),
+            content: "Hello".into(),
+            font_family: String::new(),
+            font_size: 72.0,
+            color: [1.0, 1.0, 1.0, 1.0],
+            bold: false,
+            italic: false,
+            align: Default::default(),
+            stroke_width: 0.0,
+            stroke_color: [0.0, 0.0, 0.0, 1.0],
+            shadow: None,
+            background: None,
+        });
+        let provider = MediaSourceProvider::from_project(&project);
+
+        // Half resolution, as the preview renders it.
+        let frame = provider
+            .frame(
+                &ctx,
+                &SourceRequest {
+                    material_id: "t1",
+                    kind: MaterialKind::Text,
+                    source_time: 0,
+                    segment_id: "seg",
+                    max_size: (540, 960),
+                },
+            )
+            .expect("rasterise")
+            .expect("a text material draws something");
+        assert_eq!(frame.size(), (540, 960));
+        assert!(!frame.is_planar(), "a title is RGBA, not a video surface");
+
+        // Full resolution afterwards, as the export asks for it. The cached
+        // half-size raster must not be reused: that is a soft title in the
+        // delivered file, and it is invisible in the preview that produced it.
+        let full = provider
+            .frame(
+                &ctx,
+                &SourceRequest {
+                    material_id: "t1",
+                    kind: MaterialKind::Text,
+                    source_time: 0,
+                    segment_id: "seg",
+                    max_size: (1080, 1920),
+                },
+            )
+            .expect("rasterise")
+            .expect("a text material draws something");
+        assert_eq!(full.size(), (1080, 1920));
     }
 
     #[test]

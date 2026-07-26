@@ -5,7 +5,7 @@ Sessions are long and are not reopened, so nothing important is allowed to live
 only in a conversation. If you learn something that would change how the next
 person works, it belongs in this repository, not in a chat log.
 
-Last updated: 2026-07-25.
+Last updated: 2026-07-26.
 
 ## What this is
 
@@ -31,16 +31,18 @@ Each of these was measured or checked against an independent tool, not assumed.
 | Capability | Evidence |
 |---|---|
 | Import of arbitrary formats | FFmpeg probe; canvas and frame rate adopted from the first clip |
+| Performance, reproducibly | `cargo run --release --bin chukcut-bench -- --all` — six groups, 75 rows, generates its own fixtures, refuses to report on a busy machine, `--json`/`--compare` for regressions. Baseline for this commit in `src-tauri/benches/baseline-4da5cff.json` |
 | Frame-accurate decode | `examples/render_smoke.rs` — output matches ffmpeg's own frame at the same timestamp to a max channel delta of 2, no pixel differing by more than 8 |
 | GPU compositing | wgpu on Vulkan, Intel Raptor Lake iGPU; transform, crop, opacity, keyframes |
-| Preview playback | ~13.7 ms per frame at p50 against a 33.3 ms budget, decode p50 7.2 ms |
+| Preview playback | `chukcut-bench --filter preview-frame` — **10.7 ms** for a whole 1920×1080 frame (decode, composite, readback, JPEG), i.e. 32% of the 30 fps budget and 64% of the 60 fps one, measured serially at native resolution on a quiet machine |
 | Audio playback | cpal, 48 kHz stereo; the device's played-sample count is the clock master |
 | Timeline editing | Magnetic docking, razor at the pointer, undo/redo via invertible commands |
 | Export | `examples/export_smoke.rs` — 240 declared **and** 240 decodable frames, exact 4.000 s duration, AAC track at −18.2 dB mean, −1.7 dB peak |
 | Hardware preview JPEG (VAAPI) | `mjpeg_vaapi` on the Intel iGPU. A 1080x1920 preview frame encodes in 6.2 ms against 31 ms for the old pure-Rust encoder, and matches the software encoder's picture at 37 dB PSNR. Falls back to libjpeg-turbo on any machine or frame size the device refuses |
 | Hardware export (VAAPI) | `h264_vaapi` and `hevc_vaapi` on the Intel iGPU. 240 declared and 240 decodable frames, exact 8.000 s, audio identical to the software export at −17.7 dB mean. Frames match the software encode at 51–53 dB PSNR on luma and 60–62 dB on chroma |
 | Hardware decode (VAAPI) | H.264, HEVC, VP9 **and AV1**, each probed by decoding a real embedded frame. `tests/decode.rs` — 34 tests, 22 of them run against both the software and hardware decoders and pass identically, including every seek, VFR and rotation case. The two decoders produce the same picture to a mean channel difference under 2 |
-| Zero-copy decode into wgpu | `examples/dmabuf_import.rs` — a decoded VA surface exported as DMA-BUF and imported as two wgpu textures reconstructs the software decode's picture to a mean channel difference of **0.32**, with a deliberately chroma-swapped control at 41.9. Not yet wired into the compositor; see below |
+| Zero-copy decode into wgpu | `examples/dmabuf_import.rs` — a decoded VA surface exported as DMA-BUF and imported as two wgpu textures reconstructs the software decode's picture to a mean channel difference of **0.32**, with a deliberately chroma-swapped control at 41.9 |
+| Hardware decode through the compositor | `examples/hwdecode_pipeline.rs` — the imported surface is composited by the quad shader and matches a software-decoded composite of the same instant to a mean channel difference of **1.1–1.4**, against 9.4 for a deliberately wrong colour matrix. Decode to texture falls from 20–66 ms to 0.8–3.3 ms; a whole preview frame from 39–72 ms to 7.5–16 ms. **On by default** |
 
 Two of those deserve emphasis because they are the failure modes that usually
 go unnoticed: the export is **not** truncated (the classic un-flushed-encoder
@@ -84,18 +86,245 @@ bug), and its audio is **not** silent.
   thumbnail and waveform caches share that one function on purpose, so a single
   edit invalidates everything derived from a file at once.
 
+## The benchmark suite
+
+Everything measured below now comes from one binary, and it is the only thing
+that should be quoted:
+
+```bash
+cd src-tauri
+cargo run --release --bin chukcut-bench -- --all            # ~1 minute, six groups
+cargo run --release --bin chukcut-bench -- --filter export  # one group, in isolation
+cargo run --release --bin chukcut-bench -- --json runs/today.json
+cargo run --release --bin chukcut-bench -- --compare runs/today.json
+```
+
+Source in `src-tauri/benches/`. It replaces the four separate harnesses that
+produced the earlier figures (`examples/{decode_bench,export_smoke,
+preview_jpeg_bench,hwdecode_pipeline}.rs`). Those examples are still worth
+keeping — they print things a table cannot, like a DMA-BUF plane layout or a
+PSNR against a reference encode — but the *numbers* belong to `chukcut-bench`,
+because there they are all taken the same way.
+
+Four properties of it are the point:
+
+- **It refuses to report above a load average of 4.** `--force` overrides and
+  stamps the output. This is not fastidiousness: see "A busy machine is not a
+  slow machine, it is a different machine" under Traps.
+- **It generates its own media** with ffmpeg into `target/bench-media/`, so it
+  runs on any machine and nobody's numbers depend on a directory of footage that
+  has since moved. Read the bitrates in the decode table before comparing
+  anything to a figure taken on real footage.
+- **Median, best and worst/best spread on every row.** A row whose spread is
+  above ~1.5 is marked and should not be quoted.
+- **`--json` and `--compare <file>`.** A baseline for this commit is checked in
+  at `src-tauri/benches/baseline-4da5cff.json`; `--compare` against it prints a
+  regression table. A change is only called a regression if it clears **both**
+  ±20% and an absolute floor (0.3 ms, 2 fps, 0.5 µs) — a percentage alone turned
+  a 0.18 ms wobble on a sub-millisecond row into "SLOWER, +21%", six times in the
+  first self-comparison. Self-compared on a quiet machine it now reports 72 of 76
+  rows as noise.
+
+Measured 2026-07-26 at commit `4da5cff`, Raptor Lake iGPU (Vulkan), 12 threads,
+FFmpeg 6.1.1, load average 2.45 before and 2.34 after, 58 seconds of measuring.
+Every table in this section is that one run unless it says otherwise.
+
+### One preview frame, which is the number that decides playback
+
+Decode, upload, composite, read back, JPEG-encode — everything between "the
+playhead moved" and "there are bytes for the webview", measured serially at the
+project's own resolution.
+
+| | 1920×1080 | 1080×1920 |
+|---|---:|---:|
+| Whole frame | **10.66 ms** | **11.37 ms** |
+| of which sources (decode + to texture) | 1.11 ms | 1.17 ms |
+| of which compositing | 0.41 ms | 0.43 ms |
+| of which RGBA readback | 3.27 ms | 3.33 ms |
+| of which JPEG (VAAPI) | ~5.9 ms | ~6.4 ms |
+| Ceiling if nothing overlapped | 93.8 fps | 87.9 fps |
+| Share of the budget at 24 fps | 26% | 27% |
+| Share of the budget at 30 fps | **32%** | **34%** |
+| Share of the budget at 60 fps | **64%** | **68%** |
+
+**60 fps playback now fits, serially, at native resolution.** It did not before
+the decode path was wired to the compositor: the same measurement at `fc15c71`
+gave 24.99 ms and 40 fps, with `sources` at 13.04 ms rather than 1.11. That is
+the single largest change this suite has recorded, and it is the zero-copy decode
+work paying off end to end rather than in a microbenchmark.
+
+Note what the frame is now made of: **the readback and the JPEG encode are 86% of
+it**, and decoding is 10%. The preview's remaining cost is entirely "get the
+finished frame to the webview", which is `docs/research/zero-copy-encode.md`
+pointed at the preview.
+
+The real frame is *cheaper* than this: `preview/server.rs` runs the JPEG encode
+on a thread that overlaps the next frame's compositing. This number is one
+frame's latency, which is what a seek pays with nothing to overlap. It excludes
+the ring buffer, the pacing clock and the webview's own decode and paint — those
+need a running GUI, which this binary deliberately does not.
+
+### Decode, per frame
+
+`sw →RGBA` and `hw →RGBA` both end in tightly packed RGBA in system memory;
+`hw →DMA-BUF` stops at the GPU surface, which is what the compositor now takes.
+Sequential walk, 48 frames, median of 3.
+
+| per frame | sw →RGBA | hw →RGBA | hw →DMA-BUF | bitrate |
+|---|---:|---:|---:|---:|
+| H.264 1920×1080 | 11.28 ms | 11.68 ms | **1.34 ms** | 9.8 Mbit/s |
+| H.264 1080×1920 | 11.42 ms | 11.75 ms | **1.37 ms** | 10.1 Mbit/s |
+| HEVC 1920×1080 | 11.33 ms | 11.50 ms | **0.96 ms** | 6.7 Mbit/s |
+| HEVC 1080×1920 | 12.14 ms | 11.07 ms | **0.88 ms** | 7.0 Mbit/s |
+| VP9 1920×1080 | 12.08 ms | 11.45 ms | **0.99 ms** | 10.4 Mbit/s |
+| VP9 1080×1920 | 12.42 ms | 11.45 ms | **0.95 ms** | 11.2 Mbit/s |
+| AV1 1920×1080 | 9.17 ms | 12.11 ms | **1.05 ms** | 4.4 Mbit/s |
+| AV1 1080×1920 | 9.17 ms | 11.73 ms | **0.92 ms** | 4.6 Mbit/s |
+
+Two things to read out of it:
+
+- **`hw →RGBA` is a wash against software**, within a millisecond either way in
+  seven of eight cases, and *worse* for AV1. This is the finding the earlier
+  sections describe, reproduced: the detiling download plus the swscale pass cost
+  about what they save. Hardware decode is only worth having if the frame never
+  comes back to the CPU.
+- **`hw →DMA-BUF` is 9–13×** and barely varies with codec or aspect, because at
+  that point the fixed-function block is the whole cost.
+
+Random access, which nothing had measured and which backs up the "seeking
+backwards during playback stalls" note above. Milliseconds **per seek**, 6 seeks
+to deterministic positions, median of 2 rounds:
+
+| per seek | sw →RGBA | hw →DMA-BUF |
+|---|---:|---:|
+| H.264 1920×1080 | 63.9 ms | 16.1 ms |
+| H.264 1080×1920 | 64.2 ms | 15.9 ms |
+| HEVC 1920×1080 | 122.3 ms | 16.1 ms |
+| HEVC 1080×1920 | 123.6 ms | 16.1 ms |
+| VP9 1920×1080 | 88.5 ms | 9.8 ms |
+| VP9 1080×1920 | 88.3 ms | 11.0 ms |
+| AV1 1920×1080 | 44.3 ms | 10.8 ms |
+| AV1 1080×1920 | 45.7 ms | 10.9 ms |
+
+**A seek costs 5–11 sequential frames**, and on HEVC it costs 10 whole frame
+budgets at 30 fps. These clips have half-second GOPs, which is favourable; long-
+GOP footage will be worse. The spread on these rows is 1.4–2.4× even on a quiet
+machine — a seek's cost depends on where in the GOP it lands — so read them as
+an order of magnitude, not as figures.
+
+### Compositing, per frame, with no decoder in the loop
+
+Every layer samples one texture uploaded before the clock starts, so this is
+purely uniform writes, draw calls, blending and the readback. 1920×1080 canvas.
+`GPU only` waits on the device but does not map the result.
+
+| per frame | 1 layer | 3 layers | 10 layers |
+|---|---:|---:|---:|
+| Plain, with readback | 3.65 ms | 4.78 ms | 8.03 ms |
+| Plain, GPU only | 1.12 ms | 1.94 ms | 5.09 ms |
+| Transform + crop + keyframes, with readback | 4.13 ms | 5.92 ms | 9.19 ms |
+| Transform + crop + keyframes, GPU only | 0.91 ms | 2.36 ms | 5.52 ms |
+
+- **A layer costs about 0.5 ms** and the relationship is linear, so a ten-clip
+  timeline composites in under 10 ms and layer count is not what will break
+  playback.
+- **Transform, crop and keyframes are free**, within noise, at every layer count.
+  Five keyframes on three properties per segment per frame do not register. The
+  CPU-side work in `render::layout` is not worth optimising.
+- **The readback is a flat ~2.5–3.5 ms** whatever is being composited, and at one
+  layer it is three quarters of the frame. Same conclusion as everywhere else in
+  this document.
+
+The transformed rows are deliberately built to cover the same canvas area as the
+plain ones. An earlier version scaled layers to 55% and measured *faster* than
+plain, because a compositor at 1080p is fill-rate bound.
+
+### Preview JPEG encode, per frame
+
+Nine interleaved runs at quality 88, median/best in milliseconds. Interleaved
+rather than one encoder at a time, for the reason in `preview_jpeg_bench`: run
+sequentially, whichever encoder went second paid for the heat the first made.
+
+| | jpeg-encoder (was) | libjpeg-turbo | VAAPI (now) |
+|---|---:|---:|---:|
+| 540×960 | 6.35 / 6.26 | 2.13 / 2.10 | **1.53 / 1.46** |
+| 1080×1920 | 25.03 / 24.88 | 8.24 / 8.20 | **4.75 / 4.41** |
+| 1920×1080 | 24.75 / 24.65 | 8.28 / 8.19 | **4.94 / 4.62** |
+
+Through `encode_preview_jpeg`, which is what the server actually calls, at
+1080×1920: **5.95 ms median, 4.94 best**, dispatched to VAAPI.
+
+The VAAPI breakdown at 1080×1920 is 1.06 ms of RGBA→NV12, 1.59 ms of upload and
+2.12 ms of encoding — **the fixed-function encoder is a third of its own path**,
+and the rest is carrying pixels to a chip that already had them.
+
+These agree with the July 25 figures from `preview_jpeg_bench` to within this
+machine's spread, which is the useful thing about having measured them twice with
+different harnesses.
+
+### Export, end to end, with audio
+
+3 seconds of a two-clip timeline at 1920×1080 through `export::job::run_export`,
+median of 2. Frames per second; higher is better.
+
+| | fps | what the frame path does |
+|---|---:|---|
+| Software (`libx264`) | 30.5 | swscale on the CPU |
+| VAAPI tier 1 (`--no-gpu-nv12`) | 62.8 | swscale on the CPU, then upload |
+| VAAPI tier 2 (`--no-zero-copy`) | 98.8 | compute shader, read back, upload |
+| VAAPI tier 3 (default) | **147.6** | compute shader, nothing crosses the bus |
+
+**Hardware export is now 4.8× software, not the 1.5× recorded above**, because
+the thing that limited it — decoding the sources — moved to the GPU as well. The
+per-frame breakdown says so directly: `sources` is 1.7 ms where it used to be 12
+to 76, and at tier 3 `prepare` is 0.0 ms and `submit` 1.0.
+
+Cross-checked with `--filter export` on the same quiet machine: 35.9 / 46.6 /
+75.7 / **128.4** fps. The tier *ordering* and the ratios reproduce; the absolute
+figures move by up to 15% between runs, so quote them as "about 130–150 fps at
+tier 3" and not to three figures.
+
+### Project operations
+
+A 500-segment document across four video tracks, 402 KB of JSON.
+
+| | |
+|---|---:|
+| Save (serialize only) | 0.58 ms |
+| Load (deserialize only) | 0.50 ms |
+| Save + load through the disk — what an autosave costs | **1.37 ms** |
+| Apply 1000 `SetTransform` edits | **2.67 µs** each |
+| Undo the whole history | **0.79 µs** each |
+
+The document layer is nowhere near being a problem: an autosave of a large
+project costs less than a twentieth of one frame budget, and a thousand edits
+cost 2.7 ms in total.
+
+**But "undo them all" is not possible.** `timeline::history::MAX_DEPTH` is 500,
+so of 1000 applied edits only the last 500 can be undone; the rest were dropped
+off the bottom of the stack as they went. See Known defects.
+
 ## Hardware export, measured
+
+**The whole-export rows here are history, kept because the reasoning below them
+is still the reasoning.** The current figures come from `cargo run --release
+--bin chukcut-bench -- --filter export` and are in "The benchmark suite" above:
+software 30.5 fps against tier 3's 147.6, i.e. **4.8×, not the 1.5× this section
+concluded**. What changed is not the encoder; it is that decoding moved to the
+GPU too, which is exactly what the last paragraph of this section predicted would
+have to happen.
 
 Measured 2026-07-25 on the Raptor Lake iGPU, median of three runs, 240 frames
 of real phone footage from `~/git/editing/footage`, through
 `examples/export_smoke.rs`. `--encode-only` feeds the encoder synthetic frames
 instead of composited ones, so the difference between the two rows is
-everything upstream of the encoder.
+everything upstream of the encoder. The encoder-only rows are the one thing here
+`chukcut-bench` does not reproduce — it measures whole exports — so they stay.
 
 | | 1920×1080 | 1080×1920 |
 |---|---|---|
-| Whole export, software (`libx264` medium) | 16.1 fps | 14.2 fps |
-| Whole export, VAAPI (`h264_vaapi`) | **24.2 fps** | **21.3 fps** |
+| Whole export, software (`libx264` medium) — superseded | 16.1 fps | 14.2 fps |
+| Whole export, VAAPI (`h264_vaapi`) — superseded | 24.2 fps | 21.3 fps |
 | Encoder only, software | 16.5 fps | 20.1 fps |
 | Encoder only, VAAPI H.264 | **80.6 fps** | **63.4 fps** |
 | Encoder only, VAAPI H.265 | 60.8 fps | 51.9 fps |
@@ -124,7 +353,22 @@ back to the CPU (`docs/research/zero-copy-encode.md`), doing RGBA→NV12 on the
 GPU, and hardware *decode*. The last of those was ranked third in the decision
 document and the numbers above argue it should be higher.
 
+**All three are now done**, and the last of them was indeed the biggest: see
+"The export's frame path, measured stage by stage" and "Hardware decode through
+the compositor" below. The export table above is the state before any of them
+landed and is kept because the *gap* it documents is the argument.
+
 ## Hardware decode, measured
+
+**Superseded by `cargo run --release --bin chukcut-bench -- --filter decode`**,
+whose table in "The benchmark suite" above covers four codecs rather than two,
+both aspects, and random access as well as sequential. Kept because the
+explanation under it is the important part and is unchanged.
+
+One difference matters when comparing the two tables: these figures are real
+phone footage at ~1.5 Mbit/s and `chukcut-bench` generates clips at 4–11 Mbit/s.
+That is not a detail — see "A decode number without a bitrate next to it is not a
+number" under Traps.
 
 Measured 2026-07-26, `examples/decode_bench.rs`, median of three runs of 90
 sequential frames of real footage, first frame discarded. Full working in
@@ -144,18 +388,128 @@ still has to turn NV12 into RGBA afterwards. Together they cost more than the
 decode they were supposed to accelerate — the decode itself is under 2.5 ms.
 
 The bottom row is what the frame costs when nothing copies it. That is 9–16×,
-and it is the number the preview and the export are both waiting on. It is
-**not reachable yet**: it needs `render/` to import the exported surface as a
-texture, and the exact patch for that is at the bottom of
-`docs/research/hardware-decode.md`. Until it lands,
-`media::provider::DEFAULT_ACCELERATION` is deliberately `Software`, with a
-`CHUKCUT_DECODE=software|auto|vaapi` environment override for measuring.
+and it is the number the preview and the export were both waiting on. **It is
+reachable now** — the next section is the whole pipeline measured the same way.
 
 On an integrated GPU the lesson generalises and is worth carrying into the next
 piece of work: **"move it to the GPU" is not the optimisation. "Stop copying it"
 is.**
 
-**Both of the first two are now done.** See the next section.
+## Hardware decode through the compositor, measured
+
+Measured 2026-07-26, `cargo run --release --example hwdecode_pipeline -- --dir
+target/bench-media`. Both decoders are measured **in one process, back to back,
+per file**, because run-to-run spread on this machine is wider than most of what
+is being compared. Median of three runs of 90 sequential frames, first frame
+discarded.
+
+`to texture` is one `SourceProvider::frame` call — the decode plus whatever it
+takes to reach something the compositor can bind, which is an 8 MB upload on the
+software path and two `texture_from_dmabuf_fd` calls on the hardware one.
+`whole frame` is that plus compositing and the RGBA readback: everything the
+preview does short of the JPEG encode.
+
+| per frame | sw, to texture | sw, whole frame | hw, to texture | hw, whole frame |
+|---|---:|---:|---:|---:|
+| 1920×1080 H.264 | 65.7 ms | 71.9 ms | **2.19 ms** | **9.39 ms** |
+| 1080×1920 H.264 | 58.8 ms | 67.6 ms | **2.74 ms** | **10.78 ms** |
+| 1920×1080 VP9 | 33.8 ms | 43.1 ms | **1.70 ms** | **10.20 ms** |
+| 1080×1920 VP9 | 31.8 ms | 47.2 ms | **1.94 ms** | **10.16 ms** |
+| 1920×1080 HEVC | 43.3 ms | 45.4 ms | **1.21 ms** | **7.49 ms** |
+| 1080×1920 HEVC | 44.0 ms | 65.3 ms | **1.63 ms** | **10.95 ms** |
+| 1920×1080 AV1 | 34.2 ms | 39.3 ms | **0.99 ms** | **10.22 ms** |
+| 1080×1920 AV1 | 34.3 ms | 41.3 ms | **0.82 ms** | **9.67 ms** |
+
+**Other agents were compiling throughout, so the absolute numbers are high** —
+the software column is roughly twice the quiet-machine figures in the section
+above. The two columns moved together, which is what interleaving them was for.
+
+Read it as three claims:
+
+- **Decode to texture is 15–40× cheaper.** That is the `hw → DMA-BUF` row of the
+  previous table finally reaching the compositor, and it is slightly *better*
+  than that row because the software path it replaces also included
+  `upload_rgba`.
+- **A whole preview frame is 4–8× cheaper**, and now fits the 33.3 ms budget with
+  room to spare at native resolution — 7.5 to 16 ms against 39 to 72.
+- **What is left in the frame is the readback**, 5.6–14.2 ms of it, against
+  0.7–1.6 ms of compositing. Decoding is no longer the largest term in the
+  preview; copying the finished frame back to the CPU for the JPEG encoder is.
+  That is `docs/research/zero-copy-encode.md` pointing at the preview instead of
+  the export.
+
+What is still on the CPU on this path, in descending order: the readback above,
+the JPEG encode that follows it (6.2 ms at 1080p, hardware), demuxing
+(`av_read_frame` — headers and I/O, not pixels), and the `vaSyncSurface` inside
+`av_hwframe_map`, which is a wait rather than a copy. Thumbnails and waveforms
+are deliberately still software; the reasons are in
+`docs/research/hardware-decode.md`.
+
+**One behaviour changed and it is worth knowing about.** The software path asks
+swscale to downscale during colour conversion, so a preview at 540×960 decodes a
+1080p clip to 540×960. A VA surface comes back at full resolution whatever was
+asked for, so the hardware path hands the compositor a full-resolution texture
+and lets the sampler shrink it. That is free on the GPU and it is why the
+hardware column barely varies with aspect ratio — but it means
+`provider::fitted_height` now only governs the software path, and a timeline of
+4K clips will hold 4K surfaces rather than proxy-sized ones. Proxy media is the
+answer to that, not a VPP downscale.
+
+`media::provider::DEFAULT_ACCELERATION` is now `Acceleration::Auto`, **gated on
+`RenderContext::can_import_dmabuf()`**. Without that gate a machine on the GL
+fallback or an old driver would get the middle row of the previous table, which
+is worse than software; with it, such a machine stays on software.
+`CHUKCUT_DECODE=software|auto|vaapi` still overrides both, and
+`MediaSourceProvider::from_project_with` forces the choice per provider so the
+two paths can be compared inside one process.
+
+### Verified by pixels
+
+`cargo run --release --example hwdecode_pipeline -- --dir target/bench-media
+--verify`. A hardware-decoded frame composited through the real compositor,
+against a software-decoded composite of the same instant, mean absolute
+difference over R, G and B:
+
+| | hardware vs software | control: wrong matrix | control: one frame apart |
+|---|---:|---:|---:|
+| H.264, HEVC, VP9, AV1, both aspects | **1.10 – 1.38** | 9.30 – 9.57 | 2.51 – 4.11 |
+
+`tests/compositor.rs` is the other half of this and is the stronger check,
+because it asserts on named colours rather than on agreement: seventeen tests
+render real video files through `MediaSourceProvider` and the compositor and
+check pixels at known coordinates — letterboxing, crop, opacity in linear light,
+keyframe ramps, track order, rotation. All seventeen now run on the imported
+hardware path and pass unchanged, so the two-plane case is not merely *similar*
+to the copying one, it is right about colour in absolute terms.
+
+The bar established by `tests/decode.rs` is a mean channel difference under 2,
+and every codec and aspect passes. The two controls are what make that mean
+something: forcing BT.601 onto the same surface scores 9.4, so the matrix really
+is being read from the file rather than agreeing by luck, and two adjacent
+software frames differ by 2.5–4.1, so the metric can see a difference this size.
+The residual 1.2 is chroma upsampling — the shader interpolates the half-size
+chroma texture with the sampler and swscale does its own thing — plus the 8-bit
+round trip through the sRGB render target.
+
+### The colour bug this found, which was in the *software* path
+
+**`sws_getContext` does not read a frame's colour tags.** It initialises with
+`SWS_CS_DEFAULT`, which is BT.601, whatever the file declares — so every BT.709
+clip in this editor was being converted with BT.601 coefficients. It is a
+consistent tint of up to ten code values on saturated reds and greens, not an
+obvious fault, which is exactly why it survived: `render_smoke`'s comparison
+against ffmpeg's own frame absorbed it as rounding.
+
+It surfaced from the other side. The compositor's new path takes the matrix from
+`MappedFrame::color_space`, i.e. from the file, so a correct hardware frame and
+an incorrect software one composited 9.6 code values apart — and forcing the
+*wrong* matrix on the hardware path brought them back together, which is a
+diagnosis rather than a coincidence.
+
+`decoder.rs::apply_colour` now calls `sws_setColorspaceDetails` with the file's
+matrix and range. The numbers above are after that fix; before it, hardware
+against software scored 9.6 and the wrong-matrix control scored 1.4 — the table
+inverted.
 
 ## Proxy media, measured
 
@@ -195,6 +549,13 @@ Three things there that are not obvious and are worth not rediscovering:
 - **FFmpeg guesses the muxer from the output filename**, so an atomic write to
   `proxy.mp4.part` fails inside `format::output` with a bare `EINVAL` and no
   hint. The partial file is `.partial-proxy.mp4` — a prefix, not a suffix.
+- **A synthetic fixture painted with per-pixel noise proves the opposite of
+  what it looks like it proves.** `x ^ y` content does not compress at any
+  resolution, so the 720p all-intra proxy came out *three times larger* than its
+  4K source and only 2.9× cheaper to decode instead of 8–11×. Real footage is
+  locally smooth with a few hard edges; `proxy/tests.rs::paint` now paints that,
+  and the test that compares decode costs interleaves its two measurements
+  because the load on this machine can double between them.
 
 ## The export's frame path, measured stage by stage
 
@@ -294,10 +655,17 @@ Measured 2026-07-25 on the Raptor Lake iGPU. Every preview frame is served to
 the webview as a JPEG, so this cost is a direct term in the 33.3 ms playback
 budget — and at native resolution it used to be most of it.
 
-Median/best of 21 interleaved runs at load average 3, quality 88, milliseconds
-per frame. Full detail and the traps are in
-`docs/research/vaapi-jpeg-preview.md`; the benchmark is
-`cargo run --release --example preview_jpeg_bench`.
+**The numbers now come from `cargo run --release --bin chukcut-bench --
+--filter preview-encode`** and are tabulated in "The benchmark suite" above.
+Kept here for the analysis that follows, which is unchanged. Full detail and the
+traps are in `docs/research/vaapi-jpeg-preview.md`.
+
+The figures below are the original 2026-07-25 run of
+`examples/preview_jpeg_bench` — median/best of 21 interleaved runs at load
+average 3, quality 88, milliseconds per frame. They agree with the
+`chukcut-bench` run to within this machine's spread, which is worth knowing:
+two harnesses written months apart, measuring the same code, landed in the same
+place.
 
 | | jpeg-encoder (was) | libjpeg-turbo | VAAPI (now) |
 |---|---|---|---|
@@ -349,6 +717,16 @@ Two things about the hardware path that are not obvious and cost time to find:
 Found by the integration suite. Each is real and reproducible; none has a red
 test left behind, so `cargo test` is green despite them.
 
+- **Undo cannot reach the start of a session.** `timeline::history::MAX_DEPTH` is
+  500 and `History::apply` drops the oldest command off the bottom of the stack
+  when it is exceeded, so after 1000 edits only the last 500 can be undone and the
+  earlier ones are gone with no indication that they ever existed. Measured by
+  `chukcut-bench --filter project`, which applies 1000 edits and reports how many
+  the history still held. Half an hour of editing followed by "undo back to where
+  I started" stops silently in the middle. Either the limit should be far higher —
+  the commands are small, 1000 of them cost 2.7 ms in total to apply, so depth is
+  not what makes this expensive — or the UI has to say that history has been
+  truncated. Silently is the one option that is wrong.
 - **The app opens two GPU devices** — the preview's render loop and the export's
   lazily-initialised compositor. Given that concurrent Vulkan instances were
   observed crashing this driver during testing, these should be collapsed into
@@ -421,6 +799,46 @@ things about them are load-bearing and not obvious:
   only positional rule is that a time is not negative; `validate()` reports the
   rest as a warning.
 
+### What happened when the fuzzer was pointed at transitions
+
+`tests/edit_fuzz.rs::transitions_survive_the_edits_that_move_the_clips_they_join`
+places transitions on real cuts and then lets the ordinary generator move, trim,
+split and delete the clips they join. It found two defects within two hundred
+random edits, and both are now fixed:
+
+- **An ordinary clip move orphaned a transition.** A transition is centred on a
+  cut, the cut is "the previous clip ends exactly where this one starts", and
+  moving either clip destroyed it — after which `validate()` correctly called the
+  document inconsistent, over an edit the user was entitled to make. The
+  primitive cannot fix itself (`MoveSegment` does not carry the transition, so
+  it could not put one back on undo), so `ops::detach_broken_transitions` wraps
+  the incoming command into a `Composite` with the removals it implies. One undo
+  step, and undoing it brings the transition back. `History::apply` calls it, so
+  every path into the document is covered. `transitions::edit::detach_around`
+  was written for this and nothing had called it.
+  - The subtlety that cost an hour: only a transition that is **still attached**
+    to a segment and has lost its cut may be detached this way. One whose
+    segment went with the edit — a deleted clip, a deleted lane — is already off
+    the timeline, and the removal command carries a *snapshot* of that segment.
+    Prepending a detachment there makes undo restore the transition twice, and
+    the id appears in `extras` twice.
+- **`AddTransition` was not the exact inverse of `RemoveTransition`.** `remove`
+  used `retain` and `add` used `push`, so removing the first of two transitions
+  and undoing it put it back second, rewriting the file on an undo. The pool is
+  keyed by id and nothing reads it positionally, so `add` now inserts in id
+  order — the same fix, for the same reason, as the keyframe-track ordering
+  above.
+
+Two transition-related holes the fuzzer did **not** close, recorded because they
+are one line of thought away from the above:
+
+- **`split_at` clones `extras`,** so splitting a clip that carries a transition
+  leaves the id on both halves. Neither half is unjoined, so nothing flags it.
+- **`extras` order is not restored** by remove-then-add when a segment carries an
+  effect *and* a transition: `remove` retains and `add` pushes, so the
+  transition ends up last. The list is documented as being in application order,
+  so the fix is for the command to carry the index, as `RemoveSegment` does.
+
 Two things found along the way that were worse than the list said:
 
 - **Trimming was as capable of breaking the speed invariant as `SetSpeed`
@@ -472,17 +890,27 @@ Three things worth carrying forward:
 
 ## Not built yet
 
-Keyframe editing in the UI, and audio waveforms on the timeline.
+Both keyframe editing and audio waveforms landed overnight and this line was
+stale within hours of being written — a reminder that a status document is
+only worth what its last edit is worth.
 
-**Text rasterisation is built and titles are not** — `modules/text/` turns a
-`TextMaterial` into an RGBA layer with system font fallback, real shaping
-(ligatures, kerning, CJK, Arabic, Hebrew, colour emoji), outline, drop shadow
-and background box, measured above and covered by 30 tests. What is missing is
-the twenty lines in `media/provider.rs` that call it: `MaterialSource::Text`
-still answers `Ok(None)`, so a text segment composites as nothing. That module
-was owned by other work while this landed, so the exact patch is at the bottom
-of `docs/research/text-rendering.md` rather than left half-applied. There is
-also no UI yet for creating or editing a title.
+The inspector now creates, moves and eases keyframes with a curve view, and
+the timeline draws min/max envelopes with an RMS body, on audio lanes and
+along the bottom of video clips that carry sound. What is *not* built is the
+Rust side of the keyframe edit commands — `AddKeyframe`, `RemoveKeyframe`,
+`MoveKeyframe` and `SetKeyframeEasing` — so those payloads are currently
+rejected as an unknown variant. Everything else about the feature is done.
+
+**Titles now render; there is still no UI for making one.** `modules/text/`
+turns a `TextMaterial` into an RGBA layer with system font fallback, real
+shaping (ligatures, kerning, CJK, Arabic, Hebrew, colour emoji), outline, drop
+shadow and background box, measured above and covered by 30 tests, and
+`media/provider.rs::text_frame` now calls it — `MaterialSource::Text` carries
+the material, rasterises at the size of the frame being rendered so the
+compositor's fit is the identity, and caches per size so an export does not
+reuse the preview's smaller raster. The patch that was written out at the bottom
+of `docs/research/text-rendering.md` is applied. What is missing is any way for
+the user to create or edit a title.
 
 **Transitions are built except for the compositor** —
 `src-tauri/src/modules/transitions/`, and the data model, edit commands,
@@ -493,6 +921,14 @@ patch is written out at the bottom of `docs/architecture/transitions.md` rather
 than left half-applied. Until it is applied a transition is stored, undone,
 retimed and validated correctly and renders as nothing — the cut plays as a hard
 cut.
+
+**That patch now needs adjusting before it will apply.** The hardware-decode work
+changed the two things it touches: `QuadUniform` grew `planar`, `matrix`, `range`
+and `turns` fields, and the source bind group grew a third entry for the chroma
+plane. A transition pass has to carry both through or a transitioned clip will
+render as though every frame were RGBA and upright, which for a hardware-decoded
+source means the luma plane alone — a plausible-looking greyscale picture, which
+is the worst way for it to be wrong.
 
 Two things in that document are worth reading before touching either
 `project/document.rs` or `render/`: a transition is centred on the cut and
@@ -505,7 +941,7 @@ and reduces the cost of splitting a clip under a transition to one line in
 **Proxy media is built** — `src-tauri/src/modules/proxy/`, decision 0003 — but
 two seams outside that module are still open and it does nothing until they are
 closed: `media/provider.rs` needs the `from_project_for_preview` constructor
-(the exact patch is in the decision document), and `preview/commands.rs` needs
+(the exact patch is at the bottom of decision 0003), and `preview/commands.rs` needs
 to fold `proxy::ProxyQueue::shared().generation()` into the fingerprint its
 provider cache is keyed on, or a proxy finishing will not be picked up until the
 next edit.
@@ -517,6 +953,58 @@ which is nearly all of them.
 
 ## Traps that have already cost time
 
+- **A busy machine is not a slow machine, it is a different machine.** The same
+  suite, same binary, same commit, measured minutes apart: at load 2 a whole
+  preview frame is 25 ms; at load 44 it is 258 ms. Not 2× — **ten times**. Worse,
+  it is not uniform, so ratios distort too: at load 44 the export's tier 3 came
+  out *slower* than tier 2, which is impossible on the mechanism. This is why
+  `chukcut-bench` exits rather than measuring above a load average of 4, and why
+  it prints the load before and after and a worst/best spread on every row. Check
+  `/proc/loadavg` before believing any performance number on this machine, and if
+  you have used `--force`, do not put the result in this file.
+- **A decode number without a bitrate next to it is not a number.** The first
+  version of the benchmark's fixture generator used `noise=alls=10`, which
+  produced a near-incompressible **30 Mbit/s** 1080p30 clip against the 1.5 Mbit/s
+  of the real footage every earlier measurement used. That single difference
+  **reversed a conclusion**: on the noisy clip, hardware decode into system memory
+  measured 1.8× *faster* than software, because software entropy decoding scales
+  with coefficient count and a fixed-function block barely notices. Re-run at a
+  realistic 4–11 Mbit/s, the two are a wash — which is what this document says
+  everywhere else. The fixtures are now light on noise and every decode row prints
+  its clip's bitrate.
+- **A benchmark group is affected by what ran before it in the same process.**
+  Observed at `fc15c71`, when the export ran last after a minute of software
+  decoding had the CPU and iGPU hot: tier 3 measured 34 fps against tier 2's 55,
+  and the tell was that the *decode* stage inside it had gone from 10.4 to 19.4 ms
+  per frame — the one thing the tier flag cannot touch. The iGPU shares its power
+  and thermal budget with the CPU cores. Read *ratios* from a full run and take
+  *absolute* figures from `--filter <group>`. This is also the argument for the
+  per-stage breakdown: a single fps figure could not have been diagnosed.
+- **`sws_getContext` ignores the file's colour tags.** A scaler built from
+  formats and sizes alone converts YUV to RGB with `SWS_CS_DEFAULT`, which is
+  BT.601, on a BT.709 file, forever, silently. FFmpeg's own `scale` filter sets
+  it from the frame, so our output and `ffmpeg`'s disagreed by an amount small
+  enough to read as rounding. Fixed in `decoder.rs::apply_colour`; the full story
+  is under "Hardware decode through the compositor" above. Assume any new
+  swscale context has the same defect until it calls
+  `sws_setColorspaceDetails`.
+- **The Khronos validation layer segfaults this driver on a DMA-BUF image
+  import.** `vkBindImageMemory` through `VkLayer_khronos_validation` into
+  `libvulkan_intel`, on the first hardware-decoded frame the compositor imports —
+  signal 11, no message, no wgpu error, nothing in the log. wgpu turns that layer
+  on for debug builds, so it killed `cargo test --test compositor` while the same
+  code in release was fine and verified correct. `render::context::instance_flags`
+  now leaves the layer off unless `WGPU_VALIDATION=1`; wgpu-core's own validation
+  is unaffected and still catches our mistakes with a readable message. If you
+  ever need the layer back, run with `CHUKCUT_DECODE=software` as well.
+- **A hardware decoder does not report itself as one until it has decoded a
+  frame.** `VideoDecoder::is_hardware` is set from the first frame that comes
+  back as a surface, so a provider that branches on it takes the copying path for
+  frame zero — and *caches the copy*, so the next request for the same instant is
+  answered from it. `provider.rs` branches on `acceleration()` instead, which
+  reports the request before the first frame and the truth after it. This cost a
+  measurement run that reported "the provider did not import a surface" for every
+  file on a machine that imports perfectly well.
 - **`pnpm tauri dev` builds Rust unoptimized.** The preview's JPEG encoder
   needed ~130 ms per frame at `opt-level = 0` and ~7 ms in release, which made
   playback look fundamentally broken when it was merely unoptimized. `Cargo.toml`

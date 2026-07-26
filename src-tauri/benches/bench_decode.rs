@@ -70,12 +70,19 @@ pub fn run(media: &Fixtures, budget: &Budget) -> Vec<Measurement> {
     for clip in &media.clips {
         let label = clip.label();
         let step = frame_step(&clip.path);
+        // Printed on the software row of every clip. Without it the table reads
+        // as a property of the codec when it is substantially a property of the
+        // bitrate — the mistake documented at the top of `fixtures.rs`.
+        let bitrate = format!("{:.1} Mbit/s", clip.megabits());
 
         // Software, sequential. The baseline every other row is read against.
         match rounds(budget.rounds, |_| {
             walk(&clip.path, Acceleration::Software, budget.frames, step, Want::Rgba)
         }) {
-            Ok(samples) => out.push(Measurement::ms(GROUP, format!("{label} sw →RGBA seq"), samples)),
+            Ok(samples) => out.push(
+                Measurement::ms(GROUP, format!("{label} sw →RGBA seq"), samples)
+                    .with_note(bitrate.clone()),
+            ),
             Err(error) => out.push(Measurement::skip(
                 GROUP,
                 format!("{label} sw →RGBA seq"),

@@ -35,10 +35,11 @@ The survey's recommendation held with one substitution. Three notes:
   from 12 ms to 35 ms just by turning the outline on — because round joins at
   every corner of every contour produce a path with several times the segments,
   and both the expansion and the scan conversion pay for them. `zeno` strokes
-  *during* scan conversion and never builds the path: the same title with an
-  outline is now within a millisecond or two of the same title without one.
-  kurbo stays for `BezPath` and `RoundedRect`, which is a fair trade for a crate
-  we would otherwise be reimplementing.
+  *during* scan conversion and never builds the path, and the same outlined
+  title fell to 22.9 ms and then to 17.9 once the shadow stopped re-stroking it.
+  An outline is still the most expensive thing here — see "Measured" — but it is
+  half what it was. kurbo stays for `BezPath` and `RoundedRect`, a fair trade
+  for a crate we would otherwise be reimplementing.
 - **skrifa 0.43 and 0.45 are both in the tree.** parley pins 0.43; we ask for
   0.45 directly. Nothing crosses between them — we hand skrifa the *bytes* of
   the font blob parley resolved, never a skrifa type — so the duplication costs

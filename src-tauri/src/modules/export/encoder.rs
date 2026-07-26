@@ -716,7 +716,8 @@ fn open_video_encoder(
                 )));
             };
             encoder.set_format(surface_format);
-            let device = HwDeviceContext::open(device_kind, Some(hwframes::DEFAULT_RENDER_NODE))?;
+            let device =
+                HwDeviceContext::for_kind(device_kind, Some(hwframes::DEFAULT_RENDER_NODE))?;
             let pool = device.frames(
                 surface_format,
                 spec.upload_format(),

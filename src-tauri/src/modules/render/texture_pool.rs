@@ -288,7 +288,6 @@ impl std::fmt::Debug for TexturePool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::modules::render::RenderContext;
 
     const RGBA: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
     const USAGE: wgpu::TextureUsages =
@@ -309,7 +308,7 @@ mod tests {
 
     #[test]
     fn released_textures_are_recycled() {
-        let Some(ctx) = RenderContext::try_new() else {
+        let Some(ctx) = crate::modules::render::test_context() else {
             eprintln!("skipping: no GPU adapter");
             return;
         };
@@ -330,7 +329,7 @@ mod tests {
 
     #[test]
     fn budget_caps_what_is_retained() {
-        let Some(ctx) = RenderContext::try_new() else {
+        let Some(ctx) = crate::modules::render::test_context() else {
             eprintln!("skipping: no GPU adapter");
             return;
         };

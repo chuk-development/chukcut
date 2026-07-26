@@ -23,6 +23,27 @@
 //! `job::set_zero_copy`) rather than per-job settings, so this group is
 //! deliberately not parallel with anything and restores both switches when it
 //! is done.
+//!
+//! ## Take this group with `--filter export`
+//!
+//! This is the one group in the suite that is measurably affected by what ran
+//! before it in the same process, and it was found the hard way. In a full run
+//! it goes last, after the decode, composite and preview groups have had the
+//! iGPU busy for a minute, and in that position tier 3 measured **34 fps** —
+//! *slower* than tier 2, which is impossible on the mechanism, since the only
+//! difference between them is whether the NV12 buffer is DMA-BUF-exported. Run
+//! on its own on the same quiet machine, tier 3 measures **66–68 fps** and the
+//! ordering is monotonic as it should be.
+//!
+//! The tell was in the breakdown, which is the argument for always printing one:
+//! the *decode* stage had gone from 10.4 to 19.4 ms per frame, and decoding is
+//! the one thing the tier flag cannot touch. The iGPU shares its power and
+//! thermal budget with the CPU cores, so a group that leaves the GPU hot slows
+//! down whatever runs next.
+//!
+//! Nothing here can fix that — somebody has to run last. So: read the *ratios*
+//! between the tiers from a full run, and take the absolute figures from
+//! `--filter export`.
 
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;

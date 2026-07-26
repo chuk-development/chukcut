@@ -339,14 +339,28 @@ fn keyframe_command(project: &Project, rng: &mut Lcg) -> Option<EditCommand> {
     };
     let (property, at) = match aimed {
         Some((property, keyframe)) => (property, keyframe),
-        None => (
-            *rng.pick(&PROPERTIES)?,
-            Keyframe {
-                time,
-                value: 0.0,
-                easing: Easing::Linear,
-            },
-        ),
+        None => {
+            let property = *rng.pick(&PROPERTIES)?;
+            // If a keyframe happens to sit at the time this picked, the command
+            // has to carry *that* keyframe, not a guess at it. The UI reads the
+            // `before` side out of the document, and a command claiming a
+            // keyframe had a value it never had undoes to a document the user
+            // never saw — which is a bug in the generator, not in the command,
+            // and one this loop was blaming on `RemoveKeyframe` until it was
+            // tracked down.
+            let real = existing
+                .iter()
+                .find(|(p, k)| *p == property && k.time == time)
+                .map(|(_, k)| *k);
+            (
+                property,
+                real.unwrap_or(Keyframe {
+                    time,
+                    value: 0.0,
+                    easing: Easing::Linear,
+                }),
+            )
+        }
     };
 
     Some(match rng.below(4) {
@@ -763,6 +777,12 @@ fn transitions_survive_the_edits_that_move_the_clips_they_join() {
         let Some(command) = generated else {
             continue;
         };
+        // Exactly what the app does with a command before it applies it: an
+        // edit that breaks a cut carries the removal of the transition that
+        // was sitting on it, so that one undo brings both back.
+        let command = chukcut_lib::modules::timeline::ops::detach_broken_transitions(
+            &project, command,
+        );
         let is_transition = matches!(
             command,
             EditCommand::AddTransition { .. }

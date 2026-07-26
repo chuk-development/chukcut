@@ -960,6 +960,117 @@ pub fn split_at(project: &Project, segment_id: &str, at: Micros) -> Result<EditC
     })
 }
 
+/// Wrap `command` so that it also removes any transition it is about to
+/// orphan.
+///
+/// A transition is the one thing in the document that depends on two segments:
+/// it is centred on a cut, and the cut is "the clip before this one ends
+/// exactly where it starts". Move that clip, trim it, or delete it, and the
+/// cut stops existing — `validate()` then calls the document inconsistent,
+/// which it is, and the user has done nothing wrong. The fuzzer reaches it in
+/// under two hundred random edits
+/// (`tests/edit_fuzz.rs::transitions_survive_the_edits_that_move_the_clips_they_join`).
+///
+/// The primitive cannot fix itself: `MoveSegment` does not carry the
+/// transition, so it could not put one back on undo. So the *caller* prepends
+/// the removals, which is what `transitions::edit::detach_around` was written
+/// for, and the whole thing is one `Composite` — one undo step, and undoing it
+/// brings the transition back.
+///
+/// Which transitions those are is decided by applying the command to a copy
+/// and looking, rather than by guessing from the command's shape: nudging a
+/// clip while the cut survives must not delete anything, and that is the common
+/// case.
+pub fn detach_broken_transitions(project: &Project, command: EditCommand) -> EditCommand {
+    // Only these can break a join. Checking first avoids cloning the document
+    // for a volume change.
+    let structural = matches!(
+        command,
+        EditCommand::MoveSegment { .. }
+            | EditCommand::RemoveSegment { .. }
+            | EditCommand::TrimSegment { .. }
+            | EditCommand::RemoveTrack { .. }
+            | EditCommand::Composite { .. }
+    );
+    if !structural || project.materials.transitions.is_empty() {
+        return command;
+    }
+
+    let mut probe = project.clone();
+    if command.apply(&mut probe).is_err() {
+        // It will fail for the real document too, and a failed edit changes
+        // nothing.
+        return command;
+    }
+
+    // Only a transition that is *still attached* to a segment and has lost its
+    // cut needs detaching. One whose segment went with the edit — a deleted
+    // clip, a deleted lane — is already gone from the timeline, and the command
+    // that removed it carries the segment, so undo puts both back together. A
+    // detachment there would be applied to a document the removal command has
+    // already snapshotted, and undo would restore the transition twice.
+    let orphaned: Vec<String> = attached_transitions(project)
+        .into_iter()
+        .filter(|(_, id)| join_state(&probe, id) == Some(false))
+        .map(|(segment_id, _)| segment_id)
+        .collect();
+    if orphaned.is_empty() {
+        return command;
+    }
+
+    let label = command.label();
+    let mut commands: Vec<EditCommand> = orphaned
+        .iter()
+        .filter_map(|segment_id| transitions::edit::remove_command(project, segment_id).ok())
+        .collect();
+    if commands.is_empty() {
+        return command;
+    }
+    commands.push(command);
+    EditCommand::Composite { label, commands }
+}
+
+/// `(segment id, transition id)` for every transition attached to a segment.
+fn attached_transitions(project: &Project) -> Vec<(String, String)> {
+    project
+        .tracks
+        .iter()
+        .flat_map(|track| track.segments.iter())
+        .flat_map(|segment| {
+            segment.extras.iter().filter_map(move |extra| {
+                project
+                    .materials
+                    .transition(extra)
+                    .map(|t| (segment.id.clone(), t.id.clone()))
+            })
+        })
+        .collect()
+}
+
+/// Whether `transition_id` is attached to a segment, and if so whether that
+/// segment still has a clip ending exactly where it starts.
+///
+/// `None` means no segment carries it any more — which is not a broken document,
+/// only a material in the pool that nothing points at.
+fn join_state(project: &Project, transition_id: &str) -> Option<bool> {
+    let mut attached = None;
+    for track in &project.tracks {
+        for (index, segment) in track.segments.iter().enumerate() {
+            if !segment.extras.iter().any(|extra| extra == transition_id) {
+                continue;
+            }
+            let joined = index
+                .checked_sub(1)
+                .and_then(|previous| track.segments.get(previous))
+                .is_some_and(|previous| previous.target_range.end() == segment.target_range.start);
+            // Any join is enough: a duplicated id is a different problem and
+            // detaching it here would not be the fix.
+            attached = Some(attached.unwrap_or(false) || joined);
+        }
+    }
+    attached
+}
+
 /// Keep a track's segments sorted by start time.
 fn sort_track(project: &mut Project, track_id: &str) {
     if let Some(track) = project.track_mut(track_id) {

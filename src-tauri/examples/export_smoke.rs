@@ -49,7 +49,7 @@ use chukcut_lib::modules::project::{
     new_id, CanvasConfig, Micros, Project, Segment, TimeRange, Track, TrackKind, Transform,
     VideoMaterial,
 };
-use chukcut_lib::modules::render::{Compositor, CompositorConfig, RenderContext};
+use chukcut_lib::modules::render::{Compositor, CompositorConfig};
 
 /// Prints progress as it arrives, so a hang is visible rather than silent.
 struct Printer;
@@ -227,9 +227,8 @@ fn main() -> anyhow::Result<()> {
         project.duration() as f64 / 1_000_000.0
     );
 
-    let context = Arc::new(
-        RenderContext::try_new().ok_or_else(|| anyhow::anyhow!("no usable GPU adapter"))?,
-    );
+    let context = chukcut_lib::modules::gpu::render_context()
+        .ok_or_else(|| anyhow::anyhow!("no usable GPU adapter"))?;
     println!(
         "GPU: {} ({:?})",
         context.adapter_info().name,

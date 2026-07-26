@@ -80,7 +80,7 @@ use ffmpeg::Dictionary;
 use ffmpeg_next as ffmpeg;
 
 use super::error::{PreviewError, Result};
-use crate::modules::export::hwframes::{HwDeviceContext, HwFramesContext, DEFAULT_RENDER_NODE};
+use crate::modules::export::hwframes::{HwDeviceContext, HwFramesContext};
 
 /// FFmpeg's name for the VAAPI picture-encode JPEG encoder.
 pub const ENCODER_NAME: &str = "mjpeg_vaapi";
@@ -220,8 +220,11 @@ impl VaapiJpegEncoder {
         // Saying so here keeps anything that inspects the context honest.
         encoder.set_color_range(ffmpeg::color::Range::JPEG);
 
-        let device = HwDeviceContext::vaapi(Some(DEFAULT_RENDER_NODE))
-            .map_err(|e| PreviewError::Encode(e.to_string()))?;
+        // The process's one display rather than a second one. A preview
+        // encoder is built again on every size or quality change, and an export
+        // may be encoding on the same chip while it runs.
+        let device =
+            HwDeviceContext::shared_vaapi().map_err(|e| PreviewError::Encode(e.to_string()))?;
         let frames =
             HwFramesContext::create(device, Pixel::VAAPI, Pixel::NV12, width, height, POOL_SURFACES)
                 .map_err(|e| PreviewError::Encode(e.to_string()))?;

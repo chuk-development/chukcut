@@ -278,6 +278,28 @@ fn truncate(name: &str) -> String {
 /// [run]". The threshold is printed with the table so nobody has to remember it.
 pub const NOISE_FLOOR_PCT: f64 = 20.0;
 
+/// The smallest absolute change worth a verdict, per unit.
+///
+/// A percentage floor on its own is not enough, and the first version of
+/// `--compare` proved it: a DMA-BUF decode that moved from 0.88 to 1.06 ms was
+/// reported as "SLOWER, +21%" when the difference is 0.18 ms — below what a
+/// timer, a scheduler and a clock domain can resolve on this machine. Six of the
+/// seventy-six rows in the first self-comparison were false verdicts of exactly
+/// that shape, all of them on sub-millisecond quantities.
+///
+/// So a change has to clear *both* floors. Anything else is a benchmark
+/// inventing regressions, which is the failure this whole suite exists to stop.
+fn resolution(unit: &str) -> f64 {
+    match unit {
+        // A third of a millisecond. Below this we are timing the timer.
+        "ms" => 0.3,
+        // Two frames per second, which at 30 fps is under a millisecond a frame.
+        "fps" => 2.0,
+        "µs/edit" | "µs/undo" => 0.5,
+        _ => 0.0,
+    }
+}
+
 pub fn print_comparison(before: &Report, after: &Report) {
     println!();
     println!("## Regression table");
@@ -287,8 +309,9 @@ pub fn print_comparison(before: &Report, after: &Report) {
         before.unix_time, before.load_before, after.unix_time, after.load_before
     );
     println!(
-        "Anything inside ±{NOISE_FLOOR_PCT:.0}% is marked `noise` — this machine cannot resolve \
-         smaller than that between runs."
+        "A change is only a verdict if it clears ±{NOISE_FLOOR_PCT:.0}% *and* an absolute floor \
+         (0.3 ms, 2 fps, 0.5 µs); anything else is marked `noise`, because this machine cannot \
+         resolve smaller than that between runs."
     );
     println!();
     println!(
@@ -334,7 +357,8 @@ pub fn print_comparison(before: &Report, after: &Report) {
             Direction::Lower => change < 0.0,
             Direction::Higher => change > 0.0,
         };
-        let verdict = if change.abs() < NOISE_FLOOR_PCT {
+        let below_resolution = (row.median - old.median).abs() < resolution(&row.unit);
+        let verdict = if change.abs() < NOISE_FLOOR_PCT || below_resolution {
             "noise".to_string()
         } else if improved {
             "FASTER".to_string()

@@ -9,6 +9,7 @@
 pub mod audio;
 pub mod effects;
 pub mod export;
+pub mod gpu;
 pub mod media;
 pub mod preview;
 pub mod project;

@@ -20,7 +20,7 @@ use chukcut_lib::modules::project::{
     new_id, CanvasConfig, Micros, Project, Segment, TimeRange, Track, TrackKind, Transform,
     VideoMaterial,
 };
-use chukcut_lib::modules::render::{Compositor, RenderContext};
+use chukcut_lib::modules::render::Compositor;
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -97,9 +97,8 @@ fn main() -> anyhow::Result<()> {
         println!("validate: {:?} {}", issue.severity, issue.message);
     }
 
-    let context = Arc::new(
-        RenderContext::try_new().ok_or_else(|| anyhow::anyhow!("no usable GPU adapter"))?,
-    );
+    let context = chukcut_lib::modules::gpu::render_context()
+        .ok_or_else(|| anyhow::anyhow!("no usable GPU adapter"))?;
     println!(
         "GPU: {} ({:?}, {:?})",
         context.adapter_info().name,

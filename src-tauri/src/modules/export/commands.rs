@@ -10,7 +10,7 @@ use std::sync::{Arc, OnceLock};
 use tauri::ipc::Channel;
 use tauri::State;
 
-use crate::modules::render::{Compositor, CompositorConfig, RenderContext};
+use crate::modules::render::{Compositor, CompositorConfig};
 use crate::state::AppState;
 
 use super::job::{self, ExportJob, ExportOptions, ExportProgress, ExportRequest, ProgressSink};
@@ -33,20 +33,25 @@ impl ProgressSink for ChannelSink {
     }
 }
 
-/// The GPU device and pipeline, opened once and shared by every export.
+/// The export's pipeline, built once and shared by every export.
 ///
-/// Lazily, because opening a device costs tens of milliseconds and a user who
-/// never exports should never pay it. `None` means this machine produced no
-/// usable adapter, which is a real situation on a headless box without a
-/// software rasterizer.
+/// The *device* underneath it is the process's one device, from `gpu`, which
+/// the preview's render thread is very likely already drawing with — an export
+/// does not stop the user editing. This used to open a second one, and two live
+/// Vulkan instances in one address space have been observed crashing the driver
+/// on this machine; see the header of `modules/gpu`.
+///
+/// The pipeline is built lazily because a user who never exports should not pay
+/// for it. `None` means this machine produced no usable adapter, which is a
+/// real situation on a headless box without a software rasterizer.
 static COMPOSITOR: OnceLock<Option<Arc<Compositor>>> = OnceLock::new();
 
 fn compositor() -> Result<Arc<Compositor>, String> {
     COMPOSITOR
         .get_or_init(|| {
-            let ctx = RenderContext::try_new()?;
+            let ctx = crate::modules::gpu::render_context()?;
             Some(Arc::new(Compositor::with_config(
-                Arc::new(ctx),
+                ctx,
                 CompositorConfig {
                     // An export that quietly leaves a clip out is worse than
                     // one that fails: the hole is only discovered after the

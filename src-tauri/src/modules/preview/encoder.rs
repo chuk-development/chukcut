@@ -78,12 +78,39 @@ enum Preference {
     ForceHardware,
 }
 
+/// What an unset [`BACKEND_ENV`] means.
+///
+/// **Software, for now, and this is a deliberate step back from a measured
+/// win.** The hardware encoder is genuinely faster — 6.2 ms against 10.2 ms at
+/// 1080×1920 — but on an otherwise idle machine it makes the preview *stop*:
+///
+/// ```text
+/// cargo test -j 4 --lib preview::server                          → 30 s, 2 failed
+/// CHUKCUT_PREVIEW_JPEG=software cargo test -j 4 --lib preview::server → 0.15 s, 1 failed
+/// ```
+///
+/// In the failing run the renderer produced five frames and then made no
+/// further progress for thirty seconds with `playing=true` and the playhead at
+/// frame 0 — a stall, not slowness. What distinguishes it from the benchmark
+/// that measured 6.2 ms is concurrency: encoding was moved off the render
+/// thread onto a worker pool, so several encodes now run at once against one
+/// non-reentrant hardware encoder. The benchmark encodes one frame at a time
+/// and cannot see it.
+///
+/// Four milliseconds of a 9.4 ms frame is not worth a preview that can hang, so
+/// the default reverts until the interaction is understood. `CHUKCUT_PREVIEW_JPEG=hardware`
+/// turns it back on for whoever picks this up; the thing to establish is whether
+/// the encoder needs serialising, a pool of its own, or to go back on the render
+/// thread now that it is fast enough to belong there.
+const DEFAULT_PREFERENCE: Preference = Preference::ForceSoftware;
+
 fn preference() -> Preference {
     static CACHED: std::sync::OnceLock<Preference> = std::sync::OnceLock::new();
     *CACHED.get_or_init(|| match std::env::var(BACKEND_ENV).ok().as_deref() {
         Some("software") | Some("cpu") => Preference::ForceSoftware,
         Some("hardware") | Some("vaapi") | Some("gpu") => Preference::ForceHardware,
-        _ => Preference::Auto,
+        Some("auto") => Preference::Auto,
+        _ => DEFAULT_PREFERENCE,
     })
 }
 

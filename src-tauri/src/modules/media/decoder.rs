@@ -1034,7 +1034,7 @@ fn attach_hardware(
             codec.label()
         ));
     }
-    let Some(device) = VaapiDevice::shared() else {
+    let Some(device) = crate::modules::gpu::vaapi_device() else {
         return refuse("no VAAPI device on this machine".into());
     };
 
