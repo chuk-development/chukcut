@@ -39,12 +39,23 @@ use support::{material_for, probe_output, read_counter_rgba, segment, Probed};
 
 /// A one-second timeline showing the start of the counter clip.
 fn counter_project(duration: Micros, fps: f64) -> Option<Project> {
+    counter_project_sized(320, 240, duration, fps)
+}
+
+/// The counter clip on a canvas of the caller's choosing.
+///
+/// The size matters more than it looks: 320 is a multiple of 64, and for months
+/// that made every export test blind to a bug that destroyed real exports —
+/// the VAAPI encoder misreads any plane whose pitch its driver disagrees with,
+/// and only unaligned widths expose it. Tests that care about the hardware
+/// path must run at a width that is *not* a multiple of 64.
+fn counter_project_sized(width: u32, height: u32, duration: Micros, fps: f64) -> Option<Project> {
     let media = support::media().ok()?;
     let mut project = Project::new(
         "export integration",
         CanvasConfig {
-            width: 320,
-            height: 240,
+            width,
+            height,
             background: [0.0, 0.0, 0.0, 1.0],
         },
         fps,
@@ -85,6 +96,40 @@ fn usable_hardware() -> Option<chukcut_lib::modules::export::HwEncoder> {
     chukcut_lib::modules::export::hwaccel::detect()
         .into_iter()
         .find(|encoder| encoder.usable)
+}
+
+/// Every usable hardware encoder, because "the hardware path works" is a claim
+/// per encoder, not per machine. The stripes bug was reported against H.264
+/// *and* H.265, and only H.264 had ever been pixel-checked.
+fn all_usable_hardware() -> Vec<chukcut_lib::modules::export::HwEncoder> {
+    chukcut_lib::modules::export::hwaccel::detect()
+        .into_iter()
+        .filter(|encoder| encoder.usable)
+        .collect()
+}
+
+/// Mean luma PSNR between two same-sized RGBA frames, in dB.
+///
+/// The blunt instrument for the class of bug where the picture is *recognisable
+/// but wrong* — displaced stripes, a shifted plane, a swapped chroma order.
+/// Codec loss between two encodes of the same frame sits above 40 dB; the
+/// stride bug measured 17–19 dB. A threshold of 30 cannot confuse the two.
+fn luma_psnr_rgba(a: &[u8], b: &[u8]) -> f64 {
+    assert_eq!(a.len(), b.len(), "frames must be the same size to compare");
+    let mut sum = 0.0f64;
+    let mut count = 0.0f64;
+    for (pa, pb) in a.chunks_exact(4).zip(b.chunks_exact(4)) {
+        // BT.601 luma from RGB, the same weights the counter fixture uses.
+        let ya = 0.299 * pa[0] as f64 + 0.587 * pa[1] as f64 + 0.114 * pa[2] as f64;
+        let yb = 0.299 * pb[0] as f64 + 0.587 * pb[1] as f64 + 0.114 * pb[2] as f64;
+        sum += (ya - yb) * (ya - yb);
+        count += 1.0;
+    }
+    let mse = sum / count.max(1.0);
+    if mse <= f64::EPSILON {
+        return f64::INFINITY;
+    }
+    10.0 * (255.0f64 * 255.0 / mse).log10()
 }
 
 /// Everything an export produced: the file, what ffprobe says about it, and
@@ -315,6 +360,87 @@ fn a_hardware_export_is_not_truncated_and_holds_the_right_frames() {
         );
     }
     let _ = std::fs::remove_file(&result.path);
+}
+
+/// Every hardware encoder must produce the same *picture* as the software
+/// path, at the canvas widths whose plane pitch is not a multiple of 64.
+///
+/// This is the regression test for the stripes bug, written the way the owner
+/// described the check: export the same cut through both paths and compare the
+/// frames — first, middle and last, because a bug that corrupts geometry
+/// corrupts every frame, and one that only corrupts late frames (a ring reuse
+/// fault) is invisible at frame zero.
+///
+/// Why PSNR and not equality: two encoders are lossy differently, so identical
+/// pixels are impossible. Codec loss between the two paths measures 46–49 dB
+/// on real footage; the stripes bug measured 17–19 dB. The 30 dB line cannot
+/// confuse them, and a failure prints the number so the next person sees which
+/// side of it they are on.
+///
+/// Why these sizes: 1440 (mod 64 = 32) is what a 4:3 clip adopts and is the
+/// exact canvas the bug shipped on; 1080×1920 (mod 64 = 56) is the app's
+/// default vertical canvas. 320-wide tests stayed green through the whole
+/// affair because 320 divides by 64 — that blindness is documented on
+/// `counter_project_sized` and must not be reintroduced.
+#[test]
+fn every_hardware_encoder_shows_the_same_picture_as_the_software_path() {
+    let encoders = all_usable_hardware();
+    if encoders.is_empty() {
+        eprintln!("skipping: no usable hardware encoder on this machine");
+        return;
+    }
+
+    for (width, height) in [(1440u32, 1080u32), (1080, 1920)] {
+        let Some(project) = counter_project_sized(width, height, 1_000_000, 30.0) else {
+            eprintln!("skipping: no media fixtures");
+            return;
+        };
+
+        let sw_path = scratch(&format!("picture_sw_{width}x{height}.mp4"));
+        let software = exported!(&project, request(&sw_path, None, false));
+
+        // Decode the software reference frames once per size, outside the
+        // encoder loop.
+        let sample_times: Vec<i64> = [0u64, 14, 29]
+            .iter()
+            .map(|n| (*n as f64 * 1_000_000.0 / 30.0).round() as i64 + 16_000)
+            .collect();
+        let mut sw_decoder =
+            VideoDecoder::open(&software.path).expect("open the software export");
+        let sw_frames: Vec<_> = sample_times
+            .iter()
+            .map(|at| sw_decoder.seek_and_decode(*at).expect("decode the software export"))
+            .collect();
+
+        for hardware in &encoders {
+            let hw_path = scratch(&format!("picture_{}_{width}x{height}.mp4", hardware.id));
+            let mut req = request(&hw_path, None, false);
+            req.hardware = Some(hardware.id.clone());
+            let result = exported!(&project, req);
+
+            let mut decoder = VideoDecoder::open(&result.path).expect("open the hardware export");
+            for (at, reference) in sample_times.iter().zip(&sw_frames) {
+                let frame = decoder.seek_and_decode(*at).expect("decode the hardware export");
+                assert_eq!(
+                    (frame.width, frame.height),
+                    (reference.width, reference.height),
+                    "{} at {width}x{height}: the two exports disagree about the frame size",
+                    hardware.id
+                );
+                let psnr = luma_psnr_rgba(&frame.data, &reference.data);
+                assert!(
+                    psnr > 30.0,
+                    "{} at {width}x{height}, t={at}: luma PSNR against the software export \
+                     is {psnr:.1} dB — the picture is structurally wrong, not merely lossy. \
+                     Displaced vertical strips at this size were the plane-pitch bug; see \
+                     ROW_ALIGN in render::nv12",
+                    hardware.id
+                );
+            }
+            let _ = std::fs::remove_file(&result.path);
+        }
+        let _ = std::fs::remove_file(&software.path);
+    }
 }
 
 /// A hardware export has to be a normal file: same size, same rate, same codec
