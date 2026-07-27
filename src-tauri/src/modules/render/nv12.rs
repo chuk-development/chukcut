@@ -41,6 +41,7 @@ use parking_lot::Mutex;
 
 use super::context::RenderContext;
 use super::error::{RenderError, Result};
+use super::source::YuvRange;
 use super::texture_pool::PooledTexture;
 
 /// The format the compute pass reads. A view in this format over the sRGB
@@ -166,7 +167,8 @@ struct Params {
     y_stride_words: u32,
     uv_offset_words: u32,
     uv_stride_words: u32,
-    _pad: [u32; 3],
+    range: u32,
+    _pad: [u32; 2],
 }
 
 // `#[repr(C)]`, eight `u32`s, no padding of its own — plain old data. Hand
@@ -272,12 +274,26 @@ impl Nv12Converter {
         }
     }
 
-    /// Convert `target` and read the planes back.
+    /// Convert `target` and read the planes back, in limited range.
     ///
     /// `target` must have been created viewable as [`READ_FORMAT`]; a texture
     /// that was not is refused rather than silently converted through the sRGB
     /// view, which would produce a washed-out picture that still encodes.
     pub fn convert(&self, ctx: &RenderContext, target: &PooledTexture) -> Result<Nv12Frame> {
+        self.convert_range(ctx, target, YuvRange::Limited)
+    }
+
+    /// [`Self::convert`], saying which range the samples are wanted in.
+    ///
+    /// A video encoder wants [`YuvRange::Limited`] and a JPEG encoder wants
+    /// [`YuvRange::Full`]; getting it wrong produces a picture that is valid,
+    /// plausible and washed out. See `luma_in` in `shaders/yuv.wgsl`.
+    pub fn convert_range(
+        &self,
+        ctx: &RenderContext,
+        target: &PooledTexture,
+        range: YuvRange,
+    ) -> Result<Nv12Frame> {
         let layout = Nv12Layout::for_size(target.width(), target.height());
         let total = layout.total_bytes() as u64;
 
@@ -290,7 +306,7 @@ impl Nv12Converter {
 
         // Convert, then copy into something mappable in the same submission —
         // one round trip to the GPU rather than two.
-        self.dispatch(ctx, target, &storage, layout, |encoder| {
+        self.dispatch(ctx, target, &storage, layout, range, |encoder| {
             encoder.copy_buffer_to_buffer(&storage, 0, &staging, 0, total);
         })?;
 
@@ -345,6 +361,19 @@ impl Nv12Converter {
         target: &PooledTexture,
         destination: &wgpu::Buffer,
     ) -> Result<Nv12Layout> {
+        self.convert_into_range(ctx, target, destination, YuvRange::Limited)
+    }
+
+    /// [`Self::convert_into`], saying which range the samples are wanted in.
+    ///
+    /// The preview's JPEG encoder is the caller that wants [`YuvRange::Full`].
+    pub fn convert_into_range(
+        &self,
+        ctx: &RenderContext,
+        target: &PooledTexture,
+        destination: &wgpu::Buffer,
+        range: YuvRange,
+    ) -> Result<Nv12Layout> {
         let layout = Nv12Layout::for_size(target.width(), target.height());
         if destination.size() < layout.total_bytes() as u64 {
             return Err(RenderError::Readback(format!(
@@ -356,7 +385,7 @@ impl Nv12Converter {
             )));
         }
 
-        self.dispatch(ctx, target, destination, layout, |_| {})?;
+        self.dispatch(ctx, target, destination, layout, range, |_| {})?;
 
         let waited = std::time::Instant::now();
         ctx.device()
@@ -380,6 +409,7 @@ impl Nv12Converter {
         target: &PooledTexture,
         destination: &wgpu::Buffer,
         layout: Nv12Layout,
+        range: YuvRange,
         also: impl FnOnce(&mut wgpu::CommandEncoder),
     ) -> Result<()> {
         let (width, height) = (target.width(), target.height());
@@ -404,7 +434,8 @@ impl Nv12Converter {
             y_stride_words: (layout.y_stride / 4) as u32,
             uv_offset_words: (layout.uv_offset() / 4) as u32,
             uv_stride_words: (layout.uv_stride / 4) as u32,
-            _pad: [0; 3],
+            range: range as u32,
+            _pad: [0; 2],
         };
         ctx.queue()
             .write_buffer(&params_buffer, 0, bytemuck::bytes_of(&params));
@@ -499,15 +530,29 @@ impl std::fmt::Debug for Nv12Converter {
 /// is consistent with itself.
 #[cfg(test)]
 pub(crate) fn reference_yuv(rgb: [u8; 3]) -> (f32, f32, f32) {
+    reference_yuv_in(rgb, YuvRange::Limited)
+}
+
+/// The same, in whichever range. [`YuvRange::Full`] is the JFIF matrix, which
+/// is what a JPEG encoder wants.
+#[cfg(test)]
+pub(crate) fn reference_yuv_in(rgb: [u8; 3], range: YuvRange) -> (f32, f32, f32) {
     let (r, g, b) = (
         rgb[0] as f32 / 255.0,
         rgb[1] as f32 / 255.0,
         rgb[2] as f32 / 255.0,
     );
-    let y = 16.0 + 219.0 * (0.299 * r + 0.587 * g + 0.114 * b);
-    let cb = 128.0 + 224.0 * (-0.168_736 * r - 0.331_264 * g + 0.5 * b);
-    let cr = 128.0 + 224.0 * (0.5 * r - 0.418_688 * g - 0.081_312 * b);
-    (y, cb, cr)
+    let luma = 0.299 * r + 0.587 * g + 0.114 * b;
+    let cb = -0.168_736 * r - 0.331_264 * g + 0.5 * b;
+    let cr = 0.5 * r - 0.418_688 * g - 0.081_312 * b;
+    match range {
+        YuvRange::Limited => (16.0 + 219.0 * luma, 128.0 + 224.0 * cb, 128.0 + 224.0 * cr),
+        YuvRange::Full => (
+            255.0 * luma,
+            (128.0 + 255.0 * cb).clamp(0.0, 255.0),
+            (128.0 + 255.0 * cr).clamp(0.0, 255.0),
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -572,6 +617,15 @@ mod tests {
     /// arithmetic. `srgb_target_is_read_as_stored_bytes` covers the
     /// reinterpretation separately.
     fn convert_solid(colour: [u8; 4], width: u32, height: u32) -> Option<Nv12Frame> {
+        convert_solid_in(colour, width, height, YuvRange::Limited)
+    }
+
+    fn convert_solid_in(
+        colour: [u8; 4],
+        width: u32,
+        height: u32,
+        range: YuvRange,
+    ) -> Option<Nv12Frame> {
         let ctx = crate::modules::render::test_context()?;
         let pool = TexturePool::default();
         let target = pool.acquire(
@@ -611,7 +665,11 @@ mod tests {
         );
 
         let converter = Nv12Converter::new(&ctx);
-        Some(converter.convert(&ctx, &target).expect("convert"))
+        Some(
+            converter
+                .convert_range(&ctx, &target, range)
+                .expect("convert"),
+        )
     }
 
     fn assert_matches_reference(frame: &Nv12Frame, colour: [u8; 4]) {
@@ -648,6 +706,126 @@ mod tests {
                 return;
             };
             assert_matches_reference(&frame, colour);
+        }
+    }
+
+    /// The test that would catch a limited-range JPEG, which is the expensive
+    /// bug this file's range parameter exists to make impossible.
+    ///
+    /// A JPEG file carries no range tag and every decoder reads it as 0..255.
+    /// Encoding limited-range samples produces grey blacks and no white — a
+    /// valid, plausible, washed-out picture that scores about 27 dB against the
+    /// software encoder instead of 37. Black at 16 and white at 235 is what that
+    /// looks like from here.
+    #[test]
+    fn full_range_puts_black_at_zero_and_white_at_255() {
+        let Some(black) = convert_solid_in([0, 0, 0, 255], 64, 32, YuvRange::Full) else {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        };
+        assert_eq!(black.luma(0, 0), 0, "full-range black must be 0, not 16");
+        assert_eq!(black.chroma(0, 0), (128, 128), "black is colourless");
+
+        let white = convert_solid_in([255, 255, 255, 255], 64, 32, YuvRange::Full).expect("white");
+        assert_eq!(white.luma(0, 0), 255, "full-range white must be 255, not 235");
+        assert_eq!(white.chroma(0, 0), (128, 128), "white is colourless");
+
+        // And the other arm is untouched, because the export depends on it.
+        let black = convert_solid_in([0, 0, 0, 255], 64, 32, YuvRange::Limited).expect("limited");
+        assert_eq!(black.luma(0, 0), 16, "limited-range black is 16");
+    }
+
+    /// The compute pass and the CPU converter it replaces must agree.
+    ///
+    /// `preview::vaapi::rgba_to_nv12` is the full-range integer transform the
+    /// hardware JPEG encoder was fed for months, and it is checked against the
+    /// JFIF table by its own tests. Comparing against it is therefore a check
+    /// against a *known-good* implementation rather than against a second copy
+    /// of the same arithmetic — the two are written differently (float on the
+    /// GPU, 8-bit fixed point on the CPU) and share nothing.
+    #[test]
+    fn full_range_agrees_with_the_cpu_converter_the_jpeg_encoder_used() {
+        let Some(ctx) = crate::modules::render::test_context() else {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        };
+        // Not a smooth gradient: a flat ramp hides a chroma-block offset, and
+        // hard edges are where a 2x2 box average can disagree.
+        let (width, height) = (64u32, 48u32);
+        let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                let noise = (x.wrapping_mul(2_654_435_761) ^ y.wrapping_mul(40_503)) as u8;
+                rgba.extend_from_slice(&[
+                    (x * 255 / width) as u8,
+                    noise,
+                    if (x / 3 + y / 5) % 2 == 0 { 255 } else { 12 },
+                    255,
+                ]);
+            }
+        }
+
+        let pool = TexturePool::default();
+        let target = pool.acquire(
+            ctx.device(),
+            TextureKey::new(
+                width,
+                height,
+                READ_FORMAT,
+                wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            ),
+        );
+        ctx.queue().write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: target.texture(),
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &rgba,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(width * 4),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        let gpu = Nv12Converter::new(&ctx)
+            .convert_range(&ctx, &target, YuvRange::Full)
+            .expect("convert");
+
+        let (w, h) = (width as usize, height as usize);
+        let mut y = vec![0u8; w * h];
+        let mut uv = vec![0u8; w * h / 2];
+        crate::modules::preview::vaapi::rgba_to_nv12(&rgba, w, h, &mut y, w, &mut uv, w);
+
+        // One code value: the GPU works in floats and the CPU in 8-bit fixed
+        // point, so they round differently and nothing more.
+        for row in 0..height {
+            for col in 0..width {
+                let (got, want) = (gpu.luma(col, row), y[row as usize * w + col as usize]);
+                assert!(
+                    got.abs_diff(want) <= 1,
+                    "luma at {col},{row}: GPU {got}, CPU {want}"
+                );
+            }
+        }
+        for row in (0..height).step_by(2) {
+            for col in (0..width).step_by(2) {
+                let (cb, cr) = gpu.chroma(col, row);
+                let base = (row as usize / 2) * w + col as usize;
+                assert!(
+                    cb.abs_diff(uv[base]) <= 1 && cr.abs_diff(uv[base + 1]) <= 1,
+                    "chroma at {col},{row}: GPU ({cb}, {cr}), CPU ({}, {})",
+                    uv[base],
+                    uv[base + 1]
+                );
+            }
         }
     }
 

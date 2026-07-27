@@ -319,7 +319,7 @@ falls to 5.23 ms and the render thread idles 80%, so what is left is decode plus
 ladder cannot reduce decode, which is why its rungs are worth only 1.5–1.6× once
 the frame is already panel-sized.
 
-### 2. Stop carrying the finished frame to the CPU and back
+### 2. Stop carrying the finished frame to the CPU and back — BUILT, AND BLOCKED BY THE HARDWARE
 
 **60% of the frame at load 10, 76% at load 33.** Readback 5.10 + RGBA→NV12 1.81
 + upload 2.59 = 9.50 ms of a 15.82 ms frame; at load 33, 14.70 + 20.78 + 9.35 =
@@ -340,6 +340,24 @@ already half has.
 This is `docs/research/zero-copy-encode.md` pointed at the preview, which both
 that document and STATUS.md have been predicting for two days. The numbers now
 say it is worth more here than it was in the export.
+
+**Built 2026-07-27, measured at 2.4–3.1× on the serial frame, and it does not
+work on this chip.** Intel's fixed-function *JPEG* encoder reads an imported
+linear NV12 surface as though it were 32-row tiled; the *video* encoder reads the
+same file descriptor, in the same process, correctly. The estimate above was
+right and the obstacle was not the one this section names — it was not
+`VaapiJpegEncoder` owning a staging frame, which was ten lines. Full working,
+the row-ramp probe that identified it, what was ruled out and what would make it
+work: **`docs/research/preview-zerocopy-jpeg.md`**.
+
+The path ships behind `preview::zerocopy::encoder_can_read_linear`, which encodes
+a known ramp once per process and only enables itself if the picture comes back
+right. On this machine it does not, one INFO line says so, and the preview reads
+frames back exactly as it did before. **So the 60–76% is still on the table and
+is still the largest item — it is just not reachable from here.** Anyone picking
+this up should run `cargo run --release --example preview_zerocopy` first: if its
+first table shows the `mjpeg_vaapi` row matching the `h264_vaapi` row, the work
+is already done and switches itself on.
 
 ### 3. Take `rgba_to_nv12` off the global rayon pool
 

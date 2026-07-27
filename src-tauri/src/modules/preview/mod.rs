@@ -65,7 +65,10 @@
 //!   re-encode with no colour conversion; the hardware path converts to
 //!   full-range NV12 because that is what the encoder eats.
 //!   [`encoder::encode_preview_jpeg`] picks, and falls back without telling
-//!   the caller.
+//!   the caller. [`zerocopy`] is the version that does the conversion in the
+//!   compositor's own compute pass and hands the encoder that memory —
+//!   2.4–3.1× where a driver will read it, off on the Raptor Lake iGPU where
+//!   the JPEG engine will not.
 //! - **The evidence that playback is or is not smooth.** [`stats`] folds the
 //!   per-frame numbers into one INFO line a second — frames shown, dropped,
 //!   mean and p99 frame time, decode path, resolution — because the per-frame
@@ -100,6 +103,7 @@ pub mod server;
 pub mod session;
 pub mod stats;
 pub mod vaapi;
+pub mod zerocopy;
 
 pub use cache::{CachedFrame, FrameCache, Lookup, DEFAULT_CAPACITY};
 pub use clock::{
@@ -107,7 +111,8 @@ pub use clock::{
     PlaybackClock, TimeSource, DEFAULT_READ_AHEAD,
 };
 pub use encoder::{
-    encode_jpeg, encode_preview_jpeg, hardware_available, Backend, BACKEND_ENV,
+    encode_jpeg, encode_preview_jpeg, encode_preview_jpeg_dmabuf, hardware_available, Backend,
+    BACKEND_ENV,
 };
 pub use error::{PreviewError, Result};
 pub use ladder::{Ladder, Rung, MIN_QUALITY, RUNGS, STEP_DOWN_AFTER, STEP_UP_AFTER};
@@ -124,3 +129,4 @@ pub use stats::{
     decode_path, DecodePath, Histogram, PlaybackStats, Rendered, SeekKind, SeekWatch, SessionFacts,
     SlowSeek, Summary, SLOW_SEEK, SUMMARY_INTERVAL,
 };
+pub use zerocopy::{Claim, PreviewRing};

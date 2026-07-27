@@ -24,37 +24,54 @@
 // matrices are derived from `Kr`/`Kb` rather than written out. Deriving them is
 // both shorter and harder to typo than four hand-copied constants each.
 
-// ---------------------------------------------------------------------------
-// Forward: RGB to YUV. The encoder's direction.
-// ---------------------------------------------------------------------------
-
-// BT.601, limited range — what swscale produces by default for an untagged RGB
-// source, and what `encoder.rs` tags the stream as with `color_range: MPEG`.
-// The coefficients are the ones in the standard; the 219/224 scales are the
-// limited-range excursions.
-fn luma(c: vec3<f32>) -> f32 {
-    return 16.0 + 219.0 * (0.299 * c.r + 0.587 * c.g + 0.114 * c.b);
-}
-
-fn chroma(c: vec3<f32>) -> vec2<f32> {
-    let cb = -0.168736 * c.r - 0.331264 * c.g + 0.5 * c.b;
-    let cr = 0.5 * c.r - 0.418688 * c.g - 0.081312 * c.b;
-    return vec2<f32>(128.0 + 224.0 * cb, 128.0 + 224.0 * cr);
-}
-
-// ---------------------------------------------------------------------------
-// Inverse: YUV to RGB. The decoder's direction.
-// ---------------------------------------------------------------------------
-
-// Matrix selectors. These are the numbers `render::source::YuvMatrix` casts to;
-// changing one without the other silently reinterprets every hardware-decoded
-// frame, so they are asserted equal in a Rust test rather than trusted.
+// Matrix and range selectors. These are the numbers `render::source::YuvMatrix`
+// and `YuvRange` cast to; changing one without the other silently reinterprets
+// every hardware-decoded frame, so they are asserted equal in a Rust test rather
+// than trusted. They sit above both directions because both directions switch on
+// them.
 const MATRIX_BT601: u32 = 0u;
 const MATRIX_BT709: u32 = 1u;
 const MATRIX_BT2020: u32 = 2u;
 
 const RANGE_LIMITED: u32 = 0u;
 const RANGE_FULL: u32 = 1u;
+
+// ---------------------------------------------------------------------------
+// Forward: RGB to YUV. The encoder's direction.
+// ---------------------------------------------------------------------------
+
+// BT.601. The coefficients are the ones in the standard; what the range picks is
+// the excursion the result is scaled into.
+//
+// **Limited** (219/224 about 16/128) is what swscale produces by default for an
+// untagged RGB source and what `export::encoder` tags the stream as with
+// `color_range: MPEG`. It is what a video encoder wants.
+//
+// **Full** (255 about 0/128) is the JFIF matrix, and it is what a *JPEG* encoder
+// wants — a JPEG file carries no range tag and every decoder reads it as 0..255.
+// Handing the JPEG encoder limited-range samples produces grey blacks and no
+// white: a valid file that reads as the editor having washed the footage out,
+// scoring about 27 dB against the software encoder instead of 37. That is the
+// trap `docs/research/vaapi-jpeg-preview.md` records, and it is why this is a
+// parameter rather than a constant.
+fn luma_in(c: vec3<f32>, range: u32) -> f32 {
+    let y = 0.299 * c.r + 0.587 * c.g + 0.114 * c.b;
+    if (range == RANGE_FULL) {
+        return 255.0 * y;
+    }
+    return 16.0 + 219.0 * y;
+}
+
+fn chroma_in(c: vec3<f32>, range: u32) -> vec2<f32> {
+    let cb = -0.168736 * c.r - 0.331264 * c.g + 0.5 * c.b;
+    let cr = 0.5 * c.r - 0.418688 * c.g - 0.081312 * c.b;
+    let excursion = select(224.0, 255.0, range == RANGE_FULL);
+    return vec2<f32>(128.0 + excursion * cb, 128.0 + excursion * cr);
+}
+
+// ---------------------------------------------------------------------------
+// Inverse: YUV to RGB. The decoder's direction.
+// ---------------------------------------------------------------------------
 
 /// Luma weights `(Kr, Kg, Kb)` for a matrix selector.
 fn luma_weights(matrix: u32) -> vec3<f32> {

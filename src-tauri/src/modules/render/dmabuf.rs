@@ -78,8 +78,9 @@ pub struct ExportableBuffer {
     size: u64,
     device: ash::Device,
     /// Keeps the wgpu device — and therefore the `VkDevice` `device` is a
-    /// handle to — alive for at least as long as we will call into it.
-    _ctx: Arc<RenderContext>,
+    /// handle to — alive for at least as long as we will call into it, and is
+    /// what `Drop` waits on. Not `_`-prefixed any more: it is used.
+    ctx: Arc<RenderContext>,
 }
 
 impl ExportableBuffer {
@@ -249,7 +250,7 @@ impl ExportableBuffer {
             fd,
             size,
             device,
-            _ctx: Arc::clone(ctx),
+            ctx: Arc::clone(ctx),
         })
     }
 
@@ -277,14 +278,20 @@ impl Drop for ExportableBuffer {
     fn drop(&mut self) {
         // Everything queued against this buffer has to have finished. wgpu's
         // own tracking covers the `wgpu::Buffer`, but it does not know the
-        // memory is ours, so wait for the device to go idle before freeing it.
+        // memory is ours, so wait for the device to drain before freeing it.
         //
-        // SAFETY: `device_wait_idle` blocks until every queue on this device
-        // has drained. Its only failure modes are device loss and OOM, both of
-        // which mean the work is not going to complete anyway, so an error is
-        // logged and the frees proceed.
-        if let Err(e) = unsafe { self.device.device_wait_idle() } {
-            tracing::warn!(error = ?e, "waiting for the GPU before freeing exported memory");
+        // Through wgpu's `poll` rather than `vkDeviceWaitIdle`, and that is not
+        // a stylistic preference. Vulkan requires host access to **every**
+        // `VkQueue` on the device to be externally synchronised across a
+        // `vkDeviceWaitIdle`, and nothing here can synchronise against wgpu's
+        // own submissions or against a second buffer being dropped on another
+        // thread. It was called raw for months and only ever ran one buffer at a
+        // time on the export's single thread, so it never showed; six rings torn
+        // down concurrently by `preview::zerocopy`'s tests aborted the test
+        // binary with a double free or a SIGSEGV in two runs out of five.
+        // `Device::poll` takes wgpu's own locks and waits for the same thing.
+        if let Err(e) = self.ctx.device().poll(wgpu::PollType::wait_indefinitely()) {
+            tracing::warn!(error = %e, "waiting for the GPU before freeing exported memory");
         }
 
         // SAFETY: the `wgpu::Buffer` field is dropped before this runs (Rust
@@ -385,8 +392,20 @@ pub const RING: usize = 16;
 impl Nv12Ring {
     /// Allocate the rotation, or `None` if this device cannot export memory.
     pub fn new(ctx: &Arc<RenderContext>, frame_bytes: u64) -> Option<Self> {
-        let mut buffers = Vec::with_capacity(RING);
-        for i in 0..RING {
+        Self::with_slots(ctx, frame_bytes, RING)
+    }
+
+    /// [`Self::new`] with a rotation of a chosen depth.
+    ///
+    /// [`RING`] is sized against a *video* encoder's reference list and
+    /// reordering delay. A JPEG encoder has neither — one picture is in flight
+    /// at a time — so the preview asks for a handful of slots instead of
+    /// sixteen, and the difference is 40 MB of otherwise idle device memory at
+    /// 1080p.
+    pub fn with_slots(ctx: &Arc<RenderContext>, frame_bytes: u64, slots: usize) -> Option<Self> {
+        let slots = slots.max(1);
+        let mut buffers = Vec::with_capacity(slots);
+        for i in 0..slots {
             buffers.push(ExportableBuffer::new(
                 ctx,
                 frame_bytes,
@@ -400,6 +419,16 @@ impl Nv12Ring {
     pub fn take(&mut self) -> &ExportableBuffer {
         let index = self.next;
         self.next = (self.next + 1) % self.buffers.len();
+        &self.buffers[index]
+    }
+
+    /// One buffer by index, for a caller that chooses its own slot.
+    ///
+    /// The export rotates blindly because its frames retire in order. The
+    /// preview cannot: its encode runs on another thread, so which slot is free
+    /// is a question about liveness rather than about position, and it picks the
+    /// slot itself. See `preview::zerocopy`.
+    pub fn at(&self, index: usize) -> &ExportableBuffer {
         &self.buffers[index]
     }
 

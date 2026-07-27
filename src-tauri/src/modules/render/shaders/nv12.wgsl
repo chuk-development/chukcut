@@ -27,9 +27,11 @@ struct Params {
     y_stride_words: u32,
     uv_offset_words: u32,
     uv_stride_words: u32,
+    // `RANGE_LIMITED` for a video encoder, `RANGE_FULL` for the JPEG one. See
+    // `luma_in` in `yuv.wgsl` for why this cannot be a constant.
+    range: u32,
     _pad0: u32,
     _pad1: u32,
-    _pad2: u32,
 };
 
 @group(0) @binding(0) var src: texture_2d<f32>;
@@ -45,9 +47,10 @@ fn texel(x: u32, y: u32) -> vec3<f32> {
     return textureLoad(src, vec2<i32>(i32(cx), i32(cy)), 0).rgb;
 }
 
-// `luma` and `chroma` — the RGB→YUV half of this — live in `yuv.wgsl`, which is
-// prepended to this file at build time. They are there rather than here so the
-// inverse the compositor needs sits beside them; see the header of that file.
+// `luma_in` and `chroma_in` — the RGB→YUV half of this — live in `yuv.wgsl`,
+// which is prepended to this file at build time. They are there rather than here
+// so the inverse the compositor needs sits beside them; see the header of that
+// file.
 
 fn byte(v: f32) -> u32 {
     return u32(clamp(round(v), 0.0, 255.0));
@@ -78,15 +81,25 @@ fn convert(@builtin(global_invocation_id) gid: vec3<u32>) {
         texel(x0 + 3u, y0 + 1u),
     );
 
-    dst[y0 * params.y_stride_words + gid.x] =
-        pack(luma(top[0]), luma(top[1]), luma(top[2]), luma(top[3]));
+    let range = params.range;
+
+    dst[y0 * params.y_stride_words + gid.x] = pack(
+        luma_in(top[0], range),
+        luma_in(top[1], range),
+        luma_in(top[2], range),
+        luma_in(top[3], range),
+    );
 
     // An odd-height frame has no second row to write for its last block. The
     // chroma below still averages the clamped duplicate, which is what a 4:2:0
     // encoder would do with an odd height anyway.
     if (y0 + 1u < params.height) {
-        dst[(y0 + 1u) * params.y_stride_words + gid.x] =
-            pack(luma(bottom[0]), luma(bottom[1]), luma(bottom[2]), luma(bottom[3]));
+        dst[(y0 + 1u) * params.y_stride_words + gid.x] = pack(
+            luma_in(bottom[0], range),
+            luma_in(bottom[1], range),
+            luma_in(bottom[2], range),
+            luma_in(bottom[3], range),
+        );
     }
 
     // Chroma is the 2x2 box average of the *linear-in-code-value* RGB, then
@@ -95,8 +108,8 @@ fn convert(@builtin(global_invocation_id) gid: vec3<u32>) {
     // result on saturated edges.
     let left = (top[0] + top[1] + bottom[0] + bottom[1]) * 0.25;
     let right = (top[2] + top[3] + bottom[2] + bottom[3]) * 0.25;
-    let cl = chroma(left);
-    let cr = chroma(right);
+    let cl = chroma_in(left, range);
+    let cr = chroma_in(right, range);
 
     dst[params.uv_offset_words + gid.y * params.uv_stride_words + gid.x] =
         pack(cl.x, cl.y, cr.x, cr.y);

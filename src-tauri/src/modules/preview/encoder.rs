@@ -348,6 +348,80 @@ fn encode_staged(
     }
 }
 
+/// Encode a frame the compositor wrote straight into exported GPU memory.
+///
+/// The zero-copy half of [`encode_preview_jpeg`]. There is no `rgba` argument
+/// because there is no RGBA: `buffer` describes the DMA-BUF the compute pass
+/// filled with NV12, and the encoder reads that memory in place. Readback,
+/// conversion and upload — 60–76% of a preview frame in
+/// `docs/research/preview-performance.md` — do not happen at all.
+///
+/// `None` means the hardware encoder is unusable, exactly as in
+/// [`encode_preview_jpeg`], and the caller must fall back to the copying path.
+/// **There is no software fallback from here**: the buffer is device-local, so
+/// nothing on the CPU can read it, which is why the caller decides whether to
+/// take this path *before* compositing rather than after.
+///
+/// The returned surface is a wrap of the caller's memory and must be held until
+/// the caller is willing to overwrite the buffer. See
+/// [`vaapi::VaapiJpegEncoder::encode_dmabuf`].
+///
+/// **Nothing here dispatches onto rayon**, which is the rule [`HARDWARE`]
+/// documents — and this path keeps it trivially, because the parallel loop it
+/// used to be paired with is the very thing it deletes.
+pub fn encode_preview_jpeg_dmabuf(
+    buffer: &crate::modules::export::hwframes::Nv12Dmabuf<'_>,
+    quality: u8,
+) -> Option<(Vec<u8>, ffmpeg_next::util::frame::Video)> {
+    let (width, height) = (buffer.width, buffer.height);
+    if preference() == Preference::ForceSoftware || !size_is_encodable(width, height) {
+        return None;
+    }
+
+    let mut hw = hardware().lock();
+    if hw.disabled {
+        return None;
+    }
+    if !hw.encoder.as_ref().is_some_and(|e| e.matches(width, height, quality)) {
+        if hw.encoder.is_some() {
+            REBUILDS.fetch_add(1, Ordering::Relaxed);
+        }
+        hw.encoder = None;
+        match VaapiJpegEncoder::open(width, height, quality) {
+            Ok(encoder) => hw.encoder = Some(encoder),
+            Err(error) => {
+                hw.failures += 1;
+                if hw.failures >= FAILURES_BEFORE_GIVING_UP {
+                    hw.disabled = true;
+                    tracing::warn!(%error, "giving up on the hardware JPEG encoder");
+                } else {
+                    tracing::debug!(%error, width, height, "cannot open the hardware JPEG encoder");
+                }
+                return None;
+            }
+        }
+    }
+
+    let encoder = hw.encoder.as_mut()?;
+    match encoder.encode_dmabuf(buffer) {
+        Ok(out) => {
+            hw.failures = 0;
+            Some(out)
+        }
+        Err(error) => {
+            hw.failures += 1;
+            hw.encoder = None;
+            if hw.failures >= FAILURES_BEFORE_GIVING_UP {
+                hw.disabled = true;
+                tracing::warn!(%error, "giving up on the hardware JPEG encoder");
+            } else {
+                tracing::debug!(%error, "the zero-copy JPEG encode failed");
+            }
+            None
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The public surface
 // ---------------------------------------------------------------------------

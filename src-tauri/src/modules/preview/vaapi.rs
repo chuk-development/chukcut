@@ -37,10 +37,16 @@
 //! steps carrying pixels to it cost more than it does. So the remaining win is
 //! not a faster encoder, it is not moving the pixels — the compositor already
 //! has them on the GPU, and the preview reads them back to system memory only
-//! to send them straight back. `render::nv12` removes the conversion by doing
-//! it in a compute shader, and removing the copy entirely needs DMA-BUF export
-//! from wgpu, which wgpu does not offer. `docs/research/zero-copy-encode.md`
-//! is about the same copy on the export side.
+//! to send them straight back.
+//!
+//! [`VaapiJpegEncoder::encode_dmabuf`] is the version that does not move them:
+//! `render::nv12`'s compute pass writes NV12 into memory exported as a DMA-BUF
+//! and this maps that memory as the surface. It is worth **2.4–3.1×** on the
+//! serial frame and **it does not work on the Raptor Lake iGPU**, because this
+//! encoder reads an imported linear surface as though it were 32-row tiled while
+//! `h264_vaapi` reads the same file descriptor correctly.
+//! [`super::zerocopy::encoder_can_read_linear`] finds that out by trying, once,
+//! and the whole account is in `docs/research/preview-zerocopy-jpeg.md`.
 //!
 //! ## Traps, all of which cost time to find
 //!
@@ -325,6 +331,59 @@ impl VaapiJpegEncoder {
         )
     }
 
+    /// Encode a frame the compositor wrote straight into exported GPU memory.
+    ///
+    /// This is the zero-copy entry point and the whole point of the exercise.
+    /// `buffer` describes a DMA-BUF that `render::dmabuf::ExportableBuffer`
+    /// allocated and `render::nv12`'s compute pass filled: the pixels are
+    /// already where the encoder can read them, so there is no conversion, no
+    /// readback and no upload — the three stages that were 60–76% of a preview
+    /// frame (`docs/research/preview-performance.md`).
+    ///
+    /// Two obligations on the caller, both of which produce silent corruption
+    /// rather than an error if they are not met:
+    ///
+    /// - **The GPU must have finished.** libva cannot be handed a Vulkan
+    ///   semaphore, so the only synchronisation is a CPU-side wait after the
+    ///   compute submit. `Compositor::render_nv12_into_range` does it.
+    /// - **The returned surface must be held** until the caller is willing to
+    ///   let the compute pass write that buffer again. It is a *wrap* of the
+    ///   compositor's memory, not a copy, and overwriting memory the encoder is
+    ///   still reading gives a frame torn between two compositions.
+    ///
+    /// The samples must be **full range**, which is what `YuvRange::Full` on the
+    /// compute pass is for; see the module header.
+    pub fn encode_dmabuf(
+        &mut self,
+        buffer: &crate::modules::export::hwframes::Nv12Dmabuf<'_>,
+    ) -> Result<(Vec<u8>, frame::Video)> {
+        if (buffer.width, buffer.height) != (self.width, self.height) {
+            return Err(PreviewError::FrameSize {
+                width: buffer.width,
+                height: buffer.height,
+            });
+        }
+
+        let started = std::time::Instant::now();
+        let mut surface = self
+            .frames
+            .import_nv12_dmabuf(buffer)
+            .map_err(|e| PreviewError::Encode(e.to_string()))?;
+        self.stages.convert_micros = 0;
+        // Filed under `upload` because it is the same slot in the frame budget
+        // — how the pixels reached the encoder — and because that is what makes
+        // the two paths comparable in one table. It is a mapping, not a copy.
+        self.stages.upload_micros = started.elapsed().as_micros() as u64;
+
+        let bytes = Self::encode_mapped(
+            &mut self.encoder,
+            &mut self.pts,
+            &mut self.stages,
+            &mut surface,
+        )?;
+        Ok((bytes, surface))
+    }
+
     /// Upload one NV12 frame to a surface and run the fixed-function encoder.
     ///
     /// Free-standing over the fields it needs so both entry points above can
@@ -344,12 +403,25 @@ impl VaapiJpegEncoder {
             .upload(nv12, &mut surface)
             .map_err(|e| PreviewError::Encode(e.to_string()))?;
         stages.upload_micros = started.elapsed().as_micros() as u64;
+        Self::encode_mapped(encoder, pts, stages, &mut surface)
+    }
+
+    /// Send one VA surface to the fixed-function encoder and take the JPEG back.
+    ///
+    /// The half both entry points share: whether the surface was uploaded into
+    /// or mapped over, from here on it is the same picture-encode submission.
+    fn encode_mapped(
+        encoder: &mut ffmpeg::encoder::video::Encoder,
+        pts: &mut i64,
+        stages: &mut Stages,
+        surface: &mut frame::Video,
+    ) -> Result<Vec<u8>> {
         surface.set_pts(Some(*pts));
         *pts += 1;
 
         let started = std::time::Instant::now();
         encoder
-            .send_frame(&surface)
+            .send_frame(&*surface)
             .map_err(|e| ffmpeg_error("sending a frame to the hardware JPEG encoder", e))?;
 
         let mut packet = ffmpeg::Packet::empty();

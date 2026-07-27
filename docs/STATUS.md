@@ -5,8 +5,9 @@ Sessions are long and are not reopened, so nothing important is allowed to live
 only in a conversation. If you learn something that would change how the next
 person works, it belongs in this repository, not in a chat log.
 
-Last updated: 2026-07-26 (second pass: the preview hang, and the last of the
-VAAPI device consolidation).
+Last updated: 2026-07-27 (the preview zero-copy JPEG attempt, and the
+`vkDeviceWaitIdle` crash it found). Previously 2026-07-26: the preview hang,
+and the last of the VAAPI device consolidation.
 
 ## What this is
 
@@ -68,7 +69,12 @@ bug), and its audio is **not** silent.
     and 64 of 239 frames answered 204.
   - **60–76% of the frame is delivering finished pixels to the JPEG encoder** —
     readback, CPU RGBA→NV12, upload. The fixed-function encoder is 28% of its
-    own path. This is `zero-copy-encode.md` pointed at the preview.
+    own path. This is `zero-copy-encode.md` pointed at the preview. **It was
+    built on 2026-07-27, measured at 2.4–3.1×, and this chip's JPEG encoder
+    cannot read the compositor's memory** — it reads a linear imported surface
+    as though it were tiled, while the video encoder reads the same buffer
+    correctly. So the 60–76% is still there and is still the largest item; it is
+    just not reachable from here. `docs/research/preview-zerocopy-jpeg.md`.
   - **Rendering at canvas resolution rather than panel resolution is the single
     biggest recoverable item**: capping the long edge to 960 took 34.1 fps to
     61.1 fps and every failure symptom to zero, back to back in one process.
@@ -877,6 +883,32 @@ So, as with the export, the next win is not a faster encoder. It is
 `render::nv12` (colour conversion in a compute shader, which also halves the
 readback) and then DMA-BUF export, which is `docs/research/zero-copy-encode.md`.
 
+**That was tried on 2026-07-27 and this chip will not have it.** The whole path
+is built, is measured at **2.4–3.1×** on the serial frame, and is switched off,
+because Intel's fixed-function **JPEG** encoder reads an imported linear NV12
+surface as though it were 32-row tiled while the **video** encoder reads the same
+file descriptor in the same process correctly. That one sentence is the finding;
+the evidence, the row-ramp probe that produced it, everything that was ruled out
+and what would make it work are in
+**`docs/research/preview-zerocopy-jpeg.md`**. Reproduce in thirty seconds with
+`cargo run --release --example preview_zerocopy`.
+
+Two things about it that will otherwise cost an afternoon:
+
+- **A PSNR cannot diagnose this and a row ramp can.** Tiling, an ignored pitch
+  and a range mismatch all score badly and want three different responses. A
+  picture whose luma *is* its row number tells them apart at a glance: tiling
+  collapses each 32 rows to their mean (row 0 comes back 15), an ignored pitch
+  shears progressively, a range mismatch puts black at 16.
+- **The decision to use the path is taken before the frame is composited, not
+  after.** The exported buffer is device-local, so once a frame has been drawn
+  into one there is nothing on the CPU that can read it and no software fallback
+  left. `preview::zerocopy::encoder_can_read_linear` therefore encodes a known
+  ramp once per process and only enables the path if the picture comes back
+  right — it proves the encoder rather than hoping, which is the answer to
+  `zero-copy-encode.md`'s own warning that a "zero-copy" path which quietly
+  copies is worse than none.
+
 **The reduced playback resolution is gone.** `PreviewSession` briefly carried
 two sizes — native for a parked frame, reduced for playback — purely because the
 JPEG encode overran the budget at 1080x1920. At 6.2 ms it does not, and the
@@ -1365,6 +1397,22 @@ DMA-BUF is exported and a device is interrogated from several test threads at
 once. The same 30-run comparison on `tests/compositor.rs`, `tests/export.rs` and
 `tests/decode.rs` found no failure in either build, so what is left is specific
 to the unit binary's parallelism.
+
+**Those last three are very probably fixed, and the cause was `vkDeviceWaitIdle`.**
+`ExportableBuffer::drop` called it directly to make sure nothing was still
+reading the memory it was about to free. Vulkan requires host access to **every**
+`VkQueue` on the device to be externally synchronised across that call, and
+nothing in that `Drop` can synchronise against wgpu's own submissions or against
+a second buffer being dropped on another thread. The export tears down one ring
+at a time on one thread, so it never showed at 1-in-160; six rings torn down
+concurrently by `preview::zerocopy`'s tests aborted the binary with a double free
+or a `SIGSEGV` in **two runs out of five**, which is the same fault with the
+volume turned up. It now waits through `wgpu::Device::poll`, which takes wgpu's
+own locks and waits for the same thing: 0 failures in 20 runs of the zero-copy
+set and 0 in 20 of the wider GPU set (`render::dmabuf`, `render::nv12`,
+`render::context`, `preview::{zerocopy,encoder,vaapi}` — 44 tests). Nobody has
+re-run the 500, so this is "the reproducible version of it is gone", not "the
+3-in-500 is gone".
 
 ### The ordering bug a slow path was hiding
 

@@ -668,6 +668,31 @@ impl Compositor {
         sources: &dyn SourceProvider,
         destination: &wgpu::Buffer,
     ) -> Result<()> {
+        self.render_nv12_into_range(
+            project,
+            time,
+            size,
+            sources,
+            destination,
+            crate::modules::render::source::YuvRange::Limited,
+        )
+    }
+
+    /// [`Self::render_nv12_into`], saying which range the encoder on the other
+    /// side wants.
+    ///
+    /// The export's H.264 and H.265 encoders want limited; the preview's JPEG
+    /// encoder wants full. A JPEG file carries no range tag, so limited-range
+    /// samples in one come out as grey blacks — see `shaders/yuv.wgsl`.
+    pub fn render_nv12_into_range(
+        &self,
+        project: &Project,
+        time: Micros,
+        size: (u32, u32),
+        sources: &dyn SourceProvider,
+        destination: &wgpu::Buffer,
+        range: crate::modules::render::source::YuvRange,
+    ) -> Result<()> {
         let converter = self.nv12_converter().ok_or_else(|| {
             RenderError::Readback("this device has no RGBA to NV12 compute pass".into())
         })?;
@@ -675,7 +700,7 @@ impl Compositor {
 
         let started = Instant::now();
         let before_wait = converter.wait_ns.load(Ordering::Relaxed);
-        let result = converter.convert_into(&self.ctx, &target, destination);
+        let result = converter.convert_into_range(&self.ctx, &target, destination, range);
         let waited = converter.wait_ns.load(Ordering::Relaxed) - before_wait;
         add(&self.stats.nv12_ns, started);
         self.stats
