@@ -57,6 +57,46 @@ bug), and its audio is **not** silent.
 
 ## What is known to be rough
 
+- **RESOLVED 2026-07-27, owner-confirmed ("hat perfekt funktioniert"): the
+  stutter is gone. Kept here as a diagnosis record because each of its causes
+  can come back.** It was never one bug; it was four, and the sum was what the
+  owner felt. Anyone re-investigating a "timeline/playback laggy" report should
+  check all four before assuming a new cause:
+  1. **The pipeline rendered ~8× the pixels the screen showed** — canvas-sized
+     frames into a panel-sized widget. Fixed: `preview_viewport`, panel-size
+     rendering (11.68 → 3.75 ms/frame). Regression sign: `render_width` in the
+     playback log far above the panel's device-pixel width.
+  2. **Delivering pixels to the JPEG encoder was 60% of the frame** — readback,
+     CPU convert, upload. Fixed: the compositor draws into VAAPI's own surfaces
+     (encode thread 5.32 → 1.18 ms). Regression sign: the startup log line
+     "composite straight into the JPEG encoder's own surfaces" missing — the
+     probe refused, and the readback fallback is carrying every frame.
+  3. **The playhead re-rendered the world.** The fastest-changing value in the
+     app was a subscription of the whole Timeline, the Inspector and the
+     Preview: three big React trees per position event and per scrub move, on
+     the same thread that decodes the preview's JPEGs. Fixed: every consumer
+     subscribes itself; `bodyPaintCount` and its paint test pin it. Regression
+     sign: that test failing, or any new `useTimelineStore((s) => s.playhead)`
+     in a component bigger than a line of text.
+  4. **Silent frame loss in the webview**: a 204 answered as `response.ok`,
+     threw inside `createImageBitmap`, was swallowed, and nobody retried — up
+     to a quarter of frames on a loaded run, plus duplicate renders of the
+     frame being awaited. Both fixed alongside the viewport work.
+
+- **The follow-up it caused, also resolved 2026-07-27: playback looked *soft*
+  on the very build that fixed the stutter** — "die Abspielqualität ist nicht
+  1080p". The log said it in one line: `render_width=960 render_height=540
+  downscaled=true rung=0`, so not the quality ladder — a hard cap. History:
+  `preview_max_edge` defaulted to 960 and was **inert since birth**
+  (`session.ts` passed `null`; the dialog wrote a value nothing read). Wiring
+  the settings turned that never-chosen default into a silent cap on every
+  preview. Fix: default and stored inert-era 960 are now 0 = automatic
+  (`Settings::migrated`, versioned so a *deliberate* 960 chosen after the wiring
+  survives). This is the third resolution cap the user never asked for — canvas
+  adoption at 1080 and the preview's 720 were the first two. The pattern to
+  refuse in review: **a fixed resolution number as a default in a path the user
+  watches.** Auto-size from the surface, cap only on request.
+
 - **Playback stutters, and it is now diagnosed.** Full working, with the
   reproduction commands, in **`docs/research/preview-performance.md`**. The
   short version, measured 2026-07-27 at `3440e48` with a real `PreviewServer`

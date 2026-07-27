@@ -109,7 +109,7 @@ export interface MenuSectionView {
  * `workspace_settings_set` would carry a value the user did not choose.
  */
 export const DEFAULT_SETTINGS: Settings = {
-  preview_max_edge: 960,
+  preview_max_edge: 0,
   preview_full_quality: false,
   preview_quality: 80,
   snapping: true,

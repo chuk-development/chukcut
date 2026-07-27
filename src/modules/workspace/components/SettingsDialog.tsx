@@ -43,7 +43,12 @@ import type { LogLocation } from "@/modules/workspace/types";
 
 const GIB = 1024 * 1024 * 1024;
 
-const PREVIEW_CAPS = [540, 720, 960, 1280, 1920];
+// 0 is "Auto": the panel's own size in device pixels, never above the canvas.
+// It leads the list because it is the default and the right answer for almost
+// everyone; the fixed caps are overrides for weak machines. 960 used to be the
+// default, silently, while this setting was not wired to anything — see
+// `Settings::migrated` in Rust for what that cost when it started working.
+const PREVIEW_CAPS = [0, 540, 720, 960, 1280, 1920];
 const FRAME_RATES = [24, 25, 30, 50, 60];
 const CANVASES: [number, number][] = [
   [1080, 1920],
@@ -128,13 +133,13 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
             <TabsContent value="preview" className="flex flex-col gap-3.5">
               <Field
                 label="Resolution cap"
-                caption="The long edge the preview renders at. Lower is faster and changes nothing about what you export."
+                caption="The long edge the preview renders at. Auto follows the player's size on screen. Lower is faster; none of it changes what you export."
               >
                 <NumberSelect
                   aria-label="Resolution cap"
                   value={settings.preview_max_edge}
                   options={PREVIEW_CAPS}
-                  format={(value) => `${value} px`}
+                  format={(value) => (value === 0 ? "Auto" : `${value} px`)}
                   disabled={disabled || settings.preview_full_quality}
                   onChange={(value) => void update({ preview_max_edge: value })}
                 />
