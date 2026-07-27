@@ -36,6 +36,7 @@ const SECTIONS: MenuSectionView[] = [
         label: "New Project",
         accelerator: "Ctrl+N",
         enabled: true,
+        detail: null,
         unavailable_reason: null,
       },
       { kind: "separator" },
@@ -45,6 +46,7 @@ const SECTIONS: MenuSectionView[] = [
         label: "Save",
         accelerator: "Ctrl+S",
         enabled: false,
+        detail: null,
         unavailable_reason: null,
       },
       {
@@ -53,7 +55,35 @@ const SECTIONS: MenuSectionView[] = [
         label: "Publish",
         accelerator: null,
         enabled: false,
+        detail: null,
         unavailable_reason: "there is nowhere to publish to yet",
+      },
+      {
+        kind: "submenu",
+        id: "file.recent",
+        label: "Recent Projects",
+        enabled: true,
+        entries: [
+          {
+            kind: "item",
+            id: "file.recent:/p/a.chukcut",
+            label: "a",
+            accelerator: null,
+            enabled: true,
+            detail: "/p/a.chukcut",
+            unavailable_reason: null,
+          },
+          { kind: "separator" },
+          {
+            kind: "item",
+            id: "file.recent.clear",
+            label: "Clear List",
+            accelerator: null,
+            enabled: true,
+            detail: null,
+            unavailable_reason: null,
+          },
+        ],
       },
     ],
   },
@@ -66,6 +96,7 @@ const SECTIONS: MenuSectionView[] = [
         label: "Undo",
         accelerator: "Ctrl+Z",
         enabled: true,
+        detail: null,
         unavailable_reason: null,
       },
       {
@@ -74,6 +105,7 @@ const SECTIONS: MenuSectionView[] = [
         label: "Redo",
         accelerator: "Ctrl+Shift+Z",
         enabled: true,
+        detail: null,
         unavailable_reason: null,
       },
     ],
@@ -87,6 +119,7 @@ const SECTIONS: MenuSectionView[] = [
         label: "About chukcut",
         accelerator: null,
         enabled: true,
+        detail: null,
         unavailable_reason: null,
       },
     ],
@@ -293,5 +326,73 @@ describe("the keyboard", () => {
 
     await waitFor(() => expect(title("Edit")).toHaveAttribute("aria-expanded", "false"));
     expect(onSelect).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Submenus
+// ---------------------------------------------------------------------------
+
+describe("a submenu", () => {
+  it("opens from the keyboard and reports the chosen row's id", async () => {
+    const { onSelect } = renderBar();
+
+    await userEvent.click(title("File"));
+    // New Project, then the submenu trigger — the two disabled items between
+    // them are skipped by the roving focus.
+    await userEvent.keyboard("{ArrowDown}{ArrowDown}");
+    await waitFor(() =>
+      expect(within(openMenu()).getByRole("menuitem", { name: /Recent Projects/ })).toHaveFocus(),
+    );
+
+    // → is the submenu's own key: it opens the panel and focuses the first
+    // row. The bar's ←/→ handler must not steal it to step the top titles.
+    await userEvent.keyboard("{ArrowRight}");
+    await waitFor(() => expect(title("File")).toHaveAttribute("aria-expanded", "true"));
+    await userEvent.keyboard("{Enter}");
+
+    await waitFor(() =>
+      expect(onSelect).toHaveBeenCalledExactlyOnceWith("file.recent:/p/a.chukcut"),
+    );
+  });
+
+  it("shows a row's dimmed detail — the path that tells two Untitleds apart", async () => {
+    renderBar();
+
+    await userEvent.click(title("File"));
+    await userEvent.keyboard("{ArrowDown}{ArrowDown}{ArrowRight}");
+
+    await waitFor(() => {
+      const row = screen.getByRole("menuitem", { name: /\/p\/a\.chukcut/ });
+      expect(row).toHaveTextContent("a");
+      expect(row).toHaveTextContent("/p/a.chukcut");
+    });
+  });
+
+  it("does not open when Rust greyed it", async () => {
+    const { onSelect } = renderBar([
+      {
+        title: "File",
+        entries: [
+          {
+            kind: "submenu",
+            id: "file.recent",
+            label: "Recent Projects",
+            enabled: false,
+            entries: [],
+          },
+        ],
+      },
+    ]);
+
+    await userEvent.click(title("File"));
+    const trigger = within(openMenu()).getByRole("menuitem", { name: /Recent Projects/ });
+    expect(trigger).toHaveAttribute("aria-disabled", "true");
+    // The click cannot land through the pointer (disabled Radix items are
+    // pointer-events: none), so drive it directly the way a stale hit test or
+    // a screen reader would.
+    trigger.click();
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
   });
 });

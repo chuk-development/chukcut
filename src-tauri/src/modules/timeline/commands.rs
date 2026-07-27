@@ -8,7 +8,7 @@
 use std::sync::Arc;
 use tauri::State;
 
-use super::ops::{compose_edits, link, split_at, unlink, EditCommand};
+use super::ops::{compose_edits, link, split_all_at, split_at, unlink, EditCommand};
 use crate::modules::project::{Micros, Project};
 use crate::state::AppState;
 
@@ -95,6 +95,23 @@ pub fn timeline_split(
         let mut project_guard = state.project.write();
         let project = project_guard.as_mut().ok_or("no project is open")?;
         let command = split_at(project, &segment_id, at)?;
+        state.history.write().apply(project, command)?;
+    }
+    respond(&state)
+}
+
+/// Split every unlocked clip under the playhead, across all tracks, as one
+/// undo step. See `ops::split_all_at` for the cluster rule that keeps a linked
+/// pair from being cut twice.
+#[tauri::command]
+pub fn timeline_split_all(
+    state: State<'_, Arc<AppState>>,
+    at: Micros,
+) -> Result<EditResponse, String> {
+    {
+        let mut project_guard = state.project.write();
+        let project = project_guard.as_mut().ok_or("no project is open")?;
+        let command = split_all_at(project, at)?;
         state.history.write().apply(project, command)?;
     }
     respond(&state)

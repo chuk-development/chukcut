@@ -83,6 +83,7 @@ fn request(path: &std::path::Path, overrides: Option<ExportOverrides>, audio: bo
         overrides,
         hardware: None,
         include_audio: audio,
+        range: None,
     }
 }
 
@@ -466,6 +467,185 @@ fn a_hardware_export_is_shaped_like_a_software_one() {
     assert_eq!(result.probe.avg_frame_rate, (30, 1));
     assert!(result.probe.has_audio, "no audio stream in the hardware file");
     let _ = std::fs::remove_file(&result.path);
+}
+
+// ---------------------------------------------------------------------------
+// The export range
+// ---------------------------------------------------------------------------
+
+/// A range export walks exactly its own frames, and the frames are the right
+/// ones. The counter clip writes its index into its pixels, so "frame 0 of a
+/// range starting at one second is source frame 30" is a fact to check rather
+/// than an inference from the file's length.
+#[test]
+fn a_range_export_holds_exactly_the_ranged_frames_rebased_to_zero() {
+    // Four seconds of counter (frames 0..120); export the middle two.
+    let Some(project) = counter_project(4_000_000, 30.0) else {
+        eprintln!("skipping: no media fixtures");
+        return;
+    };
+    let path = scratch("range.mp4");
+    let mut req = request(&path, None, false);
+    req.range = Some((1_000_000, 3_000_000));
+    let result = exported!(&project, req);
+
+    assert_eq!(result.expected_frames, 60, "two seconds at 30 fps");
+    assert_eq!(
+        result.probe.decoded_frames, 60,
+        "the range's frame count, counted by decoding"
+    );
+    // The file starts at zero: a two-second range is a two-second file, give
+    // or take the last frame's own duration.
+    assert!(
+        (result.probe.duration - 2.0).abs() <= 1.5 / 30.0,
+        "a two-second range exported as {:.4} s",
+        result.probe.duration
+    );
+
+    // First, middle and last frame of the output are source frames 30, 59 and
+    // 89 — the range rebased, not the project truncated.
+    let mut decoder = VideoDecoder::open(&result.path).expect("open the range export");
+    for (out_frame, source_frame) in [(0u64, 30u64), (29, 59), (59, 89)] {
+        let at = (out_frame as f64 * 1_000_000.0 / 30.0).round() as i64 + 16_000;
+        let frame = decoder.seek_and_decode(at).expect("decode the range export");
+        assert_eq!(
+            read_counter_rgba(&frame.data, frame.width, frame.height),
+            Some(source_frame),
+            "output frame {out_frame} should be source frame {source_frame}"
+        );
+    }
+    let _ = std::fs::remove_file(&result.path);
+}
+
+/// The duration of a stream, asked with ffprobe rather than with anything that
+/// wrote the file. `None` when the stream is not there.
+fn stream_duration_seconds(file: &std::path::Path, stream: &str) -> Option<f64> {
+    let output = std::process::Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            stream,
+            "-show_entries",
+            "stream=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+        ])
+        .arg(file)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
+}
+
+#[test]
+fn a_range_export_audio_is_as_long_as_the_range() {
+    let Some(project) = counter_project(4_000_000, 30.0) else {
+        eprintln!("skipping: no media fixtures");
+        return;
+    };
+    let path = scratch("range_audio.mp4");
+    let mut req = request(&path, None, true);
+    req.range = Some((1_000_000, 3_000_000));
+    let result = exported!(&project, req);
+
+    assert!(result.probe.has_audio, "no audio stream in the range export");
+    let audio = stream_duration_seconds(&result.path, "a:0")
+        .expect("the audio stream has a duration");
+    // AAC pads to its 1024-sample frame and the muxer may carry priming
+    // samples, so the tolerance is a couple of codec frames, not zero.
+    assert!(
+        (audio - 2.0).abs() <= 0.1,
+        "a two-second range carries {audio:.3} s of audio"
+    );
+    let _ = std::fs::remove_file(&result.path);
+}
+
+/// Marks that outlive an edit clamp to the timeline rather than failing.
+#[test]
+fn a_range_past_the_end_of_the_timeline_clamps_to_what_exists() {
+    let Some(project) = counter_project(2_000_000, 30.0) else {
+        eprintln!("skipping: no media fixtures");
+        return;
+    };
+    let path = scratch("range_clamped.mp4");
+    let mut req = request(&path, None, false);
+    // The out mark sits a second past the last clip.
+    req.range = Some((1_000_000, 3_000_000));
+    let result = exported!(&project, req);
+
+    assert_eq!(result.expected_frames, 30, "only the second that exists");
+    assert_eq!(result.probe.decoded_frames, 30);
+
+    let mut decoder = VideoDecoder::open(&result.path).expect("open the clamped export");
+    let frame = decoder.seek_and_decode(16_000).expect("decode frame 0");
+    assert_eq!(
+        read_counter_rgba(&frame.data, frame.width, frame.height),
+        Some(30),
+        "the clamped range still starts at its in mark"
+    );
+    let _ = std::fs::remove_file(&result.path);
+}
+
+// ---------------------------------------------------------------------------
+// Frame snapshots
+// ---------------------------------------------------------------------------
+
+/// A snapshot is a decodable PNG, at canvas size, of the requested frame — and
+/// it comes through the real compositor, which the counter readback proves.
+#[test]
+fn a_snapshot_is_a_decodable_png_of_the_canvas_at_the_requested_frame() {
+    let _ = require_media!();
+    let ctx = require_gpu!();
+    let Some(project) = counter_project(4_000_000, 30.0) else {
+        return;
+    };
+
+    let compositor = Compositor::with_config(
+        ctx,
+        CompositorConfig {
+            strict_sources: true,
+            ..Default::default()
+        },
+    );
+    let sources = MediaSourceProvider::from_project(&project);
+
+    // Frame 45, asked for at mid-frame so rounding cannot land next door.
+    let time = (45.0f64 * 1_000_000.0 / 30.0).round() as i64 + 16_000;
+    let asked = scratch("snapshot.jpg"); // deliberately the wrong extension
+    let written = chukcut_lib::modules::export::snapshot::write_png(
+        &project, time, &compositor, &sources, &asked,
+    )
+    .expect("write the snapshot");
+
+    assert_eq!(
+        written.extension().and_then(|e| e.to_str()),
+        Some("png"),
+        "the extension follows the bytes, as an export's follows its container"
+    );
+
+    let decoded = image::open(&written).expect("the PNG decodes").to_rgba8();
+    assert_eq!(decoded.dimensions(), (320, 240), "full canvas resolution");
+    assert_eq!(
+        read_counter_rgba(decoded.as_raw(), 320, 240),
+        Some(45),
+        "the snapshot is not the frame that was asked for"
+    );
+
+    // A time past the end clamps to the last frame rather than failing or
+    // rendering black.
+    let past = scratch("snapshot_past.png");
+    let written = chukcut_lib::modules::export::snapshot::write_png(
+        &project, 99_000_000, &compositor, &sources, &past,
+    )
+    .expect("write the clamped snapshot");
+    let decoded = image::open(&written).expect("the PNG decodes").to_rgba8();
+    assert_eq!(read_counter_rgba(decoded.as_raw(), 320, 240), Some(119));
+
+    let _ = std::fs::remove_file(scratch("snapshot.png"));
+    let _ = std::fs::remove_file(past);
 }
 
 // ---------------------------------------------------------------------------

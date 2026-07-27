@@ -78,10 +78,12 @@ pub fn run() {
             modules::project::commands::project_get,
             modules::project::commands::project_validate,
             modules::project::commands::project_path,
+            modules::project::commands::project_configure,
             // timeline
             modules::timeline::commands::timeline_apply,
             modules::timeline::commands::timeline_apply_many,
             modules::timeline::commands::timeline_split,
+            modules::timeline::commands::timeline_split_all,
             modules::timeline::commands::timeline_link,
             modules::timeline::commands::timeline_unlink,
             modules::timeline::commands::timeline_undo,
@@ -90,6 +92,8 @@ pub fn run() {
             modules::inspector::commands::inspector_set_crop,
             modules::inspector::commands::inspector_set_color,
             modules::inspector::commands::inspector_lut_probe,
+            modules::inspector::commands::inspector_paste_attributes,
+            modules::inspector::commands::inspector_rename_clip,
             // transitions
             modules::transitions::commands::transitions_catalog,
             modules::transitions::commands::transitions_max_duration,
@@ -121,6 +125,7 @@ pub fn run() {
             modules::export::commands::export_presets,
             modules::export::commands::export_start,
             modules::export::commands::export_cancel,
+            modules::export::commands::export_snapshot,
             // proxy
             modules::proxy::commands::proxy_request,
             modules::proxy::commands::proxy_cancel,
@@ -136,6 +141,7 @@ pub fn run() {
             modules::workspace::commands::workspace_settings_set,
             modules::workspace::commands::workspace_recent_list,
             modules::workspace::commands::workspace_recent_record,
+            modules::workspace::commands::workspace_recent_clear,
             modules::workspace::commands::workspace_cache_size,
             modules::workspace::commands::workspace_cache_clear,
             modules::workspace::commands::workspace_hardware,

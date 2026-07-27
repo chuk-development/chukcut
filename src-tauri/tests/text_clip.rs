@@ -766,6 +766,7 @@ fn a_title_survives_a_real_export_and_matches_the_preview() {
         // test is about the title, not about the encoder.
         hardware: None,
         include_audio: false,
+        range: None,
     };
 
     let settings = resolve_settings(&project, &request).expect("resolve the settings");

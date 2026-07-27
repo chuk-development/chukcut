@@ -41,6 +41,11 @@ export function workspaceRecentRecord(path: string, name: string, now: number): 
   return invoke<void>("workspace_recent_record", { path, name, now });
 }
 
+/** File → Recent Projects → Clear List. Forgets the list, touches no project. */
+export function workspaceRecentClear(): Promise<void> {
+  return invoke<void>("workspace_recent_clear");
+}
+
 /** Bytes currently held under the cache root. Walks the tree, so not free. */
 export function workspaceCacheSize(): Promise<number> {
   return invoke<number>("workspace_cache_size");

@@ -101,6 +101,13 @@ export interface ExportRequest {
   /** A `HwEncoder.id`. Null means software, which is the deliberate default. */
   hardware: string | null;
   include_audio: boolean;
+  /**
+   * Export only `[start, end]` of the timeline, in microseconds — a Rust
+   * `Option<(Micros, Micros)>`, so a two-element array here. Rust clamps it to
+   * the project and rebases the file's timestamps to start at zero. Null means
+   * the whole project.
+   */
+  range: [number, number] | null;
 }
 
 export type ExportStage =
@@ -155,4 +162,14 @@ export function exportCancel(jobId: string): Promise<boolean> {
 
 export function newProgressChannel(): Channel<ExportProgress> {
   return new Channel<ExportProgress>();
+}
+
+/**
+ * Save the frame at `time` (timeline microseconds) as a PNG at full canvas
+ * resolution, rendered fresh through the export compositor — never a copy of
+ * the preview's panel-sized picture. Resolves with the path actually written,
+ * which may differ from the request by its extension.
+ */
+export function exportSnapshot(time: number, outputPath: string): Promise<string> {
+  return invoke<string>("export_snapshot", { time, outputPath });
 }

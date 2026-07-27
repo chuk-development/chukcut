@@ -17,6 +17,7 @@ import type {
   Easing,
   Id,
   Keyframe,
+  Marker,
   Micros,
   Project,
   Segment,
@@ -99,6 +100,15 @@ export type EditCommand =
       before: Easing;
       after: Easing;
     }
+  /**
+   * The marker commands. The whole `Marker` travels — time, label, colour —
+   * because undo has to put back exactly what was there. `set_marker` keeps the
+   * id and is refused when the document's marker no longer matches `before`,
+   * the same stale-panel rule as `set_link_group`.
+   */
+  | { type: "add_marker"; marker: Marker }
+  | { type: "remove_marker"; marker: Marker }
+  | { type: "set_marker"; before: Marker; after: Marker }
   | { type: "composite"; label: string; commands: EditCommand[] };
 
 /** What every mutating command answers with: the whole document plus history state. */
@@ -130,6 +140,11 @@ export function timelineApplyMany(commands: EditCommand[], label: string): Promi
 
 export function timelineSplit(segmentId: Id, at: Micros): Promise<EditResponse> {
   return invoke<EditResponse>("timeline_split", { segmentId, at });
+}
+
+/** Split every unlocked clip under `at`, across all tracks, as one undo step. */
+export function timelineSplitAll(at: Micros): Promise<EditResponse> {
+  return invoke<EditResponse>("timeline_split_all", { at });
 }
 
 /**

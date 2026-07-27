@@ -16,6 +16,8 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { MEDIA_DRAG_MIME } from "@/lib/dnd";
 import { clamp, MICROS_PER_SECOND } from "@/lib/time";
+import { pasteAttributes, renameClip } from "@/modules/inspector/lib/clip";
+import { useInspectorStore } from "@/modules/inspector/store";
 import { useMediaStore } from "@/modules/media/store";
 import { preview } from "@/modules/preview/lib/session";
 import { usePreviewStore } from "@/modules/preview/store";
@@ -32,21 +34,25 @@ import type {
   TrackKind,
 } from "@/modules/project/types";
 import {
+  clipName,
   findSegment,
   linkedPartners,
   linkGroupOf,
+  markersOf,
   materialDuration,
   projectDuration,
   rangeEnd,
   segmentLabel,
   soundIsOnALinkedLane,
 } from "@/modules/project/types";
+import { ExportRangeOverlay, MarkerLane } from "@/modules/timeline/components/Markers";
 import { Playhead } from "@/modules/timeline/components/Playhead";
 import { RazorGuide } from "@/modules/timeline/components/RazorGuide";
 import { Segment, type SegmentGesture } from "@/modules/timeline/components/Segment";
 import { TimelineToolbar } from "@/modules/timeline/components/TimelineToolbar";
 import { TimeRuler } from "@/modules/timeline/components/TimeRuler";
 import { TrackHeader, TrackLane } from "@/modules/timeline/components/Track";
+import { detachAudio, reattachAudio } from "@/modules/timeline/lib/detach";
 import { registerTimelineDropTarget } from "@/modules/timeline/lib/dropTarget";
 import {
   copySegments,
@@ -61,13 +67,17 @@ import {
   type SegmentMove,
   type SegmentTrim,
   segmentUnderPlayhead,
+  setSegmentSpeed,
+  splitAllAt,
   splitAt,
+  toggleMuteSegment,
   toggleTrackFlag,
   trimSegments,
   undo,
   unlinkSegment,
 } from "@/modules/timeline/lib/edits";
 import { applyFades, type Fades } from "@/modules/timeline/lib/fades";
+import { addMarkerAt } from "@/modules/timeline/lib/markers";
 import { buildMaterialIndex } from "@/modules/timeline/lib/materials";
 import { freeSpan, nearestFreeStart } from "@/modules/timeline/lib/placement";
 import { closeGap, gapAt, rippleDeleteSegment } from "@/modules/timeline/lib/ripple";
@@ -198,6 +208,11 @@ function travellers(project: Project, movingIds: readonly Id[], grabbedId: Id): 
   }
 
   return partners;
+}
+
+/** Marker instants, as snap candidates for every gesture on the lanes. */
+function markerTimes(project: Project | null): Micros[] {
+  return markersOf(project).map((marker) => marker.time);
 }
 
 type DragState =
@@ -365,6 +380,11 @@ export function Timeline() {
   // `RazorGuide` subscribes to it instead.
   const setRazorTarget = useTimelineStore((s) => s.setRazorTarget);
 
+  // One bit of the clipboard — "is there something whose attributes could be
+  // pasted" — read as a boolean so filling the clipboard with different clips
+  // does not re-render the lanes.
+  const canPasteAttributes = useTimelineStore((s) => s.clipboard.length > 0);
+
   const scrollRef = useRef<HTMLDivElement>(null);
   const headerScrollRef = useRef<HTMLDivElement>(null);
   const lanesRef = useRef(new Map<Id, HTMLDivElement>());
@@ -372,6 +392,8 @@ export function Timeline() {
   const [viewportWidth, setViewportWidth] = useState(0);
   const [drag, setDrag] = useState<DragState>(null);
   const [band, setBand] = useState<BandState | null>(null);
+  /** The clip whose rename field is open, if any. */
+  const [renamingId, setRenamingId] = useState<Id | null>(null);
 
   /**
    * Membership, as a set, rebuilt only when the selection is.
@@ -500,8 +522,10 @@ export function Timeline() {
   const scrub = useCallback(
     (event: React.PointerEvent) => {
       const state = useTimelineStore.getState();
+      const current = useProjectStore.getState().project;
       // Null playhead: it is the thing moving, so it cannot be a candidate.
-      const context = buildSnapContext(useProjectStore.getState().project, null, null);
+      // Markers are: parking the playhead on one is what they are for.
+      const context = buildSnapContext(current, null, null, markerTimes(current));
       const radius = snapRadius(state.zoom);
       const apply = (clientX: number, altKey: boolean) => {
         const raw = timeAtClientX(clientX);
@@ -547,7 +571,7 @@ export function Timeline() {
       const state = useTimelineStore.getState();
       let at = time;
       if (state.snapping && !altKey) {
-        const context = buildSnapContext(current, state.playhead, segment.id);
+        const context = buildSnapContext(current, state.playhead, segment.id, markerTimes(current));
         const hit = snapInstant(time, context, snapRadius(state.zoom));
         if (
           hit &&
@@ -645,6 +669,7 @@ export function Timeline() {
         current,
         useTimelineStore.getState().playhead,
         segmentId,
+        markerTimes(current),
       );
       const minDuration = minClipDuration(current.fps);
       const speed = segment.speed > 0 ? segment.speed : 1;
@@ -969,6 +994,15 @@ export function Timeline() {
     void splitAt(hit.segmentId, at);
   }, [setError]);
 
+  /**
+   * Shift+C: every unlocked lane takes the cut, as one undo step. A playhead
+   * over nothing is refused by Rust with its own message, which `runEdit`
+   * already surfaces.
+   */
+  const handleSplitAll = useCallback(() => {
+    void splitAllAt(useTimelineStore.getState().playhead);
+  }, []);
+
   const handleDelete = useCallback(() => {
     const current = useProjectStore.getState().project;
     const ids = liveSelection(current, useTimelineStore.getState().selection);
@@ -1171,7 +1205,10 @@ export function Timeline() {
           break;
         case "c":
           event.preventDefault();
-          handleSplit();
+          // Shift widens the cut to every unlocked lane. S was the other
+          // candidate for this and is taken by snapping.
+          if (event.shiftKey) handleSplitAll();
+          else handleSplit();
           break;
         case "v":
           setTool("select");
@@ -1181,6 +1218,23 @@ export function Timeline() {
           break;
         case "s":
           toggleSnapping();
+          break;
+        case "m":
+          // A marker at the playhead, into the document and the undo history.
+          event.preventDefault();
+          void addMarkerAt(useTimelineStore.getState().playhead);
+          break;
+        case "i":
+          event.preventDefault();
+          useTimelineStore.getState().setMarkIn(useTimelineStore.getState().playhead);
+          break;
+        case "o":
+          event.preventDefault();
+          useTimelineStore.getState().setMarkOut(useTimelineStore.getState().playhead);
+          break;
+        case "x":
+          event.preventDefault();
+          useTimelineStore.getState().clearMarks();
           break;
         case "escape":
           select(null);
@@ -1200,6 +1254,7 @@ export function Timeline() {
     handlePaste,
     handleSelectAll,
     handleSplit,
+    handleSplitAll,
     select,
     setTool,
     toggleSnapping,
@@ -1359,6 +1414,72 @@ export function Timeline() {
 
   const handleUnlinkSegment = useCallback((segmentId: Id) => {
     void unlinkSegment(segmentId);
+  }, []);
+
+  const handleSetSpeed = useCallback((segmentId: Id, speed: number) => {
+    const current = useProjectStore.getState().project;
+    if (current) void setSegmentSpeed(current, segmentId, speed);
+  }, []);
+
+  /**
+   * Speed → Custom…: the inspector's slider is the custom control, so select
+   * the clip (the inspector edits the sole selection) and ask the panel to
+   * bring the slider into view and focus.
+   */
+  const handleCustomSpeed = useCallback(
+    (segmentId: Id) => {
+      select(segmentId);
+      useInspectorStore.getState().requestSpeedFocus();
+    },
+    [select],
+  );
+
+  const handleToggleMute = useCallback((segmentId: Id) => {
+    const current = useProjectStore.getState().project;
+    if (current) void toggleMuteSegment(current, segmentId);
+  }, []);
+
+  const handleRenameStart = useCallback((segmentId: Id) => setRenamingId(segmentId), []);
+  const handleRenameCancel = useCallback(() => setRenamingId(null), []);
+
+  const handleRenameCommit = useCallback((segmentId: Id, value: string | null) => {
+    setRenamingId(null);
+    const current = useProjectStore.getState().project;
+    if (!current) return;
+    const found = findSegment(current, segmentId);
+    if (!found) return;
+    const trimmed = (value ?? "").trim();
+    const existing = clipName(current, found.segment);
+    // Committing the name it already has — including "still no name" — is not
+    // an edit, and sending it would put a refusal in the error bar.
+    if (trimmed === (existing ?? "")) return;
+    void renameClip(segmentId, trimmed === "" ? null : trimmed);
+  }, []);
+
+  const handleDetachAudio = useCallback((segmentId: Id) => {
+    const current = useProjectStore.getState().project;
+    if (current) void detachAudio(current, segmentId);
+  }, []);
+
+  const handleReattachAudio = useCallback((segmentId: Id) => {
+    const current = useProjectStore.getState().project;
+    if (current) void reattachAudio(current, segmentId);
+  }, []);
+
+  /**
+   * Apply the copied clip's attributes. Aimed at a clip in the selection it
+   * covers the whole selection — that is the "paste onto these four" gesture —
+   * and aimed at an unselected clip it covers that clip alone, the same rule
+   * dragging follows.
+   */
+  const handlePasteAttributes = useCallback((segmentId: Id) => {
+    const current = useProjectStore.getState().project;
+    const { clipboard, selection } = useTimelineStore.getState();
+    const source = clipboard[0];
+    if (!current || !source) return;
+    const chosen = liveSelection(current, selection);
+    const targets = chosen.includes(segmentId) ? chosen : [segmentId];
+    void pasteAttributes(source, targets);
   }, []);
 
   const handleRippleDeleteSegment = useCallback(
@@ -1612,6 +1733,12 @@ export function Timeline() {
               style={{ width: contentWidth }}
             />
 
+            {/* In/out shading under the scrub band (never a pointer target),
+                marker flags above it (clicking a marker is aiming at the
+                marker, not at the strip behind it). */}
+            <ExportRangeOverlay zoom={zoom} />
+            <MarkerLane zoom={zoom} />
+
             <div style={gridStyle}>
               {project?.tracks.map((track) => {
                 const external =
@@ -1649,6 +1776,7 @@ export function Timeline() {
                             drag
                             ? partnerPreview(drag, segment.id)
                             : null;
+                      const soundOnPartner = soundIsOnALinkedLane(project, track, segment);
                       return (
                         <Segment
                           key={segment.id}
@@ -1660,7 +1788,7 @@ export function Timeline() {
                           muted={track.muted || segment.volume <= 0}
                           razor={tool === "razor"}
                           linked={linkGroupOf(project, segment) !== null}
-                          soundOnPartnerLane={soundIsOnALinkedLane(project, track, segment)}
+                          soundOnPartnerLane={soundOnPartner}
                           linkable={selection.length > 1 && selected.has(segment.id)}
                           zoom={zoom}
                           preview={dragging && drag.toTrackId !== track.id ? null : preview}
@@ -1677,6 +1805,25 @@ export function Timeline() {
                           onUnlink={handleUnlinkSegment}
                           onLink={handleLink}
                           onFade={handleFadeSegment}
+                          name={clipName(project, segment)}
+                          canDetachAudio={
+                            track.kind !== "audio" &&
+                            !soundOnPartner &&
+                            project.materials.videos.some(
+                              (m) => m.id === segment.material_id && m.has_audio,
+                            )
+                          }
+                          canPasteAttributes={canPasteAttributes}
+                          renaming={renamingId === segment.id}
+                          onSetSpeed={handleSetSpeed}
+                          onCustomSpeed={handleCustomSpeed}
+                          onToggleMute={handleToggleMute}
+                          onRenameStart={handleRenameStart}
+                          onRenameCommit={handleRenameCommit}
+                          onRenameCancel={handleRenameCancel}
+                          onDetachAudio={handleDetachAudio}
+                          onReattachAudio={handleReattachAudio}
+                          onPasteAttributes={handlePasteAttributes}
                         />
                       );
                     })}
@@ -1709,6 +1856,19 @@ export function Timeline() {
                         onUnlink={handleUnlinkSegment}
                         onLink={handleLink}
                         onFade={handleFadeSegment}
+                        name={clipName(project, external.segment)}
+                        canDetachAudio={false}
+                        canPasteAttributes={canPasteAttributes}
+                        renaming={false}
+                        onSetSpeed={handleSetSpeed}
+                        onCustomSpeed={handleCustomSpeed}
+                        onToggleMute={handleToggleMute}
+                        onRenameStart={handleRenameStart}
+                        onRenameCommit={handleRenameCommit}
+                        onRenameCancel={handleRenameCancel}
+                        onDetachAudio={handleDetachAudio}
+                        onReattachAudio={handleReattachAudio}
+                        onPasteAttributes={handlePasteAttributes}
                       />
                     ) : null}
 

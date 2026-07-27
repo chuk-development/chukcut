@@ -86,13 +86,30 @@ export interface MenuItemView {
   accelerator: string | null;
   enabled: boolean;
   /**
+   * A dimmed second line under the label. Only the recent-projects rows carry
+   * one — the path, because two projects called "Untitled" are otherwise the
+   * same row.
+   */
+  detail: string | null;
+  /**
    * Why this item can never be enabled, when the feature does not exist at all.
    * `null` for anything that is merely unavailable in the current document.
    */
   unavailable_reason: string | null;
 }
 
-export type MenuEntryView = ({ kind: "item" } & MenuItemView) | { kind: "separator" };
+/** A nested menu, resolved. One level only — its entries never nest again. */
+export interface MenuSubmenuView {
+  id: string;
+  label: string;
+  enabled: boolean;
+  entries: MenuEntryView[];
+}
+
+export type MenuEntryView =
+  | ({ kind: "item" } & MenuItemView)
+  | { kind: "separator" }
+  | ({ kind: "submenu" } & MenuSubmenuView);
 
 export interface MenuSectionView {
   title: string;

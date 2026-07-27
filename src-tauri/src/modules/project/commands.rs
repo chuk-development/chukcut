@@ -432,6 +432,62 @@ fn restore_working_copy(state: &AppState) -> Option<Project> {
     Some(project)
 }
 
+/// What a settings change hands back: the same shape as the timeline's
+/// `EditResponse`, because the frontend routes both through the one
+/// `applyEditResponse` path and a second shape would be a second code path for
+/// no reason.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ConfigureResponse {
+    pub project: Project,
+    pub can_undo: bool,
+    pub can_redo: bool,
+    pub undo_label: Option<String>,
+    pub redo_label: Option<String>,
+}
+
+/// Change the project's name, canvas, frame rate or background — as **one
+/// undoable step** on the same stack as every timeline edit.
+///
+/// Two things worth knowing before touching this:
+///
+/// - A no-op is deliberately not recorded. The dialog's Save button always
+///   commits, and "Undo Project settings" reversing nothing visible would read
+///   as undo being broken.
+/// - Changing `fps` re-times **nothing**. Every time in the document is `i64`
+///   microseconds (`docs/architecture/project-format.md`), so the rate is
+///   presentation and export, never position. The dialog warns about this; the
+///   command relies on it.
+#[tauri::command]
+pub fn project_configure(
+    state: State<'_, Arc<AppState>>,
+    config: super::configure::ProjectConfig,
+) -> Result<ConfigureResponse, String> {
+    {
+        let mut guard = state.project.write();
+        let project = guard.as_mut().ok_or("no project is open")?;
+        let command = super::configure::ConfigureCommand::new(project, config);
+        if !command.is_noop() {
+            state.history.write().apply_configure(project, command)?;
+        }
+    }
+
+    // The same tail as the timeline's `respond`: the working copy follows every
+    // change to the document, and the history flags ride along so the menu's
+    // Undo item is right without a second round trip.
+    let project = state.project.read().clone().ok_or("no project is open")?;
+    let origin = state.project_path.read().clone();
+    super::autosave::schedule(&project, origin);
+
+    let history = state.history.read();
+    Ok(ConfigureResponse {
+        project,
+        can_undo: history.can_undo(),
+        can_redo: history.can_redo(),
+        undo_label: history.undo_label(),
+        redo_label: history.redo_label(),
+    })
+}
+
 #[tauri::command]
 pub fn project_validate(state: State<'_, Arc<AppState>>) -> Result<Vec<ValidationIssue>, String> {
     state.with_project(|project| project.validate())

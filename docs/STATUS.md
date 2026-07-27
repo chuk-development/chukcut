@@ -50,6 +50,7 @@ Each of these was measured or checked against an independent tool, not assumed.
 | Hardware decode (VAAPI) | H.264, HEVC, VP9 **and AV1**, each probed by decoding a real embedded frame. `tests/decode.rs` — 34 tests, 22 of them run against both the software and hardware decoders and pass identically, including every seek, VFR and rotation case. The two decoders produce the same picture to a mean channel difference under 2 |
 | Zero-copy decode into wgpu | `examples/dmabuf_import.rs` — a decoded VA surface exported as DMA-BUF and imported as two wgpu textures reconstructs the software decode's picture to a mean channel difference of **0.32**, with a deliberately chroma-swapped control at 41.9 |
 | Hardware decode through the compositor | `examples/hwdecode_pipeline.rs` — the imported surface is composited by the quad shader and matches a software-decoded composite of the same instant to a mean channel difference of **1.1–1.4**, against 9.4 for a deliberately wrong colour matrix. Decode to texture falls from 20–66 ms to 0.8–3.3 ms; a whole preview frame from 39–72 ms to 7.5–16 ms. **On by default** |
+| Export range and frame snapshots | `tests/export.rs` — a 1 s..3 s range of a 4 s counter timeline yields exactly 60 decodable frames whose first/middle/last are source frames 30/59/89 (rebased to zero), with 2.0 s ± 0.1 of AAC; marks past the end clamp rather than fail; `export_snapshot` writes a decodable canvas-size PNG of the requested frame through the export compositor, never the preview's panel-sized picture. Dialog wiring (range select, long-edge resolutions, estimated size, remember-settings, snapshot button) in `src/modules/export/**.test.*`, 106 vitest |
 
 Two of those deserve emphasis because they are the failure modes that usually
 go unnoticed: the export is **not** truncated (the classic un-flushed-encoder
@@ -1494,6 +1495,47 @@ implements. What exists and the decisions inside it:
   `lut_active`): ungraded clips pay exactly nothing, a grade without a look
   skips the eight LUT taps, and a look without a grade skips the scalar
   arithmetic. Re-run on a quiet machine before quoting these anywhere.
+
+## The app shell: recent projects, project settings, shortcuts, transport keys (2026-07-27)
+
+Four additions, all workspace/app-side; the timeline and export modules were
+not touched. What the next person needs to know:
+
+- **The menu table supports one level of submenu.** `menu.rs` gained
+  `Entry::Submenu` and `describe` gained a `recent: &[RecentEntry]` parameter —
+  the recent-projects rows are the one part of the bar that is the user's data
+  rather than the `const` table, so they are injected there and nowhere else.
+  A submenu never nests another (enforced with an `unreachable!`), missing
+  files draw greyed with "file is gone" rather than being pruned, and the
+  trigger is forced off when the list is empty. The webview's dedup on
+  `MenuState` cannot see the recent list, so `installMenu` additionally
+  subscribes to the workspace store's `recent` — without that, Clear List
+  leaves a bar offering entries Rust has forgotten (`menu.ts` says why).
+- **Project settings (File → Project Settings…) are one undoable step on the
+  same stack as timeline edits.** `project_configure` +
+  `project::ConfigureCommand`, recorded by `state::DocumentHistory`, which
+  replaced `timeline::History` behind `AppState.history` with identical method
+  signatures. **Read `docs/decisions/0008-one-undo-stack-two-command-kinds.md`
+  before touching either history** — `DocumentHistory::apply` deliberately
+  reproduces `History::apply`'s two expansions, and that coupling is the
+  documented cost. Changing fps re-times nothing (times are micros); the
+  dialog says so out loud. The dialog speaks sRGB hex, the document stores
+  linear RGBA; the conversion is the real transfer function and the test pins
+  that mid grey is ~0.216, not 0.5.
+- **The shortcuts overlay is generated, not curated.**
+  `workspace/lib/shortcuts.ts::buildShortcutGroups` reads the accelerators out
+  of the same `MenuSectionView[]` the title bar draws, so a key added to the
+  menu table appears in Help → Keyboard Shortcuts with no second edit; only
+  keys the menu cannot advertise (transport, tools, mouse chords) are still
+  a hand list, `EXTRA_SHORTCUTS`, annotated with each binding's owner. The
+  test pins that no accelerator in the input can fail to appear.
+- **J/K/L are bound in `src/lib/shortcuts.ts`, app-level.** J is deliberately
+  *not* reverse play — the engine decodes forward and the audio clock is the
+  master — so J pauses and steps back one frame, and both the code and the
+  overlay say so. The one-owner-per-key rule held: Space/←/→/Home/End belong
+  to `Preview.tsx` (Shift+←/→ is *ten frames* there, not one second — changing
+  that means editing a preview-owned file), the tool letters to
+  `Timeline.tsx`, and J/K/L had no owner before this.
 
 ## Not built yet
 

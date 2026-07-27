@@ -66,10 +66,17 @@ use super::paths;
 pub mod ids {
     pub const FILE_NEW: &str = "file.new";
     pub const FILE_OPEN: &str = "file.open";
+    /// The submenu itself. Its rows are dynamic — one per remembered project —
+    /// and carry ids of the form [`FILE_RECENT_PREFIX`]`<path>`.
+    pub const FILE_RECENT: &str = "file.recent";
+    /// Prefix of a recent-project row's id; the rest of the id is the path.
+    pub const FILE_RECENT_PREFIX: &str = "file.recent:";
+    pub const FILE_RECENT_CLEAR: &str = "file.recent.clear";
     pub const FILE_SAVE: &str = "file.save";
     pub const FILE_SAVE_AS: &str = "file.save_as";
     pub const FILE_IMPORT: &str = "file.import";
     pub const FILE_EXPORT: &str = "file.export";
+    pub const FILE_PROJECT_SETTINGS: &str = "file.project_settings";
     pub const FILE_QUIT: &str = "file.quit";
 
     pub const EDIT_UNDO: &str = "edit.undo";
@@ -85,6 +92,15 @@ pub mod ids {
     pub const VIEW_ZOOM_IN: &str = "view.zoom_in";
     pub const VIEW_ZOOM_OUT: &str = "view.zoom_out";
     pub const VIEW_ZOOM_FIT: &str = "view.zoom_fit";
+    /// The zoom-preset submenu and its fixed steps, in pixels of timeline per
+    /// second of media. The values live in `workspace/lib/menu.ts`, next to
+    /// the store call they feed.
+    pub const VIEW_ZOOM_PRESET: &str = "view.zoom_preset";
+    pub const VIEW_ZOOM_DETAIL: &str = "view.zoom_preset.detail";
+    pub const VIEW_ZOOM_STANDARD: &str = "view.zoom_preset.standard";
+    pub const VIEW_ZOOM_OVERVIEW: &str = "view.zoom_preset.overview";
+    pub const VIEW_ZOOM_HOUR: &str = "view.zoom_preset.hour";
+    pub const VIEW_CENTER_PLAYHEAD: &str = "view.center_playhead";
     pub const VIEW_FULLSCREEN: &str = "view.fullscreen";
     pub const VIEW_LOGS: &str = "view.logs";
 
@@ -200,6 +216,30 @@ pub struct Item {
 pub enum Entry {
     Item(Item),
     Separator,
+    /// One level of nesting, and only one — a submenu holds items and
+    /// separators, never another submenu. Nothing in an editor's bar needs
+    /// more, and the flattenings below (`all_items`, `describe`) are written
+    /// to that rule.
+    Submenu(Submenu),
+}
+
+/// A nested menu inside a section.
+///
+/// Its static entries come from this table like everything else. The one
+/// exception is the recent-projects submenu, whose *rows* cannot be `'static`
+/// because they are the user's files: [`describe`] injects them from the list
+/// the caller passes, above the static entries. That keeps the rule intact —
+/// the submenu itself, its gate and its fixed items are still declared here,
+/// and the webview still cannot add anything.
+pub struct Submenu {
+    pub id: &'static str,
+    pub label: &'static str,
+    /// Gates the trigger. The recent submenu is additionally forced off when
+    /// the list is empty — an openable submenu with nothing in it reads as
+    /// broken — which `describe` handles because emptiness is not a fact in
+    /// [`MenuState`].
+    pub gate: Gate,
+    pub entries: &'static [Entry],
 }
 
 /// A whole submenu, in the order it is drawn.
@@ -225,6 +265,14 @@ pub const ITEMS: &[MenuSection] = &[
         entries: &[
             item(ids::FILE_NEW, "New Project", Some("Ctrl+N"), Gate::Always),
             item(ids::FILE_OPEN, "Open Project…", Some("Ctrl+O"), Gate::Always),
+            // The rows — one per remembered project — are injected by
+            // `describe` from the list on disk; only Clear List is static.
+            Entry::Submenu(Submenu {
+                id: ids::FILE_RECENT,
+                label: "Recent Projects",
+                gate: Gate::Always,
+                entries: &[item(ids::FILE_RECENT_CLEAR, "Clear List", None, Gate::Always)],
+            }),
             Entry::Separator,
             // Greyed when there is nothing to write. A Save that is a no-op
             // still teaches the user that Save sometimes does nothing.
@@ -233,6 +281,15 @@ pub const ITEMS: &[MenuSection] = &[
             Entry::Separator,
             item(ids::FILE_IMPORT, "Import Media…", Some("Ctrl+I"), Gate::State(|s| s.has_project)),
             item(ids::FILE_EXPORT, "Export…", Some("Ctrl+E"), Gate::State(|s| s.has_project)),
+            Entry::Separator,
+            // The document's own settings — name, canvas, fps, background —
+            // as opposed to Ctrl+, which is the application's.
+            item(
+                ids::FILE_PROJECT_SETTINGS,
+                "Project Settings…",
+                None,
+                Gate::State(|s| s.has_project),
+            ),
             Entry::Separator,
             item(ids::FILE_QUIT, "Quit", Some("Ctrl+Q"), Gate::Always),
         ],
@@ -269,6 +326,27 @@ pub const ITEMS: &[MenuSection] = &[
             item(ids::VIEW_ZOOM_IN, "Zoom In", Some("Ctrl+="), Gate::State(|s| s.has_project)),
             item(ids::VIEW_ZOOM_OUT, "Zoom Out", Some("Ctrl+-"), Gate::State(|s| s.has_project)),
             item(ids::VIEW_ZOOM_FIT, "Fit Timeline", Some("Ctrl+0"), Gate::State(|s| s.can_fit)),
+            // Fixed steps, labelled in timeline-pixels per second of media
+            // because that is the unit the ruler makes visible. The values are
+            // in `workspace/lib/menu.ts::ZOOM_PRESETS`, clamped by the
+            // timeline store's own bounds.
+            Entry::Submenu(Submenu {
+                id: ids::VIEW_ZOOM_PRESET,
+                label: "Zoom Preset",
+                gate: Gate::State(|s| s.has_project),
+                entries: &[
+                    item(ids::VIEW_ZOOM_DETAIL, "Detail — 400 px/s", None, Gate::State(|s| s.has_project)),
+                    item(ids::VIEW_ZOOM_STANDARD, "Standard — 100 px/s", None, Gate::State(|s| s.has_project)),
+                    item(ids::VIEW_ZOOM_OVERVIEW, "Overview — 10 px/s", None, Gate::State(|s| s.has_project)),
+                    item(ids::VIEW_ZOOM_HOUR, "Whole hour — 2 px/s", None, Gate::State(|s| s.has_project)),
+                ],
+            }),
+            item(
+                ids::VIEW_CENTER_PLAYHEAD,
+                "Center on Playhead",
+                None,
+                Gate::State(|s| s.has_project),
+            ),
             Entry::Separator,
             item(ids::VIEW_FULLSCREEN, "Toggle Fullscreen", Some("F"), Gate::Always),
             item(ids::VIEW_LOGS, "Show Log Directory", None, Gate::Capability(|c| c.logs)),
@@ -287,12 +365,28 @@ pub const ITEMS: &[MenuSection] = &[
     },
 ];
 
-/// Every item in the bar, in order, flattened out of the sections.
+/// Every item in the bar, in order, flattened out of the sections — including
+/// the static items inside submenus, which need a gate decision like any other.
 pub fn all_items() -> impl Iterator<Item = &'static Item> {
+    fn items_of(entry: &'static Entry) -> Box<dyn Iterator<Item = &'static Item>> {
+        match entry {
+            Entry::Item(item) => Box::new(std::iter::once(item)),
+            Entry::Separator => Box::new(std::iter::empty()),
+            Entry::Submenu(submenu) => Box::new(submenu.entries.iter().flat_map(items_of)),
+        }
+    }
+    ITEMS
+        .iter()
+        .flat_map(|section| section.entries.iter().flat_map(items_of))
+}
+
+/// Every submenu in the bar. There is exactly one level, by the rule on
+/// [`Entry::Submenu`].
+pub fn all_submenus() -> impl Iterator<Item = &'static Submenu> {
     ITEMS.iter().flat_map(|section| {
         section.entries.iter().filter_map(|entry| match entry {
-            Entry::Item(item) => Some(item),
-            Entry::Separator => None,
+            Entry::Submenu(submenu) => Some(submenu),
+            _ => None,
         })
     })
 }
@@ -333,13 +427,20 @@ pub fn enablement(state: &MenuState, capabilities: &Capabilities) -> BTreeMap<&'
 
 /// One item, resolved against a state. Everything `MenuBar.tsx` needs to draw a
 /// row and nothing it needs to decide.
+///
+/// Owned strings rather than `&'static str`, because the recent-projects rows
+/// are the user's file names and paths — the one part of the bar that cannot
+/// come from a `const` table. On the wire the two are indistinguishable.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ItemView {
-    pub id: &'static str,
-    pub label: &'static str,
+    pub id: String,
+    pub label: String,
     /// Printed in its own column on the right. `null` for an item with no key.
     pub accelerator: Option<&'static str>,
     pub enabled: bool,
+    /// A dimmed second line under the label. Only the recent-projects rows use
+    /// it, for the path that tells two projects called "Untitled" apart.
+    pub detail: Option<String>,
     /// Why this item can *never* be enabled, when the answer is "the feature
     /// does not exist". `null` for everything that is merely unavailable right
     /// now — the state around it already explains those, and prose on Save
@@ -351,7 +452,7 @@ pub struct ItemView {
     pub unavailable_reason: Option<&'static str>,
 }
 
-/// An item or the rule between two groups of them.
+/// An item, a rule between two groups of them, or a nested menu.
 ///
 /// Internally tagged so the TypeScript side can discriminate on `kind` without
 /// a wrapper object; see `src/modules/workspace/types.ts`.
@@ -360,6 +461,17 @@ pub struct ItemView {
 pub enum EntryView {
     Item(ItemView),
     Separator,
+    Submenu(SubmenuView),
+}
+
+/// A nested menu, resolved. Its entries are items and separators only — one
+/// level, the same rule as [`Entry::Submenu`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SubmenuView {
+    pub id: String,
+    pub label: String,
+    pub enabled: bool,
+    pub entries: Vec<EntryView>,
 }
 
 /// One top-level menu, in the order it is drawn.
@@ -369,15 +481,106 @@ pub struct SectionView {
     pub entries: Vec<EntryView>,
 }
 
-/// The whole bar, resolved against what the document and the machine can do.
+/// One remembered project, as the menu needs it: enough to draw a row and to
+/// say honestly whether clicking it can work.
+///
+/// `exists` is checked by the caller rather than in [`describe`], so the
+/// mapping stays a pure function of its inputs and the tests need no files.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecentEntry {
+    pub path: String,
+    pub name: String,
+    pub exists: bool,
+}
+
+/// The recent list as it is on disk, each entry checked against the file
+/// system. Deliberately *not* pruned: a project whose file has gone is shown
+/// greyed with the reason, which tells the user what happened to it — a row
+/// that silently vanishes tells them nothing.
+pub fn recent_entries() -> Vec<RecentEntry> {
+    super::settings::RecentProjects::load()
+        .entries
+        .into_iter()
+        .map(|entry| RecentEntry {
+            exists: std::path::Path::new(&entry.path).exists(),
+            path: entry.path,
+            name: entry.name,
+        })
+        .collect()
+}
+
+/// The whole bar, resolved against what the document and the machine can do —
+/// plus the recent-projects list, which is the one part of the bar that is the
+/// user's data rather than this table's.
 ///
 /// This is the *only* thing that crosses to the webview about the menu's shape.
 /// Sending the structure rather than only the enabled flags is deliberate: it
 /// leaves exactly one table in the codebase, so an item cannot be added to the
 /// bar in TypeScript without a gate, which is the property [`Gate`] exists to
 /// enforce.
-pub fn describe(state: &MenuState, capabilities: &Capabilities) -> Vec<SectionView> {
+pub fn describe(
+    state: &MenuState,
+    capabilities: &Capabilities,
+    recent: &[RecentEntry],
+) -> Vec<SectionView> {
     let enabled = enablement(state, capabilities);
+
+    let item_view = |item: &'static Item| {
+        EntryView::Item(ItemView {
+            id: item.id.to_string(),
+            label: item.label.to_string(),
+            accelerator: item.accelerator,
+            enabled: enabled.get(item.id).copied().unwrap_or(false),
+            detail: None,
+            unavailable_reason: unavailable_reason(item.id),
+        })
+    };
+
+    let submenu_view = |submenu: &'static Submenu| {
+        let gate_open = match submenu.gate {
+            Gate::Always => true,
+            Gate::State(decide) => decide(state),
+            Gate::Capability(decide) => decide(capabilities),
+            Gate::Unimplemented(_) => false,
+        };
+
+        let mut entries: Vec<EntryView> = Vec::new();
+        if submenu.id == ids::FILE_RECENT {
+            for entry in recent {
+                entries.push(EntryView::Item(ItemView {
+                    id: format!("{}{}", ids::FILE_RECENT_PREFIX, entry.path),
+                    label: entry.name.clone(),
+                    accelerator: None,
+                    // Opening needs no document, only a file that is there.
+                    enabled: entry.exists,
+                    detail: Some(entry.path.clone()),
+                    unavailable_reason: (!entry.exists).then_some("file is gone"),
+                }));
+            }
+            if !recent.is_empty() {
+                entries.push(EntryView::Separator);
+            }
+        }
+        entries.extend(submenu.entries.iter().map(|entry| match entry {
+            Entry::Item(item) => item_view(item),
+            Entry::Separator => EntryView::Separator,
+            // One level of nesting, enforced where it would otherwise be
+            // silently dropped.
+            Entry::Submenu(_) => unreachable!("a submenu may not hold another submenu"),
+        }));
+
+        // A submenu that opens onto nothing reads as broken, so the recent
+        // trigger is off until there is at least one row — the same reasoning
+        // as Select All on an empty timeline.
+        let has_rows = submenu.id != ids::FILE_RECENT || !recent.is_empty();
+        EntryView::Submenu(SubmenuView {
+            id: submenu.id.to_string(),
+            label: submenu.label.to_string(),
+            enabled: gate_open && has_rows,
+            entries,
+        })
+    };
+
     ITEMS
         .iter()
         .map(|section| SectionView {
@@ -387,13 +590,8 @@ pub fn describe(state: &MenuState, capabilities: &Capabilities) -> Vec<SectionVi
                 .iter()
                 .map(|entry| match entry {
                     Entry::Separator => EntryView::Separator,
-                    Entry::Item(item) => EntryView::Item(ItemView {
-                        id: item.id,
-                        label: item.label,
-                        accelerator: item.accelerator,
-                        enabled: enabled.get(item.id).copied().unwrap_or(false),
-                        unavailable_reason: unavailable_reason(item.id),
-                    }),
+                    Entry::Item(item) => item_view(item),
+                    Entry::Submenu(submenu) => submenu_view(submenu),
                 })
                 .collect(),
         })
@@ -639,6 +837,7 @@ mod tests {
             ids::FILE_SAVE_AS,
             ids::FILE_IMPORT,
             ids::FILE_EXPORT,
+            ids::FILE_PROJECT_SETTINGS,
             ids::EDIT_UNDO,
             ids::EDIT_REDO,
             ids::EDIT_DELETE,
@@ -646,6 +845,11 @@ mod tests {
             ids::VIEW_ZOOM_IN,
             ids::VIEW_ZOOM_OUT,
             ids::VIEW_ZOOM_FIT,
+            ids::VIEW_ZOOM_DETAIL,
+            ids::VIEW_ZOOM_STANDARD,
+            ids::VIEW_ZOOM_OVERVIEW,
+            ids::VIEW_ZOOM_HOUR,
+            ids::VIEW_CENTER_PLAYHEAD,
         ] {
             assert!(!is_enabled(&empty, id), "{id} must be grey with nothing open");
         }
@@ -849,13 +1053,29 @@ mod tests {
     fn the_drawn_bar_is_the_table_with_the_enabled_flags_filled_in() {
         let state = everything();
         let capabilities = Capabilities::default();
-        let sections = describe(&state, &capabilities);
+        // One remembered project, so the recent submenu has a dynamic row to
+        // account for alongside the static table.
+        let recent = vec![RecentEntry {
+            path: "/home/me/cut.chukcut".into(),
+            name: "cut".into(),
+            exists: true,
+        }];
+        let sections = describe(&state, &capabilities, &recent);
         let decided = enablement(&state, &capabilities);
 
         assert_eq!(
             sections.iter().map(|s| s.title).collect::<Vec<_>>(),
             ITEMS.iter().map(|s| s.title).collect::<Vec<_>>()
         );
+
+        fn check_item(view: &ItemView, item: &Item, decided: &BTreeMap<&'static str, bool>) {
+            assert_eq!(view.id, item.id);
+            assert_eq!(view.label, item.label);
+            assert_eq!(view.accelerator, item.accelerator);
+            // The point of the whole arrangement: the webview is told, never
+            // asked to work it out.
+            assert_eq!(view.enabled, decided[item.id], "{} is drawn wrong", item.id);
+        }
 
         let mut drawn = 0;
         for (section, source) in sections.iter().zip(ITEMS) {
@@ -865,41 +1085,151 @@ mod tests {
                     (EntryView::Separator, Entry::Separator) => {}
                     (EntryView::Item(view), Entry::Item(item)) => {
                         drawn += 1;
-                        assert_eq!(view.id, item.id);
-                        assert_eq!(view.label, item.label);
-                        assert_eq!(view.accelerator, item.accelerator);
-                        // The point of the whole arrangement: the webview is
-                        // told, never asked to work it out.
-                        assert_eq!(view.enabled, decided[item.id], "{} is drawn wrong", item.id);
+                        check_item(view, item, &decided);
                     }
-                    _ => panic!("the drawn bar and the table disagree about a separator"),
+                    (EntryView::Submenu(view), Entry::Submenu(submenu)) => {
+                        assert_eq!(view.id, submenu.id);
+                        assert_eq!(view.label, submenu.label);
+                        // The drawn submenu is its static entries, preceded by
+                        // one row per recent project (plus their separator)
+                        // when this is the recent submenu.
+                        let dynamic = if submenu.id == ids::FILE_RECENT {
+                            recent.len() + 1
+                        } else {
+                            0
+                        };
+                        assert_eq!(view.entries.len(), submenu.entries.len() + dynamic);
+                        for (inner, origin) in view.entries.iter().skip(dynamic).zip(submenu.entries)
+                        {
+                            match (inner, origin) {
+                                (EntryView::Separator, Entry::Separator) => {}
+                                (EntryView::Item(view), Entry::Item(item)) => {
+                                    drawn += 1;
+                                    check_item(view, item, &decided);
+                                }
+                                _ => panic!("a submenu and its table disagree about an entry"),
+                            }
+                        }
+                    }
+                    _ => panic!("the drawn bar and the table disagree about an entry"),
                 }
             }
         }
         assert_eq!(drawn, all_items().count());
     }
 
+    /// An item anywhere in a drawn bar, including inside submenus.
+    fn find_item(sections: &[SectionView], id: &str) -> ItemView {
+        fn from(entry: &EntryView, id: &str) -> Option<ItemView> {
+            match entry {
+                EntryView::Item(view) if view.id == id => Some(view.clone()),
+                EntryView::Submenu(view) => view.entries.iter().find_map(|inner| from(inner, id)),
+                _ => None,
+            }
+        }
+        sections
+            .iter()
+            .flat_map(|section| section.entries.iter())
+            .find_map(|entry| from(entry, id))
+            .unwrap_or_else(|| panic!("{id} is not in the drawn bar"))
+    }
+
+    /// A submenu in a drawn bar.
+    fn find_submenu(sections: &[SectionView], id: &str) -> SubmenuView {
+        sections
+            .iter()
+            .flat_map(|section| section.entries.iter())
+            .find_map(|entry| match entry {
+                EntryView::Submenu(view) if view.id == id => Some(view.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{id} is not a submenu in the drawn bar"))
+    }
+
     #[test]
     fn a_greyed_item_is_drawn_greyed() {
         // The same table, two states, and the flag has to follow the document
         // rather than the order the sections happen to be in.
-        let closed = describe(&MenuState::default(), &Capabilities::default());
-        let open = describe(&everything(), &Capabilities::default());
+        let closed = describe(&MenuState::default(), &Capabilities::default(), &[]);
+        let open = describe(&everything(), &Capabilities::default(), &[]);
 
-        let find = |sections: &[SectionView], id: &str| -> ItemView {
-            sections
-                .iter()
-                .flat_map(|section| section.entries.iter())
-                .find_map(|entry| match entry {
-                    EntryView::Item(view) if view.id == id => Some(view.clone()),
-                    _ => None,
-                })
-                .expect("the id is in the bar")
-        };
+        assert!(!find_item(&closed, ids::FILE_SAVE).enabled);
+        assert!(find_item(&open, ids::FILE_SAVE).enabled);
+        assert!(find_item(&closed, ids::FILE_NEW).enabled);
+    }
 
-        assert!(!find(&closed, ids::FILE_SAVE).enabled);
-        assert!(find(&open, ids::FILE_SAVE).enabled);
-        assert!(find(&closed, ids::FILE_NEW).enabled);
+    #[test]
+    fn the_recent_submenu_is_off_until_there_is_something_in_it() {
+        // An openable submenu with nothing inside reads as broken, so
+        // emptiness — which is not a `MenuState` fact — overrides the gate.
+        let empty = describe(&MenuState::default(), &Capabilities::default(), &[]);
+        assert!(!find_submenu(&empty, ids::FILE_RECENT).enabled);
+
+        let one = vec![RecentEntry {
+            path: "/p/a.chukcut".into(),
+            name: "a".into(),
+            exists: true,
+        }];
+        let listed = describe(&MenuState::default(), &Capabilities::default(), &one);
+        let submenu = find_submenu(&listed, ids::FILE_RECENT);
+        assert!(submenu.enabled);
+        // The rows: the project, a separator, Clear List — in that order.
+        assert_eq!(submenu.entries.len(), 3);
+        assert!(matches!(&submenu.entries[1], EntryView::Separator));
+    }
+
+    #[test]
+    fn a_recent_project_opens_with_nothing_else_open_and_carries_its_path() {
+        // Opening a remembered project is most useful precisely when nothing is
+        // open yet, so the row must not be gated on a document.
+        let recent = vec![RecentEntry {
+            path: "/p/a.chukcut".into(),
+            name: "a".into(),
+            exists: true,
+        }];
+        let drawn = describe(&MenuState::default(), &Capabilities::default(), &recent);
+        let row = find_item(&drawn, "file.recent:/p/a.chukcut");
+        assert!(row.enabled);
+        assert_eq!(row.label, "a");
+        // The path is the dimmed second line — two projects called "Untitled"
+        // are otherwise the same row.
+        assert_eq!(row.detail.as_deref(), Some("/p/a.chukcut"));
+        assert_eq!(row.unavailable_reason, None);
+    }
+
+    #[test]
+    fn a_recent_project_whose_file_is_gone_is_greyed_and_says_why() {
+        let recent = vec![
+            RecentEntry {
+                path: "/p/kept.chukcut".into(),
+                name: "kept".into(),
+                exists: true,
+            },
+            RecentEntry {
+                path: "/p/moved.chukcut".into(),
+                name: "moved".into(),
+                exists: false,
+            },
+        ];
+        let drawn = describe(&everything(), &Capabilities::default(), &recent);
+
+        assert!(find_item(&drawn, "file.recent:/p/kept.chukcut").enabled);
+        let gone = find_item(&drawn, "file.recent:/p/moved.chukcut");
+        assert!(!gone.enabled);
+        assert_eq!(gone.unavailable_reason, Some("file is gone"));
+    }
+
+    #[test]
+    fn the_zoom_presets_and_centering_follow_the_document() {
+        // All of them act on the timeline, so none may light up without one.
+        let closed = describe(&MenuState::default(), &Capabilities::default(), &[]);
+        assert!(!find_submenu(&closed, ids::VIEW_ZOOM_PRESET).enabled);
+        assert!(!find_item(&closed, ids::VIEW_CENTER_PLAYHEAD).enabled);
+
+        let open = describe(&everything(), &Capabilities::default(), &[]);
+        assert!(find_submenu(&open, ids::VIEW_ZOOM_PRESET).enabled);
+        assert!(find_item(&open, ids::VIEW_ZOOM_DETAIL).enabled);
+        assert!(find_item(&open, ids::VIEW_CENTER_PLAYHEAD).enabled);
     }
 
     #[test]

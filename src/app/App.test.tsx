@@ -28,6 +28,7 @@ const MENU_BAR = [
         label: "New Project",
         accelerator: "Ctrl+N",
         enabled: true,
+        detail: null,
         unavailable_reason: null,
       },
     ],

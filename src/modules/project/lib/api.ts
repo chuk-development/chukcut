@@ -7,7 +7,8 @@
 
 import { invoke } from "@tauri-apps/api/core";
 
-import type { ImportedMaterial, Project, ValidationIssue } from "@/modules/project/types";
+import type { ImportedMaterial, Project, Rgba, ValidationIssue } from "@/modules/project/types";
+import type { EditResponse } from "@/modules/timeline/lib/api";
 
 export interface NewProjectOptions {
   name: string;
@@ -28,6 +29,29 @@ export function projectOpen(path: string): Promise<Project> {
 /** `path` is optional; without it Rust reuses the path the project was opened from. */
 export function projectSave(path?: string): Promise<string> {
   return invoke<string>("project_save", { path: path ?? null });
+}
+
+/** Mirrors `project::configure::ProjectConfig`, field for field. */
+export interface ProjectConfig {
+  name: string;
+  width: number;
+  height: number;
+  fps: number;
+  /** Linear RGBA 0..1, exactly as the canvas stores its background. */
+  background: Rgba;
+}
+
+/**
+ * Change the project's name, canvas, frame rate or background, as one undoable
+ * step on the same stack as every timeline edit.
+ *
+ * The answer is an `EditResponse` on purpose: the caller routes it through the
+ * same `applyEditResponse` every timeline edit uses. Changing `fps` re-times
+ * nothing — every time in the document is microseconds, so the rate is
+ * presentation and export, never position.
+ */
+export function projectConfigure(config: ProjectConfig): Promise<EditResponse> {
+  return invoke<EditResponse>("project_configure", { config });
 }
 
 export function projectGet(): Promise<Project | null> {

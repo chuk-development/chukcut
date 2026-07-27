@@ -27,6 +27,7 @@ const REQUEST: ExportRequest = {
     audio_codec: "aac",
     container: "mp4",
   },
+  range: null,
   hardware: null,
   include_audio: true,
 };
@@ -120,6 +121,7 @@ describe("export_start", () => {
       },
       hardware: null,
       include_audio: true,
+      range: null,
     });
   });
 

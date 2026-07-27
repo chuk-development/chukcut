@@ -105,6 +105,307 @@ function containerFor(wanted: Container, video: VideoCodec): Container {
   return "mkv";
 }
 
+// ---------------------------------------------------------------------------
+// Resolution choices
+// ---------------------------------------------------------------------------
+
+/** One entry of the resolution select. */
+export interface ResolutionOption {
+  /** `"source"` for the canvas itself, or the long edge as a string. */
+  id: string;
+  label: string;
+  width: number;
+  height: number;
+}
+
+/** The long-edge sizes the dialog offers besides the canvas itself. */
+export const LONG_EDGES = [2160, 1440, 1080, 720];
+
+/**
+ * The canvas plus the standard long-edge sizes, each keeping the canvas
+ * aspect. "Long edge" rather than "height" because this editor is mostly
+ * vertical video: a 1080×1920 project scaled to "1080" must stay 1080×1920,
+ * not become a 608-wide sliver.
+ */
+export function resolutionOptions(base: { width: number; height: number }): ResolutionOption[] {
+  const canvas: ResolutionOption = {
+    id: "source",
+    label: `Canvas · ${even(base.width)}×${even(base.height)}`,
+    width: even(base.width),
+    height: even(base.height),
+  };
+  const long = Math.max(base.width, base.height, 1);
+  const scaled = LONG_EDGES.map((edge) => {
+    const scale = edge / long;
+    return {
+      id: String(edge),
+      label: `${edge} · ${even(base.width * scale)}×${even(base.height * scale)}`,
+      width: even(base.width * scale),
+      height: even(base.height * scale),
+    };
+  }).filter((option) => option.width !== canvas.width || option.height !== canvas.height);
+  return [canvas, ...scaled];
+}
+
+/** The option matching a width and height, or null when the size is hand-typed. */
+export function matchingResolution(
+  options: ResolutionOption[],
+  width: number,
+  height: number,
+): ResolutionOption | null {
+  return options.find((option) => option.width === width && option.height === height) ?? null;
+}
+
+// ---------------------------------------------------------------------------
+// Estimates
+// ---------------------------------------------------------------------------
+
+/**
+ * Bits per pixel of x264 at CRF 20, 1080p30 — which the YouTube preset's own
+ * comment calibrates at 8–12 Mbit/s. Every other codec and CRF is derived
+ * from this one anchor, which is also why everything below is *labelled* an
+ * estimate: the real rate depends on the footage, and grain against a locked
+ * shot differ by 5x at the same CRF.
+ */
+const H264_BPP_AT_CRF20 = 0.16;
+
+/** Roughly what a codec needs relative to H.264 for the same look. */
+const CODEC_EFFICIENCY: Record<VideoCodec, number> = {
+  h264: 1.0,
+  h265: 0.6,
+  vp9: 0.65,
+  av1: 0.5,
+};
+
+/** A codec's CRF on H.264's 0..51 scale, so one set of bands fits all four. */
+function crfOnH264Scale(codec: VideoCodec, crf: number): number {
+  const [, high] = crfRange(codec);
+  return (crf * 51) / Math.max(1, high);
+}
+
+/**
+ * The bitrate an export will land near, in bits per second.
+ *
+ * Bitrate mode is exact by definition. CRF mode uses the anchor above and the
+ * empirical "half the rate every six CRF points" rule, clamped so nonsense
+ * input cannot show a negative or absurd number.
+ */
+export function estimateVideoBitrate(
+  codec: VideoCodec,
+  quality: Quality,
+  width: number,
+  height: number,
+  fps: number,
+): number {
+  if (quality.kind === "bitrate") return Math.max(0, quality.value);
+  const equivalent = crfOnH264Scale(codec, quality.value);
+  const bitsPerPixel = H264_BPP_AT_CRF20 * CODEC_EFFICIENCY[codec] * 2 ** ((20 - equivalent) / 6);
+  const rate = Math.max(2, width) * Math.max(2, height) * Math.max(1, fps) * bitsPerPixel;
+  return Math.round(Math.min(400_000_000, Math.max(100_000, rate)));
+}
+
+/** Estimated file size in bytes: (video + audio) × duration. */
+export function estimateFileSize(
+  videoBitsPerSecond: number,
+  audioBitsPerSecond: number,
+  durationMicros: number,
+): number {
+  if (durationMicros <= 0) return 0;
+  const seconds = durationMicros / 1_000_000;
+  return Math.round(((videoBitsPerSecond + audioBitsPerSecond) * seconds) / 8);
+}
+
+/**
+ * What a CRF value means, in words a person who has never heard of CRF can
+ * act on. The bands sit on the H.264-equivalent scale so "High quality" is
+ * the same look whichever codec's slider produced it.
+ */
+export function qualityCaption(codec: VideoCodec, crf: number): string {
+  const equivalent = crfOnH264Scale(codec, crf);
+  if (equivalent <= 12) return "Near lossless — huge file";
+  if (equivalent <= 18) return "Very high quality";
+  if (equivalent <= 23) return "High quality";
+  if (equivalent <= 28) return "Good quality — smaller file";
+  if (equivalent <= 35) return "Compressed — artifacts likely";
+  return "Heavily compressed";
+}
+
+/** A bit rate at the precision anyone reads it at. Mirrors `bitrate` in job.rs. */
+export function formatBitrate(bitsPerSecond: number): string {
+  if (bitsPerSecond >= 1_000_000) return `${(bitsPerSecond / 1_000_000).toFixed(1)} Mb/s`;
+  return `${Math.round(bitsPerSecond / 1_000)} kb/s`;
+}
+
+/** Decimal units, because that is what file managers show next to the file. */
+export function formatBytes(bytes: number): string {
+  if (bytes >= 1_000_000_000) return `${(bytes / 1_000_000_000).toFixed(2)} GB`;
+  if (bytes >= 1_000_000) return `${Math.round(bytes / 1_000_000)} MB`;
+  return `${Math.max(0, Math.round(bytes / 1_000))} kB`;
+}
+
+// ---------------------------------------------------------------------------
+// The export range
+// ---------------------------------------------------------------------------
+
+/** A clamped, ordered range of the timeline, in microseconds. */
+export interface ExportRange {
+  start: number;
+  end: number;
+}
+
+/**
+ * Read another store's `exportRange` field without trusting it.
+ *
+ * The in/out marks live in the timeline store and are being added by other
+ * work — this dialog has to behave identically whether the field is absent,
+ * null, or carries values an edit has since invalidated. Anything that does
+ * not clamp to a non-empty slice of the timeline is simply "no range".
+ */
+export function normalizeExportRange(raw: unknown, durationMicros: number): ExportRange | null {
+  if (durationMicros <= 0 || typeof raw !== "object" || raw === null) return null;
+  const { start, end } = raw as { start?: unknown; end?: unknown };
+  if (typeof start !== "number" || typeof end !== "number") return null;
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
+  const low = Math.max(0, Math.min(start, end));
+  const high = Math.min(durationMicros, Math.max(start, end));
+  if (high <= low) return null;
+  return { start: Math.round(low), end: Math.round(high) };
+}
+
+// ---------------------------------------------------------------------------
+// Paths
+// ---------------------------------------------------------------------------
+
+/** The directory part of a path, without the trailing separator. */
+export function dirOf(path: string): string {
+  const slash = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  return slash > 0 ? path.slice(0, slash) : "";
+}
+
+/** The file name without its directory or extension. */
+export function stemOf(path: string): string {
+  const slash = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  const name = path.slice(slash + 1);
+  const dot = name.lastIndexOf(".");
+  // A leading dot is a hidden file, not an extension.
+  return dot > 0 ? name.slice(0, dot) : name;
+}
+
+/** Join with whichever separator the directory already uses. */
+export function joinPath(dir: string, name: string): string {
+  const separator = dir.includes("\\") && !dir.includes("/") ? "\\" : "/";
+  const trimmed = dir.endsWith("/") || dir.endsWith("\\") ? dir.slice(0, -1) : dir;
+  return `${trimmed}${separator}${name}`;
+}
+
+/**
+ * A file name a file system will take: no separators, no leading dot that
+ * would hide the file. Empty comes back as "Untitled" rather than producing
+ * a path that ends in a bare extension.
+ */
+export function sanitizeFileName(name: string): string {
+  const cleaned = name.replace(/[/\\]/g, " ").replace(/^\.+/, "").trim();
+  return cleaned || "Untitled";
+}
+
+// ---------------------------------------------------------------------------
+// Remembered settings
+// ---------------------------------------------------------------------------
+
+/**
+ * What "remember these settings" writes into the workspace settings file.
+ *
+ * Choices, not measurements: the resolution is remembered as the long-edge
+ * *choice* rather than as absolute pixels, because 3840×2160 remembered from
+ * a landscape project would distort the next vertical one. Paths are not
+ * remembered at all — a destination belongs to a project, not to the app.
+ */
+export interface RememberedExportSettings {
+  preset_id: string;
+  fps: number;
+  quality: Quality;
+  container: Container;
+  video_codec: VideoCodec;
+  audio_codec: AudioCodec;
+  hardware_id: string | null;
+  include_audio: boolean;
+  /** A `LONG_EDGES` entry, or null for "the project canvas". */
+  long_edge: number | null;
+}
+
+/** The remembered shape of a form. `base` is the canvas the sizes derive from. */
+export function rememberForm(
+  form: ExportForm,
+  base: { width: number; height: number },
+): RememberedExportSettings {
+  const match = matchingResolution(resolutionOptions(base), form.width, form.height);
+  return {
+    preset_id: form.presetId,
+    fps: form.fps,
+    quality: form.quality,
+    container: form.container,
+    video_codec: form.videoCodec,
+    audio_codec: form.audioCodec,
+    hardware_id: form.hardwareId,
+    include_audio: form.includeAudio,
+    long_edge: match && match.id !== "source" ? Number(match.id) : null,
+  };
+}
+
+/** The preset a remembered blob names, when it names one at all. */
+export function rememberedPresetId(raw: unknown): string | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const id = (raw as { preset_id?: unknown }).preset_id;
+  return typeof id === "string" && id.length > 0 ? id : null;
+}
+
+const VIDEO_CODECS: VideoCodec[] = ["h264", "h265", "vp9", "av1"];
+const AUDIO_CODECS: AudioCodec[] = ["aac", "opus", "none"];
+
+/**
+ * Lay a remembered blob over a freshly seeded form, field by defended field.
+ *
+ * The blob comes from a settings file any historical build may have written,
+ * so every field is type-checked and anything unrecognisable keeps the seed's
+ * value — a corrupt memory degrades to "the dialog forgot", never to a form
+ * that assembles an invalid request.
+ */
+export function applyRemembered(
+  form: ExportForm,
+  raw: unknown,
+  base: { width: number; height: number },
+): ExportForm {
+  if (typeof raw !== "object" || raw === null) return form;
+  const r = raw as Partial<Record<keyof RememberedExportSettings, unknown>>;
+  const next = { ...form };
+
+  if (typeof r.fps === "number" && Number.isFinite(r.fps) && r.fps > 0) next.fps = r.fps;
+  if (
+    typeof r.quality === "object" &&
+    r.quality !== null &&
+    ((r.quality as Quality).kind === "crf" || (r.quality as Quality).kind === "bitrate") &&
+    Number.isFinite((r.quality as Quality).value)
+  ) {
+    next.quality = r.quality as Quality;
+  }
+  if (CONTAINERS.some((c) => c.value === r.container)) next.container = r.container as Container;
+  if (VIDEO_CODECS.includes(r.video_codec as VideoCodec))
+    next.videoCodec = r.video_codec as VideoCodec;
+  if (AUDIO_CODECS.includes(r.audio_codec as AudioCodec))
+    next.audioCodec = r.audio_codec as AudioCodec;
+  if (typeof r.hardware_id === "string" || r.hardware_id === null)
+    next.hardwareId = (r.hardware_id as string | null) ?? null;
+  if (typeof r.include_audio === "boolean") next.includeAudio = r.include_audio;
+  if (typeof r.long_edge === "number" && LONG_EDGES.includes(r.long_edge)) {
+    const option = resolutionOptions(base).find((o) => o.id === String(r.long_edge));
+    if (option) {
+      next.width = option.width;
+      next.height = option.height;
+    }
+  }
+  return next;
+}
+
 /** What the user has typed into the dialog. */
 export interface ExportForm {
   presetId: string;
@@ -224,7 +525,11 @@ export function resolveSettings(form: ExportForm, hardware: HwEncoder[]): Resolv
  * when it happens to match the preset. A request that means the same thing on
  * every path is one that can be read in a log and reproduced.
  */
-export function buildRequest(form: ExportForm, resolved: ResolvedSettings): ExportRequest {
+export function buildRequest(
+  form: ExportForm,
+  resolved: ResolvedSettings,
+  range: ExportRange | null = null,
+): ExportRequest {
   if (!form.outputPath) {
     throw new Error("an export request needs a destination the user chose");
   }
@@ -242,6 +547,7 @@ export function buildRequest(form: ExportForm, resolved: ResolvedSettings): Expo
     },
     hardware: resolved.hardware ? resolved.hardware.id : null,
     include_audio: form.includeAudio,
+    range: range ? [range.start, range.end] : null,
   };
 }
 

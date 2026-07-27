@@ -257,6 +257,7 @@ fn main() -> anyhow::Result<()> {
         overrides,
         hardware: hardware_id,
         include_audio,
+        range: None,
     };
     let settings = job::resolve_settings(&project, &request)?;
     println!(

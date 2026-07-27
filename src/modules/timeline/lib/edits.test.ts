@@ -11,7 +11,12 @@ import { describe, expect, it } from "vitest";
 
 import type { Segment } from "@/modules/project/types";
 import type { EditCommand } from "@/modules/timeline/lib/api";
-import { planPlacement, STILL_DURATION } from "@/modules/timeline/lib/edits";
+import {
+  planPlacement,
+  STILL_DURATION,
+  setSpeedCommands,
+  toggleMuteCommand,
+} from "@/modules/timeline/lib/edits";
 import { makeMaterial, makeProject, makeSegment, makeTrack, range } from "@/test/fixtures";
 
 const SECOND = 1_000_000;
@@ -159,5 +164,67 @@ describe("planPlacement", () => {
 
   it("has nowhere to put anything in a project with no lanes", () => {
     expect(planPlacement(makeProject(), makeMaterial("m1"), 0, null)).toBeNull();
+  });
+});
+
+describe("toggleMuteCommand", () => {
+  it("mutes with the current level in `before`, so undo restores it", () => {
+    const segment = makeSegment("a", { volume: 0.7 });
+    const command = toggleMuteCommand(segment, null);
+    expect(command).toEqual({ type: "set_volume", segment_id: "a", before: 0.7, after: 0 });
+  });
+
+  it("un-mutes to the remembered level, and to full volume with nothing remembered", () => {
+    const muted = makeSegment("a", { volume: 0 });
+    expect(toggleMuteCommand(muted, 0.7)).toEqual({
+      type: "set_volume",
+      segment_id: "a",
+      before: 0,
+      after: 0.7,
+    });
+    // Nothing remembered — a restarted session — falls back to full rather
+    // than staying silent.
+    expect(toggleMuteCommand(muted, null)).toEqual({
+      type: "set_volume",
+      segment_id: "a",
+      before: 0,
+      after: 1,
+    });
+  });
+});
+
+describe("setSpeedCommands", () => {
+  it("retimes the clip and its link partners together, skipping ones already there", () => {
+    const project = makeProject({
+      materials: {
+        videos: [],
+        audios: [],
+        images: [],
+        texts: [],
+        links: ["g"],
+        transitions: [],
+        extras: {},
+      },
+      tracks: [
+        makeTrack("video-1", {
+          segments: [makeSegment("pic", { extras: ["g"] })],
+        }),
+        makeTrack("audio-1", {
+          kind: "audio",
+          segments: [makeSegment("snd", { extras: ["g"] }), makeSegment("bed")],
+        }),
+      ],
+    });
+
+    const commands = setSpeedCommands(project, "pic", 2);
+    // The pair retimes together — a linked pair is one piece of footage — and
+    // the unrelated bed is untouched.
+    expect(commands).toEqual([
+      { type: "set_speed", segment_id: "pic", before: 1, after: 2 },
+      { type: "set_speed", segment_id: "snd", before: 1, after: 2 },
+    ]);
+
+    // Already at the asked-for speed: nothing to send, no empty undo step.
+    expect(setSpeedCommands(project, "pic", 1)).toEqual([]);
   });
 });

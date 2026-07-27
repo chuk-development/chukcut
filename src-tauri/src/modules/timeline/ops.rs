@@ -12,8 +12,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::modules::project::{
-    source_duration_for, speed_slack, AnimatableProperty, Easing, Keyframe, KeyframeTrack, Micros,
-    Project, Segment, TimeRange, Track, Transform, TransitionMaterial,
+    source_duration_for, speed_slack, AnimatableProperty, Easing, Keyframe, KeyframeTrack, Marker,
+    Micros, Project, Segment, TimeRange, Track, Transform, TransitionMaterial,
 };
 use crate::modules::transitions;
 
@@ -169,6 +169,22 @@ pub enum EditCommand {
         segment_id: String,
         before: Option<String>,
         after: Option<String>,
+    },
+    /// Put a marker on the ruler.
+    ///
+    /// The whole [`Marker`] travels, for the reason `RemoveSegment` carries the
+    /// whole segment: undo has to put back exactly what was there — time, label
+    /// and colour — and an id cannot rebuild any of them.
+    AddMarker {
+        marker: Marker,
+    },
+    RemoveMarker {
+        marker: Marker,
+    },
+    /// Move, rename or recolour a marker in place. The id may not change.
+    SetMarker {
+        before: Marker,
+        after: Marker,
     },
     /// Several commands that undo as one unit, applied in order.
     Composite {
@@ -367,6 +383,20 @@ impl EditCommand {
                     "Link clips".into()
                 } else {
                     "Unlink clips".into()
+                }
+            }
+            EditCommand::AddMarker { .. } => "Add marker".into(),
+            EditCommand::RemoveMarker { .. } => "Delete marker".into(),
+            EditCommand::SetMarker { before, after } => {
+                // Dragging is the common gesture and deserves its own label;
+                // anything else changed the name or the colour.
+                if before.time != after.time
+                    && before.label == after.label
+                    && before.color == after.color
+                {
+                    "Move marker".into()
+                } else {
+                    "Edit marker".into()
                 }
             }
             EditCommand::Composite { label, .. } => label.clone(),
@@ -822,6 +852,58 @@ impl EditCommand {
                 Ok(())
             }
 
+            EditCommand::AddMarker { marker } => {
+                if marker.time < 0 {
+                    return Err("a marker cannot sit before the beginning of the timeline".into());
+                }
+                if project.markers.iter().any(|m| m.id == marker.id) {
+                    return Err(format!("a marker with the id {} already exists", marker.id));
+                }
+                project.markers.push(marker.clone());
+                sort_markers(project);
+                Ok(())
+            }
+
+            EditCommand::RemoveMarker { marker } => {
+                // The command carries what the panel believed it was deleting;
+                // if the marker moved or was renamed underneath a stale menu,
+                // deleting it anyway would make the inverse restore the *old*
+                // marker — a silent revert of an edit the user made.
+                let position = project
+                    .markers
+                    .iter()
+                    .position(|m| m.id == marker.id)
+                    .ok_or("that marker is no longer on the timeline")?;
+                if project.markers[position] != *marker {
+                    return Err("this marker changed underneath the edit; try it again".into());
+                }
+                project.markers.remove(position);
+                Ok(())
+            }
+
+            EditCommand::SetMarker { before, after } => {
+                if before.id != after.id {
+                    return Err("a marker keeps its identity through an edit".into());
+                }
+                if after.time < 0 {
+                    return Err("a marker cannot sit before the beginning of the timeline".into());
+                }
+                let current = project
+                    .markers
+                    .iter_mut()
+                    .find(|m| m.id == before.id)
+                    .ok_or("that marker is no longer on the timeline")?;
+                // Same stale check as the remove, same reason: the inverse
+                // writes `before` back, and that is only an undo if `before`
+                // is what was actually there.
+                if *current != *before {
+                    return Err("this marker changed underneath the edit; try it again".into());
+                }
+                *current = after.clone();
+                sort_markers(project);
+                Ok(())
+            }
+
             EditCommand::Composite { commands, .. } => {
                 for (i, cmd) in commands.iter().enumerate() {
                     if let Err(e) = cmd.apply(project) {
@@ -1013,6 +1095,16 @@ impl EditCommand {
                 after,
             } => EditCommand::SetLinkGroup {
                 segment_id: segment_id.clone(),
+                before: after.clone(),
+                after: before.clone(),
+            },
+            EditCommand::AddMarker { marker } => EditCommand::RemoveMarker {
+                marker: marker.clone(),
+            },
+            EditCommand::RemoveMarker { marker } => EditCommand::AddMarker {
+                marker: marker.clone(),
+            },
+            EditCommand::SetMarker { before, after } => EditCommand::SetMarker {
                 before: after.clone(),
                 after: before.clone(),
             },
@@ -1698,6 +1790,72 @@ fn join_state(project: &Project, transition_id: &str) -> Option<bool> {
         }
     }
     attached
+}
+
+/// Keep the marker list sorted by time, ties by id.
+///
+/// The id tie-break is what makes the order total: two markers at the same
+/// instant would otherwise keep whichever order the edits happened to leave,
+/// and a save of an unchanged project must be an unchanged file.
+fn sort_markers(project: &mut Project) {
+    project
+        .markers
+        .sort_by(|a, b| a.time.cmp(&b.time).then_with(|| a.id.cmp(&b.id)));
+}
+
+/// The composite that splits every unlocked clip under `at`, across tracks.
+///
+/// Built out of [`split_at`], once per *cluster*: a linked pair under the
+/// playhead is one cluster — `split_at` already cuts the partners and gives the
+/// right halves a fresh group — so its members are marked covered and not cut
+/// a second time when their own lane comes up. The whole thing is one
+/// `Composite`, one undo step.
+///
+/// A clip whose edge sits exactly at `at` has nothing to cut there and is
+/// skipped rather than refused; locked lanes are skipped because a lock means
+/// "this lane does not take edits". Only when *nothing* is cut does the whole
+/// gesture refuse, so the user is told rather than shown an empty undo entry.
+pub fn split_all_at(project: &Project, at: Micros) -> Result<EditCommand, String> {
+    let mut covered: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut commands = Vec::new();
+
+    for track in &project.tracks {
+        if track.locked {
+            continue;
+        }
+        let Some(segment) = track
+            .segments
+            .iter()
+            .find(|s| s.target_range.contains(at) && at != s.target_range.start)
+        else {
+            continue;
+        };
+        if covered.contains(&segment.id) {
+            continue;
+        }
+        covered.insert(segment.id.clone());
+        if let Some(group) = project.link_group_of(&segment.id) {
+            for (_, _, member) in project.link_members(group) {
+                covered.insert(member.id.clone());
+            }
+        }
+
+        // Every cluster is built against the same unchanged document, which is
+        // sound because the clusters touch disjoint segments: at most one clip
+        // per lane contains `at`, and link partners are claimed above.
+        match split_at(project, &segment.id, at)? {
+            EditCommand::Composite { commands: parts, .. } => commands.extend(parts),
+            other => commands.push(other),
+        }
+    }
+
+    if commands.is_empty() {
+        return Err("nothing to split: no clip crosses the playhead".into());
+    }
+    Ok(EditCommand::Composite {
+        label: "Split all tracks".into(),
+        commands,
+    })
 }
 
 /// Keep a track's segments sorted by start time.
@@ -3453,5 +3611,252 @@ mod tests {
     fn an_empty_batch_is_refused_rather_than_recorded_as_an_edit() {
         let (project, _, _) = row_of_three();
         assert!(compose_edits(&project, "Move clips", Vec::new()).is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Markers
+    // -----------------------------------------------------------------------
+
+    fn marker(id: &str, time: Micros) -> Marker {
+        Marker {
+            id: id.into(),
+            time,
+            label: String::new(),
+            color: crate::modules::project::MarkerColor::default(),
+        }
+    }
+
+    #[test]
+    fn marker_edits_apply_and_undo_exactly_and_stay_sorted() {
+        let (mut project, _, _) = project_with_clip();
+        let pristine = serde_json::to_string(&project).unwrap();
+        let mut history = History::new();
+
+        // Added out of time order on purpose: the list has to come out sorted
+        // whatever order the user pressed M in.
+        history
+            .apply(&mut project, EditCommand::AddMarker { marker: marker("m2", 2_000_000) })
+            .unwrap();
+        history
+            .apply(&mut project, EditCommand::AddMarker { marker: marker("m1", 1_000_000) })
+            .unwrap();
+        assert_eq!(
+            project.markers.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            vec!["m1", "m2"]
+        );
+
+        // Rename, recolour and move in one edit; undo restores all three.
+        let mut renamed = marker("m1", 3_500_000);
+        renamed.label = "chorus".into();
+        renamed.color = crate::modules::project::MarkerColor::Red;
+        history
+            .apply(
+                &mut project,
+                EditCommand::SetMarker {
+                    before: marker("m1", 1_000_000),
+                    after: renamed.clone(),
+                },
+            )
+            .unwrap();
+        // Moving past m2 re-sorted the list.
+        assert_eq!(
+            project.markers.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            vec!["m2", "m1"]
+        );
+        assert_eq!(project.markers[1].label, "chorus");
+
+        history
+            .apply(&mut project, EditCommand::RemoveMarker { marker: renamed })
+            .unwrap();
+        assert_eq!(project.markers.len(), 1);
+
+        while history.can_undo() {
+            history.undo(&mut project).unwrap();
+        }
+        assert_eq!(
+            serde_json::to_string(&project).unwrap(),
+            pristine,
+            "undoing every marker edit restores the document byte for byte"
+        );
+    }
+
+    #[test]
+    fn nonsense_and_stale_marker_edits_are_refused() {
+        let (mut project, _, _) = project_with_clip();
+        EditCommand::AddMarker { marker: marker("m1", 1_000_000) }
+            .apply(&mut project)
+            .unwrap();
+
+        // No second marker under one id, and no instant before the timeline.
+        assert!(EditCommand::AddMarker { marker: marker("m1", 2_000_000) }
+            .apply(&mut project)
+            .is_err());
+        assert!(EditCommand::AddMarker { marker: marker("m2", -1) }
+            .apply(&mut project)
+            .is_err());
+        assert!(EditCommand::SetMarker {
+            before: marker("m1", 1_000_000),
+            after: marker("m1", -5),
+        }
+        .apply(&mut project)
+        .is_err());
+
+        // A stale panel: the marker moved since the menu was opened. Deleting
+        // or editing it anyway would make undo restore the wrong marker.
+        assert!(EditCommand::RemoveMarker { marker: marker("m1", 999) }
+            .apply(&mut project)
+            .is_err());
+        assert!(EditCommand::SetMarker {
+            before: marker("m1", 999),
+            after: marker("m1", 2_000_000),
+        }
+        .apply(&mut project)
+        .is_err());
+
+        // And the id is an identity, not a field.
+        assert!(EditCommand::SetMarker {
+            before: marker("m1", 1_000_000),
+            after: marker("m2", 1_000_000),
+        }
+        .apply(&mut project)
+        .is_err());
+
+        assert_eq!(project.markers.len(), 1);
+        assert_eq!(project.markers[0].time, 1_000_000);
+    }
+
+    // -----------------------------------------------------------------------
+    // Mute
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn undoing_a_mute_restores_the_old_volume() {
+        // Mute is `SetVolume { after: 0 }` with the previous value in `before`,
+        // which is what makes one undo bring the level back rather than
+        // resetting it to 1.
+        let (mut project, _, segment_id) = project_with_clip();
+        EditCommand::SetVolume {
+            segment_id: segment_id.clone(),
+            before: 1.0,
+            after: 0.7,
+        }
+        .apply(&mut project)
+        .unwrap();
+
+        let mut history = History::new();
+        history
+            .apply(
+                &mut project,
+                EditCommand::SetVolume {
+                    segment_id: segment_id.clone(),
+                    before: 0.7,
+                    after: 0.0,
+                },
+            )
+            .unwrap();
+        assert_eq!(project.segment(&segment_id).unwrap().1.volume, 0.0);
+
+        history.undo(&mut project).unwrap();
+        assert_eq!(
+            project.segment(&segment_id).unwrap().1.volume,
+            0.7,
+            "undo restores the level the clip had, not a default"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Split all tracks
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn split_all_cuts_every_lane_under_the_playhead_in_one_undo_step() {
+        // A linked pair on two lanes plus an unlinked clip on a third: the pair
+        // is one cluster (split_at cuts both halves), the loose clip another,
+        // and the whole gesture is a single entry on the undo stack.
+        let Pair {
+            mut project,
+            video_track,
+            audio_track,
+            ..
+        } = linked_pair();
+        let mut third = Track::new(TrackKind::Video, "V2");
+        third.segments.push(Segment {
+            id: "loose".into(),
+            material_id: "m".into(),
+            target_range: TimeRange::new(0, 10_000_000),
+            source_range: TimeRange::new(0, 10_000_000),
+            render_index: 2,
+            speed: 1.0,
+            volume: 1.0,
+            transform: Transform::default(),
+            crop: None,
+            extras: Vec::new(),
+            keyframes: Vec::new(),
+        });
+        let third_id = third.id.clone();
+        project.tracks.push(third);
+        let before = serde_json::to_string(&project).unwrap();
+
+        let command = split_all_at(&project, 3_000_000).expect("there is plenty to cut");
+        let mut history = History::new();
+        history.apply(&mut project, command).unwrap();
+
+        assert_eq!(project.track(&video_track).unwrap().segments.len(), 2);
+        assert_eq!(
+            project.track(&audio_track).unwrap().segments.len(),
+            2,
+            "the linked sound was cut once, by its partner's cluster"
+        );
+        assert_eq!(project.track(&third_id).unwrap().segments.len(), 2);
+        assert!(errors(&project).is_empty(), "{:?}", errors(&project));
+
+        history.undo(&mut project).unwrap();
+        assert_eq!(
+            serde_json::to_string(&project).unwrap(),
+            before,
+            "one undo puts every lane back"
+        );
+        assert!(!history.can_undo(), "one gesture, one entry");
+    }
+
+    #[test]
+    fn split_all_skips_locked_lanes_and_refuses_when_nothing_crosses() {
+        let (mut project, track_id, _) = project_with_clip();
+        let mut locked = Track::new(TrackKind::Video, "V2");
+        locked.locked = true;
+        locked.segments.push(Segment {
+            id: "immovable".into(),
+            material_id: "m".into(),
+            target_range: TimeRange::new(0, 10_000_000),
+            source_range: TimeRange::new(0, 10_000_000),
+            render_index: 1,
+            speed: 1.0,
+            volume: 1.0,
+            transform: Transform::default(),
+            crop: None,
+            extras: Vec::new(),
+            keyframes: Vec::new(),
+        });
+        let locked_id = locked.id.clone();
+        project.tracks.push(locked);
+
+        split_all_at(&project, 2_000_000)
+            .unwrap()
+            .apply(&mut project)
+            .unwrap();
+        assert_eq!(project.track(&track_id).unwrap().segments.len(), 2);
+        assert_eq!(
+            project.track(&locked_id).unwrap().segments.len(),
+            1,
+            "a locked lane takes no cut"
+        );
+
+        // Past the end of everything there is nothing to cut, and a clip edge
+        // is not an inside either.
+        assert!(split_all_at(&project, 50_000_000).is_err());
+        assert!(
+            split_all_at(&project, 0).is_err(),
+            "a cut on the very first edge has nothing to its left"
+        );
     }
 }

@@ -45,6 +45,15 @@ pub struct Settings {
     /// files written before it existed, which serde reads as 0.
     #[serde(default)]
     pub settings_version: u32,
+    /// The export dialog's "remember these settings" checkbox.
+    #[serde(default)]
+    pub export_remember: bool,
+    /// The remembered export form, present when `export_remember` was ever
+    /// set. Opaque to Rust on purpose: the dialog owns the shape and has to
+    /// tolerate any historical version of it anyway, so a typed mirror here
+    /// would only be a third copy of the same fields to keep in step.
+    #[serde(default)]
+    pub export_defaults: Option<serde_json::Value>,
 }
 
 /// The current schema version. Bump it when a migration is added below.
@@ -62,6 +71,8 @@ impl Default for Settings {
             default_fps: 30.0,
             cache_limit: 8 * 1024 * 1024 * 1024,
             settings_version: SETTINGS_VERSION,
+            export_remember: false,
+            export_defaults: None,
         }
     }
 }

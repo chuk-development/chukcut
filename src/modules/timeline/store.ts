@@ -69,6 +69,26 @@ interface TimelineState {
   tool: TimelineTool;
   snapping: boolean;
   /**
+   * The in and out marks, as the user set them with I and O.
+   *
+   * A viewing aid like the zoom, not part of the document: they are never
+   * persisted, and setting them is not an edit. Either can exist without the
+   * other — a lone mark is drawn but selects nothing yet.
+   */
+  markIn: Micros | null;
+  markOut: Micros | null;
+  /**
+   * The range between the marks, for "export only this range".
+   *
+   * **Contract with the export module**: non-null exactly when both marks are
+   * set and `markIn < markOut`, and then `{start: markIn, end: markOut}`. The
+   * export side reads this field defensively by exactly this name and shape —
+   * do not rename it, do not add fields, do not make it hold a degenerate
+   * range. It is stored rather than derived at the call site so that reading
+   * it needs no knowledge of the marks at all.
+   */
+  exportRange: { start: Micros; end: Micros } | null;
+  /**
    * Where the razor is hovering.
    *
    * In the store rather than in the timeline component for one reason, and it
@@ -94,6 +114,21 @@ interface TimelineState {
   setTool: (tool: TimelineTool) => void;
   toggleSnapping: () => void;
   setRazorTarget: (target: RazorTarget | null) => void;
+  /** I: mark in at this instant. */
+  setMarkIn: (at: Micros) => void;
+  /** O: mark out at this instant. */
+  setMarkOut: (at: Micros) => void;
+  /** X: clear both marks. */
+  clearMarks: () => void;
+}
+
+/** The one place the exportRange invariant is written: both marks, in before out. */
+function rangeOf(
+  markIn: Micros | null,
+  markOut: Micros | null,
+): { start: Micros; end: Micros } | null {
+  if (markIn === null || markOut === null || markIn >= markOut) return null;
+  return { start: markIn, end: markOut };
 }
 
 export const useTimelineStore = create<TimelineState>((set, get) => ({
@@ -106,6 +141,9 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
   tool: "select",
   snapping: true,
   razorTarget: null,
+  markIn: null,
+  markOut: null,
+  exportRange: null,
 
   setZoom: (zoom) => set({ zoom: clamp(zoom, MIN_ZOOM, MAX_ZOOM) }),
   zoomBy: (factor) => set({ zoom: clamp(get().zoom * factor, MIN_ZOOM, MAX_ZOOM) }),
@@ -152,6 +190,18 @@ export const useTimelineStore = create<TimelineState>((set, get) => ({
 
   setTool: (tool) => set({ tool, razorTarget: tool === "razor" ? get().razorTarget : null }),
   toggleSnapping: () => set({ snapping: !get().snapping }),
+
+  setMarkIn: (at) => {
+    const markIn = Math.max(0, Math.round(at));
+    set({ markIn, exportRange: rangeOf(markIn, get().markOut) });
+  },
+
+  setMarkOut: (at) => {
+    const markOut = Math.max(0, Math.round(at));
+    set({ markOut, exportRange: rangeOf(get().markIn, markOut) });
+  },
+
+  clearMarks: () => set({ markIn: null, markOut: null, exportRange: null }),
 
   setRazorTarget: (target) => {
     // A pointer move that lands on the same microsecond of the same clip must

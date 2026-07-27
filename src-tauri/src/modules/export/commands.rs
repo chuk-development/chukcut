@@ -147,6 +147,47 @@ pub fn export_start(
     Ok(id)
 }
 
+/// Save the frame at `time` as a PNG at full canvas resolution.
+///
+/// Renders fresh through the export compositor rather than reading anything
+/// out of the preview: the preview's frame is panel-sized and may be on a
+/// lower quality-ladder rung, and neither belongs in a file. Returns the path
+/// actually written, which may differ from the request by its extension.
+#[tauri::command]
+pub async fn export_snapshot(
+    state: State<'_, Arc<AppState>>,
+    time: i64,
+    output_path: String,
+) -> Result<String, String> {
+    // The snapshot of the document, taken before leaving the main thread —
+    // same rule as an export: the frame saved is the one on screen when the
+    // button was pressed.
+    let project = state
+        .project
+        .read()
+        .clone()
+        .ok_or("no project is open, so there is no frame to save")?;
+
+    // Rendering a canvas-sized frame plus a PNG encode is tens to hundreds of
+    // milliseconds, which is far past what a command may spend on the main
+    // thread.
+    tauri::async_runtime::spawn_blocking(move || {
+        let compositor = compositor()?;
+        let sources = crate::modules::media::MediaSourceProvider::from_project(&project);
+        let written = super::snapshot::write_png(
+            &project,
+            time,
+            &compositor,
+            &sources,
+            std::path::Path::new(&output_path),
+        )?;
+        tracing::info!(path = %written.display(), time, "frame snapshot written");
+        Ok(written.display().to_string())
+    })
+    .await
+    .map_err(|error| format!("the snapshot thread panicked: {error}"))?
+}
+
 /// Ask a running export to stop.
 ///
 /// Succeeds even when the job has already finished — closing the dialog on the

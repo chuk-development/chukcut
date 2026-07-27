@@ -60,6 +60,19 @@ function renderClip(over: Partial<Parameters<typeof Segment>[0]> = {}) {
       onUnlink={noop}
       onLink={noop}
       onFade={noop}
+      name={null}
+      canDetachAudio={false}
+      canPasteAttributes={false}
+      renaming={false}
+      onSetSpeed={noop}
+      onCustomSpeed={noop}
+      onToggleMute={noop}
+      onRenameStart={noop}
+      onRenameCommit={noop}
+      onRenameCancel={noop}
+      onDetachAudio={noop}
+      onReattachAudio={noop}
+      onPasteAttributes={noop}
       {...over}
     />,
   );

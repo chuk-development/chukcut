@@ -21,7 +21,7 @@ import type {
   Track,
   TrackKind,
 } from "@/modules/project/types";
-import { findSegment, rangeEnd } from "@/modules/project/types";
+import { findSegment, linkedPartners, rangeEnd } from "@/modules/project/types";
 import {
   type EditCommand,
   type TrackFlags,
@@ -30,6 +30,7 @@ import {
   timelineLink,
   timelineRedo,
   timelineSplit,
+  timelineSplitAll,
   timelineUndo,
   timelineUnlink,
 } from "@/modules/timeline/lib/api";
@@ -319,6 +320,90 @@ export function segmentUnderPlayhead(
 
 export function splitAt(segmentId: Id, at: Micros): Promise<boolean> {
   return runEdit(() => timelineSplit(segmentId, at));
+}
+
+/** Shift+C: split every unlocked clip under the playhead, one undo step. */
+export function splitAllAt(at: Micros): Promise<boolean> {
+  return runEdit(() => timelineSplitAll(at));
+}
+
+// ---------------------------------------------------------------------------
+// Mute
+// ---------------------------------------------------------------------------
+
+/**
+ * What each muted clip was at before, for un-mute.
+ *
+ * Session state like the clipboard, not document state: the document says the
+ * clip is at volume 0 and nothing else, and *undo* restores the old level from
+ * the command itself (`before` on `set_volume`). This map is only for the
+ * other way back — pressing "Unmute" instead of Ctrl+Z — and losing it across
+ * a restart costs nothing worse than un-muting to full volume.
+ */
+const volumesBeforeMute = new Map<Id, number>();
+
+/**
+ * The command that mutes or un-mutes a clip, pure for the tests.
+ *
+ * Muting carries the current volume in `before`, which is the whole feature:
+ * one undo puts the level back rather than resetting it. Un-muting writes the
+ * remembered level, or full volume when nothing is remembered.
+ */
+export function toggleMuteCommand(segment: Segment, remembered: number | null): EditCommand {
+  const muted = segment.volume <= 0;
+  return {
+    type: "set_volume",
+    segment_id: segment.id,
+    before: segment.volume,
+    after: muted ? (remembered ?? 1) : 0,
+  };
+}
+
+export function toggleMuteSegment(project: Project, segmentId: Id): Promise<boolean> {
+  const found = findSegment(project, segmentId);
+  if (!found) return Promise.resolve(false);
+  const { segment } = found;
+  const command = toggleMuteCommand(segment, volumesBeforeMute.get(segmentId) ?? null);
+  if (segment.volume > 0) volumesBeforeMute.set(segmentId, segment.volume);
+  else volumesBeforeMute.delete(segmentId);
+  return runEdit(() => timelineApply(command));
+}
+
+// ---------------------------------------------------------------------------
+// Speed presets
+// ---------------------------------------------------------------------------
+
+/**
+ * The context menu's speed change: the clip and its link partners together,
+ * one undo step.
+ *
+ * The partners come along deliberately even though `set_speed` keeps the
+ * clip's place and length on the timeline (only the source range stretches):
+ * a linked pair is one piece of footage, and retiming the picture while its
+ * sound keeps playing at 1x drifts the two apart from the cut onward. The
+ * primitive is not link-mirrored in Rust — the inspector's slider edits one
+ * clip on purpose — so the menu, which speaks about "the clip", brings the
+ * partners itself.
+ */
+export function setSpeedCommands(project: Project, segmentId: Id, speed: number): EditCommand[] {
+  const found = findSegment(project, segmentId);
+  if (!found) return [];
+  const members = [found.segment, ...linkedPartners(project, segmentId)];
+  return members
+    .filter((segment) => segment.speed !== speed)
+    .map((segment) => ({
+      type: "set_speed",
+      segment_id: segment.id,
+      before: segment.speed,
+      after: speed,
+    }));
+}
+
+export function setSegmentSpeed(project: Project, segmentId: Id, speed: number): Promise<boolean> {
+  const commands = setSpeedCommands(project, segmentId, speed);
+  if (commands.length === 0) return Promise.resolve(false);
+  if (commands.length === 1) return runEdit(() => timelineApply(commands[0]));
+  return runEdit(() => timelineApplyMany(commands, "Change speed"));
 }
 
 export type TrackFlag = "muted" | "locked" | "hidden";

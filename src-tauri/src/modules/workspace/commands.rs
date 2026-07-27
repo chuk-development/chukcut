@@ -20,7 +20,15 @@ use super::{logging, paths};
 /// then and quietly becomes clickable is the honest behaviour.
 #[tauri::command]
 pub fn workspace_menu_describe(state: MenuState) -> Vec<menu::SectionView> {
-    menu::describe(&state, &menu::Capabilities::probe())
+    // The recent list rides along un-pruned: a project whose file has gone is
+    // drawn greyed with the reason rather than silently missing. Loaded fresh
+    // on every call for the same reason capabilities are re-probed — the file
+    // can reappear, and the honest bar notices.
+    menu::describe(
+        &state,
+        &menu::Capabilities::probe(),
+        &menu::recent_entries(),
+    )
 }
 
 /// Run one of the four items that are about the machine rather than the
@@ -73,6 +81,15 @@ pub fn workspace_recent_record(path: String, name: String, now: i64) -> Result<(
     let mut recent = RecentProjects::load();
     recent.record(path, name, now);
     recent.save()
+}
+
+/// File → Recent Projects → Clear List.
+///
+/// Forgets the list, not the projects: nothing on disk but `recent.json` is
+/// touched.
+#[tauri::command]
+pub fn workspace_recent_clear() -> Result<(), String> {
+    RecentProjects::default().save()
 }
 
 #[tauri::command]

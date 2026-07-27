@@ -6,7 +6,7 @@ import {
   RotateCwSquareIcon,
   SlidersHorizontalIcon,
 } from "lucide-react";
-import { useCallback } from "react";
+import { useCallback, useEffect, useRef } from "react";
 
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -20,6 +20,7 @@ import { PropertySlider } from "@/modules/inspector/components/PropertySlider";
 import { TextInspector } from "@/modules/inspector/components/TextInspector";
 import { rotateBy } from "@/modules/inspector/lib/adjust";
 import { OPACITY, TRANSFORM_PROPERTIES, VOLUME } from "@/modules/inspector/lib/properties";
+import { useInspectorStore } from "@/modules/inspector/store";
 import { runEdit, useProjectStore } from "@/modules/project/store";
 import type { Transform } from "@/modules/project/types";
 import { findSegment, projectDuration, segmentLabel } from "@/modules/project/types";
@@ -88,6 +89,20 @@ export function Inspector() {
     },
     [segment],
   );
+
+  // The timeline's Speed → "Custom…" lands here: scroll the slider into view
+  // and hand it the keyboard. The token is a counter so repeat requests fire;
+  // firing with no clip selected does nothing, which is right — the menu only
+  // offers Custom on a clip, and selecting it is the menu's job.
+  const speedFocus = useInspectorStore((s) => s.speedFocus);
+  const speedSectionRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (speedFocus === 0) return;
+    const section = speedSectionRef.current;
+    if (!section) return;
+    section.scrollIntoView({ block: "center" });
+    section.querySelector<HTMLElement>('[role="slider"]')?.focus();
+  }, [speedFocus]);
 
   const commitSpeed = useCallback(
     (speed: number) => {
@@ -257,15 +272,17 @@ export function Inspector() {
           <Separator />
 
           <Section title="Speed">
-            <PropertySlider
-              label="Speed"
-              value={segment.speed}
-              min={0.1}
-              max={4}
-              step={0.05}
-              format={(value) => `${value.toFixed(2)}×`}
-              onCommit={commitSpeed}
-            />
+            <div ref={speedSectionRef}>
+              <PropertySlider
+                label="Speed"
+                value={segment.speed}
+                min={0.1}
+                max={4}
+                step={0.05}
+                format={(value) => `${value.toFixed(2)}×`}
+                onCommit={commitSpeed}
+              />
+            </div>
           </Section>
 
           <Separator />

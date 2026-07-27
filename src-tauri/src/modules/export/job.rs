@@ -69,6 +69,12 @@ pub struct ExportRequest {
     pub hardware: Option<String>,
     #[serde(default = "yes")]
     pub include_audio: bool,
+    /// Export only `(start, end)` of the timeline, in microseconds. Clamped to
+    /// the project, and the file's timestamps are rebased so it starts at zero
+    /// — a range export is a complete video of that slice, not a fragment.
+    /// Absent means the whole project.
+    #[serde(default)]
+    pub range: Option<(Micros, Micros)>,
 }
 
 fn yes() -> bool {
@@ -107,10 +113,16 @@ pub struct ExportSettings {
     pub preset: ExportPreset,
     pub video: VideoStreamSpec,
     pub audio: Option<AudioStreamSpec>,
-    /// Frames the walk will produce, from the project duration at the output
+    /// Frames the walk will produce, from the exported duration at the output
     /// rate.
     pub total_frames: u64,
+    /// The exported duration: the whole project, or the requested range of it.
     pub duration: Micros,
+    /// Where on the timeline the export begins. `0` for a whole-project
+    /// export; the range's clamped start otherwise. Frame `i` of the file
+    /// shows the timeline at `range_start + fps.frame_time(i)`, while its PTS
+    /// stays `i` — which is the rebase to zero.
+    pub range_start: Micros,
 }
 
 impl ExportSettings {
@@ -210,12 +222,30 @@ pub fn resolve_settings(project: &Project, request: &ExportRequest) -> Result<Ex
 
     preset.validate().map_err(ExportError::Settings)?;
 
-    let duration = project.duration();
-    if duration <= 0 {
+    let project_duration = project.duration();
+    if project_duration <= 0 {
         return Err(ExportError::Settings(
             "the timeline is empty, so there is nothing to export".into(),
         ));
     }
+    // The range is clamped rather than rejected: the marks live in the UI and
+    // the project keeps being edited under them, so a mark just past the last
+    // clip is an ordinary state, not a user error. Only a range that clamps to
+    // nothing is refused, because that export would be zero frames.
+    let (range_start, duration) = match request.range {
+        None => (0, project_duration),
+        Some((a, b)) => {
+            let start = a.min(b).clamp(0, project_duration);
+            let end = a.max(b).clamp(0, project_duration);
+            if end <= start {
+                return Err(ExportError::Settings(
+                    "the export range lies outside the timeline, so there is nothing to export"
+                        .into(),
+                ));
+            }
+            (start, end - start)
+        }
+    };
     let total_frames = preset.fps.frame_count(duration);
     if total_frames == 0 {
         return Err(ExportError::Settings(
@@ -262,6 +292,7 @@ pub fn resolve_settings(project: &Project, request: &ExportRequest) -> Result<Ex
         audio,
         total_frames,
         duration,
+        range_start,
     })
 }
 
@@ -599,6 +630,20 @@ fn encode_all(
             }
             error
         })?;
+        // The mix is always the whole project — the mixer's arithmetic places
+        // every segment at its absolute time — so a range export takes its
+        // slice of the finished bed. Mixing only the range instead would mean
+        // teaching every segment placement about an offset for a buffer that
+        // is cheap next to one second of encoding.
+        if settings.range_start > 0 || settings.duration < job.project.duration() {
+            mixed = audio::slice_range(
+                mixed,
+                channels,
+                spec.sample_rate,
+                settings.range_start,
+                settings.duration,
+            );
+        }
     }
 
     let audio_rate = settings.audio.as_ref().map(|a| a.sample_rate).unwrap_or(0);
@@ -648,6 +693,11 @@ fn encode_all(
     let mut observed_nv12: Option<(usize, usize, usize, usize)> = None;
 
     let walk = walk_frames(fps, settings.total_frames, &job.cancel, |index, time| {
+        // `time` is relative to the export — frame 0 is time 0 — and the
+        // compositor wants the timeline's clock. The offset here and the
+        // index-based PTS everywhere below are together what rebases a range
+        // export to start at zero.
+        let time = settings.range_start + time;
         if let Some(state) = zero_copy.as_mut() {
             match state.frame(job, writer, size, index, time) {
                 Ok(()) => {
@@ -932,6 +982,13 @@ fn describe_export(settings: &ExportSettings, chosen: &FramePathChoice) -> Strin
         chosen.label,
         nv12,
     );
+    if settings.range_start > 0 {
+        block.push_str(&format!(
+            "\n  range      timeline {:.3} s to {:.3} s, rebased to start at zero",
+            settings.range_start as f64 / 1_000_000.0,
+            (settings.range_start + settings.duration) as f64 / 1_000_000.0,
+        ));
+    }
     if let Some(reason) = &chosen.demoted_because {
         block.push_str(&format!("\n  why        {reason}"));
     }
@@ -1301,6 +1358,7 @@ mod tests {
             overrides: None,
             hardware: None,
             include_audio: true,
+            range: None,
         }
     }
 
@@ -1342,6 +1400,83 @@ mod tests {
         assert_eq!(settings.preset.quality, Quality::Bitrate(12_000_000));
         // One second of 59.94 is 60 frames, not 59.
         assert_eq!(settings.total_frames, 60);
+    }
+
+    // -- the export range --------------------------------------------------
+
+    #[test]
+    fn a_range_shortens_the_export_and_remembers_where_it_starts() {
+        let project = project(4 * MICROS_PER_SECOND);
+        let mut req = request("/tmp/out.mp4");
+        req.range = Some((MICROS_PER_SECOND, 3 * MICROS_PER_SECOND));
+        let settings = resolve_settings(&project, &req).unwrap();
+
+        assert_eq!(settings.range_start, MICROS_PER_SECOND);
+        assert_eq!(settings.duration, 2 * MICROS_PER_SECOND);
+        // 30 fps custom preset: two seconds is sixty frames, counted from the
+        // range and not from the project.
+        assert_eq!(settings.total_frames, 60);
+    }
+
+    #[test]
+    fn a_range_is_clamped_to_the_project_not_rejected() {
+        let project = project(2 * MICROS_PER_SECOND);
+        let mut req = request("/tmp/out.mp4");
+        // Starts before zero, ends past the timeline: the marks outlived an
+        // edit, which is an ordinary state.
+        req.range = Some((-MICROS_PER_SECOND, 10 * MICROS_PER_SECOND));
+        let settings = resolve_settings(&project, &req).unwrap();
+
+        assert_eq!(settings.range_start, 0);
+        assert_eq!(settings.duration, 2 * MICROS_PER_SECOND);
+        assert_eq!(settings.total_frames, 60);
+    }
+
+    #[test]
+    fn an_inverted_range_is_ordered_rather_than_refused() {
+        let project = project(4 * MICROS_PER_SECOND);
+        let mut req = request("/tmp/out.mp4");
+        req.range = Some((3 * MICROS_PER_SECOND, MICROS_PER_SECOND));
+        let settings = resolve_settings(&project, &req).unwrap();
+
+        assert_eq!(settings.range_start, MICROS_PER_SECOND);
+        assert_eq!(settings.duration, 2 * MICROS_PER_SECOND);
+    }
+
+    #[test]
+    fn a_range_entirely_past_the_timeline_is_refused_in_prose() {
+        let project = project(MICROS_PER_SECOND);
+        let mut req = request("/tmp/out.mp4");
+        req.range = Some((5 * MICROS_PER_SECOND, 9 * MICROS_PER_SECOND));
+        let error = resolve_settings(&project, &req).unwrap_err();
+        assert!(error.to_string().contains("nothing to export"));
+    }
+
+    #[test]
+    fn a_whole_project_request_has_no_offset() {
+        let project = project(2 * MICROS_PER_SECOND);
+        let settings = resolve_settings(&project, &request("/tmp/out.mp4")).unwrap();
+        assert_eq!(settings.range_start, 0);
+        assert_eq!(settings.duration, 2 * MICROS_PER_SECOND);
+    }
+
+    #[test]
+    fn the_start_block_names_the_range_when_there_is_one() {
+        let project = project(4 * MICROS_PER_SECOND);
+        let mut req = request("/tmp/out.mp4");
+        req.range = Some((MICROS_PER_SECOND, 3 * MICROS_PER_SECOND));
+        let settings = resolve_settings(&project, &req).unwrap();
+
+        let chosen = FramePathChoice::of(true, true, true, true, true, "h264_vaapi");
+        let block = describe_export(&settings, &chosen);
+        assert!(
+            block.contains("range      timeline 1.000 s to 3.000 s"),
+            "{block}"
+        );
+
+        // And a whole-project export does not mention one.
+        let whole = resolve_settings(&project, &request("/tmp/out.mp4")).unwrap();
+        assert!(!describe_export(&whole, &chosen).contains("range      "));
     }
 
     #[test]

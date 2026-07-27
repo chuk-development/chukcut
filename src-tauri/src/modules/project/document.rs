@@ -100,6 +100,64 @@ pub struct Project {
 
     pub materials: MaterialPool,
     pub tracks: Vec<Track>,
+
+    /// Timeline markers, sorted by time (ties broken by id).
+    ///
+    /// A **project-level list**, not a per-track one, and that is a decision
+    /// rather than a shortcut: a marker names an instant of the *piece* — "the
+    /// beat drops here", "retake from this point" — and is drawn on the ruler,
+    /// which spans every lane. Hanging markers on a track would tie each one to
+    /// a lane it has nothing to say about and delete it when that lane goes.
+    /// It is also not a pool category: a marker is not referenced by anything,
+    /// so the indirection materials exist for would buy nothing here.
+    ///
+    /// Kept sorted so that a save of an unchanged project is an unchanged file
+    /// (the same rule as `MaterialPool::extras`); the marker commands in
+    /// `timeline/ops.rs` re-sort after every mutation.
+    #[serde(default)]
+    pub markers: Vec<Marker>,
+}
+
+/// One of the fixed marker colours.
+///
+/// A closed set rather than an RGBA field on purpose: markers are for telling
+/// instants apart at a glance, and six nameable colours do that; a colour
+/// picker would add a float quadruple to validate and serialize for no extra
+/// expressive power.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MarkerColor {
+    #[default]
+    Blue,
+    Green,
+    Yellow,
+    Orange,
+    Red,
+    Purple,
+}
+
+/// A named instant on the ruler.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Marker {
+    pub id: Id,
+    /// Where on the timeline, in microseconds like every other time.
+    pub time: Micros,
+    /// Short free text; empty is an ordinary unnamed marker.
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub color: MarkerColor,
+}
+
+impl Marker {
+    pub fn new(time: Micros) -> Self {
+        Self {
+            id: new_id(),
+            time,
+            label: String::new(),
+            color: MarkerColor::default(),
+        }
+    }
 }
 
 impl Project {
@@ -114,6 +172,7 @@ impl Project {
             fps,
             materials: MaterialPool::default(),
             tracks: Vec::new(),
+            markers: Vec::new(),
         }
     }
 
@@ -1490,6 +1549,27 @@ impl Project {
             }
         }
 
+        // Markers are edited by id, so a duplicate makes one of the two
+        // unreachable — the same reason duplicate segment ids are errors. A
+        // negative time is an instant that does not exist.
+        let mut seen_markers: HashSet<&str> = HashSet::new();
+        for marker in &self.markers {
+            if !seen_markers.insert(marker.id.as_str()) {
+                issues.push(ValidationIssue {
+                    severity: Severity::Error,
+                    message: format!("two markers share the id {}", marker.id),
+                    subject_id: Some(marker.id.clone()),
+                });
+            }
+            if marker.time < 0 {
+                issues.push(ValidationIssue {
+                    severity: Severity::Error,
+                    message: format!("marker sits before the timeline, at {} µs", marker.time),
+                    subject_id: Some(marker.id.clone()),
+                });
+            }
+        }
+
         for m in &self.materials.videos {
             if !std::path::Path::new(&m.path).exists() {
                 issues.push(ValidationIssue {
@@ -1697,6 +1777,57 @@ mod tests {
             .find(|i| i.message.contains("LUT file is missing"))
             .expect("the missing file is reported");
         assert_eq!(issue.severity, Severity::Warning);
+    }
+
+    /// Markers must survive a save and a load — time, label and colour — and
+    /// a second save of the reloaded project must be byte-identical, which is
+    /// the property every category of the document holds.
+    #[test]
+    fn markers_round_trip_through_json() {
+        let mut project = Project::new("t", CanvasConfig::default(), 30.0);
+        let mut beat = Marker::new(2_500_000);
+        beat.label = "beat drops".into();
+        beat.color = MarkerColor::Red;
+        let plain = Marker::new(500_000);
+        project.markers = vec![plain.clone(), beat.clone()];
+
+        let json = serde_json::to_string_pretty(&project).expect("serialize");
+        let reloaded: Project = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(reloaded.markers.len(), 2);
+        assert_eq!(reloaded.markers[0], plain);
+        assert_eq!(reloaded.markers[1], beat);
+        assert_eq!(reloaded.markers[1].label, "beat drops");
+        assert_eq!(reloaded.markers[1].color, MarkerColor::Red);
+
+        let again = serde_json::to_string_pretty(&reloaded).expect("serialize again");
+        assert_eq!(json, again, "a resave is byte-identical");
+    }
+
+    /// A file written before markers existed has no `markers` key and must
+    /// open with the list empty rather than refuse to load.
+    #[test]
+    fn a_project_saved_before_markers_existed_still_opens() {
+        let project = Project::new("old", CanvasConfig::default(), 30.0);
+        let mut json: serde_json::Value = serde_json::to_value(&project).expect("serialize");
+        json.as_object_mut().expect("object").remove("markers");
+
+        let reloaded: Project = serde_json::from_value(json).expect("an old file still opens");
+        assert!(reloaded.markers.is_empty());
+    }
+
+    #[test]
+    fn duplicate_marker_ids_and_negative_times_are_flagged() {
+        let mut project = Project::new("t", CanvasConfig::default(), 30.0);
+        let mut twin = Marker::new(1_000_000);
+        twin.id = "m1".into();
+        let mut other = Marker::new(-5);
+        other.id = "m1".into();
+        project.markers = vec![twin, other];
+
+        let issues = project.validate();
+        assert!(issues.iter().any(|i| i.message.contains("two markers")));
+        assert!(issues.iter().any(|i| i.message.contains("before the timeline")));
     }
 
     #[test]

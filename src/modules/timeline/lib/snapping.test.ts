@@ -183,3 +183,32 @@ describe("snapRadius", () => {
     }
   });
 });
+
+describe("markers as snap targets", () => {
+  it("puts every marker time into the context and reports the hit as a marker", () => {
+    const context = buildSnapContext(null, null, null, [2 * SEC, 7 * SEC]);
+    const hit = snapInstant(2 * SEC + 40_000, context, 100_000);
+    expect(hit?.value).toBe(2 * SEC);
+    expect(hit?.kind).toBe("marker");
+  });
+
+  it("lets a clip edge beat a marker at the same distance", () => {
+    // Docking to material is the edit that was meant; the marker at the same
+    // spot is a coincidence. The tie-break in PRIORITY says so.
+    const project = projectWith([clip("a", 4 * SEC, SEC)]);
+    const context = buildSnapContext(project, null, null, [6 * SEC]);
+    // 5.5s sits exactly between the clip end at 5s and the marker at 6s.
+    const hit = snapInstant(5_500_000, context, SEC);
+    expect(hit?.kind).toBe("clip");
+    expect(hit?.value).toBe(5 * SEC);
+  });
+
+  it("pulls a dragged clip's edge onto a marker", () => {
+    const context = buildSnapContext(null, null, null, [10 * SEC]);
+    // The clip's *end* lands near the marker, so the whole clip shifts left.
+    const hit = snapRange(8 * SEC + 30_000, 2 * SEC, context, 100_000);
+    expect(hit?.edge).toBe("end");
+    expect(hit?.kind).toBe("marker");
+    expect(hit?.value).toBe(8 * SEC);
+  });
+});

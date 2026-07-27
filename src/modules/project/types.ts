@@ -258,6 +258,21 @@ export interface Track {
   volume: number;
 }
 
+/**
+ * The fixed marker palette. A closed set on both sides — six nameable colours
+ * tell instants apart at a glance, which is all a marker's colour is for.
+ */
+export type MarkerColor = "blue" | "green" | "yellow" | "orange" | "red" | "purple";
+
+/** A named instant on the ruler. A project-level list; see `Project.markers`. */
+export interface Marker {
+  id: Id;
+  time: Micros;
+  /** Short free text; empty is an ordinary unnamed marker. */
+  label: string;
+  color: MarkerColor;
+}
+
 export interface Project {
   id: Id;
   schema_version: number;
@@ -269,6 +284,18 @@ export interface Project {
   fps: number;
   materials: MaterialPool;
   tracks: Track[];
+  /**
+   * Timeline markers, sorted by time. Rust always sends the field; it is
+   * optional here for the reason `color_adjusts` is — fixtures across modules
+   * build `Project` literals from before it existed. Consumers go through
+   * [`markersOf`].
+   */
+  markers?: Marker[];
+}
+
+/** The project's markers, tolerant of fixtures built before the field existed. */
+export function markersOf(project: Project | null): Marker[] {
+  return project?.markers ?? [];
 }
 
 /**
@@ -391,8 +418,29 @@ export function soundIsOnALinkedLane(project: Project, track: Track, segment: Se
   );
 }
 
+/**
+ * The name a user gave a clip, if any.
+ *
+ * Stored as a `{"clip_name": …}` entry in `MaterialPool.extras`, referenced
+ * from `Segment.extras` — a segment has no name field, and this is the
+ * extras-style home `inspector/edit.rs::rename_clip_command` writes to. Rust
+ * never reads it; the label is presentation, and this is where it is resolved.
+ */
+export function clipName(project: Project, segment: Segment): string | null {
+  for (const id of segment.extras) {
+    const entry = project.materials.extras[id];
+    if (entry && typeof entry === "object" && "clip_name" in entry) {
+      const name = (entry as { clip_name: unknown }).clip_name;
+      if (typeof name === "string" && name.length > 0) return name;
+    }
+  }
+  return null;
+}
+
 /** What to write on a clip. Falls back to the material id so a broken reference is visible rather than blank. */
 export function segmentLabel(project: Project, segment: Segment): string {
+  const named = clipName(project, segment);
+  if (named) return named;
   const { videos, audios, images, texts } = project.materials;
   const video = videos.find((m) => m.id === segment.material_id);
   if (video) return basename(video.path);

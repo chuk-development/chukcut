@@ -15,7 +15,9 @@
 
 pub mod autosave;
 pub mod commands;
+pub mod configure;
 pub mod document;
 pub mod migrate;
 
+pub use configure::{ConfigureCommand, ProjectConfig};
 pub use document::*;

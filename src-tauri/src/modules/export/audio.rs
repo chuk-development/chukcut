@@ -283,6 +283,32 @@ pub fn mix_timeline(
     Ok(mixer.finish())
 }
 
+/// The slice of a full-project mix that lies inside `[start, start + duration)`,
+/// padded with silence to exactly the range's length.
+///
+/// A range export walks only its own frames, and the audio has to match them
+/// sample for sample: a bed that is one frame short would end early, and one
+/// that keeps the project's length would drift the whole file. So the length
+/// of the answer is `frames_for(duration)` whatever the input held — a range
+/// that runs past the mix (clamping can leave the video one frame longer than
+/// the sound) is padded rather than truncated.
+pub fn slice_range(
+    mixed: Vec<f32>,
+    channels: usize,
+    sample_rate: u32,
+    start: Micros,
+    duration: Micros,
+) -> Vec<f32> {
+    let channels = channels.max(1);
+    let total = mixed.len() / channels;
+    let from = frames_for(start.max(0), sample_rate).min(total);
+    let want = frames_for(duration.max(0), sample_rate);
+    let to = (from + want).min(total);
+    let mut slice = mixed[from * channels..to * channels].to_vec();
+    slice.resize(want * channels, 0.0);
+    slice
+}
+
 /// Which track kinds can contribute sound.
 fn track_bears_audio(kind: TrackKind) -> bool {
     matches!(kind, TrackKind::Audio | TrackKind::Video)
@@ -819,6 +845,50 @@ mod tests {
 
         let error = mix_timeline(&project, &Broken, RATE, 2, &AtomicBool::new(false)).unwrap_err();
         assert!(error.to_string().contains("the file went away"));
+    }
+
+    // -- slicing a mix for a range export ---------------------------------
+
+    /// A recognisable mix: sample frame `n` holds the value `n` on every
+    /// channel, so the slice's *content* can be asserted, not only its length.
+    fn counting_mix(frames: usize, channels: usize) -> Vec<f32> {
+        (0..frames)
+            .flat_map(|n| std::iter::repeat(n as f32).take(channels))
+            .collect()
+    }
+
+    #[test]
+    fn a_slice_is_exactly_as_long_as_its_range_and_starts_at_the_right_sample() {
+        // Two seconds of mix; take the middle second.
+        let mixed = counting_mix(2 * RATE as usize, 2);
+        let slice = slice_range(mixed, 2, RATE, 500_000, MICROS_PER_SECOND);
+
+        assert_eq!(slice.len(), RATE as usize * 2);
+        // The first sample frame of the slice is the mix's frame at 0.5 s.
+        assert_eq!(slice[0], (RATE / 2) as f32);
+        // And the last is the frame just before 1.5 s.
+        assert_eq!(slice[slice.len() - 1], (RATE + RATE / 2 - 1) as f32);
+    }
+
+    #[test]
+    fn a_slice_past_the_end_of_the_mix_is_padded_with_silence_not_truncated() {
+        // One second of mix, a range asking for its last half plus another
+        // half that does not exist — which is what clamping a video range one
+        // frame longer than the audio produces.
+        let mixed = counting_mix(RATE as usize, 2);
+        let slice = slice_range(mixed, 2, RATE, 500_000, MICROS_PER_SECOND);
+
+        assert_eq!(slice.len(), RATE as usize * 2, "the range's length, always");
+        assert_eq!(slice[0], (RATE / 2) as f32);
+        // Everything past the mix's end is silence.
+        assert!(slice[RATE as usize..].iter().all(|s| *s == 0.0));
+    }
+
+    #[test]
+    fn a_whole_project_slice_is_the_mix_unchanged() {
+        let mixed = counting_mix(RATE as usize, 2);
+        let slice = slice_range(mixed.clone(), 2, RATE, 0, MICROS_PER_SECOND);
+        assert_eq!(slice, mixed);
     }
 
     #[test]

@@ -328,6 +328,7 @@ const HANDLERS = {
   openProject: () => {},
   showExport: () => {},
   showShortcuts: () => {},
+  showProjectSettings: () => {},
 };
 
 describe("an enabled item", () => {
@@ -444,14 +445,70 @@ describe("an enabled item", () => {
       openProject: () => opened.push("open"),
       showExport: () => opened.push("export"),
       showShortcuts: () => opened.push("shortcuts"),
+      showProjectSettings: () => opened.push("projectSettings"),
     };
 
     runMenuAction(MENU_IDS.newProject, handlers);
     runMenuAction(MENU_IDS.openProject, handlers);
     runMenuAction(MENU_IDS.export, handlers);
     runMenuAction(MENU_IDS.shortcuts, handlers);
+    runMenuAction(MENU_IDS.projectSettings, handlers);
 
-    expect(opened).toEqual(["new", "open", "export", "shortcuts"]);
+    expect(opened).toEqual(["new", "open", "export", "shortcuts", "projectSettings"]);
+  });
+
+  it("sets the zoom to a preset's exact value", () => {
+    runMenuAction("view.zoom_preset.overview", HANDLERS);
+    // 10 px per second, in the store's px-per-microsecond unit.
+    expect(useTimelineStore.getState().zoom).toBeCloseTo(10 / 1e6, 12);
+
+    runMenuAction("view.zoom_preset.standard", HANDLERS);
+    expect(useTimelineStore.getState().zoom).toBeCloseTo(100 / 1e6, 12);
+  });
+});
+
+describe("the recent-projects rows", () => {
+  it("opens the path carried in the row's id, through the ordinary open flow", async () => {
+    // Clean document, so the guard passes silently.
+    useProjectStore.setState({ project: PROJECT, dirty: false });
+    ipc.handle("project_open", PROJECT);
+    ipc.handle("workspace_recent_record", null);
+    ipc.handle("workspace_recent_list", []);
+
+    runMenuAction("file.recent:/home/me/older.chukcut", HANDLERS);
+    await settle();
+
+    expect(ipc.lastCall("project_open")).toEqual({ path: "/home/me/older.chukcut" });
+    // Opening re-records the project, which is what moves it to the top.
+    expect(ipc.lastCall("workspace_recent_record")).toMatchObject({
+      path: "/home/me/older.chukcut",
+    });
+  });
+
+  it("asks before discarding unsaved work, exactly like File → Open", async () => {
+    useProjectStore.setState({ project: PROJECT, dirty: true });
+
+    runMenuAction("file.recent:/home/me/older.chukcut", HANDLERS);
+    await settle();
+
+    expect(useWorkspaceStore.getState().discardPrompt).toBe("opening another project");
+    useWorkspaceStore.getState().answerDiscardPrompt("cancel");
+    await settle();
+    // Cancelled, so nothing crossed the boundary.
+    expect(ipc.count("project_open")).toBe(0);
+  });
+
+  it("clears the list through Rust and empties the store with it", async () => {
+    useWorkspaceStore.setState({
+      recent: [{ path: "/a.chukcut", name: "a", opened_at: 1 }],
+    });
+    ipc.handle("workspace_recent_clear", null);
+
+    runMenuAction(MENU_IDS.recentClear, HANDLERS);
+    await settle();
+
+    expect(ipc.count("workspace_recent_clear")).toBe(1);
+    expect(useWorkspaceStore.getState().recent).toEqual([]);
   });
 });
 
@@ -546,6 +603,7 @@ describe("the bar Rust hands back", () => {
           label: "Save",
           accelerator: "Ctrl+S",
           enabled: true,
+          detail: null,
           unavailable_reason: null,
         },
       ],
@@ -579,6 +637,22 @@ describe("the bar Rust hands back", () => {
     expect(ipc.count("workspace_menu_describe")).toBe(1);
 
     useProjectStore.setState({ project: PROJECT, dirty: true });
+    await settle();
+    expect(ipc.count("workspace_menu_describe")).toBe(2);
+
+    stop();
+  });
+
+  it("is asked for again when the recent list changes, which no gate can see", async () => {
+    ipc.handle("workspace_menu_describe", BAR);
+    const stop = installMenu(() => {});
+    await settle();
+    expect(ipc.count("workspace_menu_describe")).toBe(1);
+
+    // Clearing the list — or a failed open dropping a row — changes nothing in
+    // `MenuState`, so without its own subscription the bar would keep offering
+    // entries Rust has already forgotten.
+    useWorkspaceStore.setState({ recent: [] });
     await settle();
     expect(ipc.count("workspace_menu_describe")).toBe(2);
 

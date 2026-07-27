@@ -40,11 +40,14 @@ import {
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuShortcut,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 import { MODIFIER } from "@/modules/workspace/lib/shortcuts";
-import type { MenuEntryView, MenuSectionView } from "@/modules/workspace/types";
+import type { MenuEntryView, MenuItemView, MenuSectionView } from "@/modules/workspace/types";
 
 export interface MenuBarProps {
   /** The bar as Rust resolved it. Empty until the first answer lands. */
@@ -67,20 +70,82 @@ export function displayAccelerator(accelerator: string): string {
 /**
  * Every entry with something to be identified by.
  *
- * An item has an id. A separator has nothing — it is a rule — so it borrows the
- * id of the item above it, which is stable for exactly as long as the table in
- * `menu.rs` is. Its position in the array would do the same job right up until
- * someone made the bar's contents conditional.
+ * Items and submenus have ids. A separator has nothing — it is a rule — so it
+ * borrows the id of the entry above it, which is stable for exactly as long as
+ * the table in `menu.rs` is. Its position in the array would do the same job
+ * right up until someone made the bar's contents conditional — which the
+ * recent-projects submenu now is.
  */
-function keyed(section: MenuSectionView): { key: string; entry: MenuEntryView }[] {
+function keyed(entries: MenuEntryView[]): { key: string; entry: MenuEntryView }[] {
   let previous = "top";
-  return section.entries.map((entry) => {
-    if (entry.kind === "item") {
+  return entries.map((entry) => {
+    if (entry.kind !== "separator") {
       previous = entry.id;
       return { key: entry.id, entry };
     }
     return { key: `after:${previous}`, entry };
   });
+}
+
+/** One row. The same row whether it sits in a menu or a submenu. */
+function ItemRow({ item, onSelect }: { item: MenuItemView; onSelect: (id: string) => void }) {
+  return (
+    <DropdownMenuItem
+      data-menu-id={item.id}
+      disabled={!item.enabled}
+      // Only ever set for an item that can *never* be enabled — because the
+      // feature does not exist, or because a recent project's file is gone. An
+      // item greyed because nothing is selected explains itself; these do not.
+      title={item.unavailable_reason ?? undefined}
+      onSelect={() => onSelect(item.id)}
+    >
+      {item.detail ? (
+        <span className="flex min-w-0 flex-col">
+          <span>{item.label}</span>
+          <span className="truncate text-[11px] text-muted-foreground">{item.detail}</span>
+        </span>
+      ) : (
+        item.label
+      )}
+      {item.accelerator ? (
+        <DropdownMenuShortcut>{displayAccelerator(item.accelerator)}</DropdownMenuShortcut>
+      ) : null}
+    </DropdownMenuItem>
+  );
+}
+
+/**
+ * A menu's rows: items, separators and one level of submenu, exactly as the
+ * table sent them. The submenu's own rows come through the same function —
+ * Rust guarantees they never nest further.
+ */
+function Entries({
+  entries,
+  onSelect,
+}: {
+  entries: MenuEntryView[];
+  onSelect: (id: string) => void;
+}) {
+  return (
+    <>
+      {keyed(entries).map(({ key, entry }) =>
+        entry.kind === "separator" ? (
+          <DropdownMenuSeparator key={key} />
+        ) : entry.kind === "submenu" ? (
+          <DropdownMenuSub key={key}>
+            <DropdownMenuSubTrigger data-menu-id={entry.id} disabled={!entry.enabled}>
+              {entry.label}
+            </DropdownMenuSubTrigger>
+            <DropdownMenuSubContent className="max-w-[360px]">
+              <Entries entries={entry.entries} onSelect={onSelect} />
+            </DropdownMenuSubContent>
+          </DropdownMenuSub>
+        ) : (
+          <ItemRow key={key} item={entry} onSelect={onSelect} />
+        ),
+      )}
+    </>
+  );
 }
 
 export function MenuBar({ sections, onSelect }: MenuBarProps) {
@@ -152,6 +217,19 @@ export function MenuBar({ sections, onSelect }: MenuBarProps) {
       // Radix's menu content is a vertically-oriented roving focus group, so it
       // ignores ←/→ and lets them through to here. ↑/↓/Enter/Escape it keeps,
       // which is exactly the division of labour we want.
+      //
+      // Submenus are the exception: on a submenu trigger → opens the submenu,
+      // and inside one ← closes it — both Radix's own keys. Stepping the top
+      // menus there would make submenus unusable from the keyboard, so those
+      // two places keep their arrows.
+      const target = event.target as HTMLElement | null;
+      if (
+        target?.closest(
+          '[data-slot="dropdown-menu-sub-trigger"], [data-slot="dropdown-menu-sub-content"]',
+        )
+      ) {
+        return;
+      }
       if (event.key === "ArrowRight") {
         event.preventDefault();
         step(1);
@@ -211,29 +289,7 @@ export function MenuBar({ sections, onSelect }: MenuBarProps) {
               }
             }}
           >
-            {keyed(section).map(({ key, entry }) =>
-              entry.kind === "separator" ? (
-                <DropdownMenuSeparator key={key} />
-              ) : (
-                <DropdownMenuItem
-                  key={key}
-                  data-menu-id={entry.id}
-                  disabled={!entry.enabled}
-                  // Only ever set for an item that can *never* be enabled. An
-                  // item greyed because nothing is selected explains itself;
-                  // one greyed because the feature does not exist does not.
-                  title={entry.unavailable_reason ?? undefined}
-                  onSelect={() => onSelect(entry.id)}
-                >
-                  {entry.label}
-                  {entry.accelerator ? (
-                    <DropdownMenuShortcut>
-                      {displayAccelerator(entry.accelerator)}
-                    </DropdownMenuShortcut>
-                  ) : null}
-                </DropdownMenuItem>
-              ),
-            )}
+            <Entries entries={section.entries} onSelect={onSelect} />
           </DropdownMenuContent>
         </DropdownMenu>
       ))}

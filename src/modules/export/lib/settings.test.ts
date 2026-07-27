@@ -11,16 +11,31 @@ import { describe, expect, it } from "vitest";
 
 import type { HwEncoder } from "@/modules/export/lib/api";
 import {
+  applyRemembered,
   buildRequest,
   containerAccepts,
   crfRange,
   defaultFileName,
+  dirOf,
   type ExportForm,
+  estimateFileSize,
+  estimateVideoBitrate,
   exportBlockedReason,
+  formatBitrate,
+  formatBytes,
   formatFps,
   formFromPreset,
   fpsToNumber,
+  joinPath,
+  matchingResolution,
+  normalizeExportRange,
+  qualityCaption,
+  rememberedPresetId,
+  rememberForm,
+  resolutionOptions,
   resolveSettings,
+  sanitizeFileName,
+  stemOf,
   withExtension,
 } from "@/modules/export/lib/settings";
 import {
@@ -213,7 +228,18 @@ describe("the request Rust is sent", () => {
       },
       hardware: null,
       include_audio: true,
+      range: null,
     });
+  });
+
+  it("carries the range as a two-element array, the shape of a Rust tuple", () => {
+    const chosen = form();
+    const request = buildRequest(chosen, resolveSettings(chosen, []), {
+      start: 500_000,
+      end: 1_500_000,
+    });
+
+    expect(request.range).toEqual([500_000, 1_500_000]);
   });
 
   it("sends the resolved values, not the raw ones the user typed", () => {
@@ -286,6 +312,224 @@ describe("why the Export button is off", () => {
     expect(exportBlockedReason(project, 0, "/tmp/a.mp4")).toMatch(/empty/i);
     expect(exportBlockedReason(project, 2_000_000, null)).toMatch(/where/i);
     expect(exportBlockedReason(project, 2_000_000, "/tmp/a.mp4")).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Resolution options
+// ---------------------------------------------------------------------------
+
+describe("the resolution options", () => {
+  it("keeps the aspect while scaling the long edge, for either orientation", () => {
+    // Vertical: the long edge is the height.
+    const vertical = resolutionOptions({ width: 1080, height: 1920 });
+    expect(vertical[0]).toMatchObject({ id: "source", width: 1080, height: 1920 });
+    expect(vertical.find((o) => o.id === "720")).toMatchObject({ width: 404, height: 720 });
+    expect(vertical.find((o) => o.id === "2160")).toMatchObject({ width: 1214, height: 2160 });
+
+    // Landscape: the long edge is the width, so "2160" means 2160 wide — the
+    // same rule in both orientations, not the 16:9 "p" ladder.
+    const landscape = resolutionOptions({ width: 1920, height: 1080 });
+    expect(landscape.find((o) => o.id === "2160")).toMatchObject({ width: 2160, height: 1214 });
+    expect(landscape.find((o) => o.id === "720")).toMatchObject({ width: 720, height: 404 });
+  });
+
+  it("drops the long-edge entry that duplicates the canvas", () => {
+    const options = resolutionOptions({ width: 1080, height: 1920 });
+    // A 1920-long-edge option would be the canvas again — and 1920 is not in
+    // the list anyway; but 1080×1920's own "1080" entry is 606×1080, kept.
+    const landscape = resolutionOptions({ width: 1920, height: 1080 });
+    expect(landscape.filter((o) => o.width === 1920 && o.height === 1080)).toHaveLength(1);
+    expect(options[0].id).toBe("source");
+  });
+
+  it("every option is even in both dimensions, whatever the canvas", () => {
+    for (const option of resolutionOptions({ width: 1081, height: 607 })) {
+      expect(option.width % 2).toBe(0);
+      expect(option.height % 2).toBe(0);
+    }
+  });
+
+  it("matches a size back to its option, or to nothing when hand-typed", () => {
+    const options = resolutionOptions({ width: 1080, height: 1920 });
+    expect(matchingResolution(options, 1080, 1920)?.id).toBe("source");
+    expect(matchingResolution(options, 404, 720)?.id).toBe("720");
+    expect(matchingResolution(options, 500, 700)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Estimates
+// ---------------------------------------------------------------------------
+
+describe("the estimated bitrate and size", () => {
+  it("returns a bitrate target verbatim — that mode is exact by definition", () => {
+    expect(
+      estimateVideoBitrate("h264", { kind: "bitrate", value: 12_000_000 }, 1920, 1080, 30),
+    ).toBe(12_000_000);
+  });
+
+  it("lands near the presets' own calibration at CRF 20, 1080p30", () => {
+    const rate = estimateVideoBitrate("h264", { kind: "crf", value: 20 }, 1920, 1080, 30);
+    // The YouTube preset's comment says 8–12 Mbit/s.
+    expect(rate).toBeGreaterThan(8_000_000);
+    expect(rate).toBeLessThan(12_000_000);
+  });
+
+  it("moves the right way with every input", () => {
+    const at = (crf: number, w = 1920, h = 1080, fps = 30, codec: "h264" | "h265" = "h264") =>
+      estimateVideoBitrate(codec, { kind: "crf", value: crf }, w, h, fps);
+
+    // Lower CRF is more bits; six points is about a doubling.
+    expect(at(14)).toBeGreaterThan(at(20) * 1.8);
+    expect(at(26)).toBeLessThan(at(20) * 0.6);
+    // More pixels and more frames are more bits.
+    expect(at(20, 3840, 2160)).toBeGreaterThan(at(20) * 3);
+    expect(at(20, 1920, 1080, 60)).toBeCloseTo(at(20) * 2, -4);
+    // HEVC needs less than H.264 for the same look.
+    expect(at(20, 1920, 1080, 30, "h265")).toBeLessThan(at(20));
+  });
+
+  it("multiplies out to bytes: duration times the summed rates over eight", () => {
+    // 8 Mb/s video + 192 kb/s audio for 10 s = 81.92 Mbit = 10.24 MB.
+    expect(estimateFileSize(8_000_000, 192_000, 10_000_000)).toBe(10_240_000);
+    expect(estimateFileSize(8_000_000, 0, 0)).toBe(0);
+    // Doubling the duration doubles the size.
+    expect(estimateFileSize(8_000_000, 192_000, 20_000_000)).toBe(
+      2 * estimateFileSize(8_000_000, 192_000, 10_000_000),
+    );
+  });
+
+  it("captions the slider in words, on a scale shared across codecs", () => {
+    expect(qualityCaption("h264", 20)).toBe("High quality");
+    expect(qualityCaption("h264", 10)).toMatch(/lossless/i);
+    expect(qualityCaption("h264", 40)).toMatch(/compressed/i);
+    // VP9's 0..63 scale: 25 of 63 is about 20 of 51, the same band.
+    expect(qualityCaption("vp9", 25)).toBe("High quality");
+  });
+
+  it("formats rates and sizes the way people read them", () => {
+    expect(formatBitrate(9_940_000)).toBe("9.9 Mb/s");
+    expect(formatBitrate(192_000)).toBe("192 kb/s");
+    expect(formatBytes(10_240_000)).toBe("10 MB");
+    expect(formatBytes(2_500_000_000)).toBe("2.50 GB");
+    expect(formatBytes(999_000)).toBe("999 kB");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The export range, read defensively
+// ---------------------------------------------------------------------------
+
+describe("normalizing another store's exportRange", () => {
+  const DURATION = 2_000_000;
+
+  it("passes a clean range through", () => {
+    expect(normalizeExportRange({ start: 100, end: 900 }, DURATION)).toEqual({
+      start: 100,
+      end: 900,
+    });
+  });
+
+  it("clamps to the timeline and orders the ends", () => {
+    expect(normalizeExportRange({ start: -50, end: 99_000_000 }, DURATION)).toEqual({
+      start: 0,
+      end: DURATION,
+    });
+    expect(normalizeExportRange({ start: 900, end: 100 }, DURATION)).toEqual({
+      start: 100,
+      end: 900,
+    });
+  });
+
+  it("answers null for absent, malformed or empty ranges", () => {
+    expect(normalizeExportRange(undefined, DURATION)).toBeNull();
+    expect(normalizeExportRange(null, DURATION)).toBeNull();
+    expect(normalizeExportRange("1..2", DURATION)).toBeNull();
+    expect(normalizeExportRange({ start: "0", end: 100 }, DURATION)).toBeNull();
+    expect(normalizeExportRange({ start: Number.NaN, end: 100 }, DURATION)).toBeNull();
+    expect(normalizeExportRange({ start: 500, end: 500 }, DURATION)).toBeNull();
+    // Entirely past the timeline clamps to nothing.
+    expect(normalizeExportRange({ start: 3_000_000, end: 4_000_000 }, DURATION)).toBeNull();
+    // And an empty timeline has no range at all.
+    expect(normalizeExportRange({ start: 0, end: 100 }, 0)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Paths
+// ---------------------------------------------------------------------------
+
+describe("path arithmetic", () => {
+  it("splits and joins without inventing separators", () => {
+    expect(dirOf("/home/me/cut.mp4")).toBe("/home/me");
+    expect(dirOf("cut.mp4")).toBe("");
+    expect(stemOf("/home/me/cut.mp4")).toBe("cut");
+    expect(stemOf("/home/me/my.clip.v2.mp4")).toBe("my.clip.v2");
+    expect(stemOf("/home/me/.hidden")).toBe(".hidden");
+    expect(joinPath("/home/me", "cut.mp4")).toBe("/home/me/cut.mp4");
+    expect(joinPath("/home/me/", "cut.mp4")).toBe("/home/me/cut.mp4");
+    expect(joinPath("C:\\videos", "cut.mp4")).toBe("C:\\videos\\cut.mp4");
+  });
+
+  it("sanitizes a file name into something a file system takes", () => {
+    expect(sanitizeFileName("my cut")).toBe("my cut");
+    expect(sanitizeFileName("a/b\\c")).toBe("a b c");
+    expect(sanitizeFileName("...sneaky")).toBe("sneaky");
+    expect(sanitizeFileName("   ")).toBe("Untitled");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Remembered settings
+// ---------------------------------------------------------------------------
+
+describe("remembering the form", () => {
+  const BASE = { width: 1080, height: 1920 };
+
+  it("round-trips choices, and stores the resolution as a choice", () => {
+    const chosen = form({ width: 404, height: 720, includeAudio: false, container: "mkv" });
+    const remembered = rememberForm(chosen, BASE);
+
+    expect(remembered.long_edge).toBe(720);
+    expect(remembered.include_audio).toBe(false);
+    expect(remembered.container).toBe("mkv");
+    expect(rememberedPresetId(remembered)).toBe("youtube_1080p");
+
+    const seeded = form();
+    const applied = applyRemembered(seeded, remembered, BASE);
+    expect([applied.width, applied.height]).toEqual([404, 720]);
+    expect(applied.includeAudio).toBe(false);
+    expect(applied.container).toBe("mkv");
+  });
+
+  it("remembers the canvas as null, so a new project keeps its own shape", () => {
+    const chosen = form({ width: 1080, height: 1920 });
+    expect(rememberForm(chosen, BASE).long_edge).toBeNull();
+
+    // Applied to a different project's seed, the sizes stay the seed's own.
+    const other = form({ width: 1920, height: 1080 });
+    const applied = applyRemembered(other, rememberForm(chosen, BASE), {
+      width: 1920,
+      height: 1080,
+    });
+    expect([applied.width, applied.height]).toEqual([1920, 1080]);
+  });
+
+  it("survives a blob any historical build could have written", () => {
+    const seeded = form();
+    for (const garbage of [
+      null,
+      42,
+      "remembered",
+      { container: 7, quality: "loud", fps: "-", long_edge: "many", include_audio: "yes" },
+      { quality: { kind: "louder", value: 99 } },
+    ]) {
+      const applied = applyRemembered(seeded, garbage, BASE);
+      expect(applied).toEqual(seeded);
+    }
+    expect(rememberedPresetId(null)).toBeNull();
+    expect(rememberedPresetId({ preset_id: 9 })).toBeNull();
   });
 });
 

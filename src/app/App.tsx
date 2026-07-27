@@ -7,6 +7,7 @@ import { ResizeEdges } from "@/app/components/ResizeEdges";
 import { TitleBar } from "@/app/components/TitleBar";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { type FileDropEvent, listenForFileDrop } from "@/lib/fileDrop";
+import { installTransportKeys } from "@/lib/shortcuts";
 import { clamp } from "@/lib/time";
 import { ExportDialog } from "@/modules/export/components/ExportDialog";
 import { ExportProgressDock } from "@/modules/export/components/ExportProgressDock";
@@ -21,6 +22,7 @@ import { Timeline } from "@/modules/timeline/components/Timeline";
 import { resolveTimelineDrop } from "@/modules/timeline/lib/dropTarget";
 import { insertMaterial, STILL_DURATION } from "@/modules/timeline/lib/edits";
 import { useTimelineStore } from "@/modules/timeline/store";
+import { ProjectSettingsDialog } from "@/modules/workspace/components/ProjectSettingsDialog";
 import { SettingsDialog } from "@/modules/workspace/components/SettingsDialog";
 import { ShortcutsDialog } from "@/modules/workspace/components/ShortcutsDialog";
 import { StartScreen } from "@/modules/workspace/components/StartScreen";
@@ -57,6 +59,7 @@ export function App() {
   const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [projectSettingsOpen, setProjectSettingsOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [fileDragging, setFileDragging] = useState(false);
   const [recovered, setRecovered] = useState<RecoveryNotice | null>(null);
@@ -156,6 +159,7 @@ export function App() {
       openProject: () => void openProject(),
       showExport: () => setExportOpen(true),
       showShortcuts: () => setShortcutsOpen(true),
+      showProjectSettings: () => setProjectSettingsOpen(true),
     }),
     [openProject, startNewProject],
   );
@@ -169,6 +173,14 @@ export function App() {
    * `workspace/lib/menu.ts`.
    */
   useEffect(() => installMenu(setMenuSections), []);
+
+  /**
+   * J/K/L. Bound at the app level rather than in the preview panel because
+   * they act on the playback session, which outlives any panel; the guard on
+   * an open project is inside the handler. See `src/lib/shortcuts.ts` for why
+   * J steps back a frame instead of reverse-playing.
+   */
+  useEffect(() => installTransportKeys(), []);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -419,7 +431,14 @@ export function App() {
         <NewProjectDialog open={newProjectOpen} onOpenChange={setNewProjectOpen} />
         <ExportDialog open={exportOpen} onOpenChange={setExportOpen} />
         <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
-        <ShortcutsDialog open={shortcutsOpen} onOpenChange={setShortcutsOpen} />
+        <ProjectSettingsDialog open={projectSettingsOpen} onOpenChange={setProjectSettingsOpen} />
+        {/* The same sections the title bar draws: the reference lists every
+            key the menu advertises by reading the bar itself. */}
+        <ShortcutsDialog
+          open={shortcutsOpen}
+          onOpenChange={setShortcutsOpen}
+          sections={menuSections}
+        />
         {/* One prompt for the whole app: the question outlives the menu item
             that raised it, and a dialog owned by a dropdown dies with it. */}
         <UnsavedChangesDialog />

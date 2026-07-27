@@ -18,6 +18,7 @@ import { describeError } from "@/modules/project/store";
 import {
   workspaceCacheClear,
   workspaceCacheSize,
+  workspaceRecentClear,
   workspaceRecentList,
   workspaceRecentRecord,
   workspaceSettingsGet,
@@ -90,6 +91,13 @@ interface WorkspaceState {
    * a second IPC round trip; the next `workspace_recent_list` agrees.
    */
   dropRecent: (path: string) => void;
+  /**
+   * File → Recent Projects → Clear List. Rust forgets the file; the store
+   * empties immediately so the start screen agrees without a round trip.
+   * Returns whether the write landed, so the caller knows whether the menu
+   * needs redrawing.
+   */
+  clearRecent: () => Promise<boolean>;
 
   refreshCacheSize: () => Promise<void>;
   clearCache: () => Promise<void>;
@@ -179,6 +187,19 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   },
 
   dropRecent: (path) => set({ recent: get().recent.filter((entry) => entry.path !== path) }),
+
+  clearRecent: async () => {
+    try {
+      await workspaceRecentClear();
+      set({ recent: [], recentStatus: "ready", recentError: null });
+      return true;
+    } catch (error) {
+      // The list is still on disk, so keep showing it rather than lying about
+      // having cleared it.
+      set({ recentError: describeError(error) });
+      return false;
+    }
+  },
 
   refreshCacheSize: async () => {
     try {

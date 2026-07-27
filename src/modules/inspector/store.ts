@@ -18,15 +18,26 @@ interface InspectorState {
   curveProperty: string | null;
   /** Segment-relative time of the selected keyframe. */
   selectedKeyframeTime: Micros | null;
+  /**
+   * Bumped when something outside the panel wants the speed slider looked at —
+   * the timeline's Speed → "Custom…" menu item. A counter rather than a flag
+   * so two requests in a row both fire the effect; the inspector scrolls the
+   * slider into view and focuses it, then simply leaves the number where it
+   * is.
+   */
+  speedFocus: number;
 
   showCurve: (propertyId: string | null) => void;
   selectKeyframe: (time: Micros | null) => void;
+  requestSpeedFocus: () => void;
 }
 
 export const useInspectorStore = create<InspectorState>((set) => ({
   curveProperty: null,
   selectedKeyframeTime: null,
+  speedFocus: 0,
 
   showCurve: (curveProperty) => set({ curveProperty, selectedKeyframeTime: null }),
   selectKeyframe: (selectedKeyframeTime) => set({ selectedKeyframeTime }),
+  requestSpeedFocus: () => set((state) => ({ speedFocus: state.speedFocus + 1 })),
 }));

@@ -33,7 +33,10 @@
 //! That is what makes colour undo exact without a command that mutates the
 //! pool.
 
-use crate::modules::project::document::{ColorAdjustMaterial, Crop, LutRef, Project, Segment};
+use crate::modules::project::document::{
+    new_id, source_duration_for, ColorAdjustMaterial, Crop, LutRef, Project, Segment, TimeRange,
+    Transform,
+};
 use crate::modules::timeline::ops::EditCommand;
 
 /// The values of a colour edit as the panel sends them: no id, because the
@@ -244,12 +247,231 @@ pub fn set_color_command(
     Ok((material, command))
 }
 
+// ---------------------------------------------------------------------------
+// Paste attributes
+// ---------------------------------------------------------------------------
+
+/// Everything "Paste attributes" carries from the copied clip to the selected
+/// ones: the look of a clip, none of its timing or identity.
+///
+/// The grade travels as *values* rather than as a material id, because the
+/// clipboard outlives the document it copied from — an id from another project
+/// resolves to nothing here. One material is minted per paste and **shared by
+/// every target**, which is safe because colour materials are immutable: every
+/// committed change mints a fresh material and swaps the reference (see the
+/// module docs above), so nothing can later edit one target's grade through the
+/// shared block.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ClipAttributes {
+    pub transform: Transform,
+    pub speed: f32,
+    pub volume: f32,
+    #[serde(default)]
+    pub crop: Option<Crop>,
+    #[serde(default)]
+    pub color: Option<ColorEdit>,
+}
+
+/// The edit that applies `attributes` to every clip in `targets`.
+///
+/// One `replace_segment` per target, all in one `Composite` — one undo step,
+/// and undoing it restores every clip byte for byte because both primitives
+/// snapshot the whole segment. Link partners are deliberately **not** touched:
+/// `History::apply` does not mirror into a composite, so a selection holding
+/// both halves of a linked pair applies exactly once to each, and a selection
+/// holding one half leaves the other alone — pasting a transform onto a sound
+/// clip nobody selected would be the double-application this avoids.
+///
+/// Returns the minted colour material alongside, `None` when the source had no
+/// grade; the caller pushes it into the pool before applying, exactly the
+/// `set_color_command` contract.
+pub fn paste_attributes_command(
+    project: &Project,
+    attributes: &ClipAttributes,
+    targets: &[String],
+) -> Result<(Option<ColorAdjustMaterial>, EditCommand), String> {
+    if let Some(field) = attributes.transform.non_finite_field() {
+        return Err(format!("{field} must be a finite number"));
+    }
+    if !attributes.speed.is_finite() || attributes.speed <= 0.0 {
+        return Err("the copied clip's speed is not usable".into());
+    }
+    if !attributes.volume.is_finite() {
+        return Err("volume must be a finite number".into());
+    }
+    let crop = normalize_crop(attributes.crop)?;
+
+    // The same validation and identity-is-absence rule as `set_color_command`:
+    // an identity grade on the source means the targets end up ungraded.
+    let color = attributes.color.clone().filter(|c| !c.is_identity());
+    if let Some(c) = &color {
+        for (name, value) in [
+            ("brightness", c.brightness),
+            ("contrast", c.contrast),
+            ("saturation", c.saturation),
+            ("temperature", c.temperature),
+        ] {
+            if !value.is_finite() {
+                return Err(format!("{name} must be a finite number"));
+            }
+        }
+        if let Some(lut) = &c.lut {
+            if !lut.intensity.is_finite() {
+                return Err("LUT intensity must be a finite number".into());
+            }
+            if lut.path.trim().is_empty() {
+                return Err("a LUT needs a file".into());
+            }
+        }
+    }
+    let material = color.map(|c| {
+        let mut material = ColorAdjustMaterial::identity();
+        material.brightness = c.brightness;
+        material.contrast = c.contrast;
+        material.saturation = c.saturation;
+        material.temperature = c.temperature;
+        material.lut = c.lut.map(|lut| LutRef {
+            path: lut.path,
+            intensity: lut.intensity.clamp(0.0, 1.0),
+        });
+        material
+    });
+    let color_id = material.as_ref().map(|m| m.id.clone());
+
+    // Targets in document order, each once, so the composite a given paste
+    // expands into is always the same one — a stale selection entry is skipped
+    // like `removalCommands` skips it, because the rest of the selection is
+    // still there to paste onto.
+    let wanted: std::collections::BTreeSet<&str> =
+        targets.iter().map(String::as_str).collect();
+    let ordered: Vec<&Segment> = project
+        .tracks
+        .iter()
+        .flat_map(|track| track.segments.iter())
+        .filter(|segment| wanted.contains(segment.id.as_str()))
+        .collect();
+    if ordered.is_empty() {
+        return Err("none of those clips are on the timeline any more".into());
+    }
+
+    let materials = &project.materials;
+    let mut commands = Vec::with_capacity(ordered.len());
+    for target in &ordered {
+        let color_id = color_id.clone();
+        commands.push(replace_segment(
+            project,
+            &target.id,
+            "Paste attributes",
+            move |segment| {
+                segment.transform = attributes.transform;
+                // The speed is the factor between the two ranges, so the source
+                // range follows — the clip keeps its place and length on the
+                // timeline, exactly what `SetSpeed` does.
+                segment.speed = attributes.speed;
+                segment.source_range = TimeRange::new(
+                    segment.source_range.start,
+                    source_duration_for(segment.target_range.duration, attributes.speed),
+                );
+                segment.volume = attributes.volume.clamp(0.0, 4.0);
+                segment.crop = crop;
+                segment
+                    .extras
+                    .retain(|id| materials.color_adjust(id).is_none());
+                if let Some(id) = color_id {
+                    segment.extras.push(id);
+                }
+            },
+        )?);
+    }
+
+    let command = if commands.len() == 1 {
+        commands.into_iter().next().expect("one command")
+    } else {
+        EditCommand::Composite {
+            label: "Paste attributes".into(),
+            commands,
+        }
+    };
+    Ok((material, command))
+}
+
+// ---------------------------------------------------------------------------
+// Rename
+// ---------------------------------------------------------------------------
+
+/// The edit that names a clip, or clears its name.
+///
+/// A segment has no name field, and growing one would break every
+/// `Segment { .. }` literal in the tree — including fixtures owned by other
+/// modules — for something only the timeline's label reads. So the name lives
+/// where every other segment-scoped parameter block lives: an entry in
+/// `MaterialPool::extras` shaped `{"clip_name": …}`, referenced from
+/// `Segment::extras`, resolved by the webview's `segmentLabel`. Rust never
+/// reads it back — the label is presentation.
+///
+/// Same mint-and-swap contract as colour: the returned `(id, value)` goes into
+/// `MaterialPool::extras` *before* the command applies, the undoable edit is
+/// the reference swinging over, and a superseded entry stays in the pool inert.
+pub fn rename_clip_command(
+    project: &Project,
+    segment_id: &str,
+    name: Option<String>,
+) -> Result<(Option<(String, serde_json::Value)>, EditCommand), String> {
+    let (_, current) = project
+        .segment(segment_id)
+        .ok_or_else(|| format!("unknown segment {segment_id}"))?;
+
+    // An all-whitespace name is a request to go back to the derived label,
+    // which keeps "unnamed" at one spelling in the document.
+    let name = name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
+
+    let existing: Vec<String> = current
+        .extras
+        .iter()
+        .filter(|id| clip_name_entry(project, id).is_some())
+        .cloned()
+        .collect();
+    if name.is_none() && existing.is_empty() {
+        return Err("the clip has no name to clear".into());
+    }
+    if let Some(name) = &name {
+        // Renaming to the name it already has would be an undo step that does
+        // nothing.
+        if existing
+            .iter()
+            .filter_map(|id| clip_name_entry(project, id))
+            .any(|current| current == *name)
+        {
+            return Err("the clip is already called that".into());
+        }
+    }
+
+    let entry = name.map(|n| (new_id(), serde_json::json!({ "clip_name": n })));
+    let entry_id = entry.as_ref().map(|(id, _)| id.clone());
+
+    let command = replace_segment(project, segment_id, "Rename clip", move |segment| {
+        segment.extras.retain(|id| !existing.contains(id));
+        if let Some(id) = entry_id {
+            segment.extras.push(id);
+        }
+    })?;
+    Ok((entry, command))
+}
+
+/// The clip name an extras-pool id resolves to, if it is a name entry at all.
+fn clip_name_entry<'a>(project: &'a Project, id: &str) -> Option<&'a str> {
+    project
+        .materials
+        .extras
+        .get(id)
+        .and_then(|value| value.get("clip_name"))
+        .and_then(|name| name.as_str())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::modules::project::document::{
-        new_id, CanvasConfig, TimeRange, Track, TrackKind, Transform,
-    };
+    use crate::modules::project::document::{CanvasConfig, Track, TrackKind};
     use crate::modules::timeline::History;
 
     fn project_with_clip() -> (Project, String) {
@@ -596,5 +818,266 @@ mod tests {
             lut: None,
         };
         assert!(set_color_command(&project, &segment_id, Some(bad)).is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Paste attributes
+    // -----------------------------------------------------------------------
+
+    fn attributes() -> ClipAttributes {
+        ClipAttributes {
+            transform: Transform {
+                position: [0.2, -0.1],
+                scale: [0.5, 0.5],
+                rotation: 15.0,
+                opacity: 0.8,
+                flip_h: true,
+                flip_v: false,
+            },
+            speed: 2.0,
+            volume: 0.4,
+            crop: Some(Crop {
+                left: 0.1,
+                top: 0.0,
+                right: 0.9,
+                bottom: 1.0,
+            }),
+            color: Some(ColorEdit {
+                brightness: 0.1,
+                contrast: 1.2,
+                saturation: 0.9,
+                temperature: 0.3,
+                lut: None,
+            }),
+        }
+    }
+
+    /// The linked pair the importer produces, with both halves selected: each
+    /// half takes the attributes exactly once, one undo restores both exactly,
+    /// and the two share one immutable grade material.
+    #[test]
+    fn pasting_attributes_onto_a_linked_pair_applies_once_per_clip() {
+        let (mut project, video_id) = project_with_clip();
+        let mut audio_lane = Track::new(TrackKind::Audio, "A1");
+        let partner = Segment {
+            id: new_id(),
+            material_id: "m".into(),
+            target_range: TimeRange::new(0, 4_000_000),
+            source_range: TimeRange::new(0, 4_000_000),
+            render_index: 1,
+            speed: 1.0,
+            volume: 1.0,
+            transform: Transform::default(),
+            crop: None,
+            extras: vec!["group-1".into()],
+            keyframes: Vec::new(),
+        };
+        let audio_id = partner.id.clone();
+        audio_lane.segments.push(partner);
+        project.tracks.push(audio_lane);
+        project.materials.links.insert("group-1".into());
+        project
+            .segment_mut(&video_id)
+            .unwrap()
+            .extras
+            .push("group-1".into());
+        let pristine = serde_json::to_string(&project).unwrap();
+
+        let (material, command) = paste_attributes_command(
+            &project,
+            &attributes(),
+            &[video_id.clone(), audio_id.clone()],
+        )
+        .unwrap();
+        let grade_id = material.as_ref().unwrap().id.clone();
+        project.materials.color_adjusts.push(material.unwrap());
+        let mut history = History::new();
+        history.apply(&mut project, command).unwrap();
+        assert_eq!(history.undo_label().as_deref(), Some("Paste attributes"));
+
+        for id in [&video_id, &audio_id] {
+            let (_, segment) = project.segment(id).unwrap();
+            assert_eq!(segment.speed, 2.0, "applied once, not compounded");
+            assert_eq!(segment.volume, 0.4);
+            assert_eq!(segment.transform.rotation, 15.0);
+            assert_eq!(segment.crop.unwrap().left, 0.1);
+            // The clip keeps its place and length; the source range follows the
+            // speed, exactly the `SetSpeed` rule.
+            assert_eq!(segment.target_range, TimeRange::new(0, 4_000_000));
+            assert_eq!(segment.source_range, TimeRange::new(0, 8_000_000));
+            assert!(
+                segment.extras.contains(&"group-1".to_string()),
+                "the link survived the paste"
+            );
+            assert_eq!(
+                project.materials.color_adjust_of(segment).unwrap().id,
+                grade_id,
+                "both halves reference the one shared grade material"
+            );
+        }
+
+        // One undo puts both clips back byte for byte; the minted material
+        // stays in the pool, inert like every superseded grade.
+        history.undo(&mut project).unwrap();
+        assert!(!history.can_undo(), "one gesture, one entry");
+        project.materials.color_adjusts.clear();
+        assert_eq!(serde_json::to_string(&project).unwrap(), pristine);
+    }
+
+    /// Pasting onto one half of a pair must leave the other half alone: the
+    /// composite is deliberately outside the link mirroring, and pasting a
+    /// transform onto a sound clip nobody selected would be a double
+    /// application by another name.
+    #[test]
+    fn pasting_attributes_onto_one_half_leaves_the_partner_alone() {
+        let (mut project, video_id) = project_with_clip();
+        let mut audio_lane = Track::new(TrackKind::Audio, "A1");
+        let partner = Segment {
+            id: new_id(),
+            material_id: "m".into(),
+            target_range: TimeRange::new(0, 4_000_000),
+            source_range: TimeRange::new(0, 4_000_000),
+            render_index: 1,
+            speed: 1.0,
+            volume: 1.0,
+            transform: Transform::default(),
+            crop: None,
+            extras: vec!["group-1".into()],
+            keyframes: Vec::new(),
+        };
+        let audio_id = partner.id.clone();
+        audio_lane.segments.push(partner);
+        project.tracks.push(audio_lane);
+        project.materials.links.insert("group-1".into());
+        project
+            .segment_mut(&video_id)
+            .unwrap()
+            .extras
+            .push("group-1".into());
+
+        let (material, command) =
+            paste_attributes_command(&project, &attributes(), &[video_id.clone()]).unwrap();
+        project.materials.color_adjusts.push(material.unwrap());
+        History::new().apply(&mut project, command).unwrap();
+
+        let (_, partner) = project.segment(&audio_id).unwrap();
+        assert_eq!(partner.speed, 1.0);
+        assert_eq!(partner.volume, 1.0);
+        assert!(partner.crop.is_none());
+        let (_, pasted) = project.segment(&video_id).unwrap();
+        assert_eq!(pasted.speed, 2.0);
+    }
+
+    #[test]
+    fn pasting_attributes_with_no_grade_clears_the_targets_grade() {
+        let (mut project, segment_id) = project_with_clip();
+        let (material, command) = set_color_command(
+            &project,
+            &segment_id,
+            Some(ColorEdit {
+                brightness: 0.3,
+                contrast: 1.0,
+                saturation: 1.0,
+                temperature: 0.0,
+                lut: None,
+            }),
+        )
+        .unwrap();
+        project.materials.color_adjusts.push(material.unwrap());
+        let mut history = History::new();
+        history.apply(&mut project, command).unwrap();
+
+        let mut plain = attributes();
+        plain.color = None;
+        let (material, command) =
+            paste_attributes_command(&project, &plain, &[segment_id.clone()]).unwrap();
+        assert!(material.is_none(), "no grade on the source mints nothing");
+        history.apply(&mut project, command).unwrap();
+
+        let (_, segment) = project.segment(&segment_id).unwrap();
+        assert!(
+            project.materials.color_adjust_of(segment).is_none(),
+            "the target looks like the source: ungraded"
+        );
+    }
+
+    #[test]
+    fn pasting_attributes_refuses_nonsense_and_stale_targets() {
+        let (project, segment_id) = project_with_clip();
+
+        let mut bad = attributes();
+        bad.speed = f32::NAN;
+        assert!(paste_attributes_command(&project, &bad, &[segment_id.clone()]).is_err());
+
+        let mut bad = attributes();
+        bad.volume = f32::INFINITY;
+        assert!(paste_attributes_command(&project, &bad, &[segment_id.clone()]).is_err());
+
+        assert!(
+            paste_attributes_command(&project, &attributes(), &["gone".into()]).is_err(),
+            "a selection of clips that no longer exist has nothing to paste onto"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Rename
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn renaming_a_clip_attaches_swaps_and_clears_with_exact_undo() {
+        let (mut project, segment_id) = project_with_clip();
+        let pristine_tracks = serde_json::to_string(&project.tracks).unwrap();
+        let mut history = History::new();
+
+        let (entry, command) =
+            rename_clip_command(&project, &segment_id, Some("Opening shot".into())).unwrap();
+        let (first_id, value) = entry.expect("a name mints an entry");
+        assert_eq!(value["clip_name"], "Opening shot");
+        project.materials.extras.insert(first_id.clone(), value);
+        history.apply(&mut project, command).unwrap();
+        assert_eq!(history.undo_label().as_deref(), Some("Rename clip"));
+
+        let (_, segment) = project.segment(&segment_id).unwrap();
+        assert_eq!(clip_name_entry(&project, &segment.extras[0]), Some("Opening shot"));
+
+        // Renaming again swaps to a fresh entry; only one name at a time.
+        let (entry, command) =
+            rename_clip_command(&project, &segment_id, Some("Retake".into())).unwrap();
+        let (second_id, value) = entry.unwrap();
+        assert_ne!(second_id, first_id);
+        project.materials.extras.insert(second_id, value);
+        history.apply(&mut project, command).unwrap();
+        let (_, segment) = project.segment(&segment_id).unwrap();
+        let names: Vec<&str> = segment
+            .extras
+            .iter()
+            .filter_map(|id| clip_name_entry(&project, id))
+            .collect();
+        assert_eq!(names, vec!["Retake"]);
+
+        // The same name again is a no-op and refused; whitespace clears.
+        assert!(rename_clip_command(&project, &segment_id, Some("Retake".into())).is_err());
+        let (entry, command) =
+            rename_clip_command(&project, &segment_id, Some("   ".into())).unwrap();
+        assert!(entry.is_none(), "clearing mints nothing");
+        history.apply(&mut project, command).unwrap();
+        let (_, segment) = project.segment(&segment_id).unwrap();
+        assert!(segment
+            .extras
+            .iter()
+            .all(|id| clip_name_entry(&project, id).is_none()));
+
+        // With no name there is nothing to clear.
+        assert!(rename_clip_command(&project, &segment_id, None).is_err());
+
+        // Undo everything: the segments are back to pristine; the pool keeps
+        // the superseded entries, inert on purpose.
+        while history.can_undo() {
+            history.undo(&mut project).unwrap();
+        }
+        assert_eq!(
+            serde_json::to_string(&project.tracks).unwrap(),
+            pristine_tracks
+        );
     }
 }

@@ -97,3 +97,51 @@ describe("the clipboard", () => {
     expect(store().clipboard).toHaveLength(1);
   });
 });
+
+describe("the in/out marks", () => {
+  beforeEach(() => {
+    useTimelineStore.setState({ markIn: null, markOut: null, exportRange: null });
+  });
+
+  it("holds no range until both marks are set", () => {
+    // The export side reads `exportRange` defensively: null means "the whole
+    // project", and a half-set pair must read as exactly that.
+    store().setMarkIn(1_000_000);
+    expect(store().markIn).toBe(1_000_000);
+    expect(store().exportRange).toBeNull();
+
+    store().setMarkOut(3_000_000);
+    expect(store().exportRange).toEqual({ start: 1_000_000, end: 3_000_000 });
+  });
+
+  it("holds no range when in does not precede out", () => {
+    store().setMarkIn(3_000_000);
+    store().setMarkOut(1_000_000);
+    expect(store().exportRange).toBeNull();
+
+    // Equal marks are an empty range, which is no range.
+    store().setMarkOut(3_000_000);
+    expect(store().exportRange).toBeNull();
+
+    // Moving the in mark back below the out mark revives the range.
+    store().setMarkIn(2_000_000);
+    expect(store().exportRange).toEqual({ start: 2_000_000, end: 3_000_000 });
+  });
+
+  it("clamps marks to the timeline and rounds them to whole micros", () => {
+    store().setMarkIn(-5);
+    store().setMarkOut(1_000_000.6);
+    expect(store().markIn).toBe(0);
+    expect(store().markOut).toBe(1_000_001);
+    expect(store().exportRange).toEqual({ start: 0, end: 1_000_001 });
+  });
+
+  it("X clears both marks and the range with them", () => {
+    store().setMarkIn(1_000_000);
+    store().setMarkOut(2_000_000);
+    store().clearMarks();
+    expect(store().markIn).toBeNull();
+    expect(store().markOut).toBeNull();
+    expect(store().exportRange).toBeNull();
+  });
+});

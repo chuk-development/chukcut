@@ -58,6 +58,7 @@ pub mod hwaccel;
 pub mod hwframes;
 pub mod job;
 pub mod presets;
+pub mod snapshot;
 
 pub use audio::{mix_timeline, AudioMixer, AudioRequest, AudioSource, SilentAudioSource};
 pub use encoder::{AudioStreamSpec, MediaWriter, VideoStreamSpec, WriterStats};

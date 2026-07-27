@@ -39,6 +39,7 @@
 
 import { newId } from "@/lib/ids";
 import type {
+  ColorAdjustMaterial,
   Id,
   Micros,
   Project,
@@ -88,6 +89,16 @@ export interface ClipboardEntry {
    * therefore not possible yet; see `pasteEntries`.
    */
   materialPath: string | null;
+  /**
+   * The clip's colour grade, resolved to its **values** at copy time.
+   *
+   * The segment only carries the material's id, and an id from another
+   * project — or from before an undo swapped the reference — resolves to
+   * nothing. "Paste attributes" needs the numbers, so they are captured here
+   * while the source document is still at hand. Optional because entries
+   * built before the field existed have no way to carry it.
+   */
+  colorAdjust?: ColorAdjustMaterial | null;
 }
 
 /** How a paste behaves when the instant it wants is already occupied. */
@@ -138,7 +149,18 @@ export function copyEntries(project: Project, segmentIds: readonly Id[]): Clipbo
     offset: segment.target_range.start - earliest,
     linkGroup: linkGroupOf(project, segment),
     materialPath: materialPathOf(project, segment.material_id),
+    colorAdjust: colorAdjustOf(project, segment),
   }));
+}
+
+/** The grade a segment references, mirroring `MaterialPool::color_adjust_of`. */
+export function colorAdjustOf(project: Project, segment: Segment): ColorAdjustMaterial | null {
+  const pool = project.materials.color_adjusts ?? [];
+  for (const id of segment.extras) {
+    const material = pool.find((m) => m.id === id);
+    if (material) return structuredClone(material);
+  }
+  return null;
 }
 
 /** Whether a material id means anything in this document. */

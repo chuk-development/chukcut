@@ -205,6 +205,7 @@ pub fn run(ctx: &Arc<RenderContext>, media: &Fixtures, budget: &Budget) -> Vec<M
             overrides: None,
             hardware: hardware_id.clone(),
             include_audio: true,
+            range: None,
         };
         let settings = match job::resolve_settings(&project, &request) {
             Ok(settings) => settings,

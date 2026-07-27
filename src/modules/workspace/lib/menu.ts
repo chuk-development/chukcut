@@ -52,7 +52,8 @@ import {
   workspaceMenuDescribe,
   workspaceMenuRun,
 } from "@/modules/workspace/lib/api";
-import { guardUnsaved, saveProject } from "@/modules/workspace/lib/lifecycle";
+import { guardUnsaved, openProjectAt, saveProject } from "@/modules/workspace/lib/lifecycle";
+import { useWorkspaceStore } from "@/modules/workspace/store";
 import type { MenuSectionView, MenuState } from "@/modules/workspace/types";
 
 /** Raised for both File → Quit and the window's close button. */
@@ -62,10 +63,12 @@ export const CLOSE_REQUESTED_EVENT = "menu://close-requested";
 export const MENU_IDS = {
   newProject: "file.new",
   openProject: "file.open",
+  recentClear: "file.recent.clear",
   save: "file.save",
   saveAs: "file.save_as",
   importMedia: "file.import",
   export: "file.export",
+  projectSettings: "file.project_settings",
   quit: "file.quit",
   undo: "edit.undo",
   redo: "edit.redo",
@@ -79,12 +82,33 @@ export const MENU_IDS = {
   zoomIn: "view.zoom_in",
   zoomOut: "view.zoom_out",
   zoomFit: "view.zoom_fit",
+  centerPlayhead: "view.center_playhead",
   fullscreen: "view.fullscreen",
   logs: "view.logs",
   about: "help.about",
   shortcuts: "help.shortcuts",
   docs: "help.docs",
 } as const;
+
+/**
+ * A recent-project row's id is this prefix plus the file's path — the one
+ * family of ids that cannot be constants, because they are the user's files.
+ * `menu.rs` builds them; this side only takes them apart.
+ */
+export const RECENT_ID_PREFIX = "file.recent:";
+
+/**
+ * The View → Zoom Preset steps, in pixels of timeline per microsecond — the
+ * store's own unit. Labelled in the menu (`menu.rs`) in px/s, because that is
+ * what the ruler makes visible; the two must agree, so each value here is its
+ * label's number ÷ 1e6.
+ */
+export const ZOOM_PRESETS: Record<string, number> = {
+  "view.zoom_preset.detail": 400 / 1e6,
+  "view.zoom_preset.standard": 100 / 1e6,
+  "view.zoom_preset.overview": 10 / 1e6,
+  "view.zoom_preset.hour": 2 / 1e6,
+};
 
 /**
  * The items about the machine rather than the document: quitting, revealing the
@@ -224,6 +248,7 @@ export interface MenuHandlers {
   openProject: () => void;
   showExport: () => void;
   showShortcuts: () => void;
+  showProjectSettings: () => void;
 }
 
 /**
@@ -245,6 +270,20 @@ export function runMenuAction(id: string, handlers: MenuHandlers): void {
     // an error banner over "the file manager did not open" is worse than the
     // silence.
     void workspaceMenuRun(id).catch(() => {});
+    return;
+  }
+
+  // A recent-project row: the id carries the path. Same guard, same open path
+  // as File → Open, so the unsaved-changes question is asked exactly once and
+  // in the same words.
+  if (id.startsWith(RECENT_ID_PREFIX)) {
+    void openRecent(id.slice(RECENT_ID_PREFIX.length));
+    return;
+  }
+
+  const preset = ZOOM_PRESETS[id];
+  if (preset !== undefined) {
+    useTimelineStore.getState().setZoom(preset);
     return;
   }
 
@@ -302,6 +341,15 @@ export function runMenuAction(id: string, handlers: MenuHandlers): void {
       break;
     case MENU_IDS.zoomFit:
       fitTimeline();
+      break;
+    case MENU_IDS.centerPlayhead:
+      centerOnPlayhead();
+      break;
+    case MENU_IDS.recentClear:
+      void clearRecentList();
+      break;
+    case MENU_IDS.projectSettings:
+      handlers.showProjectSettings();
       break;
     case MENU_IDS.fullscreen:
       void toggleFullscreen();
@@ -436,6 +484,41 @@ async function splitUnderPlayhead(): Promise<void> {
 }
 
 /**
+ * Open a project from the recent list, guarded exactly like File → Open.
+ *
+ * `openProjectAt` already drops the entry and shows the error when the file
+ * went away between the bar being drawn and the click — the same race the
+ * greyed "file is gone" rows cover for files that were already gone.
+ */
+async function openRecent(path: string): Promise<void> {
+  if (!(await guardUnsaved("opening another project"))) return;
+  // Success records the open (reordering the list) and failure drops the row —
+  // both through the workspace store, whose `recent` subscription in
+  // `installMenu` is what redraws the submenu either way.
+  await openProjectAt(path);
+}
+
+/** Clear the recent list; the store change redraws the bar showing it. */
+function clearRecentList(): Promise<boolean> {
+  return useWorkspaceStore.getState().clearRecent();
+}
+
+/**
+ * Scroll the timeline so the playhead sits in the middle of the viewport.
+ *
+ * The same reach the menu's fit uses, and for the same reason: the geometry
+ * lives in the lane viewport's DOM node and the menu handler lives outside
+ * React. The store's `scrollX` follows via the viewport's own scroll listener,
+ * exactly as it does when the user drags the scrollbar.
+ */
+export function centerOnPlayhead(): void {
+  const { playhead, zoom } = useTimelineStore.getState();
+  const viewport = document.querySelector<HTMLElement>('[data-slot="timeline-viewport"]');
+  if (!viewport) return;
+  viewport.scrollLeft = Math.max(0, playhead * zoom - viewport.clientWidth / 2);
+}
+
+/**
  * Zoom so the whole timeline fits the viewport.
  *
  * The timeline owns this geometry and does the same thing for its toolbar
@@ -518,8 +601,24 @@ export function installMenu(onSections: (sections: MenuSectionView[]) => void): 
       });
   };
 
+  // The deduplication above is on `MenuState` — the facts the *gates* read.
+  // The recent-projects submenu draws from a list that is not one of those
+  // facts, so a change to the list has to force its way past the comparison:
+  // clearing it, or a failed open dropping its row, changes no gate and would
+  // otherwise leave the bar offering entries Rust has already forgotten.
+  const recentChanged = () => {
+    last = null;
+    push();
+  };
+
   push();
-  const unsubscribes = [useProjectStore.subscribe(push), useTimelineStore.subscribe(push)];
+  const unsubscribes = [
+    useProjectStore.subscribe(push),
+    useTimelineStore.subscribe(push),
+    useWorkspaceStore.subscribe((state, previous) => {
+      if (state.recent !== previous.recent) recentChanged();
+    }),
+  ];
 
   const listeners: Array<() => void> = [];
   // The subscription can resolve after the effect that started it was torn

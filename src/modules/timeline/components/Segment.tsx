@@ -1,10 +1,15 @@
 import {
+  ClipboardPasteIcon,
   CopyIcon,
+  GaugeIcon,
   LinkIcon,
   LockIcon,
+  PencilIcon,
   ScissorsIcon,
+  SplitIcon,
   Trash2Icon,
   Unlink2Icon,
+  Volume2Icon,
   VolumeXIcon,
 } from "lucide-react";
 import type React from "react";
@@ -16,6 +21,9 @@ import {
   ContextMenuItem,
   ContextMenuSeparator,
   ContextMenuShortcut,
+  ContextMenuSub,
+  ContextMenuSubContent,
+  ContextMenuSubTrigger,
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
 import { formatDuration } from "@/lib/time";
@@ -146,6 +154,80 @@ interface SegmentProps {
   onLink: () => void;
   /** A fade handle was released: write these fades as volume keyframes. */
   onFade: (segmentId: string, fades: Fades) => void;
+  /** The user-given clip name, when one is set; the label falls back to it already. */
+  name: string | null;
+  /** This clip's sound can be split onto a linked audio lane. */
+  canDetachAudio: boolean;
+  /** There is a copied clip whose attributes could be pasted here. */
+  canPasteAttributes: boolean;
+  /** The rename field is open on this clip. */
+  renaming: boolean;
+  onSetSpeed: (segmentId: string, speed: number) => void;
+  /** Speed → Custom…: focus the inspector's slider. */
+  onCustomSpeed: (segmentId: string) => void;
+  onToggleMute: (segmentId: string) => void;
+  onRenameStart: (segmentId: string) => void;
+  /** Null clears the name; the empty string is treated the same. */
+  onRenameCommit: (segmentId: string, name: string | null) => void;
+  onRenameCancel: () => void;
+  onDetachAudio: (segmentId: string) => void;
+  onReattachAudio: (segmentId: string) => void;
+  onPasteAttributes: (segmentId: string) => void;
+}
+
+/** The submenu's presets, in menu order. */
+const SPEED_PRESETS = [0.5, 1, 1.5, 2] as const;
+
+/**
+ * The inline rename input, resolved exactly once.
+ *
+ * Enter commits, Escape cancels, and clicking elsewhere commits — but the
+ * commit unmounts the field, which fires its blur, so without the one-shot
+ * guard every Enter would commit twice and the second, now-stale edit would
+ * come back refused in the error bar.
+ */
+function RenameField({
+  defaultValue,
+  placeholder,
+  onCommit,
+  onCancel,
+}: {
+  defaultValue: string;
+  placeholder: string;
+  onCommit: (value: string) => void;
+  onCancel: () => void;
+}) {
+  const [done, setDone] = useState(false);
+  const finish = (value: string | null) => {
+    if (done) return;
+    setDone(true);
+    if (value === null) onCancel();
+    else onCommit(value);
+  };
+
+  return (
+    <input
+      // biome-ignore lint/a11y/noAutofocus: the field exists because the user just asked to type into it
+      autoFocus
+      type="text"
+      aria-label="Clip name"
+      defaultValue={defaultValue}
+      placeholder={placeholder}
+      data-slot="clip-rename"
+      onPointerDown={(event) => event.stopPropagation()}
+      onKeyDown={(event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          finish((event.target as HTMLInputElement).value);
+        } else if (event.key === "Escape") {
+          event.preventDefault();
+          finish(null);
+        }
+      }}
+      onBlur={(event) => finish(event.target.value)}
+      className="absolute left-1 top-[2px] z-30 h-[14px] w-[calc(100%-8px)] max-w-[220px] rounded-[2px] border border-primary/60 bg-background/95 px-1 text-[11px] text-foreground outline-none"
+    />
+  );
 }
 
 function ClipBody({
@@ -174,6 +256,19 @@ function ClipBody({
   onUnlink,
   onLink,
   onFade,
+  name,
+  canDetachAudio,
+  canPasteAttributes,
+  renaming,
+  onSetSpeed,
+  onCustomSpeed,
+  onToggleMute,
+  onRenameStart,
+  onRenameCommit,
+  onRenameCancel,
+  onDetachAudio,
+  onReattachAudio,
+  onPasteAttributes,
 }: SegmentProps) {
   clipPaintCount.set(segment.id, (clipPaintCount.get(segment.id) ?? 0) + 1);
 
@@ -451,6 +546,18 @@ function ClipBody({
             </span>
           </span>
 
+          {/* The rename field, over the label it replaces. A pointer press in
+              it must not start a drag, and the timeline's key handler already
+              ignores keys whose target is an input. */}
+          {renaming ? (
+            <RenameField
+              defaultValue={name ?? ""}
+              placeholder={label}
+              onCommit={(value) => onRenameCommit(segment.id, value)}
+              onCancel={onRenameCancel}
+            />
+          ) : null}
+
           {/* Source limits, drawn on the edge that cannot move so the marker
               travels with the edge it describes. */}
           {atSourceHead && width > 12 ? (
@@ -553,6 +660,59 @@ function ClipBody({
           <CopyIcon />
           Duplicate
         </ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuSub>
+          <ContextMenuSubTrigger>
+            <GaugeIcon />
+            Speed
+          </ContextMenuSubTrigger>
+          <ContextMenuSubContent>
+            {SPEED_PRESETS.map((preset) => (
+              <ContextMenuItem key={preset} onSelect={() => onSetSpeed(segment.id, preset)}>
+                {`${preset}×`}
+                {segment.speed === preset ? (
+                  <span aria-hidden className="ml-auto text-[10px]" title="Current speed">
+                    •
+                  </span>
+                ) : null}
+              </ContextMenuItem>
+            ))}
+            <ContextMenuSeparator />
+            <ContextMenuItem onSelect={() => onCustomSpeed(segment.id)}>Custom…</ContextMenuItem>
+          </ContextMenuSubContent>
+        </ContextMenuSub>
+        {/* The clip's own volume, not the lane switch: the `before` on the
+            command is what makes undo restore the old level. */}
+        <ContextMenuItem onSelect={() => onToggleMute(segment.id)}>
+          {segment.volume <= 0 ? <Volume2Icon /> : <VolumeXIcon />}
+          {segment.volume <= 0 ? "Unmute clip" : "Mute clip"}
+        </ContextMenuItem>
+        <ContextMenuItem onSelect={() => onRenameStart(segment.id)}>
+          <PencilIcon />
+          Rename clip
+        </ContextMenuItem>
+        <ContextMenuItem
+          disabled={!canPasteAttributes}
+          onSelect={() => onPasteAttributes(segment.id)}
+        >
+          <ClipboardPasteIcon />
+          Paste attributes
+        </ContextMenuItem>
+        {canDetachAudio ? (
+          <ContextMenuItem onSelect={() => onDetachAudio(segment.id)}>
+            <SplitIcon />
+            Detach audio
+          </ContextMenuItem>
+        ) : null}
+        {/* Only when the sound really is a linked clip of this file on an
+            audio lane — the shape "Detach audio" creates. Anything looser and
+            "Re-attach" would delete a clip it cannot substitute for. */}
+        {soundOnPartnerLane ? (
+          <ContextMenuItem onSelect={() => onReattachAudio(segment.id)}>
+            <Volume2Icon />
+            Re-attach audio
+          </ContextMenuItem>
+        ) : null}
         {linked || linkable ? (
           <>
             <ContextMenuSeparator />

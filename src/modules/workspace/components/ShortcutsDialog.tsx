@@ -1,10 +1,13 @@
 /**
  * The keyboard reference.
  *
- * There are a few dozen bindings and, until this existed, no way to find out
- * about any of them except by reading the source or hovering every icon in the
- * toolbar. The list itself is in `lib/shortcuts.ts`; this only draws it.
+ * Drawn from the same bar Rust resolved for the menu — so every accelerator
+ * the menu advertises is in here by construction — plus the catalogue of keys
+ * the menu does not advertise. `lib/shortcuts.ts` owns the merge; this only
+ * draws it.
  */
+
+import { useMemo } from "react";
 
 import {
   Dialog,
@@ -14,27 +17,36 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { SHORTCUT_GROUPS, shortcutCount } from "@/modules/workspace/lib/shortcuts";
+import { buildShortcutGroups, shortcutCount } from "@/modules/workspace/lib/shortcuts";
+import type { MenuSectionView } from "@/modules/workspace/types";
 
 interface ShortcutsDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /**
+   * The menu bar as Rust last resolved it — the same array `TitleBar` draws.
+   * Empty before the first answer lands, in which case the dialog still lists
+   * the non-menu bindings rather than nothing.
+   */
+  sections: MenuSectionView[];
 }
 
-export function ShortcutsDialog({ open, onOpenChange }: ShortcutsDialogProps) {
+export function ShortcutsDialog({ open, onOpenChange, sections }: ShortcutsDialogProps) {
+  const groups = useMemo(() => buildShortcutGroups(sections), [sections]);
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-[600px]">
         <DialogHeader>
           <DialogTitle>Keyboard shortcuts</DialogTitle>
           <DialogDescription>
-            {shortcutCount()} of them. Single keys do nothing while you are typing in a field.
+            {shortcutCount(groups)} of them. Single keys do nothing while you are typing in a field.
           </DialogDescription>
         </DialogHeader>
 
         <DialogBody className="max-h-[min(64vh,520px)] overflow-y-auto">
           <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-            {SHORTCUT_GROUPS.map((group) => (
+            {groups.map((group) => (
               <section key={group.title} aria-label={group.title}>
                 <h3 className="text-[12px] font-semibold text-panel-foreground">{group.title}</h3>
                 {group.caption ? (

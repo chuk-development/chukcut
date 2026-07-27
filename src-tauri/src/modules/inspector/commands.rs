@@ -11,7 +11,7 @@
 use std::sync::Arc;
 use tauri::State;
 
-use super::edit::{self, ColorEdit};
+use super::edit::{self, ClipAttributes, ColorEdit};
 use crate::modules::project::document::Crop;
 use crate::modules::timeline::commands::EditResponse;
 use crate::state::AppState;
@@ -58,6 +58,68 @@ pub fn inspector_set_color(
             project.materials.color_adjusts.push(material);
             if let Err(error) = state.history.write().apply(project, command) {
                 project.materials.color_adjusts.retain(|m| m.id != id);
+                return Err(error);
+            }
+        } else {
+            state.history.write().apply(project, command)?;
+        }
+    }
+    respond(&state)
+}
+
+/// Apply a copied clip's transform, speed, volume, crop and colour grade to
+/// every clip in `segment_ids`, as one undo step.
+///
+/// The attribute values come from the webview's clipboard rather than from a
+/// segment id, because the clipboard outlives the document it copied from; the
+/// composite itself is built here against the real document, so a stale
+/// selection is skipped and the grade lands as one shared immutable material.
+#[tauri::command]
+pub fn inspector_paste_attributes(
+    state: State<'_, Arc<AppState>>,
+    attributes: ClipAttributes,
+    segment_ids: Vec<String>,
+) -> Result<EditResponse, String> {
+    {
+        let mut guard = state.project.write();
+        let project = guard.as_mut().ok_or("no project is open")?;
+        let (material, command) =
+            edit::paste_attributes_command(project, &attributes, &segment_ids)?;
+
+        // Pool before command, with the take-back on failure: the same
+        // contract as `inspector_set_color` above, for the same reasons.
+        if let Some(material) = material {
+            let id = material.id.clone();
+            project.materials.color_adjusts.push(material);
+            if let Err(error) = state.history.write().apply(project, command) {
+                project.materials.color_adjusts.retain(|m| m.id != id);
+                return Err(error);
+            }
+        } else {
+            state.history.write().apply(project, command)?;
+        }
+    }
+    respond(&state)
+}
+
+/// Name a clip, or clear its name. The name lives in `MaterialPool::extras`
+/// and is resolved by the webview's label code; see `edit::rename_clip_command`
+/// for why a segment grows no field for it.
+#[tauri::command]
+pub fn inspector_rename_clip(
+    state: State<'_, Arc<AppState>>,
+    segment_id: String,
+    name: Option<String>,
+) -> Result<EditResponse, String> {
+    {
+        let mut guard = state.project.write();
+        let project = guard.as_mut().ok_or("no project is open")?;
+        let (entry, command) = edit::rename_clip_command(project, &segment_id, name)?;
+
+        if let Some((id, value)) = entry {
+            project.materials.extras.insert(id.clone(), value);
+            if let Err(error) = state.history.write().apply(project, command) {
+                project.materials.extras.remove(&id);
                 return Err(error);
             }
         } else {
