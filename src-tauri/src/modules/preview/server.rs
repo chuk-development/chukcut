@@ -771,23 +771,42 @@ impl PreviewServer {
             Lookup::Miss => {}
         }
 
-        // Not rendered yet. Nudge the renderer and wait briefly.
-        self.request_frame(session, frame);
-        let waited = std::time::Instant::now();
-        let found = self.shared.cache.wait(session, frame, FRAME_WAIT);
-        probe::add(&PROBE.serve_wait_ns, waited);
-        match found {
-            Lookup::Hit(bytes) => {
-                probe::bump(&PROBE.serve_wait_hit);
-                probe::add(&PROBE.serve_ns, served);
-                return jpeg_response(&bytes);
+        // Not rendered yet. What happens next depends on whether we are
+        // playing, because the two states have opposite economics:
+        //
+        // - Paused, this is a scrub: the nudge below queues exactly this frame
+        //   and waiting for it is how the pointer's position becomes the
+        //   picture. The wait is the feature.
+        // - Playing, the nudge is a no-op (`request_frame` returns early) and
+        //   the render thread is already producing frames in playback order —
+        //   nothing this handler does makes the missing frame arrive sooner.
+        //   Waiting `FRAME_WAIT` = 60 ms here just held the *displayed* picture
+        //   back by 60 ms whenever the renderer slipped a frame, which is
+        //   latency exactly when the preview is already struggling. Measured in
+        //   `docs/research/preview-performance.md`: median announce→bytes went
+        //   54–62 ms when behind, and every one of those waits was pure loss.
+        //   Skip straight to the nearest-frame fallback instead: a neighbour a
+        //   frame old is indistinguishable at speed, and the next request will
+        //   catch up on its own.
+        let playing = self.shared.work.lock().playing;
+        if !playing {
+            self.request_frame(session, frame);
+            let waited = std::time::Instant::now();
+            let found = self.shared.cache.wait(session, frame, FRAME_WAIT);
+            probe::add(&PROBE.serve_wait_ns, waited);
+            match found {
+                Lookup::Hit(bytes) => {
+                    probe::bump(&PROBE.serve_wait_hit);
+                    probe::add(&PROBE.serve_ns, served);
+                    return jpeg_response(&bytes);
+                }
+                Lookup::Stale => {
+                    probe::bump(&PROBE.serve_stale);
+                    probe::add(&PROBE.serve_ns, served);
+                    return gone(session);
+                }
+                Lookup::Miss => {}
             }
-            Lookup::Stale => {
-                probe::bump(&PROBE.serve_stale);
-                probe::add(&PROBE.serve_ns, served);
-                return gone(session);
-            }
-            Lookup::Miss => {}
         }
 
         // Still not there. Answer with the closest frame we do have rather than
@@ -2329,6 +2348,47 @@ mod tests {
         let response = server.serve_uri("chukcut-frame://preview/5/1");
         assert_eq!(response.status(), tauri::http::StatusCode::OK);
         handle.join().unwrap();
+    }
+
+    /// During playback a missing frame is answered *now* — with a neighbour or
+    /// a 204 — never by waiting `FRAME_WAIT` for a render that the wait cannot
+    /// summon (`request_frame` is a no-op while playing). The old behaviour
+    /// held every such request for the full 60 ms, which stalled the displayed
+    /// picture precisely when the renderer was already behind.
+    ///
+    /// The threshold is below `FRAME_WAIT` with slack for a loaded machine:
+    /// the old path could not answer this request in under 60 ms, the new one
+    /// does no timed work at all.
+    #[test]
+    fn playback_never_waits_on_a_missing_frame() {
+        let server = served(5);
+        server.shared.cache.insert(CachedFrame {
+            session: 5,
+            frame: 1,
+            time: 33_333,
+            bytes: Arc::from(vec![0xFF, 0xD8].into_boxed_slice()),
+        });
+        server.shared.work.lock().playing = true;
+
+        // Frame 2 is not in the ring; frame 1 is a serviceable neighbour.
+        let started = std::time::Instant::now();
+        let response = server.serve_uri("chukcut-frame://preview/5/2");
+        let elapsed = started.elapsed();
+        assert_eq!(response.status(), tauri::http::StatusCode::OK);
+        assert!(
+            elapsed < FRAME_WAIT - Duration::from_millis(15),
+            "a playback request for a missing frame blocked {elapsed:?}"
+        );
+
+        // And with nothing near it either: an immediate 204, not a timed miss.
+        let started = std::time::Instant::now();
+        let response = server.serve_uri("chukcut-frame://preview/5/40");
+        let elapsed = started.elapsed();
+        assert_eq!(response.status(), tauri::http::StatusCode::NO_CONTENT);
+        assert!(
+            elapsed < FRAME_WAIT - Duration::from_millis(15),
+            "a playback request with an empty ring blocked {elapsed:?}"
+        );
     }
 
     #[test]

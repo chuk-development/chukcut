@@ -23,9 +23,18 @@ use parking_lot::{Condvar, Mutex};
 
 use crate::modules::project::document::Micros;
 
-/// 90 frames is three seconds at 30 fps: long enough to ride out a slow patch,
-/// short enough that a seek throws away only a few megabytes of JPEG.
-pub const DEFAULT_CAPACITY: usize = 90;
+/// Two seconds behind the playhead plus the read-ahead window in front.
+///
+/// This used to be 90 with a comment about "riding out a slow patch", which
+/// was a fiction: the renderer never runs more than `DEFAULT_READ_AHEAD` = 12
+/// frames past the playhead, so 78 of the 90 slots could only ever hold
+/// frames *behind* it. Frames behind the playhead are not useless — the
+/// webview's requests trail the position announcements, and a short scrub
+/// back lands on them — but two seconds of trail is ample for both, and the
+/// profile (`docs/research/preview-performance.md`) called the rest dead
+/// weight. Sized as trail + read-ahead so the two constants cannot drift
+/// apart again: if the read-ahead grows, the ring grows with it.
+pub const DEFAULT_CAPACITY: usize = 60 + super::clock::DEFAULT_READ_AHEAD;
 
 /// One encoded frame, ready to hand to the webview verbatim.
 #[derive(Debug, Clone)]
