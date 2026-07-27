@@ -56,7 +56,9 @@ use chukcut_lib::modules::preview::encoder::{
     decode_jpeg_rgb, encode_jpeg, encode_preview_jpeg, encode_preview_jpeg_dmabuf,
     hardware_available, psnr_rgb, Backend,
 };
+use chukcut_lib::modules::preview::encoder::encode_preview_jpeg_va_surface;
 use chukcut_lib::modules::preview::vaapi::VaapiJpegEncoder;
+use chukcut_lib::modules::preview::vasurface::{self, SurfaceRing};
 use chukcut_lib::modules::preview::zerocopy::{self, PreviewRing};
 use chukcut_lib::modules::preview::DEFAULT_JPEG_QUALITY;
 use chukcut_lib::modules::project::{
@@ -64,6 +66,8 @@ use chukcut_lib::modules::project::{
     VideoMaterial,
 };
 use chukcut_lib::modules::render::source::YuvRange;
+use chukcut_lib::modules::render::nv12::{Nv12PlaneWriter, READ_FORMAT};
+use chukcut_lib::modules::render::texture_pool::{TextureKey, TexturePool};
 use chukcut_lib::modules::render::{Compositor, Nv12Layout, RenderContext};
 
 /// The clip is 1920x1080; every canvas below is a crop of that aspect or a
@@ -126,14 +130,23 @@ fn main() {
         if ctx.can_import_dmabuf() { "yes" } else { "no" },
     );
     println!("  quality  {DEFAULT_JPEG_QUALITY}");
+    let drawn_ok = vasurface::encoder_reads_its_own_surface(&ctx);
+    let linear_ok = zerocopy::encoder_can_read_linear(&ctx);
     println!(
-        "  verdict  the JPEG encoder {} read the compositor's own memory, so the preview {}",
-        if zerocopy::encoder_can_read_linear(&ctx) { "CAN" } else { "CANNOT" },
-        if zerocopy::encoder_can_read_linear(&ctx) {
-            "hands it over"
-        } else {
-            "reads frames back to the CPU"
-        },
+        "  verdict  a VA surface the compositor drew into: the JPEG encoder {}",
+        if drawn_ok { "READS IT" } else { "cannot read it" },
+    );
+    println!(
+        "           a linear buffer the driver imports:   the JPEG encoder {}",
+        if linear_ok { "READS IT" } else { "cannot read it" },
+    );
+    println!(
+        "           so the preview {}",
+        match (drawn_ok, linear_ok) {
+            (true, _) => "composites straight into the encoder's own surfaces",
+            (false, true) => "composites into an exported linear buffer",
+            (false, false) => "reads every frame back to the CPU",
+        }
     );
     println!();
 
@@ -269,12 +282,25 @@ fn row_ramp(ctx: &Arc<RenderContext>) {
         Err(e) => println!("  h264_vaapi control failed: {e}"),
     }
 
+    // The other direction: the driver allocates the surface and the compositor
+    // draws into it. Same encoder, same picture, no modifier declared anywhere.
+    match drawn_ramp(ctx, width, height) {
+        Ok(rgb) => println!(
+            "  {:<34}{}",
+            "mjpeg_vaapi, a surface it allocated",
+            row_means(&rgb, w, &ROWS)
+        ),
+        Err(e) => println!("  the drawn-surface arm failed: {e}"),
+    }
+
     println!();
     println!(
         "  A row of 32-row block means — 0→15, 31→15, 32→47 — is linear memory read as\n  \
          though it were 32-row tiled. If `h264_vaapi` reads the same buffer correctly and\n  \
          `mjpeg_vaapi` does not, nothing about the buffer is wrong and there is nothing on\n  \
-         this side of the boundary to fix."
+         this side of the boundary to fix — the *declared* layout is simply not what the\n  \
+         JPEG engine acts on. The last row is what happens when nobody declares one: the\n  \
+         driver allocates, Vulkan imports, and the tiling is the encoder's own."
     );
     println!();
 
@@ -349,6 +375,84 @@ fn row_ramp(ctx: &Arc<RenderContext>) {
     }
 }
 
+/// The row ramp again, drawn into a surface VAAPI allocated.
+///
+/// The mirror of everything above it: nothing here declares a modifier, a pitch
+/// or an offset, because the surface came from the driver and Vulkan was told
+/// its layout by the export descriptor.
+fn drawn_ramp(ctx: &Arc<RenderContext>, width: u32, height: u32) -> Result<Vec<u8>, String> {
+    let rgba: Vec<u8> = (0..(width * height) as usize)
+        .flat_map(|i| {
+            let level = ((i / width as usize) % 256) as u8;
+            [level, level, level, 255]
+        })
+        .collect();
+    let jpeg = encode_drawn(ctx, (width, height), &rgba)?;
+    decode_jpeg_rgb(&jpeg)
+        .map(|(rgb, ..)| rgb)
+        .map_err(|e| e.to_string())
+}
+
+/// Upload RGBA, draw it as NV12 into a driver-allocated surface, encode there.
+///
+/// A miniature of what `preview::server::render_one` does on the drawn path,
+/// with the ring built and thrown away around one frame — fine here and not in
+/// the server, where the allocation is the expensive part.
+fn encode_drawn(
+    ctx: &Arc<RenderContext>,
+    size: (u32, u32),
+    rgba: &[u8],
+) -> Result<Vec<u8>, String> {
+    let (width, height) = size;
+    let ring = Arc::new(
+        SurfaceRing::new(ctx, size).ok_or("this device cannot draw into a VAAPI surface")?,
+    );
+    let pool = TexturePool::default();
+    let target = pool.acquire(
+        ctx.device(),
+        TextureKey::new(
+            width,
+            height,
+            READ_FORMAT,
+            wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        ),
+    );
+    ctx.queue().write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: target.texture(),
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        rgba,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(width * 4),
+            rows_per_image: Some(height),
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+
+    let mut claim = ring.claim().ok_or("a fresh ring has no free surface")?;
+    Nv12PlaneWriter::new(ctx)
+        .write_planes(
+            ctx,
+            &target,
+            ring.luma(claim.index()),
+            ring.chroma(claim.index()),
+            YuvRange::Full,
+        )
+        .map_err(|e| e.to_string())?;
+    let jpeg = encode_preview_jpeg_va_surface(claim.surface_mut(), 95)
+        .ok_or("the hardware JPEG encoder refused the surface")?;
+    claim.release();
+    Ok(jpeg)
+}
+
 /// Mean luma of each named row of a decoded RGB picture.
 fn row_means(rgb: &[u8], w: usize, rows: &[usize]) -> String {
     rows.iter()
@@ -419,10 +523,10 @@ fn describe(rgb: &[u8]) -> String {
 }
 
 fn verify(ctx: &Arc<RenderContext>, clip: &Path) {
-    heading("2. the same frame, three ways, compared per pixel");
+    heading("2. the same frame, every way, compared per pixel");
     println!(
-        "  {:>11}  {:>6}  {:>28}  {:>28}",
-        "size", "stride", "zero-copy vs libjpeg-turbo", "zero-copy vs the copying GPU"
+        "  {:>11}  {:>6}  {:<9}  {:>30}  {:>30}",
+        "size", "stride", "arm", "vs libjpeg-turbo", "vs the copying GPU"
     );
 
     for size in SIZES {
@@ -449,43 +553,66 @@ fn verify(ctx: &Arc<RenderContext>, clip: &Path) {
             continue;
         };
 
-        let Some(zero) = encode_zero_copy(ctx, &compositor, &project, &sources, at, size) else {
-            println!("  {:>11}  the zero-copy path was not available", label(size));
-            continue;
-        };
-
         let (sw, ..) = decode_jpeg_rgb(&software).expect("decode the software JPEG");
         let (cp, ..) = decode_jpeg_rgb(&copying).expect("decode the copying JPEG");
-        let (zc, ..) = decode_jpeg_rgb(&zero).expect("decode the zero-copy JPEG");
 
-        // `CHUKCUT_DUMP=<dir>` writes the three files out. A PSNR says two
-        // pictures differ; only looking at them says how, and "how" is the
-        // difference between a stride bug, a range bug and a plane swap.
-        if let Ok(dir) = std::env::var("CHUKCUT_DUMP") {
-            let _ = std::fs::create_dir_all(&dir);
+        // `CHUKCUT_DUMP=<dir>` writes every file out. A PSNR says two pictures
+        // differ; only looking at them says how, and "how" is the difference
+        // between a stride bug, a range bug and a plane swap.
+        let dump = std::env::var("CHUKCUT_DUMP").ok();
+        if let Some(dir) = &dump {
+            let _ = std::fs::create_dir_all(dir);
             let stem = label(size);
             let _ = std::fs::write(format!("{dir}/{stem}-software.jpg"), &software);
             let _ = std::fs::write(format!("{dir}/{stem}-copying.jpg"), &copying);
-            let _ = std::fs::write(format!("{dir}/{stem}-zerocopy.jpg"), &zero);
-            for (name, pixels) in [("software", &sw), ("copying", &cp), ("zerocopy", &zc)] {
-                println!("      {name:>9}: {}", describe(pixels));
-            }
         }
 
-        let against_software = compare(&sw, &zc);
-        let against_copying = compare(&cp, &zc);
-        println!(
-            "  {:>11}  {:>6}  {:>10.1} dB max {:>3} >8 {:>5.2}%  {:>10.1} dB max {:>3} >8 {:>5.2}%{}",
-            label(size),
-            layout.y_stride,
-            against_software.psnr,
-            against_software.max,
-            against_software.over_8 * 100.0,
-            against_copying.psnr,
-            against_copying.max,
-            against_copying.over_8 * 100.0,
-            if backend == Backend::Vaapi { "" } else { "  (the copying arm fell back to the CPU)" },
-        );
+        // Both zero-copy arms, in the order the server prefers them: the drawn
+        // surface first because it declares nothing about layout, the exported
+        // linear buffer second because it declares everything.
+        let arms = [
+            ("drawn", encode_drawn(ctx, size, &rgba).ok()),
+            (
+                "exported",
+                encode_zero_copy(ctx, &compositor, &project, &sources, at, size),
+            ),
+        ];
+        for (name, encoded) in arms {
+            let Some(bytes) = encoded else {
+                println!(
+                    "  {:>11}  {:>6}  {:<9}  not available on this device",
+                    label(size),
+                    layout.y_stride,
+                    name
+                );
+                continue;
+            };
+            let (zc, ..) = decode_jpeg_rgb(&bytes).expect("decode the zero-copy JPEG");
+            if let Some(dir) = &dump {
+                let stem = label(size);
+                let _ = std::fs::write(format!("{dir}/{stem}-{name}.jpg"), &bytes);
+                println!("      {name:>9}: {}", describe(&zc));
+            }
+            let against_software = compare(&sw, &zc);
+            let against_copying = compare(&cp, &zc);
+            println!(
+                "  {:>11}  {:>6}  {:<9}  {:>7.1} dB max {:>3} >8 {:>6.2}%  {:>7.1} dB max {:>3} >8 {:>6.2}%{}",
+                label(size),
+                layout.y_stride,
+                name,
+                against_software.psnr,
+                against_software.max,
+                against_software.over_8 * 100.0,
+                against_copying.psnr,
+                against_copying.max,
+                against_copying.over_8 * 100.0,
+                if backend == Backend::Vaapi {
+                    ""
+                } else {
+                    "  (the copying arm fell back to the CPU)"
+                },
+            );
+        }
     }
 
     println!();
@@ -539,32 +666,39 @@ fn encode_zero_copy(
 // ---------------------------------------------------------------------------
 
 fn speed(ctx: &Arc<RenderContext>, clip: &Path, rounds: usize) {
-    heading("3. what a whole preview frame costs, both arms interleaved");
+    heading("3. what a whole preview frame costs, all three arms interleaved");
     println!(
-        "  {:>11}  {:>26}  {:>26}  {:>8}",
-        "size", "readback + convert + upload", "straight from the compositor", "ratio"
+        "  {:>11}  {:>24}  {:>24}  {:>7}  {:>24}  {:>7}",
+        "size",
+        "readback + convert + upload",
+        "drawn into the encoder's",
+        "ratio",
+        "exported linear buffer",
+        "ratio"
     );
 
     for size in [(1920u32, 1080u32), (1088, 1920), (1440, 1080)] {
         let project = single_clip(clip, size);
-        // One compositor and one decoder *per arm*, so neither inherits the
-        // other's warm texture cache — and both are warmed before the clock
-        // starts.
+        // One compositor and one decoder *per arm*, so none inherits another's
+        // warm texture cache — and every arm is warmed before the clock starts.
         let copying = Arm::new(ctx, &project);
+        let drawn = Arm::new(ctx, &project);
         let zero = Arm::new(ctx, &project);
 
+        let surfaces = SurfaceRing::new(ctx, size).map(Arc::new);
         let ring = PreviewRing::new(ctx, size).map(Arc::new);
-        if ring.is_none() {
-            println!("  {:>11}  this device cannot export DMA-BUF memory", label(size));
-            continue;
-        }
 
         let _ = copying
             .compositor
             .render_frame(&project, 0, size, &copying.sources);
-        let _ = one_zero_copy_frame(&zero, &project, ring.as_ref().unwrap(), size, 0);
+        if let Some(surfaces) = surfaces.as_ref() {
+            let _ = one_drawn_frame(&drawn, &project, surfaces, size, 0);
+        }
+        if let Some(ring) = ring.as_ref() {
+            let _ = one_zero_copy_frame(&zero, &project, ring, size, 0);
+        }
 
-        let (mut copy_best, mut zero_best) = (f64::MAX, f64::MAX);
+        let (mut copy_best, mut drawn_best, mut zero_best) = (f64::MAX, f64::MAX, f64::MAX);
         for round in 0..rounds {
             copy_best = copy_best.min(time(FRAMES, |n| {
                 let at = instant(round, n);
@@ -576,20 +710,27 @@ fn speed(ctx: &Arc<RenderContext>, clip: &Path, rounds: usize) {
                     .ok()
                     .map(|_| ())
             }));
-            zero_best = zero_best.min(time(FRAMES, |n| {
-                let at = instant(round, n);
-                one_zero_copy_frame(&zero, &project, ring.as_ref().unwrap(), size, at)
-            }));
+            if let Some(surfaces) = surfaces.as_ref() {
+                drawn_best = drawn_best.min(time(FRAMES, |n| {
+                    let at = instant(round, n);
+                    one_drawn_frame(&drawn, &project, surfaces, size, at)
+                }));
+            }
+            if let Some(ring) = ring.as_ref() {
+                zero_best = zero_best.min(time(FRAMES, |n| {
+                    let at = instant(round, n);
+                    one_zero_copy_frame(&zero, &project, ring, size, at)
+                }));
+            }
         }
 
         println!(
-            "  {:>11}  {:>17.2} ms {:>5.0} fps  {:>17.2} ms {:>5.0} fps  {:>7.2}x",
+            "  {:>11}  {:>15.2} ms {:>5.0} fps  {}  {}",
             label(size),
             copy_best,
             1000.0 / copy_best,
-            zero_best,
-            1000.0 / zero_best,
-            copy_best / zero_best,
+            arm_cell(drawn_best, copy_best),
+            arm_cell(zero_best, copy_best),
         );
     }
 
@@ -622,6 +763,50 @@ impl Arm {
 /// provider's texture cache instead of a frame.
 fn instant(round: usize, n: usize) -> Micros {
     ((round * FRAMES + n) as Micros) * 33_333 % 2_900_000
+}
+
+/// One whole frame on the drawn path: composite, draw NV12 into the driver's
+/// surface, encode there.
+///
+/// Through the compositor rather than through a bare `Nv12PlaneWriter`, because
+/// that is the call the server makes and the pipeline it caches is part of what
+/// is being timed.
+fn one_drawn_frame(
+    arm: &Arm,
+    project: &Project,
+    ring: &Arc<SurfaceRing>,
+    size: (u32, u32),
+    at: Micros,
+) -> Option<()> {
+    let mut claim = ring.claim()?;
+    arm.compositor
+        .render_nv12_into_planes(
+            project,
+            at,
+            size,
+            &arm.sources,
+            ring.luma(claim.index()),
+            ring.chroma(claim.index()),
+            YuvRange::Full,
+        )
+        .ok()?;
+    encode_preview_jpeg_va_surface(claim.surface_mut(), DEFAULT_JPEG_QUALITY)?;
+    claim.release();
+    Some(())
+}
+
+/// One arm's cell in the speed table: milliseconds, fps and the ratio against
+/// the copying path, or a note that the arm does not run here.
+fn arm_cell(best: f64, against: f64) -> String {
+    if !best.is_finite() {
+        return format!("{:>24}  {:>7}", "not available", "—");
+    }
+    format!(
+        "{:>15.2} ms {:>5.0} fps  {:>6.2}x",
+        best,
+        1000.0 / best,
+        against / best
+    )
 }
 
 fn one_zero_copy_frame(

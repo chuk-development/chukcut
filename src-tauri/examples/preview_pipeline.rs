@@ -52,6 +52,7 @@ use std::time::{Duration, Instant};
 use chukcut_lib::modules::media::MediaSourceProvider;
 use chukcut_lib::modules::preview::encoder::{encode_preview_jpeg, hardware_available};
 use chukcut_lib::modules::preview::probe::PROBE;
+use chukcut_lib::modules::preview::{vasurface, zerocopy};
 use chukcut_lib::modules::preview::vaapi::VaapiJpegEncoder;
 use chukcut_lib::modules::preview::{
     frame_url, Counts, PreviewOptions, PreviewServer, DEFAULT_JPEG_QUALITY,
@@ -646,6 +647,25 @@ fn main() {
         let sources: Arc<dyn SourceProvider> = Arc::new(MediaSourceProvider::from_project(&project));
         server.set_source_provider(sources);
 
+        // The control arm, and it runs **first and in this same process** on
+        // purpose: a "before" taken from a build that no longer exists is not a
+        // measurement, and this machine's load moves by a factor of two between
+        // minutes. Both switches off means every frame is composited to RGBA,
+        // read back, converted on rayon and uploaded — what the preview did
+        // before `preview::vasurface` existed.
+        vasurface::set_enabled(false);
+        zerocopy::set_enabled(false);
+        let copying = live_phase(
+            &server,
+            Arc::clone(&project),
+            &PreviewOptions::default(),
+            options.seconds,
+        );
+        report_live(&copying, options.fps, "live, reading every frame back");
+        println!();
+        vasurface::set_enabled(true);
+        zerocopy::set_enabled(true);
+
         let live = live_phase(
             &server,
             Arc::clone(&project),
@@ -653,6 +673,13 @@ fn main() {
             options.seconds,
         );
         report_live(&live, options.fps, "live, native proxy");
+        println!(
+            "    ⇒ not copying the frame moved the encode from {:.2} to {:.2} ms a frame and the rendered rate from {:.1} to {:.1} fps, in one process",
+            Counts::per(copying.counts.encode_ns, copying.counts.encodes),
+            Counts::per(live.counts.encode_ns, live.counts.encodes),
+            copying.rendered as f64 / copying.wall,
+            live.rendered as f64 / live.wall,
+        );
 
         if let Some(long_edge) = options.long_edge {
             println!();

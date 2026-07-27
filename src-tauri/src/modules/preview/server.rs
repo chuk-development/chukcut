@@ -45,12 +45,15 @@ use super::clock::{
     frame_at, frame_interval, frame_time, pace, MonotonicSource, Pacing, PlaybackClock, TimeSource,
     DEFAULT_READ_AHEAD,
 };
-use super::encoder::{encode_preview_jpeg, encode_preview_jpeg_dmabuf, Backend};
+use super::encoder::{
+    encode_preview_jpeg, encode_preview_jpeg_dmabuf, encode_preview_jpeg_va_surface, Backend,
+};
 use super::error::{PreviewError, Result};
 use super::ladder::{self, Ladder};
 use super::probe::{self, PROBE};
 use super::session::{PreviewOptions, PreviewSession, Viewport};
 use super::stats::{self, PlaybackStats, Rendered, SeekKind, SeekWatch, SessionFacts};
+use super::vasurface::{self, SurfaceRing};
 use super::zerocopy::{self, PreviewRing};
 use crate::modules::audio::AudioEngine;
 use crate::modules::project::document::{Micros, Project};
@@ -1043,12 +1046,10 @@ fn render_loop(shared: Arc<Shared>) {
     // it guarantees.
     let mut discarded_last = false;
 
-    // The exported buffers the compute pass writes NV12 into, allocated the
-    // first time a session asks for a frame this device can encode that way and
-    // reallocated only when a session needs a bigger one. This thread's own
-    // state — the encode thread reaches the buffers through the `Arc` inside a
-    // claim, never through this. See [`zerocopy`].
-    let mut ring: Option<Arc<PreviewRing>> = None;
+    // Where a finished frame can go other than system memory, allocated on the
+    // first frame that qualifies. This thread's own state — the encode thread
+    // reaches the memory through the `Arc` inside a claim, never through this.
+    let mut destinations = Destinations::default();
 
     loop {
         // Timed around `next_job` rather than inside it, so one counter covers
@@ -1063,7 +1064,14 @@ fn render_loop(shared: Arc<Shared>) {
         if job.scrub {
             probe::bump(&PROBE.scrub_jobs);
         }
-        discarded_last = render_one(&shared, &ctx, &compositor, &mut ring, job, discarded_last);
+        discarded_last = render_one(
+            &shared,
+            &ctx,
+            &compositor,
+            &mut destinations,
+            job,
+            discarded_last,
+        );
     }
 }
 
@@ -1148,11 +1156,23 @@ fn next_job(shared: &Shared) -> Option<Job> {
 /// How many frames may be waiting to be JPEG-encoded at once.
 ///
 /// Encoding runs off the render thread so that compositing the next frame and
-/// encoding the last one overlap — with compositing around 17 ms and encoding
-/// around 10 ms, doing them in sequence left almost nothing of the 33 ms
-/// budget, and any hiccup cascaded. The cap exists because an unbounded queue
-/// would let a slow encoder turn into unbounded memory: each pending frame
-/// holds a full RGBA buffer.
+/// encoding the last one overlap, and the cap exists because an unbounded queue
+/// would let a slow encoder turn into unbounded memory: on the copying path each
+/// pending frame holds a full RGBA buffer, and on the drawn path each one holds
+/// a slot of a rotation only `vasurface::SLOTS` deep.
+///
+/// **The numbers this comment used to quote were inverted and are now both
+/// stale**, which is worth recording because the reasoning changed twice. It
+/// said "compositing around 17 ms and encoding around 10 ms". Measured on a
+/// running server at 1080p (`docs/research/preview-performance.md`), the encode
+/// was the *larger* of the two — composite 5.77 / encode 6.46 at load 10, and
+/// composite 28.16 / encode 57.16 at load 33, because `rgba_to_nv12` took all
+/// twelve rayon workers while the render thread wanted them. Since the preview
+/// composites straight into the encoder's own surface that pass is gone
+/// entirely, and the same measurement is composite 8.92 / encode **1.18** ms.
+/// So the encode is once again much the smaller half, for a different reason
+/// than this comment originally gave, and what saturates first is the render
+/// thread.
 const MAX_PENDING_ENCODES: usize = 3;
 
 static PENDING_ENCODES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -1261,38 +1281,105 @@ fn too_late_to_encode(frame: i64, position: Micros, fps: f64, discarded_last: bo
     frame_at(position, fps) - frame > LATE_ENCODE_TOLERANCE
 }
 
+/// Somewhere other than system memory to put a finished frame.
+///
+/// Two rotations, because there are two ways round the same idea and a machine
+/// may have either, both or neither:
+///
+/// - **`drawn`** — the media driver allocates an NV12 surface, Vulkan imports
+///   its planes, and the compositor draws into them. The tiling is the
+///   encoder's own by construction. This is the one that works on Intel.
+/// - **`exported`** — Vulkan allocates a linear buffer, the media driver
+///   imports it. This is what the export does, and Intel's *JPEG* engine reads
+///   such a surface as though it were tiled while its *video* engine reads the
+///   same file descriptor correctly. Kept because it is a different set of
+///   driver assumptions and a machine that fails one may pass the other.
+///
+/// The render thread owns this. The encode thread reaches the memory only
+/// through the `Arc` inside a claim.
+#[derive(Default)]
+struct Destinations {
+    /// Keyed by *exact* size, most-recently-used last. A VA surface has a fixed
+    /// extent, so unlike an exported buffer a smaller frame cannot borrow a
+    /// bigger surface — and `render_one` alternates between two sizes whenever
+    /// the quality ladder is off rung 0, because a scrub always renders at the
+    /// session's own size. One ring would thrash between them; two do not, and
+    /// two at panel size is a few megabytes.
+    drawn: Vec<Arc<SurfaceRing>>,
+    exported: Option<Arc<PreviewRing>>,
+}
+
+/// How many `drawn` rings stay resident. See the field's own note.
+const RESIDENT_SURFACE_RINGS: usize = 2;
+
+impl Destinations {
+    /// The ring for `size`, allocating it if this is a size we do not hold.
+    ///
+    /// `None` on a device that cannot do this at all, which is a reason to use
+    /// another path and not a reason to fail.
+    fn surfaces(&mut self, ctx: &Arc<RenderContext>, size: (u32, u32)) -> Option<&Arc<SurfaceRing>> {
+        if let Some(at) = self.drawn.iter().position(|ring| ring.holds(size)) {
+            // Move to the back so the least recently used is always at the
+            // front and is what gets evicted below.
+            let ring = self.drawn.remove(at);
+            self.drawn.push(ring);
+            return self.drawn.last();
+        }
+        let fresh = Arc::new(SurfaceRing::new(ctx, size)?);
+        tracing::info!(
+            width = size.0,
+            height = size.1,
+            slots = vasurface::SLOTS,
+            "the preview will composite straight into the JPEG encoder's own surfaces"
+        );
+        self.drawn.push(fresh);
+        if self.drawn.len() > RESIDENT_SURFACE_RINGS {
+            // Dropping a ring whose surfaces the encoder may still hold is
+            // safe: a surface is reference counted and the last reference is
+            // whoever is using it, not this vector.
+            self.drawn.remove(0);
+        }
+        self.drawn.last()
+    }
+}
+
 /// A composited frame, waiting to be turned into JPEG, and where its pixels are.
 ///
-/// The two arms are the whole of the zero-copy change as the rest of this file
+/// The three arms are the whole of the zero-copy work as the rest of this file
 /// sees it. Everything downstream — the ladder, the ring, the stats, the
-/// announcement — is identical either way, which is deliberate: a second frame
-/// path that diverged after the encode would double the number of states this
-/// server can be in.
+/// announcement — is identical whichever it is, which is deliberate: a second
+/// frame path that diverged after the encode would double the number of states
+/// this server can be in.
 enum Composited {
     /// Read back to system memory. The encoder converts it to NV12 on twelve
     /// rayon workers and uploads it into a VA surface — the 9.50 ms of a
     /// 15.82 ms frame that `docs/research/preview-performance.md` measured.
     Rgba(Vec<u8>),
-    /// Written straight into a buffer the encoder can read, with the colour
-    /// conversion done by the same compute pass that wrote it. Nothing crosses
-    /// the bus. The [`zerocopy::Claim`] is what keeps the compute pass from
-    /// overwriting the memory while the encoder is still reading it, so it
-    /// travels with the frame and is released on the encode thread.
+    /// Drawn straight into a VA surface the media driver allocated. Nothing
+    /// crosses the bus and nothing on either side declares a layout. The
+    /// [`vasurface::Claim`] carries the surface itself, so it travels with the
+    /// frame to the encode thread and the surface cannot be redrawn until it
+    /// comes back.
+    Drawn(vasurface::Claim),
+    /// Written into a linear buffer the encoder imports, with the colour
+    /// conversion done by the same compute pass that wrote it. The
+    /// [`zerocopy::Claim`] is what keeps the compute pass from overwriting the
+    /// memory while the encoder is still reading it.
     Exported(zerocopy::Claim, crate::modules::render::Nv12Layout),
 }
 
 /// Composite one frame into whichever memory the encoder can read fastest.
 ///
-/// Takes the zero-copy path when everything it needs lines up, and quietly
+/// Takes a zero-copy path when everything it needs lines up, and quietly
 /// composites the ordinary way when it does not. The decision is made **before**
 /// the frame is drawn rather than after, and that is not a stylistic choice:
-/// the exported buffer is device-local, so once a frame has been composited into
-/// one there is no way for the CPU to read it back and no software fallback
-/// left. See `zerocopy`'s header.
+/// both zero-copy destinations are device-local, so once a frame has been
+/// composited into one there is no way for the CPU to read it back and no
+/// software fallback left. See `vasurface`'s header.
 fn composite(
     ctx: &Arc<RenderContext>,
     compositor: &Compositor,
-    ring: &mut Option<Arc<PreviewRing>>,
+    destinations: &mut Destinations,
     session: &PreviewSession,
     time: Micros,
     size: (u32, u32),
@@ -1301,13 +1388,40 @@ fn composite(
     use crate::modules::render::source::YuvRange;
     use crate::modules::render::Nv12Layout;
 
-    if let Some(claim) = claim_exported(ctx, ring, session, size) {
+    // **Full range, not limited**, on both zero-copy arms. A JPEG file has no
+    // range tag and every decoder reads it as 0..255, so limited-range samples
+    // come out as grey blacks — a valid picture that reads as the editor having
+    // washed the footage out, and about 27 dB against the software encoder
+    // instead of 37. The export's encoders want the other one. See
+    // `shaders/yuv.wgsl`.
+    if let Some(claim) = claim_drawn(ctx, destinations, size) {
+        let ring = Arc::clone(claim.ring());
+        match compositor.render_nv12_into_planes(
+            &session.project,
+            time,
+            size,
+            sources,
+            ring.luma(claim.index()),
+            ring.chroma(claim.index()),
+            YuvRange::Full,
+        ) {
+            // `render_nv12_into_planes` has waited for the GPU by the time it
+            // returns, which is the only synchronisation libva can be given —
+            // it cannot be handed a Vulkan semaphore. Skipping it would produce
+            // a frame torn between two compositions, intermittently.
+            Ok(()) => return Ok(Composited::Drawn(claim)),
+            Err(error) => {
+                // The render pass itself failed, which is a property of the
+                // device rather than of this frame. Write the path off and fall
+                // through, so the picture keeps moving.
+                vasurface::write_off(&error.to_string());
+                claim.release();
+            }
+        }
+    }
+
+    if let Some(claim) = claim_exported(ctx, &mut destinations.exported, session, size) {
         let layout = Nv12Layout::for_size(size.0, size.1);
-        // **Full range, not limited.** A JPEG file has no range tag and every
-        // decoder reads it as 0..255, so limited-range samples come out as grey
-        // blacks — a valid picture that reads as the editor having washed the
-        // footage out, and about 27 dB against the software encoder instead of
-        // 37. The export's encoders want the other one. See `shaders/yuv.wgsl`.
         match compositor.render_nv12_into_range(
             &session.project,
             time,
@@ -1316,15 +1430,8 @@ fn composite(
             claim.ring().buffer(claim.index()),
             YuvRange::Full,
         ) {
-            // `render_nv12_into_range` has waited for the GPU by the time it
-            // returns, which is the only synchronisation libva can be given —
-            // it cannot be handed a Vulkan semaphore. Skipping it would produce
-            // a frame torn between two compositions, intermittently.
             Ok(()) => return Ok(Composited::Exported(claim, layout)),
             Err(error) => {
-                // The compute pass itself failed, which is a property of the
-                // device rather than of this frame. Write the path off and fall
-                // through to the readback, so the picture keeps moving.
                 zerocopy::write_off(&error.to_string());
                 drop(claim);
             }
@@ -1336,17 +1443,67 @@ fn composite(
         .map(Composited::Rgba)
 }
 
-/// An exported buffer to composite into, if this frame can use one.
-///
-/// Allocates the ring on the first frame that qualifies and reallocates it only
-/// when a session needs a bigger one — a ring is six buffers and 19 MB at 1080p,
-/// so rebuilding it per frame would cost more than it saves.
+/// A driver-allocated surface to draw this frame into, if it can have one.
 ///
 /// The gates are ordered cheapest-first and that ordering is load-bearing, not
-/// tidiness: this runs on the render thread once per frame, and the last two
-/// touch the encoder's process-wide mutex. On a machine that cannot use the path
-/// — which is every machine with this chip — nothing below the `OnceLock` is ever
-/// reached again after the first frame.
+/// tidiness: this runs on the render thread once per frame. On a machine where
+/// the answer is no, nothing below the `OnceLock` inside
+/// [`vasurface::encoder_reads_its_own_surface`] is ever reached again after the
+/// first frame, and the per-frame cost is two atomic loads and an even-size
+/// test.
+fn claim_drawn(
+    ctx: &Arc<RenderContext>,
+    destinations: &mut Destinations,
+    size: (u32, u32),
+) -> Option<vasurface::Claim> {
+    if !vasurface::enabled() || vasurface::written_off() {
+        return None;
+    }
+    // NV12 has no odd edge, so neither has the encoder. `size_is_encodable` is
+    // the same gate the copying path uses to fall back to libjpeg-turbo.
+    if !super::vaapi::size_is_encodable(size.0, size.1) {
+        return None;
+    }
+    // Whether this machine's JPEG engine reads a surface the compositor drew
+    // into. Answered once by pushing a known row ramp through the real encoder
+    // and checking every row — never from a capability list, which said nothing
+    // useful about the linear path either. Cached in a `OnceLock`, so from the
+    // second frame on this is an atomic load.
+    //
+    // **Before** anything that opens a device or takes the encoder's mutex,
+    // which is why it is on this line and not below.
+    if !vasurface::encoder_reads_its_own_surface(ctx) {
+        return None;
+    }
+
+    let ring = match destinations.surfaces(ctx, size) {
+        Some(ring) => Arc::clone(ring),
+        None => {
+            // No VAAPI, no DMA-BUF import, or a driver that will not let Vulkan
+            // render into its own tiling. Not an error: the readback path still
+            // shows a picture.
+            vasurface::write_off("this device cannot draw into a VAAPI-allocated NV12 surface");
+            return None;
+        }
+    };
+
+    // `None` when every surface is still being read. Compositing another way is
+    // the right answer — waiting here would stall the render thread behind the
+    // encode thread, which is the pipelining this whole server is built on.
+    ring.claim()
+}
+
+/// An exported buffer to composite into, if this frame can use one.
+///
+/// The other direction, kept for machines whose JPEG engine reads a linear
+/// imported surface correctly — this chip's does not. Allocates the ring on the
+/// first frame that qualifies and reallocates it only when a session needs a
+/// bigger one; a ring is six buffers and 19 MB at 1080p, so rebuilding it per
+/// frame would cost more than it saves.
+///
+/// Same cheapest-first gate ordering as [`claim_drawn`], for the same reason:
+/// the last two touch the encoder's process-wide mutex, and on a machine that
+/// cannot use the path nothing below the `OnceLock` is ever reached again.
 fn claim_exported(
     ctx: &Arc<RenderContext>,
     ring: &mut Option<Arc<PreviewRing>>,
@@ -1356,21 +1513,9 @@ fn claim_exported(
     if !zerocopy::enabled() || zerocopy::written_off() {
         return None;
     }
-    // NV12 has no odd edge, so neither has the encoder. `size_is_encodable` is
-    // the same gate the copying path uses to fall back to libjpeg-turbo.
     if !super::vaapi::size_is_encodable(size.0, size.1) {
         return None;
     }
-    // Whether this machine's JPEG engine can read the compositor's memory at
-    // all. Answered once by trying — on this hardware it cannot — and cached in
-    // a `OnceLock`, so from the second frame on this is an atomic load.
-    //
-    // **Before** anything that touches the encoder's mutex, which is the whole
-    // reason it is on this line and not below. A machine where the answer is no
-    // would otherwise take that lock once per frame on the render thread, and
-    // block there for as long as the encode thread holds it — reintroducing the
-    // serialisation that having two threads exists to prevent, on exactly the
-    // machines that get no benefit in exchange.
     if !zerocopy::encoder_can_read_linear(ctx) {
         return None;
     }
@@ -1401,9 +1546,6 @@ fn claim_exported(
         *ring = Some(Arc::new(fresh));
     }
 
-    // `None` when every slot is still being read. Compositing the copying way
-    // is the right answer — waiting here would stall the render thread behind
-    // the encode thread, which is the pipelining this whole server is built on.
     ring.as_ref()?.claim()
 }
 
@@ -1415,6 +1557,29 @@ fn encode_composited(
 ) -> Result<(Vec<u8>, Backend)> {
     match composited {
         Composited::Rgba(rgba) => encode_preview_jpeg(&rgba, size.0, size.1, quality),
+        Composited::Drawn(mut claim) => {
+            let encoded = encode_preview_jpeg_va_surface(claim.surface_mut(), quality);
+            // The surface goes back to the ring either way: the encode has
+            // finished with it whether or not it produced bytes, and a claim
+            // that never came back would shrink the rotation by one for the
+            // rest of the session.
+            claim.release();
+            match encoded {
+                Some(bytes) => Ok((bytes, Backend::Vaapi)),
+                // No software fallback exists from here — the surface is
+                // device-local. One frame is lost and every later frame reads
+                // back, which is the honest version of a zero-copy path that
+                // cannot be taken.
+                None => {
+                    vasurface::write_off("the hardware JPEG encoder refused a drawn surface");
+                    Err(PreviewError::Encode(
+                        "the hardware JPEG encoder could not read the composited frame; \
+                         later frames will be read back to the CPU first"
+                            .into(),
+                    ))
+                }
+            }
+        }
         Composited::Exported(claim, layout) => {
             // The borrow of the ring ends with this block, so the claim can be
             // consumed below. `Nv12Dmabuf` lends the file descriptor rather than
@@ -1431,10 +1596,6 @@ fn encode_composited(
                     claim.release(Some(surface));
                     Ok((bytes, Backend::Vaapi))
                 }
-                // No software fallback exists from here — the buffer is
-                // device-local. One frame is lost and every later frame reads
-                // back, which is the honest version of a zero-copy path that
-                // cannot be taken.
                 None => {
                     claim.release(None);
                     zerocopy::write_off("the hardware JPEG encoder refused an imported surface");
@@ -1464,7 +1625,7 @@ fn render_one(
     shared: &Arc<Shared>,
     ctx: &Arc<RenderContext>,
     compositor: &Compositor,
-    ring: &mut Option<Arc<PreviewRing>>,
+    destinations: &mut Destinations,
     job: Job,
     discarded_last: bool,
 ) -> bool {
@@ -1494,7 +1655,15 @@ fn render_one(
     let sources = Arc::clone(&*shared.sources.read());
 
     let composite_started = std::time::Instant::now();
-    let composited = match composite(ctx, compositor, ring, session, time, size, sources.as_ref()) {
+    let composited = match composite(
+        ctx,
+        compositor,
+        destinations,
+        session,
+        time,
+        size,
+        sources.as_ref(),
+    ) {
         Ok(composited) => composited,
         Err(error) => {
             let message = format!("cannot render the preview frame: {error}");

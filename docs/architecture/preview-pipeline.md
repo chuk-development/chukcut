@@ -65,14 +65,27 @@ into a texture either way. Switching later replaces the sink, not the renderer.
         ▼
    render graph ──────► RGBA texture (the panel's size)
         │
+        ├─ if the hardware allows: a render pass writes NV12 into the two planes
+        │  of a VA surface the media driver allocated, and the JPEG encoder reads
+        │  that surface. Nothing crosses the bus.
+        │
+        └─ otherwise: readback to CPU ──► RGBA→NV12 on rayon ──► upload
+        │
         ▼
-   readback to CPU ──► JPEG encode ──► frame cache (ring buffer)
-                  (VAAPI, else libjpeg-turbo)
+     JPEG encode ──► frame cache (ring buffer)
+   (VAAPI, else libjpeg-turbo)
                                               │
         chukcut-frame://preview/<session>/<n> │
                                               ▼
                                    webview <canvas>
 ```
+
+Which of the two branches a machine takes is decided **once per process, by
+trying it**: `preview::vasurface::encoder_reads_its_own_surface` draws a row ramp
+through the real encoder and checks every row. It is worth 2.7–2.9× on a whole
+frame and the reasoning is in `docs/research/preview-zerocopy-jpeg.md`. The
+choice is made *before* the frame is composited, because the zero-copy
+destination is device-local and there is no way back to the CPU from it.
 
 ### Sessions
 

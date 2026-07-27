@@ -25,7 +25,10 @@ the time goes.
 4. **60–76% of the frame is spent carrying finished pixels to the JPEG
    encoder** — the readback, the CPU RGBA→NV12 pass and the upload — for a
    picture the compositor already had on the GPU and that is then displayed in a
-   panel a fraction of its size.
+   panel a fraction of its size. **Fixed later the same day**, on the second
+   attempt: the media driver allocates the NV12 surface, Vulkan imports its
+   planes, and the compositor draws into them. Item 2 below, and
+   `preview-zerocopy-jpeg.md`.
 
 ## How to reproduce every number here
 
@@ -319,7 +322,7 @@ falls to 5.23 ms and the render thread idles 80%, so what is left is decode plus
 ladder cannot reduce decode, which is why its rungs are worth only 1.5–1.6× once
 the frame is already panel-sized.
 
-### 2. Stop carrying the finished frame to the CPU and back — BUILT, AND BLOCKED BY THE HARDWARE
+### 2. Stop carrying the finished frame to the CPU and back — DONE
 
 **60% of the frame at load 10, 76% at load 33.** Readback 5.10 + RGBA→NV12 1.81
 + upload 2.59 = 9.50 ms of a 15.82 ms frame; at load 33, 14.70 + 20.78 + 9.35 =
@@ -341,36 +344,59 @@ This is `docs/research/zero-copy-encode.md` pointed at the preview, which both
 that document and STATUS.md have been predicting for two days. The numbers now
 say it is worth more here than it was in the export.
 
-**Built 2026-07-27, measured at 2.4–3.1× on the serial frame, and it does not
-work on this chip.** Intel's fixed-function *JPEG* encoder reads an imported
-linear NV12 surface as though it were 32-row tiled; the *video* encoder reads the
-same file descriptor, in the same process, correctly. The estimate above was
-right and the obstacle was not the one this section names — it was not
-`VaapiJpegEncoder` owning a staging frame, which was ten lines. Full working,
-the row-ramp probe that identified it, what was ruled out and what would make it
-work: **`docs/research/preview-zerocopy-jpeg.md`**.
+**Built 2026-07-27 and done, on the second attempt.**
 
-The path ships behind `preview::zerocopy::encoder_can_read_linear`, which encodes
-a known ramp once per process and only enables itself if the picture comes back
-right. On this machine it does not, one INFO line says so, and the preview reads
-frames back exactly as it did before. **So the 60–76% is still on the table and
-is still the largest item — it is just not reachable from here.** Anyone picking
-this up should run `cargo run --release --example preview_zerocopy` first: if its
-first table shows the `mjpeg_vaapi` row matching the `h264_vaapi` row, the work
-is already done and switches itself on.
+The first attempt allocated the NV12 destination ourselves, described it as
+`DRM_FORMAT_MOD_LINEAR` and let the media driver import it — the arrangement the
+export uses. It measured 2.4–3.1× and produced a fine coloured mosaic, because
+Intel's fixed-function *JPEG* encoder reads such a surface as though it were
+32-row tiled while the *video* encoder reads the identical file descriptor
+correctly. Declaring a different modifier could not have helped: iHD **ignores**
+`VASurfaceAttribDRMFormatModifiers` and hands back `I915_FORMAT_MOD_Y_TILED`
+whatever is asked for.
 
-### 3. Take `rgba_to_nv12` off the global rayon pool
+The second attempt turns the arrangement round. VAAPI allocates the surface,
+`vaExportSurfaceHandle` exports it, Vulkan imports the two planes as colour
+attachments through `VK_EXT_image_drm_format_modifier`, and the compositor draws
+NV12 straight into them — so the layout is the driver's own by construction and
+nothing on our side declares one. **On the bench suite that is 11.93 → 4.36 ms
+at 1920×1080 and 11.41 → 3.98 ms at 1080×1920** (2.7–2.9×), taking the frame from
+72% of the 60 fps budget to 26%. On a running server, A/B in one process, the
+encode thread falls from 5.32 to **1.18 ms** a frame and the pipelined ceiling
+rises from 90.9 to 112.1 fps.
 
-**Cheap, and only worth doing if item 2 is deferred** — item 2 deletes the pass
-entirely. The evidence is that the render thread's own work inflates 4.9×
-between load 10 and load 33 while its inputs did not change, and the encode
-thread is running a 12-way parallel loop over the whole frame the entire time.
-A dedicated two- or four-thread pool would bound the interference. Ten lines.
+The estimate at the top of this section was right; the obstacle was not the one
+it names — it was not `VaapiJpegEncoder` owning a staging frame, which was ten
+lines. Full working, the driver capability tables, the row-ramp probe and the
+per-pixel comparison at 1440, 1360, 700 and 394:
+**`docs/research/preview-zerocopy-jpeg.md`**.
 
-Note this is the *third* time the global pool has caused a preview problem: the
+Both routes ship, each behind its own probe that pushes a known row ramp through
+the real encoder and checks every row — `vasurface::encoder_reads_its_own_surface`
+and `zerocopy::encoder_can_read_linear`. The drawn route is preferred because it
+declares nothing about layout; the linear one is tried next; the readback is the
+fallback and is unchanged. Run `cargo run --release --example preview_zerocopy`
+on any new machine: its first table says which of the two that machine takes.
+
+### 3. Take `rgba_to_nv12` off the global rayon pool — CLOSED BY DELETION
+
+**This said "cheap, and only worth doing if item 2 is deferred — item 2 deletes
+the pass entirely". Item 2 landed, and it did.** On the drawn path there is no
+RGBA readback and no `rgba_to_nv12` at all, so the 12-way parallel loop that was
+competing with the render thread's own decode, `device.poll` and unpad copy does
+not run. The evidence it rested on — the render thread's own work inflating 4.9×
+between load 10 and load 33 while its inputs did not change — should simply stop
+being observable.
+
+**It is still live on the fallback.** A machine with no hardware JPEG encoder, no
+DMA-BUF import, or a driver that refuses both zero-copy arms still runs the
+copying path and still has this problem. A dedicated two- or four-thread pool is
+still ten lines and is still the right answer there.
+
+Note this was the *third* time the global pool caused a preview problem: the
 deadlock in `encode_queue`'s header, the request-pool starvation in
-`frame_protocol_async`'s header, and now this. That pattern is worth a decision
-document.
+`frame_protocol_async`'s header, and this. That pattern is worth a decision
+document whether or not this instance is gone.
 
 ### 4. Do not block a frame request for 60 ms during playback
 
@@ -437,8 +463,12 @@ anything else gets built on them.
 4. **`MAX_PENDING_ENCODES`'s doc comment: "with compositing around 17 ms and
    encoding around 10 ms".** Inverted at 1080p on this machine: composite 5.77 /
    encode 6.46 at load 10, composite 28.16 / encode 57.16 at load 33. The encode
-   is the *larger* of the two and it is what saturates first, which changes the
-   reasoning that comment is there to support.
+   was the *larger* of the two and it was what saturated first, which changes the
+   reasoning that comment is there to support. **Now fixed, and the comment says
+   both things**: since the preview composites into the encoder's own surface the
+   same measurement is composite 8.92 / encode 1.18 ms, so the encode is much the
+   smaller half again — for a different reason from the one the original comment
+   gave, and with the render thread as what saturates first.
 
 5. **`docs/architecture/preview-pipeline.md`: "Rendered frames land in a
    fixed-size ring (default 90 frames ≈ 3 s at 30 fps)".** True of the
@@ -450,9 +480,11 @@ anything else gets built on them.
    preview.** It ranks the readback first "if it is 4 ms of a 15 ms frame, the
    ceiling on all of this work is 35%". For the preview the readback plus the
    conversion plus the upload is 60–76% of the frame, so the ceiling is much
-   higher here than that document allows for — and unlike the export, the
-   preview's encoder wants NV12 in a *buffer*, which is the case that document's
-   own 2026-07-26 update says is already solved.
+   higher here than that document allows for. Its other claim — that the
+   preview's encoder wants NV12 in a *buffer*, "the case already solved" — is the
+   one that cost a day: the JPEG engine wants NV12 in a surface **it allocated**,
+   and a buffer we allocate and describe is exactly what it will not read. See
+   `preview-zerocopy-jpeg.md`.
 
 ## What was not measured, and would need a GUI
 

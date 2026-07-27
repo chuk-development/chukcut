@@ -175,6 +175,29 @@ impl DmabufFrame {
     /// synchronisation in this path. Without it the fds would describe a
     /// surface the decoder may still be writing.
     pub fn map(hardware: &frame::Video) -> Result<Self> {
+        Self::map_with(hardware, ffmpeg::ffi::AV_HWFRAME_MAP_READ as i32)
+    }
+
+    /// Export a surface that is going to be **written** as well as read.
+    ///
+    /// The preview's encoder surfaces take this route: VAAPI allocates them,
+    /// Vulkan imports the exported planes as colour attachments, and the
+    /// compositor draws NV12 straight into them. `VA_EXPORT_SURFACE_READ_WRITE`
+    /// rather than `READ_ONLY` is the whole difference, and a driver that
+    /// hands back a read-only buffer object would make the Vulkan import fail
+    /// rather than corrupt anything.
+    ///
+    /// `AV_HWFRAME_MAP_READ` stays set alongside the write, because it is what
+    /// makes libavutil call `vaSyncSurface` first. This happens once per
+    /// surface at setup rather than per frame, so the stall costs nothing.
+    pub fn map_writable(hardware: &frame::Video) -> Result<Self> {
+        Self::map_with(
+            hardware,
+            ffmpeg::ffi::AV_HWFRAME_MAP_READ as i32 | ffmpeg::ffi::AV_HWFRAME_MAP_WRITE as i32,
+        )
+    }
+
+    fn map_with(hardware: &frame::Video, access: i32) -> Result<Self> {
         if hardware.format() != Pixel::VAAPI {
             return Err(MediaError::Invalid(format!(
                 "only a VA surface can be exported as DMA-BUF, got {:?}",
@@ -197,8 +220,7 @@ impl DmabufFrame {
             ffmpeg::ffi::av_hwframe_map(
                 mapped.as_mut_ptr(),
                 hardware.as_ptr(),
-                ffmpeg::ffi::AV_HWFRAME_MAP_READ as i32
-                    | ffmpeg::ffi::AV_HWFRAME_MAP_DIRECT as i32,
+                access | ffmpeg::ffi::AV_HWFRAME_MAP_DIRECT as i32,
             )
         };
         if code < 0 {

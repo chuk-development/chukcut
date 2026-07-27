@@ -103,6 +103,7 @@ pub mod server;
 pub mod session;
 pub mod stats;
 pub mod vaapi;
+pub mod vasurface;
 pub mod zerocopy;
 
 pub use cache::{CachedFrame, FrameCache, Lookup, DEFAULT_CAPACITY};
@@ -129,4 +130,5 @@ pub use stats::{
     decode_path, DecodePath, Histogram, PlaybackStats, Rendered, SeekKind, SeekWatch, SessionFacts,
     SlowSeek, Summary, SLOW_SEEK, SUMMARY_INTERVAL,
 };
+pub use vasurface::SurfaceRing;
 pub use zerocopy::{Claim, PreviewRing};

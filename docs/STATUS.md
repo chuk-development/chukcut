@@ -5,9 +5,11 @@ Sessions are long and are not reopened, so nothing important is allowed to live
 only in a conversation. If you learn something that would change how the next
 person works, it belongs in this repository, not in a chat log.
 
-Last updated: 2026-07-27 (the preview zero-copy JPEG attempt, and the
-`vkDeviceWaitIdle` crash it found). Previously 2026-07-26: the preview hang,
-and the last of the VAAPI device consolidation.
+Last updated: 2026-07-27 (**the preview stopped copying its frames** — the JPEG
+encoder now reads a surface the compositor drew into, 2.7–2.9× on a whole frame;
+and earlier the same day, the attempt that went the other way round and the
+`vkDeviceWaitIdle` crash it found). Previously 2026-07-26: the preview hang, and
+the last of the VAAPI device consolidation.
 
 ## What this is
 
@@ -43,6 +45,7 @@ Each of these was measured or checked against an independent tool, not assumed.
 | Linked audio and video | An imported file with both streams lands as two clips on two lanes that move, trim, split and delete as one, and can be unlinked. `modules/timeline/ops.rs` — the mirrored move, trim, split and delete each undo in one step, and `tests/round_trip.rs` proves the linkage survives a save. Decision `docs/decisions/0005-linked-audio-and-video.md` |
 | Export | `examples/export_smoke.rs` — 240 declared **and** 240 decodable frames, exact 4.000 s duration, AAC track at −18.2 dB mean, −1.7 dB peak |
 | Hardware preview JPEG (VAAPI) | `mjpeg_vaapi` on the Intel iGPU. A 1080x1920 preview frame encodes in 6.2 ms against 31 ms for the old pure-Rust encoder, and matches the software encoder's picture at 37 dB PSNR. Falls back to libjpeg-turbo on any machine or frame size the device refuses. **On by default**, after the deadlock that had it switched off — see "The hang that was not the device" |
+| Zero-copy preview JPEG | The compositor draws NV12 straight into a VA surface the media driver allocated, so nothing is read back, converted or uploaded. `chukcut-bench --filter preview-frame`, both arms in one process: **11.93 → 4.36 ms** at 1920×1080 and **11.41 → 3.98 ms** at 1080×1920. Right per pixel at 1440, 1360, 700 and 394 — 41.8–47.5 dB against libjpeg-turbo, against the copying path's own 37 dB. Gated on a row-ramp probe through the real encoder, never on a capability list. `docs/research/preview-zerocopy-jpeg.md` |
 | Hardware export (VAAPI) | `h264_vaapi` and `hevc_vaapi` on the Intel iGPU. 240 declared and 240 decodable frames, exact 8.000 s, audio identical to the software export at −17.7 dB mean. Frames match the software encode at 51–53 dB PSNR on luma and 60–62 dB on chroma |
 | Hardware decode (VAAPI) | H.264, HEVC, VP9 **and AV1**, each probed by decoding a real embedded frame. `tests/decode.rs` — 34 tests, 22 of them run against both the software and hardware decoders and pass identically, including every seek, VFR and rotation case. The two decoders produce the same picture to a mean channel difference under 2 |
 | Zero-copy decode into wgpu | `examples/dmabuf_import.rs` — a decoded VA surface exported as DMA-BUF and imported as two wgpu textures reconstructs the software decode's picture to a mean channel difference of **0.32**, with a deliberately chroma-swapped control at 41.9 |
@@ -67,14 +70,21 @@ bug), and its audio is **not** silent.
     request then blocks for up to `FRAME_WAIT` = 60 ms. Measured at load 33:
     21.6 fps rendered, the ring at or behind the playhead 47.8% of the time,
     and 64 of 239 frames answered 204.
-  - **60–76% of the frame is delivering finished pixels to the JPEG encoder** —
-    readback, CPU RGBA→NV12, upload. The fixed-function encoder is 28% of its
-    own path. This is `zero-copy-encode.md` pointed at the preview. **It was
-    built on 2026-07-27, measured at 2.4–3.1×, and this chip's JPEG encoder
-    cannot read the compositor's memory** — it reads a linear imported surface
-    as though it were tiled, while the video encoder reads the same buffer
-    correctly. So the 60–76% is still there and is still the largest item; it is
-    just not reachable from here. `docs/research/preview-zerocopy-jpeg.md`.
+  - **60–76% of the frame was delivering finished pixels to the JPEG encoder** —
+    readback, CPU RGBA→NV12, upload. **Fixed on 2026-07-27, on the second
+    attempt.** The first attempt allocated the NV12 buffer, described it as
+    linear and let the driver import it; this chip's JPEG engine reads such a
+    surface as though it were tiled while its video engine reads the identical
+    file descriptor correctly. The second turns it round: **VAAPI allocates the
+    surface, Vulkan imports its two planes as colour attachments, and the
+    compositor draws NV12 straight into them**, so the layout is the driver's own
+    and nothing on our side declares one. `chukcut-bench --filter preview-frame`,
+    both arms in one process: 11.93 → **4.36 ms** at 1920×1080 and 11.41 →
+    **3.98 ms** at 1080×1920, i.e. 72% → 26% of the 60 fps budget. Three runs
+    over an hour give ratios of 2.6–2.9× at both aspects; quote the ratio, not
+    the milliseconds. On a running server, A/B in one process, the
+    encode thread falls from 5.32 to **1.18 ms** a frame.
+    `docs/research/preview-zerocopy-jpeg.md`.
   - **Rendering at canvas resolution rather than panel resolution is the single
     biggest recoverable item**: capping the long edge to 960 took 34.1 fps to
     61.1 fps and every failure symptom to zero, back to back in one process.
@@ -883,29 +893,57 @@ So, as with the export, the next win is not a faster encoder. It is
 `render::nv12` (colour conversion in a compute shader, which also halves the
 readback) and then DMA-BUF export, which is `docs/research/zero-copy-encode.md`.
 
-**That was tried on 2026-07-27 and this chip will not have it.** The whole path
-is built, is measured at **2.4–3.1×** on the serial frame, and is switched off,
-because Intel's fixed-function **JPEG** encoder reads an imported linear NV12
-surface as though it were 32-row tiled while the **video** encoder reads the same
-file descriptor in the same process correctly. That one sentence is the finding;
-the evidence, the row-ramp probe that produced it, everything that was ruled out
-and what would make it work are in
+**That was done on 2026-07-27, and the direction that works is the opposite of
+the one everything above assumed.**
+
+The obvious route — we allocate the NV12 buffer, describe it as
+`DRM_FORMAT_MOD_LINEAR`, the driver imports it — is what the export does with
+`h264_vaapi` and it measured 2.4–3.1× here too. It produces a mosaic, because
+Intel's fixed-function **JPEG** engine reads such a surface as though it were
+32-row tiled while the **video** engine reads the same file descriptor in the same
+process correctly. Declaring a different modifier cannot help: iHD **ignores**
+`VASurfaceAttribDRMFormatModifiers` and returns `I915_FORMAT_MOD_Y_TILED`
+whatever is asked for, on every entrypoint.
+
+The route that works turns it round. **VAAPI allocates the surface,
+`vaExportSurfaceHandle` exports it, Vulkan imports the two planes as colour
+attachments through `VK_EXT_image_drm_format_modifier`, and the compositor draws
+NV12 into them** — the same trick `render::dmabuf::import_plane` has been doing
+for decoded frames since July 26, pointed the other way. Nothing on our side
+declares a layout because the layout is not ours. Measured, quiet machine:
+**11.93 → 4.36 ms** at 1920×1080 and **11.41 → 3.98 ms** at 1080×1920, and right
+per pixel at 1440, 1360, 700 and 394 — 41.8 to 47.5 dB against libjpeg-turbo,
+against the 37 dB the *copying* hardware path scores.
+
+The evidence, the driver capability tables, the row-ramp probe, what was ruled
+out and what is still unknown are in
 **`docs/research/preview-zerocopy-jpeg.md`**. Reproduce in thirty seconds with
 `cargo run --release --example preview_zerocopy`.
 
-Two things about it that will otherwise cost an afternoon:
+Four things about it that will otherwise cost an afternoon:
 
 - **A PSNR cannot diagnose this and a row ramp can.** Tiling, an ignored pitch
   and a range mismatch all score badly and want three different responses. A
   picture whose luma *is* its row number tells them apart at a glance: tiling
   collapses each 32 rows to their mean (row 0 comes back 15), an ignored pitch
   shears progressively, a range mismatch puts black at 16.
+- **Ask the driver, in C, before theorising.** Thirty lines against
+  `libva`/`libva-drm` produced the surface-attribute list, the modifier iHD
+  actually hands back, and its plane pitches at six sizes, in ten minutes. The
+  same questions asked through Rust and FFmpeg would have taken a day and
+  answered less.
+- **WebGPU has no storage-writable `R8Unorm` — and does not need to.** That fact
+  is why `render::nv12`'s compute pass writes a buffer, and it was also why this
+  looked expensive. Both `R8Unorm` and `Rg8Unorm` are ordinary *colour
+  attachments*, so `shaders/nv12_planes.wgsl` draws the planes instead, one
+  full-screen triangle each, and measures the same as the compute version.
 - **The decision to use the path is taken before the frame is composited, not
-  after.** The exported buffer is device-local, so once a frame has been drawn
-  into one there is nothing on the CPU that can read it and no software fallback
-  left. `preview::zerocopy::encoder_can_read_linear` therefore encodes a known
-  ramp once per process and only enables the path if the picture comes back
-  right — it proves the encoder rather than hoping, which is the answer to
+  after.** The destination is device-local on both arms, so once a frame has been
+  drawn into one there is nothing on the CPU that can read it and no software
+  fallback left. `preview::vasurface::encoder_reads_its_own_surface` and
+  `preview::zerocopy::encoder_can_read_linear` therefore each encode a known ramp
+  once per process and only enable their path if the picture comes back
+  right — they prove the encoder rather than hoping, which is the answer to
   `zero-copy-encode.md`'s own warning that a "zero-copy" path which quietly
   copies is worse than none.
 
@@ -944,6 +982,16 @@ test left behind, so `cargo test` is green despite them.
   the commands are small, 1000 of them cost 2.7 ms in total to apply, so depth is
   not what makes this expensive — or the UI has to say that history has been
   truncated. Silently is the one option that is wrong.
+- **`tests/decode.rs::decoding_sequentially_is_dramatically_cheaper_than_seeking_to_each_frame`
+  is a timing assertion and it flakes on a busy machine.** It asserts a *ratio*
+  between sequential and random-access decoding and fails with "sequential decode
+  took 78 ms and random access 153 ms; sequential reads appear to be seeking".
+  Reproduced **1 run in 12** on `71f11cf` with nothing else changed, and 0 in 32
+  on the same machine minutes later. The property it is testing is real and worth
+  testing; the threshold is not survivable under load. It wants either the
+  `chukcut-bench` load guard or a much wider margin. **Do not spend time chasing
+  it after an unrelated change** — check whether it reproduces on the tip with
+  the change stashed first.
 The preview hang that used to be listed here is **fixed**, and it was not the
 shared device. It was a rayon reentrancy deadlock in the hardware JPEG path;
 the account is under "The hang that was not the device" below, and hardware
@@ -1559,6 +1607,33 @@ first rendered frame actually had. Those two being different is a bug, and
 nothing else in the system would say so.
 
 ## Traps that have already cost time
+
+- **Do not describe your memory to a media driver. Let it allocate, and import
+  what it gives you.** The rule that came out of a day on the preview's JPEG
+  path, and it generalises past this one bug. If *we* allocate the surface, every
+  fact about its layout — the modifier, the pitch, the plane offsets — is a claim
+  we are making that some fixed-function engine may quietly disregard, and Intel's
+  JPEG engine disregards `DRM_FORMAT_MOD_LINEAR` and reads the buffer as the
+  Y-tiling it always uses. Nothing errors. The picture is a mosaic. If the
+  *driver* allocates and we import its exported descriptor, there is no claim to
+  be wrong about: the modifier, pitch and offset all come from the thing that will
+  read them. `VK_EXT_image_drm_format_modifier` makes this cheap on the Vulkan
+  side, and `render::dmabuf::import_plane` had already been doing it for decoded
+  frames for a day before anyone thought to point it the other way.
+
+  Two corollaries worth having in mind before the next one of these:
+
+  - **A capability list will not save you.** `vaQuerySurfaceAttributes` for the
+    JPEG encode entrypoint reports NV12, `DRM_PRIME_2` and a 16384 maximum, all of
+    which the *broken* path satisfied. `VASurfaceAttribDRMFormatModifiers` is
+    write-only, so there is nothing to query — and iHD ignores it on the write
+    side too, returning `I915_FORMAT_MOD_Y_TILED` whatever you ask for. Only a
+    known picture pushed through the real engine and checked row by row answers
+    this, which is what both probes do.
+  - **Write the thirty-line C probe first.** `libva` and Vulkan both answer these
+    questions directly and in minutes; the same questions asked through
+    `ffmpeg-next` and `wgpu` take a day and answer less. Full tables in
+    `docs/research/preview-zerocopy-jpeg.md`, part two.
 
 - **A GTK menu accelerator shadows typing, and a bare letter therefore cannot be
   one. This no longer applies, and it is here so nobody re-derives it.**

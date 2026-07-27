@@ -384,6 +384,53 @@ impl VaapiJpegEncoder {
         Ok((bytes, surface))
     }
 
+    /// Encode a VA surface the caller allocated and the GPU has already filled.
+    ///
+    /// The *other* zero-copy entry point, and the one that works on this chip.
+    /// [`Self::encode_dmabuf`] goes the direction the export goes — we allocate
+    /// the memory, describe it as linear, and the driver imports it — and
+    /// Intel's JPEG engine reads such a surface as though it were 32-row tiled
+    /// (`docs/research/preview-zerocopy-jpeg.md`). This goes the other way: the
+    /// media driver allocated the surface, so its tiling is by construction the
+    /// one the encoder expects, and Vulkan imported *that* and drew into it.
+    ///
+    /// Two obligations on the caller, both of which produce silent corruption
+    /// rather than an error if they are not met, and both identical to
+    /// [`Self::encode_dmabuf`]'s:
+    ///
+    /// - **The GPU must have finished.** libva cannot be handed a Vulkan
+    ///   semaphore, so the only synchronisation is a CPU-side wait after the
+    ///   render submit. `Nv12PlaneWriter::write_planes` does it.
+    /// - **The surface must not be redrawn** until the encoder has finished
+    ///   reading it. `preview::vasurface` is what tracks that.
+    ///
+    /// The samples must be **full range**, as for every other JPEG path here.
+    pub fn encode_va_surface(&mut self, surface: &mut frame::Video) -> Result<Vec<u8>> {
+        if (surface.width(), surface.height()) != (self.width, self.height) {
+            return Err(PreviewError::FrameSize {
+                width: surface.width(),
+                height: surface.height(),
+            });
+        }
+        // Nothing was converted and nothing was uploaded: the pixels were
+        // written where they already needed to be. Both stages are zero so the
+        // breakdown in `Stages` stays comparable across the three paths.
+        self.stages.convert_micros = 0;
+        self.stages.upload_micros = 0;
+        Self::encode_mapped(&mut self.encoder, &mut self.pts, &mut self.stages, surface)
+    }
+
+    /// An empty VA surface from this encoder's own pool.
+    ///
+    /// The surfaces the compositor draws into come from here rather than from a
+    /// pool of their own so that there is no question whether the encoder will
+    /// accept them: it is the pool that is attached to the codec context.
+    pub fn empty_surface(&self) -> Result<frame::Video> {
+        self.frames
+            .empty_frame()
+            .map_err(|e| PreviewError::Encode(e.to_string()))
+    }
+
     /// Upload one NV12 frame to a surface and run the fixed-function encoder.
     ///
     /// Free-standing over the fields it needs so both entry points above can

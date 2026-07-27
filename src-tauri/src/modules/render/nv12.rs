@@ -523,6 +523,256 @@ impl std::fmt::Debug for Nv12Converter {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The same conversion, into two images the media driver allocated
+// ---------------------------------------------------------------------------
+
+/// The uniform `shaders/nv12_planes.wgsl` reads. Four `u32`s, no padding.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PlaneParams {
+    width: u32,
+    height: u32,
+    range: u32,
+    _pad: u32,
+}
+
+unsafe impl bytemuck::Zeroable for PlaneParams {}
+unsafe impl bytemuck::Pod for PlaneParams {}
+
+/// The luma plane's format when it is a separate image. One byte a sample.
+pub const LUMA_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
+
+/// The chroma plane's format: interleaved Cb and Cr at half resolution, which
+/// is precisely a two-channel texture of half the size.
+pub const CHROMA_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg8Unorm;
+
+/// RGBA→NV12 written into two *images* rather than into a buffer.
+///
+/// [`Nv12Converter`] is the right thing whenever we choose the destination's
+/// layout. This one is for the case where we do not: the destination is a VA
+/// surface the media driver allocated and Vulkan imported, so it is tiled in
+/// whatever way that driver picked and nothing here knows which way. The
+/// hardware does the swizzle on write.
+///
+/// **Why that is worth a second pipeline.** Intel's fixed-function JPEG engine
+/// reads an imported *linear* NV12 surface as though it were 32-row tiled while
+/// its video encoder reads the identical file descriptor correctly, so the
+/// buffer route produces a fine coloured mosaic on this chip. The evidence is
+/// `docs/research/preview-zerocopy-jpeg.md`; letting the driver allocate deletes
+/// the question rather than answering it.
+///
+/// A render pass and not a compute pass because WebGPU has no storage-writable
+/// `R8Unorm` or `Rg8Unorm` — the same fact that made [`Nv12Converter`] write a
+/// buffer — but both are ordinary colour attachments.
+pub struct Nv12PlaneWriter {
+    luma: wgpu::RenderPipeline,
+    chroma: wgpu::RenderPipeline,
+    layout: wgpu::BindGroupLayout,
+    params: wgpu::Buffer,
+    /// Nanoseconds spent blocked on the GPU, for the compositor's stats. Same
+    /// meaning as [`Nv12Converter::wait_ns`].
+    pub(super) wait_ns: AtomicU64,
+}
+
+impl Nv12PlaneWriter {
+    pub fn new(ctx: &RenderContext) -> Self {
+        let device = ctx.device();
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("chukcut nv12 plane shader"),
+            // `yuv.wgsl` prepended for the same reason as in `Nv12Converter`:
+            // WGSL has no `#include` and the two directions belong together.
+            source: wgpu::ShaderSource::Wgsl(
+                concat!(
+                    include_str!("shaders/yuv.wgsl"),
+                    include_str!("shaders/nv12_planes.wgsl")
+                )
+                .into(),
+            ),
+        });
+
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("chukcut nv12 plane bindings"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(
+                            std::mem::size_of::<PlaneParams>() as u64
+                        ),
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("chukcut nv12 plane pipeline layout"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+
+        let build = |entry: &str, format: wgpu::TextureFormat, label: &str| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vertex"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some(entry),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+
+        Self {
+            luma: build("luma", LUMA_FORMAT, "chukcut nv12 luma plane"),
+            chroma: build("chroma", CHROMA_FORMAT, "chukcut nv12 chroma plane"),
+            layout,
+            params: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("chukcut nv12 plane params"),
+                size: std::mem::size_of::<PlaneParams>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            wait_ns: AtomicU64::new(0),
+        }
+    }
+
+    /// Draw `target` into the two planes and wait for the GPU.
+    ///
+    /// `luma` must be [`LUMA_FORMAT`] and the size of the picture; `chroma` must
+    /// be [`CHROMA_FORMAT`] and half of it, rounded up. Both are views of images
+    /// somebody else owns — for the preview, of a VA surface — so this writes
+    /// them and asserts nothing about what they are backed by.
+    ///
+    /// **Blocks until the GPU has finished**, for the same reason
+    /// [`Nv12Converter::convert_into_range`] does: libva cannot be handed a
+    /// Vulkan semaphore, so a CPU-side wait is the only synchronisation the
+    /// encoder on the other side can be given. Skipping it gives a frame torn
+    /// between two compositions, intermittently.
+    pub fn write_planes(
+        &self,
+        ctx: &RenderContext,
+        target: &PooledTexture,
+        luma: &wgpu::TextureView,
+        chroma: &wgpu::TextureView,
+        range: YuvRange,
+    ) -> Result<()> {
+        let (width, height) = (target.width(), target.height());
+        let view = target.view_as(READ_FORMAT).ok_or_else(|| {
+            RenderError::Readback(format!(
+                "a {:?} render target cannot be read as {READ_FORMAT:?}; it was not created \
+                 with that view format",
+                target.format()
+            ))
+        })?;
+
+        let device = ctx.device();
+        ctx.queue().write_buffer(
+            &self.params,
+            0,
+            bytemuck::bytes_of(&PlaneParams {
+                width,
+                height,
+                range: range as u32,
+                _pad: 0,
+            }),
+        );
+
+        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("chukcut nv12 plane bind group"),
+            layout: &self.layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.params.as_entire_binding(),
+                },
+            ],
+        });
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("chukcut nv12 planes"),
+        });
+        for (pipeline, attachment, label) in [
+            (&self.luma, luma, "chukcut nv12 luma"),
+            (&self.chroma, chroma, "chukcut nv12 chroma"),
+        ] {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some(label),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: attachment,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        // Every fragment of the attachment is written by the
+                        // full-screen triangle, so clearing first would be a
+                        // whole extra pass over the plane for nothing.
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, &group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        ctx.queue().submit(Some(encoder.finish()));
+
+        let waited = std::time::Instant::now();
+        ctx.device()
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|e| RenderError::Readback(e.to_string()))?;
+        self.wait_ns.fetch_add(
+            waited.elapsed().as_nanos() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        Ok(())
+    }
+}
+
+impl std::fmt::Debug for Nv12PlaneWriter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Nv12PlaneWriter").finish()
+    }
+}
+
 /// BT.601 limited-range RGB→YUV on the CPU, for the tests.
 ///
 /// Deliberately a second implementation of the shader's arithmetic rather than

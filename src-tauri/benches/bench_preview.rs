@@ -344,9 +344,113 @@ pub fn run_frame(
                 error,
             )),
         }
+
+        // The same frame again, composited straight into a VA surface the media
+        // driver allocated, so the readback, the CPU RGBA→NV12 pass and the
+        // upload — 60% of the row above — do not happen at all. Immediately
+        // after the copying arm and in the same process on purpose: a "before"
+        // taken from a build that no longer exists is not a measurement.
+        out.extend(drawn_frame(ctx, &compositor, &project, render_size, &label, budget));
     }
 
     out
+}
+
+/// The whole-frame row for the zero-copy path the preview takes when the
+/// hardware allows it.
+///
+/// Skipped with a reason rather than omitted where it does not run, because
+/// "this machine cannot" is the interesting half of the finding — see
+/// `docs/research/preview-zerocopy-jpeg.md`.
+fn drawn_frame(
+    ctx: &Arc<RenderContext>,
+    compositor: &Compositor,
+    project: &Project,
+    size: (u32, u32),
+    label: &str,
+    budget: &Budget,
+) -> Vec<Measurement> {
+    use chukcut_lib::modules::preview::encoder::encode_preview_jpeg_va_surface;
+    use chukcut_lib::modules::preview::vasurface::{self, SurfaceRing};
+    use chukcut_lib::modules::render::source::YuvRange;
+
+    let name = format!("{label} whole frame, drawn into the encoder's surface");
+    if !vasurface::encoder_reads_its_own_surface(ctx) {
+        return vec![Measurement::skip(
+            FRAME_GROUP,
+            name,
+            "this machine's JPEG encoder does not read a surface the compositor drew into",
+        )];
+    }
+    let Some(ring) = SurfaceRing::new(ctx, size).map(Arc::new) else {
+        return vec![Measurement::skip(
+            FRAME_GROUP,
+            name,
+            "this device cannot draw into a VAAPI-allocated NV12 surface",
+        )];
+    };
+    // A fresh provider, so this arm does not inherit the copying arm's warm
+    // texture cache.
+    let sources = MediaSourceProvider::from_project(project);
+
+    let one = |at: Micros| -> Result<usize, String> {
+        let mut claim = ring.claim().ok_or("no free surface")?;
+        compositor
+            .render_nv12_into_planes(
+                project,
+                at,
+                size,
+                &sources,
+                ring.luma(claim.index()),
+                ring.chroma(claim.index()),
+                // Full range: a JPEG carries no range tag. See `shaders/yuv.wgsl`.
+                YuvRange::Full,
+            )
+            .map_err(|e| e.to_string())?;
+        let bytes = encode_preview_jpeg_va_surface(claim.surface_mut(), DEFAULT_JPEG_QUALITY)
+            .ok_or("the hardware JPEG encoder refused the surface")?;
+        claim.release();
+        Ok(bytes.len())
+    };
+
+    if let Err(error) = one(0) {
+        return vec![Measurement::skip(FRAME_GROUP, name, error)];
+    }
+    compositor.reset_stats();
+
+    let mut jpeg_bytes = 0usize;
+    let result = rounds::<String>(budget.rounds, |round| {
+        let started = std::time::Instant::now();
+        for n in 0..budget.frames {
+            let at = ((round * budget.frames + n) as Micros) * 33_333 % 2_900_000;
+            jpeg_bytes = one(at)?;
+        }
+        Ok(started.elapsed().as_secs_f64() * 1000.0 / budget.frames.max(1) as f64)
+    });
+
+    match result {
+        Ok(samples) => {
+            let stats = compositor.stats();
+            let median = {
+                let mut sorted = samples.clone();
+                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                sorted[sorted.len() / 2]
+            };
+            let out = vec![
+                Measurement::ms(FRAME_GROUP, name, samples).with_note(format!(
+                    "sources {:.2} + composite {:.2} + NV12 into the surface {:.2} ms, no readback ({} KB)",
+                    stats.per_frame(stats.sources_ns) / 1e6,
+                    stats.per_frame(stats.composite_ns) / 1e6,
+                    stats.per_frame(stats.nv12_ns) / 1e6,
+                    jpeg_bytes / 1024,
+                )),
+                budget_row(&format!("{label} drawn"), median),
+            ];
+            compositor.reset_stats();
+            out
+        }
+        Err(error) => vec![Measurement::skip(FRAME_GROUP, name, error)],
+    }
 }
 
 /// The frame cost expressed as a fraction of the budget at each rate.

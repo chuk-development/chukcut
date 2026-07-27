@@ -29,7 +29,7 @@ use parking_lot::Mutex;
 use super::context::RenderContext;
 use super::error::{RenderError, Result};
 use super::layout::{self, QuadPlacement};
-use super::nv12::{Nv12Converter, Nv12Frame, READ_FORMAT};
+use super::nv12::{Nv12Converter, Nv12Frame, Nv12PlaneWriter, READ_FORMAT};
 use super::source::{SourceFrame, SourceProvider, SourceRequest};
 use super::texture_pool::{PooledTexture, TextureKey, TexturePool, DEFAULT_BUDGET_BYTES};
 use crate::modules::project::document::{MaterialKind, Micros, Project, Segment};
@@ -281,6 +281,12 @@ pub struct Compositor {
     /// compile: a machine that only ever previews should not pay for the
     /// export path's pipeline.
     nv12: OnceLock<Option<Nv12Converter>>,
+    /// The RGBA→NV12 *render* pass, built on first use.
+    ///
+    /// Separate from `nv12` above because it writes two images rather than one
+    /// buffer, and lazy for the same reason: two more shader compiles that only
+    /// the preview's surface-drawing path ever wants.
+    nv12_planes: OnceLock<Nv12PlaneWriter>,
     /// The transition pipelines, built on first use.
     ///
     /// Lazy for the same reason `nv12` is: it is five shader compiles, and a
@@ -559,6 +565,7 @@ impl Compositor {
             uniform_stride: uniform_stride as u32,
             stats: StatCounters::default(),
             nv12: OnceLock::new(),
+            nv12_planes: OnceLock::new(),
             transitions: OnceLock::new(),
         }
     }
@@ -711,12 +718,58 @@ impl Compositor {
         result.map(|_| ())
     }
 
+    /// Composite and draw NV12 straight into two images somebody else owns.
+    ///
+    /// The other zero-copy entry point, and the one that works on Intel's JPEG
+    /// engine. [`Self::render_nv12_into_range`] writes a buffer whose layout we
+    /// chose and hands the media driver a `DRM_FORMAT_MOD_LINEAR` descriptor;
+    /// this writes two colour attachments over a surface the **media driver**
+    /// allocated, so the tiling is the encoder's own and nothing here declares
+    /// anything about it. `docs/research/preview-zerocopy-jpeg.md` is why the
+    /// distinction exists.
+    ///
+    /// Returns once the GPU has finished, which is the only synchronisation the
+    /// encoder on the other side can be given.
+    pub fn render_nv12_into_planes(
+        &self,
+        project: &Project,
+        time: Micros,
+        size: (u32, u32),
+        sources: &dyn SourceProvider,
+        luma: &wgpu::TextureView,
+        chroma: &wgpu::TextureView,
+        range: crate::modules::render::source::YuvRange,
+    ) -> Result<()> {
+        let writer = self.nv12_planes();
+        let target = self.render_to_texture(project, time, size, sources)?;
+
+        let started = Instant::now();
+        let before_wait = writer.wait_ns.load(Ordering::Relaxed);
+        let result = writer.write_planes(&self.ctx, &target, luma, chroma, range);
+        let waited = writer.wait_ns.load(Ordering::Relaxed) - before_wait;
+        add(&self.stats.nv12_ns, started);
+        self.stats
+            .readback_wait_ns
+            .fetch_add(waited, Ordering::Relaxed);
+
+        self.pool.release(target);
+        result
+    }
+
     /// The compute converter, built once. `None` on a device where it will not
     /// build, which is a reason to fall back rather than to fail.
     fn nv12_converter(&self) -> Option<&Nv12Converter> {
         self.nv12
             .get_or_init(|| Some(Nv12Converter::new(&self.ctx)))
             .as_ref()
+    }
+
+    /// The plane writer, built once. Unlike the compute converter this has no
+    /// `None` case: a render pass to an `R8Unorm` target is core WebGPU, so if
+    /// it will not build there is nothing to fall back *from*.
+    fn nv12_planes(&self) -> &Nv12PlaneWriter {
+        self.nv12_planes
+            .get_or_init(|| Nv12PlaneWriter::new(&self.ctx))
     }
 
     /// [`Self::render_frame`], but keeping the dimensions attached.

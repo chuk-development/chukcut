@@ -373,7 +373,60 @@ pub fn encode_preview_jpeg_dmabuf(
     buffer: &crate::modules::export::hwframes::Nv12Dmabuf<'_>,
     quality: u8,
 ) -> Option<(Vec<u8>, ffmpeg_next::util::frame::Video)> {
-    let (width, height) = (buffer.width, buffer.height);
+    with_hardware(buffer.width, buffer.height, quality, "zero-copy", |encoder| {
+        encoder.encode_dmabuf(buffer)
+    })
+}
+
+/// Encode a VA surface the compositor drew NV12 into.
+///
+/// The other zero-copy half of [`encode_preview_jpeg`], and the one that works
+/// on Intel: the surface was allocated by the media driver and imported into
+/// Vulkan, rather than allocated by Vulkan and imported by the media driver, so
+/// its tiling is the encoder's own by construction. See
+/// [`vaapi::VaapiJpegEncoder::encode_va_surface`] and
+/// `docs/research/preview-zerocopy-jpeg.md`.
+///
+/// No surface comes back because the caller already owns it — it is holding the
+/// claim that reserves it — which is the one way this is simpler than
+/// [`encode_preview_jpeg_dmabuf`].
+///
+/// `None` means the hardware encoder is unusable and the caller must fall back
+/// to the copying path. **There is no software fallback from here**: the surface
+/// is device-local, which is why the caller decides whether to take this path
+/// *before* compositing rather than after.
+///
+/// **Nothing here dispatches onto rayon**, which is the rule [`HARDWARE`]
+/// documents, and this path keeps it trivially: the parallel loop it would have
+/// been paired with is the very thing it deletes.
+pub fn encode_preview_jpeg_va_surface(
+    surface: &mut ffmpeg_next::util::frame::Video,
+    quality: u8,
+) -> Option<Vec<u8>> {
+    let (width, height) = (surface.width(), surface.height());
+    with_hardware(width, height, quality, "surface-drawing", |encoder| {
+        encoder.encode_va_surface(surface)
+    })
+}
+
+/// Take the process's one hardware JPEG encoder, opening or reopening it for
+/// this size and quality, and run `encode` on it.
+///
+/// The failure bookkeeping — `failures`, `FAILURES_BEFORE_GIVING_UP`,
+/// `disabled`, `REBUILDS` — is identical for every entry point and was written
+/// out three times before this existed. `what` names the path in the log line so
+/// a reader can tell which of them gave up.
+///
+/// The lock is taken for the whole call. That is deliberate and is the reason
+/// the zero-copy paths are worth having at all: what is under it is now only the
+/// fixed-function encode, where it used to also cover an upload.
+fn with_hardware<T>(
+    width: u32,
+    height: u32,
+    quality: u8,
+    what: &str,
+    encode: impl FnOnce(&mut VaapiJpegEncoder) -> Result<T>,
+) -> Option<T> {
     if preference() == Preference::ForceSoftware || !size_is_encodable(width, height) {
         return None;
     }
@@ -403,7 +456,7 @@ pub fn encode_preview_jpeg_dmabuf(
     }
 
     let encoder = hw.encoder.as_mut()?;
-    match encoder.encode_dmabuf(buffer) {
+    match encode(encoder) {
         Ok(out) => {
             hw.failures = 0;
             Some(out)
@@ -415,7 +468,7 @@ pub fn encode_preview_jpeg_dmabuf(
                 hw.disabled = true;
                 tracing::warn!(%error, "giving up on the hardware JPEG encoder");
             } else {
-                tracing::debug!(%error, "the zero-copy JPEG encode failed");
+                tracing::debug!(%error, path = what, "the JPEG encode failed");
             }
             None
         }

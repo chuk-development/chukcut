@@ -583,6 +583,37 @@ use crate::modules::media::dmabuf::Plane;
 /// usable modifier, or when the driver refuses the layout — all of which mean
 /// "use the copying path", not "fail".
 pub fn import_plane(ctx: &RenderContext, plane: &Plane) -> Option<wgpu::Texture> {
+    import_plane_with(ctx, plane, PlaneUse::Read)
+}
+
+/// What an imported plane is for, which decides its Vulkan usage flags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaneUse {
+    /// Sampled by the compositor. A decoded frame arriving from the hardware
+    /// decoder.
+    Read,
+    /// Drawn into by a render pass. A *destination* the media driver allocated
+    /// — the preview's NV12 surface — so the tiling is the driver's own and
+    /// this side never has to know which tiling it is.
+    ///
+    /// Whether a driver accepts this is a real question and not a formality:
+    /// `VK_EXT_image_drm_format_modifier` reports the usable usages per
+    /// modifier, and a driver may expose a modifier for sampling that it will
+    /// not render into. On the Raptor Lake iGPU, `vkGetPhysicalDeviceFormat
+    /// Properties2` reports `COLOR_ATTACHMENT` and `STORAGE` for `R8_UNORM` and
+    /// `R8G8_UNORM` under `LINEAR`, `X_TILED` and `Y_TILED`, and `Y_TILED` is
+    /// what the iHD driver allocates. A device where that is not true refuses
+    /// the import and `None` comes back, which is a reason to use the copying
+    /// path and not a reason to fail.
+    Write,
+}
+
+/// [`import_plane`], saying what the plane is going to be used for.
+pub fn import_plane_with(
+    ctx: &RenderContext,
+    plane: &Plane,
+    intent: PlaneUse,
+) -> Option<wgpu::Texture> {
     if !ctx.can_import_dmabuf() || !plane.is_importable() {
         return None;
     }
@@ -605,14 +636,31 @@ pub fn import_plane(ctx: &RenderContext, plane: &Plane) -> Option<wgpu::Texture>
         height: plane.height,
         depth_or_array_layers: 1,
     };
+    let (hal_usage, wgpu_usage, initial, label) = match intent {
+        PlaneUse::Read => (
+            wgpu::TextureUses::RESOURCE | wgpu::TextureUses::COPY_SRC,
+            wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+            wgpu::TextureUses::RESOURCE,
+            "decoded video plane",
+        ),
+        PlaneUse::Write => (
+            wgpu::TextureUses::COLOR_TARGET | wgpu::TextureUses::COPY_SRC,
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            // `UNINITIALIZED` and not `COLOR_TARGET`: the render pass writes
+            // every fragment of the plane, so telling wgpu the contents matter
+            // would only invite it to clear or preserve a picture nobody reads.
+            wgpu::TextureUses::UNINITIALIZED,
+            "encoder surface plane",
+        ),
+    };
     let hal_descriptor = wgpu_hal::TextureDescriptor {
-        label: Some("decoded video plane"),
+        label: Some(label),
         size,
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format,
-        usage: wgpu::TextureUses::RESOURCE | wgpu::TextureUses::COPY_SRC,
+        usage: hal_usage,
         memory_flags: wgpu_hal::MemoryFlags::empty(),
         view_formats: Vec::new(),
     };
@@ -637,16 +685,16 @@ pub fn import_plane(ctx: &RenderContext, plane: &Plane) -> Option<wgpu::Texture>
         ctx.device().create_texture_from_hal::<wgpu_hal::api::Vulkan>(
             hal_texture,
             &wgpu::TextureDescriptor {
-                label: Some("decoded video plane"),
+                label: Some(label),
                 size,
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+                usage: wgpu_usage,
                 view_formats: &[],
             },
-            wgpu::TextureUses::RESOURCE,
+            initial,
         )
     })
 }

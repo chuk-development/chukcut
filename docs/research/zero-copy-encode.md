@@ -1,5 +1,15 @@
 # Zero-copy from the compositor into the encoder
 
+> **Superseded in one important respect, 2026-07-27.** This document's whole
+> frame is "we allocate the NV12 destination and describe it to the driver",
+> which is what `export::job` tier 3 does and what works with `h264_vaapi`. It
+> does **not** work with Intel's JPEG engine, which reads a surface described as
+> linear as though it were Y-tiled — and the fix is to stop describing memory to
+> the driver at all: let VAAPI allocate, export, and import *that* into Vulkan.
+> Read `docs/research/preview-zerocopy-jpeg.md` before building anything from
+> here. In particular, the claim below that "the preview's encoder wants NV12 in
+> a buffer, which is already solved" is the sentence that cost a day.
+
 Written 2026-07-25, while building the VAAPI encode path in
 `src-tauri/src/modules/export/`. It is the notes of the person who got closest
 to this problem without solving it, which is the point: the next person should
