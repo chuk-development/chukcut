@@ -24,10 +24,10 @@ import { formatTimecode } from "@/lib/time";
 import { cn } from "@/lib/utils";
 import type { PreviewZoom } from "@/modules/preview/store";
 import type { Micros } from "@/modules/project/types";
+import { useTimelineStore } from "@/modules/timeline/store";
 
 interface TransportControlsProps {
   playing: boolean;
-  playhead: Micros;
   duration: Micros;
   fps: number;
   zoom: PreviewZoom;
@@ -52,9 +52,18 @@ const ZOOM_OPTIONS: { value: string; label: string }[] = [
   { value: "2", label: "200%" },
 ];
 
+/**
+ * The running timecode, subscribing to the playhead itself so its 24-per-second
+ * change rate stays inside this span instead of re-rendering the transport row
+ * — or, when it was a prop from `Preview`, the entire player.
+ */
+function Timecode({ fps }: { fps: number }) {
+  const playhead = useTimelineStore((s) => s.playhead);
+  return <span className="text-primary">{formatTimecode(playhead, fps)}</span>;
+}
+
 export function TransportControls({
   playing,
-  playhead,
   duration,
   fps,
   zoom,
@@ -75,7 +84,7 @@ export function TransportControls({
       )}
     >
       <div className="flex items-baseline gap-1.5 font-mono text-[11px] tabular-nums">
-        <span className="text-primary">{formatTimecode(playhead, fps)}</span>
+        <Timecode fps={fps} />
         <span className="text-muted-foreground/60">/</span>
         <span className="text-muted-foreground">{formatTimecode(duration, fps)}</span>
       </div>

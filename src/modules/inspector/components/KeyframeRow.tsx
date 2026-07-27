@@ -24,7 +24,7 @@ import {
 import type { PropertyDef } from "@/modules/inspector/lib/properties";
 import { useInspectorStore } from "@/modules/inspector/store";
 import { runEdit } from "@/modules/project/store";
-import type { Micros, Project, Segment } from "@/modules/project/types";
+import type { Project, Segment } from "@/modules/project/types";
 import { timelineApply } from "@/modules/timeline/lib/api";
 import { useTimelineStore } from "@/modules/timeline/store";
 
@@ -32,8 +32,6 @@ export interface KeyframeRowProps {
   project: Project;
   segment: Segment;
   def: PropertyDef;
-  /** Timeline time, not segment-relative. */
-  playhead: Micros;
   disabled?: boolean;
 }
 
@@ -48,7 +46,9 @@ export interface KeyframeRowProps {
  * editor that wrote the static value instead would appear to do nothing,
  * because the animation overrides it on the very next frame.
  */
-export function KeyframeRow({ project, segment, def, playhead, disabled }: KeyframeRowProps) {
+export function KeyframeRow({ project, segment, def, disabled }: KeyframeRowProps) {
+  // From the store, not a prop — see KeyframeEditor for why.
+  const playhead = useTimelineStore((s) => s.playhead);
   const showCurve = useInspectorStore((s) => s.showCurve);
   const setPlayhead = useTimelineStore((s) => s.setPlayhead);
 

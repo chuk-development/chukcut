@@ -37,8 +37,6 @@ import { useTimelineStore } from "@/modules/timeline/store";
 export interface KeyframeEditorProps {
   project: Project;
   segment: Segment;
-  /** Timeline time. */
-  playhead: Micros;
 }
 
 /**
@@ -50,7 +48,11 @@ export interface KeyframeEditorProps {
  * points it there too, so the curve is already showing the right thing by the
  * time the user looks down.
  */
-export function KeyframeEditor({ project, segment, playhead }: KeyframeEditorProps) {
+export function KeyframeEditor({ project, segment }: KeyframeEditorProps) {
+  // From the store rather than a prop: the playhead changes on every position
+  // event and every scrub move, and a prop makes that the parent's render rate.
+  // The parent was the whole inspector.
+  const playhead = useTimelineStore((s) => s.playhead);
   const curveProperty = useInspectorStore((s) => s.curveProperty);
   const showCurve = useInspectorStore((s) => s.showCurve);
   const selectedKeyframeTime = useInspectorStore((s) => s.selectedKeyframeTime);

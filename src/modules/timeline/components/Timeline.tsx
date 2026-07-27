@@ -250,7 +250,22 @@ function partnerPreview(
   };
 }
 
+/**
+ * How many times the timeline body has rendered.
+ *
+ * Same instrument as `clipPaintCount`, same reason: the claim it guards can
+ * only be observed from inside the component. The claim is that **the playhead
+ * is not a subscription of this component**. It was — the fastest-changing
+ * value in the app, written on every position event during playback and every
+ * pointer move during a scrub, re-rendering these fifteen hundred lines each
+ * time to move a one-pixel line and a timecode that read it themselves ever
+ * since. `Timeline.paint.test.tsx` pins it.
+ */
+export const bodyPaintCount = { renders: 0 };
+
 export function Timeline() {
+  bodyPaintCount.renders += 1;
+
   const project = useProjectStore((s) => s.project);
   const canUndo = useProjectStore((s) => s.canUndo);
   const canRedo = useProjectStore((s) => s.canRedo);
@@ -258,7 +273,6 @@ export function Timeline() {
 
   const zoom = useTimelineStore((s) => s.zoom);
   const scrollX = useTimelineStore((s) => s.scrollX);
-  const playhead = useTimelineStore((s) => s.playhead);
   const selection = useTimelineStore((s) => s.selection);
   const tool = useTimelineStore((s) => s.tool);
   const snapping = useTimelineStore((s) => s.snapping);
@@ -1327,7 +1341,6 @@ export function Timeline() {
       aria-label="Timeline"
     >
       <TimelineToolbar
-        playhead={playhead}
         duration={duration}
         fps={fps}
         zoom={zoom}
@@ -1554,7 +1567,7 @@ export function Timeline() {
               />
             ) : null}
 
-            <Playhead time={playhead} zoom={zoom} onGrab={scrub} />
+            <Playhead zoom={zoom} onGrab={scrub} />
           </div>
         </div>
 

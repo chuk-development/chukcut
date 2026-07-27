@@ -17,10 +17,21 @@ import { Slider } from "@/components/ui/slider";
 import { IconTooltip } from "@/components/ui/tooltip";
 import { formatTimecode } from "@/lib/time";
 import type { Micros } from "@/modules/project/types";
-import { MAX_ZOOM, MIN_ZOOM } from "@/modules/timeline/store";
+import { MAX_ZOOM, MIN_ZOOM, useTimelineStore } from "@/modules/timeline/store";
+
+/**
+ * The running timecode, as its own component so the store subscription is its
+ * own too. The playhead changes on every position event and every scrub move;
+ * subscribing up in the toolbar would re-render the whole button row at that
+ * rate, and passing it down from the timeline re-rendered the whole *timeline*
+ * at that rate — which it did, until it measurably didn't (`bodyPaintCount`).
+ */
+function Timecode({ fps }: { fps: number }) {
+  const playhead = useTimelineStore((s) => s.playhead);
+  return <span className="text-foreground">{formatTimecode(playhead, fps)}</span>;
+}
 
 interface TimelineToolbarProps {
-  playhead: Micros;
   duration: Micros;
   fps: number;
   zoom: number;
@@ -56,7 +67,6 @@ function sliderToZoom(value: number): number {
 }
 
 export function TimelineToolbar({
-  playhead,
   duration,
   fps,
   zoom,
@@ -153,7 +163,7 @@ export function TimelineToolbar({
       </IconTooltip>
 
       <div className="ml-3 flex items-baseline gap-1.5 font-mono text-[11px] tabular-nums">
-        <span className="text-foreground">{formatTimecode(playhead, fps)}</span>
+        <Timecode fps={fps} />
         <span className="text-muted-foreground/60">/</span>
         <span className="text-muted-foreground">{formatTimecode(duration, fps)}</span>
       </div>

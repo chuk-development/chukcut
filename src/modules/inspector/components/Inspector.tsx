@@ -61,7 +61,6 @@ export function Inspector() {
   // user is not looking at. See `soleSelection`.
   const selection = useTimelineStore((s) => s.selection);
   const selectedSegmentId = soleSelection(selection);
-  const playhead = useTimelineStore((s) => s.playhead);
 
   const found = project && selectedSegmentId ? findSegment(project, selectedSegmentId) : null;
   const segment = found?.segment ?? null;
@@ -181,13 +180,7 @@ export function Inspector() {
 
           <Section title="Transform">
             {TRANSFORM_PROPERTIES.map((def) => (
-              <KeyframeRow
-                key={def.id}
-                project={project}
-                segment={segment}
-                def={def}
-                playhead={playhead}
-              />
+              <KeyframeRow key={def.id} project={project} segment={segment} def={def} />
             ))}
 
             <div className="flex items-center gap-1 pt-0.5">
@@ -237,19 +230,13 @@ export function Inspector() {
           <Separator />
 
           <Section title="Audio">
-            <KeyframeRow
-              project={project}
-              segment={segment}
-              def={VOLUME}
-              playhead={playhead}
-              disabled={!hasAudio}
-            />
+            <KeyframeRow project={project} segment={segment} def={VOLUME} disabled={!hasAudio} />
           </Section>
 
           <Separator />
 
           <Section title="Keyframes">
-            <KeyframeEditor project={project} segment={segment} playhead={playhead} />
+            <KeyframeEditor project={project} segment={segment} />
           </Section>
         </ScrollArea>
       )}

@@ -57,7 +57,6 @@ function drawPlaceholder(
 
 export function Preview() {
   const project = useProjectStore((s) => s.project);
-  const playhead = useTimelineStore((s) => s.playhead);
 
   const session = usePreviewStore((s) => s.session);
   const frameUrl = usePreviewStore((s) => s.frameUrl);
@@ -243,11 +242,14 @@ export function Preview() {
   const step = useCallback(
     (frames: number) => {
       const delta = frameDuration(fps) * frames;
-      const target = Math.min(duration, Math.max(0, playhead + delta));
+      // Read at call time, not at render time: subscribing would re-render the
+      // whole player on every position event just to keep a callback fresh.
+      const at = useTimelineStore.getState().playhead;
+      const target = Math.min(duration, Math.max(0, at + delta));
       useTimelineStore.getState().setPlayhead(target);
       void preview.seek(target);
     },
-    [fps, duration, playhead],
+    [fps, duration],
   );
 
   const jump = useCallback(
@@ -315,7 +317,6 @@ export function Preview() {
   const transport = (compact: boolean) => (
     <TransportControls
       playing={playing}
-      playhead={playhead}
       duration={duration}
       fps={fps}
       zoom={zoom}

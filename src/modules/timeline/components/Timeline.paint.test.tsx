@@ -23,14 +23,14 @@
  * which is the only place the difference is observable.
  */
 
-import { fireEvent, render } from "@testing-library/react";
+import { act, fireEvent, render } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { useProjectStore } from "@/modules/project/store";
 import type { Project, Segment } from "@/modules/project/types";
 import { clipPaintCount } from "@/modules/timeline/components/Segment";
-import { Timeline } from "@/modules/timeline/components/Timeline";
+import { bodyPaintCount, Timeline } from "@/modules/timeline/components/Timeline";
 import { useTimelineStore } from "@/modules/timeline/store";
 import { makeProject, makeSegment, makeTrack, range } from "@/test/fixtures";
 import { type IpcHarness, installIpc } from "@/test/ipc";
@@ -196,6 +196,37 @@ describe("dragging one clip on a crowded timeline", () => {
     // Identity, not equality: subscribers compare by reference, and most of a
     // pointer stream changes nothing.
     expect(useTimelineStore.getState().razorTarget).toBe(target);
+  });
+});
+
+describe("playback moving the playhead", () => {
+  it("moves the line and the timecode without rendering the timeline body", () => {
+    mount();
+
+    const bodyBefore = bodyPaintCount.renders;
+    const clipsBefore = snapshot();
+
+    // What Rust does during playback: one position event per frame, each
+    // writing the playhead. A second of 24 fps playback, delivered as fast as
+    // the store can take it.
+    act(() => {
+      for (let frame = 1; frame <= 24; frame++) {
+        useTimelineStore.getState().setPlayhead(frame * 41_667);
+      }
+    });
+
+    // The line moved — the isolated subscription is alive, not optimised away.
+    const line = document.querySelector<HTMLElement>('[data-slot="playhead"]');
+    if (!line) throw new Error("the timeline has no playhead");
+    expect(line.style.left).not.toBe("0px");
+
+    // And nothing else did. Before the playhead became its own subscriber,
+    // every one of those 24 writes re-rendered this entire component — the
+    // whole lane list reconciled 24 times a second to move one pixel of DOM,
+    // while the same thread decoded and painted the preview's JPEGs. That is
+    // what the owner reported as the timeline "lagging insanely".
+    expect(bodyPaintCount.renders).toBe(bodyBefore);
+    expect([...paintsSince(clipsBefore).keys()]).toEqual([]);
   });
 });
 
