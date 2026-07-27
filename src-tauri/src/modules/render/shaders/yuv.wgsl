@@ -124,3 +124,18 @@ fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
     let hi = pow((c + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
     return select(hi, lo, c <= vec3<f32>(0.04045));
 }
+
+/// The inverse of `srgb_to_linear`, per channel.
+///
+/// Here because the colour adjustments in `quad.wgsl` are applied in
+/// *gamma-encoded* space — brightness and contrast pivoting on encoded mid
+/// grey is what every editor's sliders mean, and applying the same offsets in
+/// linear light crushes shadows and blows highlights — so the quad shader has
+/// to encode, adjust, and decode again. Living next to its inverse keeps the
+/// two from drifting apart, the argument this whole file makes.
+fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
+    let clamped = clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
+    let lo = clamped * 12.92;
+    let hi = 1.055 * pow(clamped, vec3<f32>(1.0 / 2.4)) - vec3<f32>(0.055);
+    return select(hi, lo, clamped <= vec3<f32>(0.0031308));
+}

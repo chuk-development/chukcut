@@ -73,6 +73,8 @@ export const VIDEO_FILTERS: DialogFilter[] = [
       "flac",
       "aac",
       "m4a",
+      "ogg",
+      "opus",
       "png",
       "jpg",
       "jpeg",

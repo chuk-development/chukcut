@@ -1353,6 +1353,148 @@ case. The one thing that cannot cross yet is a **title**: a `TextMaterial` has
 no file, and carrying one would need an edit command that writes the material
 pool. Those clips are dropped from the paste rather than pasted broken.
 
+## Audio fades, ripple edits and track management
+
+Added 2026-07-27, all three timeline-side.
+
+- **Audio fade handles.** Every clip that is heard from where it sits (its
+  material carries audio and the sound is not on a linked lane) gets a drag
+  handle at each top corner; dragging inward draws the ramp and writes plain
+  `Volume` keyframes on release — `(0,0)→(len,1)` for a fade-in, the mirror for
+  a fade-out, one shared apex when they meet. There is no "fade" anywhere in
+  the document or the engine: both mixers already sampled the `Volume` track
+  (`audio/mixer.rs::a_volume_keyframe_fades_across_the_segment`,
+  `export/audio.rs::volume_keyframes_fade_the_segment` are the proof, not an
+  assumption), so preview and export follow for free. The keyframe value
+  multiplies the segment's own volume, so 1.0 is neutral.
+  `timeline/lib/fades.ts` reads fades back *by pattern* and its command builder
+  diffs current-against-wanted — hand-authored volume automation between the
+  ramps is left alone, and a fade dragged to zero removes its keyframes rather
+  than leaving a zero-length ramp that shows the property as animated.
+- **A finding worth keeping: `split_at` used to copy keyframes verbatim onto
+  the right half.** Keyframe times are segment-relative, so the right half
+  replayed the *whole clip's* animation from the cut onward — a fade-out
+  authored for the tail played `left_duration` too late, and the head's
+  keyframes existed twice. Fixed in `ops.rs::rebase_keyframes_for_split`:
+  times at or after the cut shift onto the right half's own clock, a cut
+  mid-ramp gets an anchor keyframe holding the interpolated value (so a fade
+  crossing the cut stays continuous), and a track fully consumed by the left
+  half collapses to a single anchor holding its last value. The left half is
+  deliberately untouched: it keeps keyframes beyond its new end, which is the
+  same warning a tail trim leaves and exactly what makes it play unchanged.
+- **Ripple delete and close gap.** Context menu on a clip and on a lane's
+  empty space. Both are one `timeline_apply_many` batch — one undo step — and
+  the frontend (`timeline/lib/ripple.ts`) sends the parts already ordered:
+  removal first, then leftward moves left-to-right, because `compose_edits`
+  deliberately leaves a mixed batch in the caller's order. Link partners come
+  along on the Rust side, exactly once; a ripple whose mirrored move has
+  nowhere to land (a music bed in the way) is refused wholesale and the
+  timeline is untouched. "Close gap" only offers on a *bounded* gap.
+- **Track management.** "Add track" (video/audio/text) below the headers, lane
+  reorder by dragging the header grip, delete via the header's context menu
+  with a confirmation dialog when the lane holds clips. Reorder is a new
+  `EditCommand::MoveTrack { track_id, from_index, to_index }` whose `to_index`
+  is the position in the *resulting* list, so its inverse is itself with the
+  indices swapped; `reindex_render_order` runs on apply, so restacking the
+  composite *is* the reorder and `render_index` needs no separate bookkeeping.
+  Tests pin the restack and the byte-exact undo. One known wart: deleting a
+  track whose clips are linked to clips on other lanes leaves those partners
+  in a one-member group until undo — the link badge shows with no partner.
+
+## Crop, rotation and per-clip colour (2026-07-27)
+
+The inspector now has all three, and the honest headline is what was *already
+there*: **crop and rotation were fully implemented in the renderer and wired to
+nothing.** `layout::place_quad` had been cropping (UV rect, re-fit to the
+cropped aspect) and rotating (pixel-space, both decode paths, since the MVP is
+path-independent) all along, with geometry tests — what was missing was any UI
+and, for crop, any command. Before building anything, check what the
+compositor already does.
+
+What was added, and where the reasoning lives:
+
+- **Crop UI** — four inset sliders plus reset, `inspector_set_crop`. The
+  panel speaks insets, the document keeps the kept-rectangle; `insetsOf` /
+  `cropFromInsets` in `src/modules/inspector/lib/adjust.ts` translate, and the
+  slider cap (45% per edge) is what makes the empty crop unreachable.
+- **Rotation UI** — the slider existed; ±90° step buttons were added, wrapped
+  into `-180..180` so four turns land back on exactly 0.
+- **Colour adjustments** — brightness, contrast, saturation, temperature as a
+  new typed pool category, `ColorAdjustMaterial`, referenced from
+  `Segment::extras` exactly like a transition and for the reasons written on
+  the struct; opacity stays a `Transform` field but renders in the colour
+  panel. The GPU work is one branch in `quad.wgsl` (`apply_color`, encoded
+  space, order documented there), so transition layers, the preview and both
+  export tiers get it from the same draw. **Identity is a flag, not
+  arithmetic**: an ungraded or identity-graded clip takes the exact pre-colour
+  shader path, and `an_identity_grade_renders_byte_identical_to_no_grade_at_all`
+  asserts full-frame byte equality.
+- **Undo without touching `timeline/ops.rs`** — both edits are a `Composite`
+  of `RemoveSegment` + `InsertSegment` of the same segment, built in Rust from
+  the live document (`modules/inspector/edit.rs`, module docs say why this is
+  the command model used as designed and not a trick). Colour additionally
+  never mutates a material in place: each commit mints a fresh material and
+  swaps the segment's reference, so undo is a reference swap back to a
+  material still in the pool. See `docs/decisions/0007-colour-as-materials.md`.
+
+Verified with pixel tests in `compositor.rs`, all run on **both decode
+paths** via split-tone sources (a solid colour cannot show *which part went
+where*): crop keeps only the kept region and re-fits its aspect; 90/180/270
+put each half where a clockwise turn says; 45° draws the exact diamond;
+crop-then-rotate composes in document order; grades match a spelled-out
+reference to ±2 code values; and preview (`render`) and export
+(`render_nv12`) agree on a graded frame to ±3, the same harness the
+transitions work used.
+
+### .cube LUTs (same day, on top of the above)
+
+Per-clip 3D LUTs, applied **after** the scalar grade — grade first, look
+second, the order looks are authored against and the order `quad.wgsl`
+implements. What exists and the decisions inside it:
+
+- **Parser and reference sampler** in `modules/render/lut.rs`: 3D `.cube`
+  (TITLE, LUT_3D_SIZE 2..256, DOMAIN_MIN/MAX, red-fastest data), tolerant of
+  comments, CRLF and trailing whitespace; every malformed file is refused
+  with a message naming the line; 1D LUTs are refused by name.
+  `Cube::sample` is the CPU trilinear the shader mirrors, so tests compare
+  the two instead of letting a change cancel out.
+- **Document**: `LutRef { path, intensity }` on `ColorAdjustMaterial` — not
+  a category of its own, because grade and look are one gesture, one
+  material, one uniform block, and a second category would ask the ordering
+  question across two materials. Only the **path** is stored. The parsed
+  cube is runtime cache (`LutCache`, keyed path+mtime, one `stat` per graded
+  clip per frame), so editing the file externally shows on the next frame
+  with no invalidation plumbing, and a project whose LUT file is gone
+  **opens, warns (`validate()`), and renders the clip unadjusted** — pinned
+  byte-identically in a test, missing and malformed files both.
+- **GPU**: `Rgba32Float` 3D texture, trilinear **by hand from eight
+  `textureLoad`s** rather than the sampler. Not squeamishness: hardware
+  filtering quantises interpolation weights (8-bit subtexel typically),
+  which fails the identity requirement — an identity `.cube` at full
+  intensity renders **byte-identical** to no LUT, asserted at sizes 2 and
+  17. `lut_active` gates the whole thing exactly as `color_active` does, so
+  pre-feature documents take the untouched shader path.
+- Analytic pixel tests on both decode paths (invert, channel swap, ×0.5
+  gradient — numbers a reviewer recomputes in their head), intensity as an
+  exact lerp with 0 byte-identical to absence, grade-then-look order pinned
+  against the reversed order's number, mtime reload, and preview/export
+  parity over a graded+LUT frame.
+- **UI**: a LUT row in the Colour section — file picker (validated by
+  `inspector_lut_probe` at pick time, so a broken file is refused with the
+  parser's line message before touching the document), filename display,
+  0..1 intensity slider, remove. Same mint-and-swap undo as the sliders.
+- **Cost, measured**: `chukcut-bench --filter composite` grew `grade+lut`
+  rows (a 33-point warm LUT plus a non-identity grade on every layer) priced
+  against the `plain` rows. Run 2026-07-27 with `--force` at load ~7 (other
+  agents building — treat as indicative; spreads were nevertheless ≤ 1.3×):
+  GPU-only per 1080p frame, plain → grade+lut: 1 layer 1.54 → 2.08 ms,
+  3 layers 2.67 → 4.23 ms, 10 layers 6.43 → 12.56 ms — i.e. **the colour
+  pass costs ~0.5–0.6 ms per full-canvas graded layer** on this iGPU. Not
+  free, which is why both halves are flag-gated (`color_active`,
+  `lut_active`): ungraded clips pay exactly nothing, a grade without a look
+  skips the eight LUT taps, and a look without a grade skips the scalar
+  arithmetic. Re-run on a quiet machine before quoting these anywhere.
+
 ## Not built yet
 
 Both keyframe editing and audio waveforms landed overnight and this line was
@@ -1647,6 +1789,17 @@ first rendered frame actually had. Those two being different is a bug, and
 nothing else in the system would say so.
 
 ## Traps that have already cost time
+
+- **FFmpeg will demux a plain text file as video.** The `tty` demuxer matches
+  on the extension alone — `.txt`, `.nfo`, `.asc` and friends — and reports an
+  `ansi` "video" stream with a size and a frame rate, so a stray text file
+  dropped on the media panel imported as a video material whose card could
+  never render (verified: `ffprobe notes.txt` prints `Video: ansi, pal8,
+  640x400`). `project::commands::is_text_art` refuses the tty/bintext family by
+  format and codec name; `tests/media_import.rs` pins it, along with the other
+  refusals — text bytes wearing `.mp4` fail at `avformat_open_input` with the
+  path in the message, and a subtitle file is refused as "no video, image or
+  audio stream" rather than imported as an empty card.
 
 - **Do not describe your memory to a media driver. Let it allocate, and import
   what it gives you.** The rule that came out of a day on the preview's JPEG

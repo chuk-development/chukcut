@@ -8,7 +8,7 @@ import {
   VolumeXIcon,
 } from "lucide-react";
 import type React from "react";
-import { memo, useEffect } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 
 import {
   ContextMenu,
@@ -25,6 +25,7 @@ import type { Id, Micros, Segment as SegmentModel, TrackKind } from "@/modules/p
 import { rangeEnd } from "@/modules/project/types";
 import { Filmstrip } from "@/modules/timeline/components/Filmstrip";
 import { Waveform } from "@/modules/timeline/components/Waveform";
+import { clampFades, type Fades, fadesOf } from "@/modules/timeline/lib/fades";
 
 /** Clip colour is keyed by lane kind so a glance tells you what a lane holds. */
 const KIND_STYLE: Record<TrackKind, string> = {
@@ -139,8 +140,12 @@ interface SegmentProps {
   onSplit: (segmentId: string) => void;
   onDuplicate: (segmentId: string) => void;
   onDelete: (segmentId: string) => void;
+  /** Delete this clip and pull everything later on its lane left by its duration. */
+  onRippleDelete: (segmentId: string) => void;
   onUnlink: (segmentId: string) => void;
   onLink: () => void;
+  /** A fade handle was released: write these fades as volume keyframes. */
+  onFade: (segmentId: string, fades: Fades) => void;
 }
 
 function ClipBody({
@@ -165,8 +170,10 @@ function ClipBody({
   onSplit,
   onDuplicate,
   onDelete,
+  onRippleDelete,
   onUnlink,
   onLink,
+  onFade,
 }: SegmentProps) {
   clipPaintCount.set(segment.id, (clipPaintCount.get(segment.id) ?? 0) + 1);
 
@@ -217,6 +224,56 @@ function ClipBody({
   const waveformHeight = soundOnly
     ? Math.max(1, height - LABEL_BAND)
     : Math.min(STRIP_WAVEFORM_HEIGHT, Math.max(0, height - LABEL_BAND));
+
+  // -----------------------------------------------------------------------
+  // Audio fades
+  //
+  // Two drag handles at the clip's top corners; dragging inward writes volume
+  // keyframes on release (`fades.ts`). Only a clip that is *heard from here*
+  // gets them — a video clip whose sound lives on its linked audio lane fades
+  // there, next to the waveform, like everything else about its sound.
+  // -----------------------------------------------------------------------
+  const carriesSound = material?.hasAudio === true && !soundOnPartnerLane;
+  const fades = useMemo(() => fadesOf(segment), [segment]);
+  /** Live handle position while a fade is being dragged. Never reaches Rust. */
+  const [fadeDrag, setFadeDrag] = useState<Fades | null>(null);
+  const shownFades = fadeDrag ?? fades;
+  const duration0 = segment.target_range.duration;
+  const showsFades = carriesSound && onScreen && !ghosted && !preview;
+  const showsFadeHandles = showsFades && !locked && !razor && width >= 24;
+
+  const beginFadeDrag = (event: React.PointerEvent, edge: "in" | "out") => {
+    if (event.button !== 0) return;
+    event.stopPropagation();
+    event.preventDefault();
+    const startX = event.clientX;
+    const base = fades;
+    let live = base;
+
+    const onMove = (moveEvent: PointerEvent) => {
+      // A fade-in grows rightward, a fade-out leftward: same axis, mirrored.
+      const delta = (moveEvent.clientX - startX) / zoom;
+      live = clampFades(
+        duration0,
+        edge === "in"
+          ? { fadeIn: base.fadeIn + delta, fadeOut: base.fadeOut }
+          : { fadeIn: base.fadeIn, fadeOut: base.fadeOut - delta },
+      );
+      setFadeDrag(live);
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      setFadeDrag(null);
+      if (live.fadeIn !== base.fadeIn || live.fadeOut !== base.fadeOut) {
+        onFade(segment.id, live);
+      }
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp, { once: true });
+  };
+
+  const fadeInPx = Math.min(shownFades.fadeIn * zoom, width);
+  const fadeOutPx = Math.min(shownFades.fadeOut * zoom, width);
 
   return (
     <ContextMenu>
@@ -269,6 +326,35 @@ function ClipBody({
               topPx={soundOnly ? LABEL_BAND : height - waveformHeight}
               variant={soundOnly ? "full" : "strip"}
               muted={muted}
+            />
+          ) : null}
+
+          {/* Fade ramps, drawn as the wedge of clip the fade silences: a
+              triangle from the corner down to where the ramp reaches full
+              volume. Over the waveform, under the label, and never a pointer
+              target — the handles below are the control. */}
+          {showsFades && fadeInPx > 0 ? (
+            <span
+              aria-hidden
+              data-slot="fade"
+              data-edge="in"
+              className="pointer-events-none absolute inset-y-0 left-0 bg-timeline-clip-scrim/60"
+              style={{
+                width: fadeInPx,
+                clipPath: "polygon(0 100%, 0 0, 100% 0)",
+              }}
+            />
+          ) : null}
+          {showsFades && fadeOutPx > 0 ? (
+            <span
+              aria-hidden
+              data-slot="fade"
+              data-edge="out"
+              className="pointer-events-none absolute inset-y-0 right-0 bg-timeline-clip-scrim/60"
+              style={{
+                width: fadeOutPx,
+                clipPath: "polygon(0 0, 100% 0, 100% 100%)",
+              }}
             />
           ) : null}
 
@@ -384,6 +470,41 @@ function ClipBody({
             />
           ) : null}
 
+          {/* Fade handles: the CapCut/Premiere idiom, one at each top corner,
+              sitting where its ramp ends so the handle *is* the fade length.
+              Above the trim handles at the corners — a fade of zero puts them
+              in the same place, and the top sliver belongs to the fade. */}
+          {showsFadeHandles ? (
+            <>
+              <button
+                type="button"
+                aria-label="Fade in"
+                title="Drag to fade the sound in"
+                data-slot="fade-handle"
+                data-edge="in"
+                onPointerDown={(event) => beginFadeDrag(event, "in")}
+                className="absolute top-[1px] z-20 size-3 cursor-ew-resize border-none bg-transparent p-0 opacity-0 outline-none transition-opacity group-hover:opacity-100 data-[shown=true]:opacity-100"
+                data-shown={selected || shownFades.fadeIn > 0}
+                style={{ left: Math.max(0, Math.min(fadeInPx - 6, width - 12)) }}
+              >
+                <span className="mx-auto block size-2 rounded-full border border-background/60 bg-foreground/90" />
+              </button>
+              <button
+                type="button"
+                aria-label="Fade out"
+                title="Drag to fade the sound out"
+                data-slot="fade-handle"
+                data-edge="out"
+                onPointerDown={(event) => beginFadeDrag(event, "out")}
+                className="absolute top-[1px] z-20 size-3 cursor-ew-resize border-none bg-transparent p-0 opacity-0 outline-none transition-opacity group-hover:opacity-100 data-[shown=true]:opacity-100"
+                data-shown={selected || shownFades.fadeOut > 0}
+                style={{ right: Math.max(0, Math.min(fadeOutPx - 6, width - 12)) }}
+              >
+                <span className="mx-auto block size-2 rounded-full border border-background/60 bg-foreground/90" />
+              </button>
+            </>
+          ) : null}
+
           {/* Trim handles. Wide enough to hit, invisible until the clip
               matters, and gone under the razor — they would otherwise swallow
               the first and last few pixels of cuttable clip. */}
@@ -462,6 +583,13 @@ function ClipBody({
           <Trash2Icon />
           Delete
           <ContextMenuShortcut>Del</ContextMenuShortcut>
+        </ContextMenuItem>
+        {/* Delete plus close-the-hole, in one undo step. Linked partners come
+            along on the Rust side, so what the menu promises is what happens
+            on both lanes. */}
+        <ContextMenuItem onSelect={() => onRippleDelete(segment.id)}>
+          <Trash2Icon />
+          Ripple delete
         </ContextMenuItem>
       </ContextMenuContent>
     </ContextMenu>

@@ -86,6 +86,10 @@ pub fn run() {
             modules::timeline::commands::timeline_unlink,
             modules::timeline::commands::timeline_undo,
             modules::timeline::commands::timeline_redo,
+            // inspector
+            modules::inspector::commands::inspector_set_crop,
+            modules::inspector::commands::inspector_set_color,
+            modules::inspector::commands::inspector_lut_probe,
             // transitions
             modules::transitions::commands::transitions_catalog,
             modules::transitions::commands::transitions_max_duration,

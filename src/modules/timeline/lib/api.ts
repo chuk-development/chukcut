@@ -13,7 +13,10 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import type {
+  AnimatableProperty,
+  Easing,
   Id,
+  Keyframe,
   Micros,
   Project,
   Segment,
@@ -38,6 +41,11 @@ export interface TrackFlags {
 export type EditCommand =
   | { type: "add_track"; track: Track; index: number }
   | { type: "remove_track"; track: Track; index: number }
+  /**
+   * Move a lane in the track order. `to_index` is its position in the
+   * *resulting* list; render order follows track order on the Rust side.
+   */
+  | { type: "move_track"; track_id: Id; from_index: number; to_index: number }
   | { type: "insert_segment"; track_id: Id; segment: Segment; index: number }
   | { type: "remove_segment"; track_id: Id; segment: Segment; index: number }
   | {
@@ -66,6 +74,31 @@ export type EditCommand =
    * so a stale panel is refused rather than obeyed.
    */
   | { type: "set_link_group"; segment_id: Id; before: Id | null; after: Id | null }
+  /**
+   * The keyframe commands, which are what the audio fade handles write.
+   * `keyframe.time` is relative to the segment start, like every keyframe time
+   * in the document. The full contract — track creation and removal, collision
+   * rules — lives on the Rust enum in `timeline/ops.rs`.
+   */
+  | { type: "add_keyframe"; segment_id: Id; property: AnimatableProperty; keyframe: Keyframe }
+  | { type: "remove_keyframe"; segment_id: Id; property: AnimatableProperty; keyframe: Keyframe }
+  | {
+      type: "move_keyframe";
+      segment_id: Id;
+      property: AnimatableProperty;
+      from_time: Micros;
+      to_time: Micros;
+      before_value: number;
+      after_value: number;
+    }
+  | {
+      type: "set_keyframe_easing";
+      segment_id: Id;
+      property: AnimatableProperty;
+      time: Micros;
+      before: Easing;
+      after: Easing;
+    }
   | { type: "composite"; label: string; commands: EditCommand[] };
 
 /** What every mutating command answers with: the whole document plus history state. */

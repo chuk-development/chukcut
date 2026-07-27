@@ -2,6 +2,8 @@ import {
   FlipHorizontalIcon,
   FlipVerticalIcon,
   RotateCcwIcon,
+  RotateCcwSquareIcon,
+  RotateCwSquareIcon,
   SlidersHorizontalIcon,
 } from "lucide-react";
 import { useCallback } from "react";
@@ -10,11 +12,14 @@ import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { formatDuration, formatTimecode } from "@/lib/time";
+import { ColorSection } from "@/modules/inspector/components/ColorSection";
+import { CropSection } from "@/modules/inspector/components/CropSection";
 import { KeyframeEditor } from "@/modules/inspector/components/KeyframeEditor";
 import { KeyframeRow } from "@/modules/inspector/components/KeyframeRow";
 import { PropertySlider } from "@/modules/inspector/components/PropertySlider";
 import { TextInspector } from "@/modules/inspector/components/TextInspector";
-import { TRANSFORM_PROPERTIES, VOLUME } from "@/modules/inspector/lib/properties";
+import { rotateBy } from "@/modules/inspector/lib/adjust";
+import { OPACITY, TRANSFORM_PROPERTIES, VOLUME } from "@/modules/inspector/lib/properties";
 import { runEdit, useProjectStore } from "@/modules/project/store";
 import type { Transform } from "@/modules/project/types";
 import { findSegment, projectDuration, segmentLabel } from "@/modules/project/types";
@@ -202,6 +207,29 @@ export function Inspector() {
                 <FlipVerticalIcon />
                 Flip V
               </Button>
+              {/* Quarter turns, through the same set_transform edit the
+                  rotation slider commits, wrapped so four of them land back
+                  on exactly 0°. */}
+              <Button
+                size="sm"
+                aria-label="Rotate left 90 degrees"
+                onClick={() =>
+                  commitTransform({ rotation: rotateBy(segment.transform.rotation, -90) })
+                }
+              >
+                <RotateCcwSquareIcon />
+                90°
+              </Button>
+              <Button
+                size="sm"
+                aria-label="Rotate right 90 degrees"
+                onClick={() =>
+                  commitTransform({ rotation: rotateBy(segment.transform.rotation, 90) })
+                }
+              >
+                <RotateCwSquareIcon />
+                90°
+              </Button>
               <Button
                 size="sm"
                 className="ml-auto"
@@ -211,6 +239,19 @@ export function Inspector() {
                 Reset
               </Button>
             </div>
+          </Section>
+
+          <Separator />
+
+          <Section title="Crop">
+            <CropSection segment={segment} />
+          </Section>
+
+          <Separator />
+
+          <Section title="Colour">
+            <ColorSection project={project} segment={segment} />
+            <KeyframeRow project={project} segment={segment} def={OPACITY} />
           </Section>
 
           <Separator />

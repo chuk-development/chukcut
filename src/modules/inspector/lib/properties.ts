@@ -121,16 +121,16 @@ export const VOLUME: PropertyDef = {
   }),
 };
 
-export const TRANSFORM_PROPERTIES: PropertyDef[] = [
-  POSITION_X,
-  POSITION_Y,
-  SCALE,
-  ROTATION,
-  OPACITY,
-];
+/**
+ * The rows the Transform section shows. Opacity is deliberately not here: it
+ * renders in the Colour section with the grade sliders, where an editor's
+ * users look for it — while staying a `Transform` field in the document and a
+ * keyframable row like any other.
+ */
+export const TRANSFORM_PROPERTIES: PropertyDef[] = [POSITION_X, POSITION_Y, SCALE, ROTATION];
 
 /** Every row that can be keyframed, in the order the curve view lists them. */
-export const ANIMATABLE_PROPERTIES: PropertyDef[] = [...TRANSFORM_PROPERTIES, VOLUME];
+export const ANIMATABLE_PROPERTIES: PropertyDef[] = [...TRANSFORM_PROPERTIES, OPACITY, VOLUME];
 
 export function propertyById(id: string): PropertyDef | null {
   return ANIMATABLE_PROPERTIES.find((def) => def.id === id) ?? null;

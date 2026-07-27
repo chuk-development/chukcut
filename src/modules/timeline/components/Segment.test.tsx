@@ -7,7 +7,7 @@
  * indistinguishable from the editor being broken.
  */
 
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Micros } from "@/modules/project/types";
@@ -56,8 +56,10 @@ function renderClip(over: Partial<Parameters<typeof Segment>[0]> = {}) {
       onSplit={noop}
       onDuplicate={noop}
       onDelete={noop}
+      onRippleDelete={noop}
       onUnlink={noop}
       onLink={noop}
+      onFade={noop}
       {...over}
     />,
   );
@@ -328,6 +330,114 @@ describe("audio on a clip", () => {
     const waveform = document.querySelector('[data-slot="waveform"]');
     expect(waveform).toBeInTheDocument();
     expect(filmstrip()).toBeNull();
+  });
+});
+
+describe("audio fades", () => {
+  const SECOND_PX = SECOND * 1e-4; // 100 px per second at the fixture zoom.
+
+  function fadedSegment() {
+    return makeSegment("clip-1", {
+      target_range: range(0, 4 * SECOND),
+      source_range: range(0, 4 * SECOND),
+      keyframes: [
+        {
+          property: "volume",
+          keyframes: [
+            { time: 0, value: 0, easing: "linear" },
+            { time: SECOND, value: 1, easing: "linear" },
+          ],
+        },
+      ],
+    });
+  }
+
+  it("offers a handle at each top corner of a clip that carries sound", () => {
+    renderClip();
+    expect(screen.getByRole("button", { name: "Fade in" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Fade out" })).toBeInTheDocument();
+  });
+
+  it("offers none where the sound is not: no audio, a linked lane, a lock", () => {
+    renderClip({ material: { ...VIDEO, hasAudio: false } });
+    expect(screen.queryByRole("button", { name: "Fade in" })).toBeNull();
+  });
+
+  it("offers none on a clip whose sound lives on its linked audio lane", () => {
+    // The fade belongs where the waveform is — on the audio clip below.
+    renderClip({ soundOnPartnerLane: true });
+    expect(screen.queryByRole("button", { name: "Fade in" })).toBeNull();
+  });
+
+  it("offers none on a locked clip", () => {
+    renderClip({ locked: true });
+    expect(screen.queryByRole("button", { name: "Fade in" })).toBeNull();
+  });
+
+  it("draws the ramp its volume keyframes spell", () => {
+    renderClip({ segment: fadedSegment() });
+
+    const ramp = document.querySelector('[data-slot="fade"][data-edge="in"]');
+    expect(ramp).toBeInTheDocument();
+    // One second of fade at 100 px per second.
+    expect(ramp).toHaveStyle({ width: `${SECOND_PX}px` });
+    expect(document.querySelector('[data-slot="fade"][data-edge="out"]')).toBeNull();
+  });
+
+  it("reports the fades a completed handle drag drew", () => {
+    const onFade = vi.fn();
+    renderClip({ onFade });
+
+    // 100 px at zoom 1e-4 is one second of fade-in.
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Fade in" }), {
+      button: 0,
+      clientX: 0,
+    });
+    fireEvent.pointerMove(window, { clientX: 100 });
+    fireEvent.pointerUp(window);
+
+    expect(onFade).toHaveBeenCalledWith("clip-1", { fadeIn: SECOND, fadeOut: 0 });
+  });
+
+  it("reports a fade-out drag measured from the clip's end, leftwards", () => {
+    const onFade = vi.fn();
+    renderClip({ onFade });
+
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Fade out" }), {
+      button: 0,
+      clientX: 400,
+    });
+    fireEvent.pointerMove(window, { clientX: 350 });
+    fireEvent.pointerUp(window);
+
+    expect(onFade).toHaveBeenCalledWith("clip-1", { fadeIn: 0, fadeOut: SECOND / 2 });
+  });
+
+  it("dragging a fade back to nothing reports zero, which removes the keyframes", () => {
+    const onFade = vi.fn();
+    renderClip({ segment: fadedSegment(), onFade });
+
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Fade in" }), {
+      button: 0,
+      clientX: 100,
+    });
+    fireEvent.pointerMove(window, { clientX: -50 });
+    fireEvent.pointerUp(window);
+
+    expect(onFade).toHaveBeenCalledWith("clip-1", { fadeIn: 0, fadeOut: 0 });
+  });
+
+  it("says nothing when the handle never moved", () => {
+    const onFade = vi.fn();
+    renderClip({ onFade });
+
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Fade in" }), {
+      button: 0,
+      clientX: 0,
+    });
+    fireEvent.pointerUp(window);
+
+    expect(onFade).not.toHaveBeenCalled();
   });
 });
 

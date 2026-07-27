@@ -28,6 +28,17 @@ pub enum EditCommand {
         track: Track,
         index: usize,
     },
+    /// Move a lane to a new place in the track order.
+    ///
+    /// `to_index` is the track's position in the *resulting* list, which makes
+    /// the inverse the same command with the indices swapped. Render order is
+    /// derived from track order by [`reindex_render_order`], so reordering
+    /// lanes is the whole of restacking the composite — no segment is touched.
+    MoveTrack {
+        track_id: String,
+        from_index: usize,
+        to_index: usize,
+    },
     InsertSegment {
         track_id: String,
         segment: Segment,
@@ -327,6 +338,7 @@ impl EditCommand {
         match self {
             EditCommand::AddTrack { .. } => "Add track".into(),
             EditCommand::RemoveTrack { .. } => "Delete track".into(),
+            EditCommand::MoveTrack { .. } => "Reorder tracks".into(),
             EditCommand::InsertSegment { .. } => "Add clip".into(),
             EditCommand::RemoveSegment { .. } => "Delete clip".into(),
             EditCommand::MoveSegment { .. } => "Move clip".into(),
@@ -403,6 +415,34 @@ impl EditCommand {
                     ));
                 }
                 project.tracks.remove(*index);
+                reindex_render_order(project);
+                Ok(())
+            }
+
+            EditCommand::MoveTrack {
+                track_id,
+                from_index,
+                to_index,
+            } => {
+                // Same guard as `RemoveTrack`: the index is where the track was
+                // when the gesture started, and moving whatever is there *now*
+                // would reorder someone else's lane and invert incorrectly.
+                let found = project
+                    .tracks
+                    .get(*from_index)
+                    .ok_or("that track is no longer on the timeline")?;
+                if found.id != *track_id {
+                    return Err(format!(
+                        "the track \"{}\" is no longer where this edit expected it; the timeline \
+                         changed underneath it",
+                        found.name
+                    ));
+                }
+                if *to_index >= project.tracks.len() {
+                    return Err("there is no such place on the timeline for a track".into());
+                }
+                let track = project.tracks.remove(*from_index);
+                project.tracks.insert(*to_index, track);
                 reindex_render_order(project);
                 Ok(())
             }
@@ -809,6 +849,15 @@ impl EditCommand {
                 track: track.clone(),
                 index: *index,
             },
+            EditCommand::MoveTrack {
+                track_id,
+                from_index,
+                to_index,
+            } => EditCommand::MoveTrack {
+                track_id: track_id.clone(),
+                from_index: *to_index,
+                to_index: *from_index,
+            },
             EditCommand::InsertSegment {
                 track_id,
                 segment,
@@ -1091,6 +1140,21 @@ fn split_one(project: &Project, segment_id: &str, at: Micros) -> Result<SplitHal
         project.materials.transition(id).is_none() && !project.materials.links.contains(id)
     });
 
+    // The right half keeps only the animation that describes *its* frames.
+    // Keyframe times are relative to the segment start, and until 2026-07 the
+    // clone above copied them verbatim — so the right half replayed the whole
+    // clip's animation from the cut onward: a fade-out authored for the tail
+    // landed `left_duration` too late, and the head's keyframes existed twice.
+    // Times at or after the cut shift left by the cut; times before it belong
+    // to the left half, which keeps the original list untouched on purpose —
+    // sampling inside the left half interpolates toward keyframes beyond its
+    // new end exactly as the unsplit clip did, so it plays identically, and
+    // `validate()` reports those keyframes as the same warning a tail trim
+    // leaves. Where the cut lands mid-ramp, the right half gets an anchor at
+    // its own start carrying the value the unsplit clip had at that instant,
+    // so neither half's playback moves.
+    rebase_keyframes_for_split(&mut right.keyframes, left_duration);
+
     let right_id = right.id.clone();
     let index = track
         .segments
@@ -1114,6 +1178,52 @@ fn split_one(project: &Project, segment_id: &str, at: Micros) -> Result<SplitHal
         },
         right_id,
     })
+}
+
+/// Rebase a freshly split right half's keyframes onto its own clock.
+///
+/// `cut` is the split point as an offset from the original segment's start —
+/// the left half's duration. Everything at or after it moves left by it;
+/// everything before it is dropped, because those instants now belong to the
+/// left half. Two boundary cases keep the sound and picture at the cut exactly
+/// what they were:
+///
+/// - A cut inside a ramp gets an **anchor** keyframe at time 0 holding the
+///   interpolated value, with the easing of the interval it interrupted, so a
+///   fade crossing the cut stays one continuous fade across the two clips.
+/// - A track whose keyframes all sit before the cut collapses to a single
+///   anchor: the unsplit clip held its last keyframe's value over that region
+///   (the sampler clamps), and the right half must not snap back to 1.0.
+fn rebase_keyframes_for_split(tracks: &mut Vec<KeyframeTrack>, cut: Micros) {
+    for track in tracks.iter_mut() {
+        let boundary = track.sample(cut);
+        let governing = track
+            .keyframes
+            .iter()
+            .rev()
+            .find(|k| k.time < cut)
+            .map(|k| k.easing);
+        track.keyframes.retain(|k| k.time >= cut);
+        for keyframe in track.keyframes.iter_mut() {
+            keyframe.time -= cut;
+        }
+        let anchored = track.keyframes.first().is_some_and(|k| k.time == 0);
+        if let (Some(value), Some(easing)) = (boundary, governing) {
+            if !anchored {
+                track.keyframes.insert(
+                    0,
+                    Keyframe {
+                        time: 0,
+                        value,
+                        easing,
+                    },
+                );
+            }
+        }
+    }
+    // A property whose animation lived entirely on the left half is not
+    // animated here at all, and an empty track shows it as animated.
+    tracks.retain(|track| !track.keyframes.is_empty());
 }
 
 // ---------------------------------------------------------------------------
@@ -1275,7 +1385,10 @@ pub fn compose_edits(
 ///   is about to appear.
 ///
 /// A mixed batch is left in the order the caller gave, because there is no
-/// ordering that is right for one — and the app does not build one.
+/// ordering that is right for one. The one mixed batch the app builds — a
+/// ripple delete, one removal followed by leftward moves sorted left to right —
+/// arrives already in the order that never overlaps, and relies on being left
+/// alone here.
 fn order_for_apply(mut commands: Vec<EditCommand>) -> Vec<EditCommand> {
     if commands
         .iter()
@@ -1808,6 +1921,121 @@ mod tests {
         }
         .apply(&mut project)
         .expect("a trim that respects it is not");
+    }
+
+    #[test]
+    fn splitting_a_clip_rebases_the_right_halfs_keyframes() {
+        // The bug this pins: `split_one` used to clone the keyframes verbatim.
+        // Times are relative to the segment start, so the right half replayed
+        // the whole clip's animation from the cut onward — a fade-out authored
+        // for the tail played `left_duration` too late, and the head's
+        // keyframes existed twice.
+        let (mut project, track_id, segment_id) = project_with_clip();
+
+        // A fade-in over the first second, entirely on what becomes the left
+        // half, and a fade-out over the last second, crossing the cut at 3.5s.
+        for (time, value) in [(0, 0.0), (1_000_000, 1.0)] {
+            add(&segment_id, AnimatableProperty::Volume, time, value)
+                .apply(&mut project)
+                .unwrap();
+        }
+        for (time, value) in [(3_000_000, 1.0), (4_000_000, 0.0)] {
+            add(&segment_id, AnimatableProperty::Volume, time, value)
+                .apply(&mut project)
+                .unwrap();
+        }
+        let before = serde_json::to_string(&project).unwrap();
+
+        let command = split_at(&project, &segment_id, 3_500_000).unwrap();
+        command.apply(&mut project).unwrap();
+
+        // The left half keeps its keyframes untouched — including the one now
+        // past its end, which is what makes it play exactly as before: the
+        // sampler interpolates toward it, so the fade-out still reaches 0.5 at
+        // the cut.
+        let left = project.segment(&segment_id).unwrap().1;
+        let left_track = &left.keyframes[0];
+        assert_eq!(left_track.property, AnimatableProperty::Volume);
+        let times: Vec<Micros> = left_track.keyframes.iter().map(|k| k.time).collect();
+        assert_eq!(times, vec![0, 1_000_000, 3_000_000, 4_000_000]);
+
+        // The right half's clock starts at the cut. The fade-out's remainder is
+        // shifted onto it, anchored at its own start with the value the unsplit
+        // clip had at that instant — so the fade is continuous across the cut.
+        let track = project.track(&track_id).unwrap();
+        let right = &track.segments[1];
+        assert_eq!(right.keyframes.len(), 1, "one property is animated here");
+        let right_track = &right.keyframes[0];
+        let pairs: Vec<(Micros, f32)> = right_track
+            .keyframes
+            .iter()
+            .map(|k| (k.time, k.value))
+            .collect();
+        assert_eq!(pairs, vec![(0, 0.5), (500_000, 0.0)]);
+
+        // What a listener would check: the value at the cut and at the end are
+        // the ones the unsplit clip had at those instants.
+        assert_eq!(right_track.sample(0), Some(0.5));
+        assert_eq!(right_track.sample(500_000), Some(0.0));
+
+        // And the whole thing comes back on one undo.
+        command.invert().apply(&mut project).unwrap();
+        assert_eq!(serde_json::to_string(&project).unwrap(), before);
+    }
+
+    #[test]
+    fn splitting_after_the_animation_holds_the_last_value_on_the_right_half() {
+        // A fade-in that finished before the cut: the unsplit clip held 1.0
+        // over the right region because the sampler clamps to the last
+        // keyframe. Dropping the track entirely would be right by accident for
+        // a value of 1.0 — so the fixture fades to 0.6, where the difference
+        // between "anchored" and "forgotten" is audible.
+        let (mut project, track_id, segment_id) = project_with_clip();
+        for (time, value) in [(0, 0.0), (1_000_000, 0.6)] {
+            add(&segment_id, AnimatableProperty::Volume, time, value)
+                .apply(&mut project)
+                .unwrap();
+        }
+
+        split_at(&project, &segment_id, 2_000_000)
+            .unwrap()
+            .apply(&mut project)
+            .unwrap();
+
+        let track = project.track(&track_id).unwrap();
+        let right = &track.segments[1];
+        let pairs: Vec<(Micros, f32)> = right.keyframes[0]
+            .keyframes
+            .iter()
+            .map(|k| (k.time, k.value))
+            .collect();
+        assert_eq!(pairs, vec![(0, 0.6)], "a single anchor holds the value");
+    }
+
+    #[test]
+    fn splitting_before_the_animation_leaves_the_right_half_clean() {
+        // The mirror image: everything animated sits after the cut, so the
+        // right half takes all of it, shifted, and needs no anchor.
+        let (mut project, track_id, segment_id) = project_with_clip();
+        for (time, value) in [(3_000_000, 1.0), (4_000_000, 0.0)] {
+            add(&segment_id, AnimatableProperty::Volume, time, value)
+                .apply(&mut project)
+                .unwrap();
+        }
+
+        split_at(&project, &segment_id, 1_000_000)
+            .unwrap()
+            .apply(&mut project)
+            .unwrap();
+
+        let track = project.track(&track_id).unwrap();
+        let right = &track.segments[1];
+        let pairs: Vec<(Micros, f32)> = right.keyframes[0]
+            .keyframes
+            .iter()
+            .map(|k| (k.time, k.value))
+            .collect();
+        assert_eq!(pairs, vec![(2_000_000, 1.0), (3_000_000, 0.0)]);
     }
 
     #[test]
@@ -2926,6 +3154,275 @@ mod tests {
             vec![0, 1_000_000, 2_000_000]
         );
         assert!(errors(&project).is_empty(), "{:?}", errors(&project));
+    }
+
+    // -----------------------------------------------------------------------
+    // Ripple edits
+    //
+    // A ripple is not a primitive: the frontend sends one removal plus one move
+    // per later clip on the lane, in an order that never overlaps — the removal
+    // first, then the moves left to right, so each destination is vacated
+    // before anything arrives. `compose_edits` is what carries the link
+    // partners and makes the whole thing one undo step.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_ripple_delete_batch_closes_the_gap_and_undoes_in_one_step() {
+        let (mut project, track_id, ids) = row_of_three();
+        let before = serde_json::to_string(&project).unwrap();
+
+        // What `rippleDeleteCommands` in the webview builds: remove "one",
+        // pull "two" and "three" left by its duration.
+        let batch = vec![
+            remove_command(&project, &ids[0]),
+            move_command(&project, &ids[1], -1_000_000),
+            move_command(&project, &ids[2], -1_000_000),
+        ];
+        let command = compose_edits(&project, "Ripple delete", batch).unwrap();
+
+        let mut history = History::new();
+        history.apply(&mut project, command).unwrap();
+
+        let track = project.track(&track_id).unwrap();
+        assert_eq!(
+            track
+                .segments
+                .iter()
+                .map(|s| (s.id.clone(), s.target_range.start))
+                .collect::<Vec<_>>(),
+            vec![("two".to_string(), 0), ("three".to_string(), 1_000_000)],
+            "everything later moved left by the deleted clip's duration"
+        );
+        assert!(errors(&project).is_empty(), "{:?}", errors(&project));
+
+        history.undo(&mut project).unwrap();
+        assert_eq!(
+            serde_json::to_string(&project).unwrap(),
+            before,
+            "one undo puts the clip back and the gap with it"
+        );
+        assert!(!history.can_undo(), "one gesture, one entry");
+    }
+
+    /// A second linked pair after the first, for ripples across linked clips.
+    fn two_linked_pairs() -> Pair {
+        let mut pair = linked_pair();
+        let make = |id: &str, render_index: i32| Segment {
+            id: id.to_string(),
+            material_id: "m".into(),
+            target_range: TimeRange::new(6_000_000, 1_000_000),
+            source_range: TimeRange::new(0, 1_000_000),
+            render_index,
+            speed: 1.0,
+            volume: 1.0,
+            transform: Transform::default(),
+            crop: None,
+            extras: Vec::new(),
+            keyframes: Vec::new(),
+        };
+        pair.project
+            .track_mut(&pair.video_track)
+            .unwrap()
+            .segments
+            .push(make("v2", 0));
+        pair.project
+            .track_mut(&pair.audio_track)
+            .unwrap()
+            .segments
+            .push(make("a2", 1));
+        link(&pair.project, &["v2".into(), "a2".into()])
+            .unwrap()
+            .apply(&mut pair.project)
+            .unwrap();
+        pair
+    }
+
+    #[test]
+    fn a_ripple_across_linked_clips_moves_both_halves_of_every_pair() {
+        // The batch names only the video lane — remove v, move v2 — and the
+        // audio has to come along by itself: a delete, and every partner of
+        // every moved clip, expanded exactly once by `compose_edits`.
+        let Pair { mut project, .. } = two_linked_pairs();
+        let before = serde_json::to_string(&project).unwrap();
+
+        let batch = vec![
+            remove_command(&project, "v"),
+            move_command(&project, "v2", -4_000_000),
+        ];
+        let command = compose_edits(&project, "Ripple delete", batch).unwrap();
+        let mut history = History::new();
+        history.apply(&mut project, command).unwrap();
+
+        assert!(project.segment("v").is_none());
+        assert!(
+            project.segment("a").is_none(),
+            "deleting the picture deleted its linked sound"
+        );
+        assert_eq!(range_of(&project, "v2").start, 2_000_000);
+        assert_eq!(
+            range_of(&project, "a2").start,
+            2_000_000,
+            "the moved clip's sound rippled with it"
+        );
+        assert!(errors(&project).is_empty(), "{:?}", errors(&project));
+
+        history.undo(&mut project).unwrap();
+        assert_eq!(
+            serde_json::to_string(&project).unwrap(),
+            before,
+            "one undo restores both pairs, still linked"
+        );
+    }
+
+    #[test]
+    fn a_ripple_whose_mirror_has_nowhere_to_go_changes_nothing() {
+        // A music bed sits where the moved clip's sound would land, so the
+        // mirrored move is refused — and with it the whole ripple, because a
+        // ripple that deletes the clip but leaves the gap is worse than one
+        // that visibly did nothing.
+        let mut project = Project::new("t", CanvasConfig::default(), 30.0);
+        project.materials.videos.push(VideoMaterial {
+            id: "m".into(),
+            path: "/media/clip.mp4".into(),
+            width: 1920,
+            height: 1080,
+            duration: 10_000_000,
+            fps: 30.0,
+            has_audio: true,
+            rotation: 0,
+        });
+        let make = |id: &str, start: Micros, duration: Micros, render_index: i32| Segment {
+            id: id.to_string(),
+            material_id: "m".into(),
+            target_range: TimeRange::new(start, duration),
+            source_range: TimeRange::new(0, duration),
+            render_index,
+            speed: 1.0,
+            volume: 1.0,
+            transform: Transform::default(),
+            crop: None,
+            extras: Vec::new(),
+            keyframes: Vec::new(),
+        };
+        let mut video_track = Track::new(TrackKind::Video, "V1");
+        video_track.segments.push(make("head", 0, 1_000_000, 0));
+        video_track.segments.push(make("v2", 6_000_000, 1_000_000, 0));
+        let mut audio_track = Track::new(TrackKind::Audio, "A1");
+        audio_track.segments.push(make("bed", 5_200_000, 500_000, 1));
+        audio_track.segments.push(make("a2", 6_000_000, 1_000_000, 1));
+        project.tracks.push(video_track);
+        project.tracks.push(audio_track);
+        link(&project, &["v2".into(), "a2".into()])
+            .unwrap()
+            .apply(&mut project)
+            .unwrap();
+        let before = serde_json::to_string(&project).unwrap();
+
+        // Ripple-deleting "head" pulls v2 back by a second; its mirrored sound
+        // would land on the bed at 5.2s.
+        let batch = vec![
+            remove_command(&project, "head"),
+            move_command(&project, "v2", -1_000_000),
+        ];
+        let command = compose_edits(&project, "Ripple delete", batch).unwrap();
+        let mut history = History::new();
+        let error = history
+            .apply(&mut project, command)
+            .expect_err("the sound has nowhere to go");
+        assert!(error.contains("occupied"), "{error}");
+        assert_eq!(
+            serde_json::to_string(&project).unwrap(),
+            before,
+            "and nothing was deleted or moved"
+        );
+        assert!(!history.can_undo());
+    }
+
+    // -----------------------------------------------------------------------
+    // Track order
+    // -----------------------------------------------------------------------
+
+    /// Three lanes, one clip each, render order already normalised.
+    fn stacked_tracks() -> (Project, Vec<String>) {
+        let mut project = Project::new("t", CanvasConfig::default(), 30.0);
+        let mut ids = Vec::new();
+        for name in ["V1", "V2", "V3"] {
+            let mut track = Track::new(TrackKind::Video, name);
+            track.segments.push(Segment {
+                id: format!("clip-{name}"),
+                material_id: "m".into(),
+                target_range: TimeRange::new(0, 1_000_000),
+                source_range: TimeRange::new(0, 1_000_000),
+                render_index: ids.len() as i32,
+                speed: 1.0,
+                volume: 1.0,
+                transform: Transform::default(),
+                crop: None,
+                extras: Vec::new(),
+                keyframes: Vec::new(),
+            });
+            ids.push(track.id.clone());
+            project.tracks.push(track);
+        }
+        (project, ids)
+    }
+
+    #[test]
+    fn reordering_tracks_restacks_the_render_order_and_undoes_exactly() {
+        let (mut project, ids) = stacked_tracks();
+        let before = serde_json::to_string(&project).unwrap();
+
+        let command = EditCommand::MoveTrack {
+            track_id: ids[0].clone(),
+            from_index: 0,
+            to_index: 2,
+        };
+        let mut history = History::new();
+        history.apply(&mut project, command).unwrap();
+
+        let order: Vec<&str> = project.tracks.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(order, vec!["V2", "V3", "V1"]);
+        // Render order follows track order: the moved lane now paints on top.
+        for (index, track) in project.tracks.iter().enumerate() {
+            assert_eq!(
+                track.segments[0].render_index, index as i32,
+                "{} carries the render index of its new position",
+                track.name
+            );
+        }
+
+        history.undo(&mut project).unwrap();
+        assert_eq!(
+            serde_json::to_string(&project).unwrap(),
+            before,
+            "undoing the reorder restores order and render indices alike"
+        );
+    }
+
+    #[test]
+    fn a_track_move_against_a_stale_index_is_refused() {
+        let (mut project, ids) = stacked_tracks();
+        let before = serde_json::to_string(&project).unwrap();
+
+        // The gesture thought V2 was still at index 0.
+        let error = EditCommand::MoveTrack {
+            track_id: ids[1].clone(),
+            from_index: 0,
+            to_index: 2,
+        }
+        .apply(&mut project)
+        .expect_err("a stale index refuses");
+        assert!(error.contains("V1"), "the message names the lane: {error}");
+        assert_eq!(serde_json::to_string(&project).unwrap(), before);
+
+        // And a destination past the end is a place that does not exist.
+        assert!(EditCommand::MoveTrack {
+            track_id: ids[0].clone(),
+            from_index: 0,
+            to_index: 3,
+        }
+        .apply(&mut project)
+        .is_err());
     }
 
     #[test]

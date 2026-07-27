@@ -32,7 +32,7 @@ use super::layout::{self, QuadPlacement};
 use super::nv12::{Nv12Converter, Nv12Frame, Nv12PlaneWriter, READ_FORMAT};
 use super::source::{SourceFrame, SourceProvider, SourceRequest};
 use super::texture_pool::{PooledTexture, TextureKey, TexturePool, DEFAULT_BUDGET_BYTES};
-use crate::modules::project::document::{MaterialKind, Micros, Project, Segment};
+use crate::modules::project::document::{MaterialKind, MaterialPool, Micros, Project, Segment};
 use crate::modules::transitions::{self, TransitionParams, TransitionPipeline};
 
 /// Alignment every `copy_texture_to_buffer` row must satisfy.
@@ -52,6 +52,14 @@ const TARGET_USAGE: wgpu::TextureUsages = wgpu::TextureUsages::RENDER_ATTACHMENT
 struct QuadUniform {
     mvp: [f32; 16],
     crop: [f32; 4],
+    /// Colour adjustments as `(brightness, contrast, saturation, temperature)`.
+    /// Read by the shader only when `color_active` is 1.
+    color: [f32; 4],
+    /// The LUT's `DOMAIN_MIN` in xyz, its intensity in w. Read only when
+    /// `lut_active` is 1.
+    lut_lo: [f32; 4],
+    /// The LUT's `DOMAIN_MAX` in xyz, its edge size `N` (as a float) in w.
+    lut_hi: [f32; 4],
     opacity: f32,
     /// 1 when the source is two YUV planes rather than one RGBA texture.
     planar: u32,
@@ -61,7 +69,15 @@ struct QuadUniform {
     range: u32,
     /// Clockwise quarter turns the shader must apply to the texture coordinate.
     turns: u32,
-    _pad: [u32; 3],
+    /// 1 when `color` holds a non-identity adjustment. A flag rather than
+    /// identity values, so an ungraded clip takes exactly the code path it
+    /// always took — the byte-identity test below depends on it.
+    color_active: u32,
+    /// 1 when the bind group's LUT texture is this clip's LUT rather than the
+    /// placeholder. Gated like `color_active`, and also how a missing LUT
+    /// file renders the clip untouched.
+    lut_active: u32,
+    _pad: u32,
 }
 
 // `#[repr(C)]`, every field a `f32` array, no padding: the definition of a
@@ -264,6 +280,12 @@ pub struct Compositor {
     /// plane. One neutral texel, never sampled — the shader's `planar` branch
     /// does not read it — but the binding still has to exist.
     chroma_placeholder: wgpu::TextureView,
+    /// What binding 3 gets when the segment has no LUT, for the same
+    /// no-optional-bindings reason.
+    lut_placeholder: wgpu::TextureView,
+    /// Path → uploaded 3D LUT, revalidated by mtime per lookup. Runtime state
+    /// only — the document stores nothing but the path.
+    luts: super::lut::LutCache,
     vertices: wgpu::Buffer,
     indices: wgpu::Buffer,
     /// Per-draw uniforms, addressed with dynamic offsets. Grown, never shrunk —
@@ -397,6 +419,20 @@ impl Compositor {
                     },
                     count: None,
                 },
+                // The clip's 3D LUT, likewise always bound. Non-filterable
+                // because it is `Rgba32Float` read with `textureLoad` only —
+                // the shader interpolates by hand for exactness; see
+                // `sample_lut` in `quad.wgsl`.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -526,6 +562,24 @@ impl Compositor {
         let chroma_placeholder =
             placeholder.create_view(&wgpu::TextureViewDescriptor::default());
 
+        // The dead LUT binding: one black texel, never read, because the
+        // shader's `lut_active` branch does not run without a real LUT bound.
+        let lut_placeholder = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("chukcut lut placeholder"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D3,
+            format: wgpu::TextureFormat::Rgba32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let lut_placeholder = lut_placeholder.create_view(&wgpu::TextureViewDescriptor::default());
+
         let vertices = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("chukcut quad vertices"),
             size: std::mem::size_of_val(&QUAD_VERTICES) as u64,
@@ -558,6 +612,8 @@ impl Compositor {
             texture_layout,
             sampler,
             chroma_placeholder,
+            lut_placeholder,
+            luts: super::lut::LutCache::default(),
             vertices,
             indices,
             uniforms: Mutex::new(Scratch::default()),
@@ -823,15 +879,40 @@ impl Compositor {
         );
 
         for quad in draws.quads() {
+            let (lut_lo, lut_hi) = match &quad.lut {
+                Some((lut, intensity)) => (
+                    [
+                        lut.domain_min[0],
+                        lut.domain_min[1],
+                        lut.domain_min[2],
+                        *intensity,
+                    ],
+                    [
+                        lut.domain_max[0],
+                        lut.domain_max[1],
+                        lut.domain_max[2],
+                        lut.size as f32,
+                    ],
+                ),
+                // Never read — `lut_active` is 0 — but a degenerate domain
+                // would still be a division by zero waiting for a bug, so the
+                // dead values are a sane identity domain.
+                None => ([0.0, 0.0, 0.0, 0.0], [1.0, 1.0, 1.0, 2.0]),
+            };
             let block = QuadUniform {
                 mvp: quad.placement.mvp,
                 crop: quad.placement.crop,
+                color: quad.color.unwrap_or([0.0, 1.0, 1.0, 0.0]),
+                lut_lo,
+                lut_hi,
                 opacity: quad.placement.opacity,
                 planar: u32::from(quad.frame.is_planar()),
                 matrix: quad.frame.matrix as u32,
                 range: quad.frame.range as u32,
                 turns: quad.frame.turns % 4,
-                _pad: [0; 3],
+                color_active: u32::from(quad.color.is_some()),
+                lut_active: u32::from(quad.lut.is_some()),
+                _pad: 0,
             };
             self.ctx.queue().write_buffer(
                 uniform_buffer,
@@ -858,7 +939,7 @@ impl Compositor {
         let mut source_groups: Vec<Option<wgpu::BindGroup>> =
             (0..draws.slots).map(|_| None).collect();
         for quad in draws.quads() {
-            source_groups[quad.slot as usize] = Some(self.source_group(device, &quad.frame));
+            source_groups[quad.slot as usize] = Some(self.source_group(device, quad));
         }
 
         let bg = project.canvas.background;
@@ -971,7 +1052,8 @@ impl Compositor {
             .get_or_init(|| TransitionPipeline::new(&self.ctx, self.config.format))
     }
 
-    fn source_group(&self, device: &wgpu::Device, frame: &SourceFrame) -> wgpu::BindGroup {
+    fn source_group(&self, device: &wgpu::Device, quad: &QuadDraw) -> wgpu::BindGroup {
+        let frame = &quad.frame;
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("chukcut quad source bind group"),
             layout: &self.texture_layout,
@@ -991,6 +1073,15 @@ impl Compositor {
                             .chroma_view
                             .as_deref()
                             .unwrap_or(&self.chroma_placeholder),
+                    ),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(
+                        quad.lut
+                            .as_ref()
+                            .map(|(lut, _)| &lut.view)
+                            .unwrap_or(&self.lut_placeholder),
                     ),
                 },
             ],
@@ -1067,6 +1158,7 @@ impl Compositor {
             {
                 let from = self.quad(
                     canvas,
+                    &project.materials,
                     size,
                     sources,
                     instant.from.segment,
@@ -1077,6 +1169,7 @@ impl Compositor {
                 )?;
                 let to = self.quad(
                     canvas,
+                    &project.materials,
                     size,
                     sources,
                     instant.to.segment,
@@ -1112,7 +1205,15 @@ impl Compositor {
             };
 
             let quad = self.quad(
-                canvas, size, sources, segment, kind, source_time, time, &mut draws,
+                canvas,
+                &project.materials,
+                size,
+                sources,
+                segment,
+                kind,
+                source_time,
+                time,
+                &mut draws,
             )?;
             if let Some(quad) = quad {
                 draws.items.push(Draw::Quad(quad));
@@ -1131,6 +1232,7 @@ impl Compositor {
     fn quad(
         &self,
         canvas: (u32, u32),
+        materials: &MaterialPool,
         size: (u32, u32),
         sources: &dyn SourceProvider,
         segment: &Segment,
@@ -1178,11 +1280,46 @@ impl Compositor {
             return Ok(None);
         };
 
+        // The clip's colour adjustment, already reduced to what the shader
+        // needs. Identity grades are dropped *here* rather than sent with the
+        // flag up: the shader path for an ungraded clip must be exactly the
+        // pre-colour one, or every existing project shifts by a code value.
+        //
+        // The two halves gate independently: `scalars_are_identity` rather
+        // than `is_identity`, so a clip with only a LUT does not pay for the
+        // grade arithmetic — and, the case the "missing LUT file" contract
+        // needs, a clip whose LUT will not resolve and whose scalars are at
+        // rest takes no colour path at all.
+        let adjust = materials.color_adjust_of(segment);
+        let color = adjust
+            .filter(|adjust| !adjust.scalars_are_identity())
+            .map(|adjust| {
+                [
+                    adjust.brightness,
+                    adjust.contrast,
+                    adjust.saturation,
+                    adjust.temperature,
+                ]
+            });
+        // The LUT resolves through the cache, which stats the file each time;
+        // a missing or malformed file answers `None` here and the clip
+        // renders without its look — warned about, never failed on.
+        let lut = adjust
+            .and_then(|adjust| adjust.lut.as_ref())
+            .filter(|lut| lut.intensity > 0.0)
+            .and_then(|lut| {
+                self.luts
+                    .get(&self.ctx, &lut.path)
+                    .map(|gpu| (gpu, lut.intensity.min(1.0)))
+            });
+
         let slot = draws.slots as u32;
         draws.slots += 1;
         Ok(Some(QuadDraw {
             frame,
             placement,
+            color,
+            lut,
             slot,
         }))
     }
@@ -1302,6 +1439,14 @@ impl std::fmt::Debug for Compositor {
 struct QuadDraw {
     frame: SourceFrame,
     placement: QuadPlacement,
+    /// `(brightness, contrast, saturation, temperature)` when the segment has
+    /// a non-identity colour adjustment; `None` renders exactly as before the
+    /// colour feature existed.
+    color: Option<[f32; 4]>,
+    /// The clip's resolved LUT and its intensity. `None` when there is no
+    /// LUT, its intensity is 0, or its file is missing or malformed — all of
+    /// which render the clip without a look rather than failing.
+    lut: Option<(std::sync::Arc<super::lut::GpuLut>, f32)>,
     slot: u32,
 }
 
@@ -1893,6 +2038,13 @@ mod tests {
         /// Full-range NV12, so a luma of 255 is white and 0 is black with no
         /// rescale to reason about.
         Planar(u8, u8, u8, u32, u32),
+        /// Left half one colour, right half another. The asymmetric source
+        /// the crop and rotation tests need: a solid colour cannot show
+        /// *which* part of the picture ended up *where*.
+        SplitRgba([u8; 4], [u8; 4], u32, u32),
+        /// The same split as full-range achromatic NV12: left luma, right
+        /// luma, chroma at 128 throughout.
+        SplitPlanar(u8, u8, u32, u32),
     }
 
     #[derive(Default)]
@@ -1957,6 +2109,58 @@ mod tests {
             );
             Arc::new(texture)
         }
+
+        /// [`Self::plane`] with the left half of every row one texel and the
+        /// right half another.
+        fn split_plane(
+            ctx: &RenderContext,
+            w: u32,
+            h: u32,
+            format: wgpu::TextureFormat,
+            left: &[u8],
+            right: &[u8],
+        ) -> Arc<wgpu::Texture> {
+            let texture = ctx.device().create_texture(&wgpu::TextureDescriptor {
+                label: Some("mixed provider split plane"),
+                size: wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let mut data = Vec::with_capacity((w * h) as usize * left.len());
+            for _ in 0..h {
+                for x in 0..w {
+                    data.extend_from_slice(if x < w / 2 { left } else { right });
+                }
+            }
+            ctx.queue().write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &data,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(w * left.len() as u32),
+                    rows_per_image: Some(h),
+                },
+                wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+            );
+            Arc::new(texture)
+        }
     }
 
     impl SourceProvider for MixedProvider {
@@ -1980,6 +2184,17 @@ mod tests {
                 TestSource::Planar(y, cb, cr, w, h) => SourceFrame::from_planes(
                     Self::plane(ctx, w, h, wgpu::TextureFormat::R8Unorm, &[y]),
                     Self::plane(ctx, w / 2, h / 2, wgpu::TextureFormat::Rg8Unorm, &[cb, cr]),
+                    YuvMatrix::Bt709,
+                    YuvRange::Full,
+                    0,
+                    None,
+                ),
+                TestSource::SplitRgba(left, right, w, h) => SourceFrame::from_texture(
+                    Self::split_plane(ctx, w, h, wgpu::TextureFormat::Rgba8Unorm, &left, &right),
+                ),
+                TestSource::SplitPlanar(left, right, w, h) => SourceFrame::from_planes(
+                    Self::split_plane(ctx, w, h, wgpu::TextureFormat::R8Unorm, &[left], &[right]),
+                    Self::plane(ctx, w / 2, h / 2, wgpu::TextureFormat::Rg8Unorm, &[128, 128]),
                     YuvMatrix::Bt709,
                     YuvRange::Full,
                     0,
@@ -2375,6 +2590,832 @@ mod tests {
             // a frame where nothing is happening.
             let [r, _, b, _] = preview.pixel(320, 240);
             assert!(r > 10 && b > 10, "expected both clips at {at} µs, got {:?}", preview.pixel(320, 240));
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Crop and rotation
+    //
+    // Both are exercised through a split source — left half one tone, right
+    // half another — because a solid colour can prove *that* something drew
+    // and never *which part of the picture went where*, and "which part went
+    // where" is the entire content of crop and rotation. And both are run on
+    // both decode paths: geometry that only holds for software-decoded RGBA
+    // is the trap this codebase has already been caught by (see the greyscale
+    // incident in CLAUDE.md), and hardware decode is the default.
+    // -----------------------------------------------------------------------
+
+    /// Where a probed pixel landed, for the split-source geometry tests.
+    #[derive(Debug, PartialEq, Clone, Copy)]
+    enum Region {
+        /// The tone the *left* half of the source carries.
+        Left,
+        /// The tone the *right* half of the source carries.
+        Right,
+        Background,
+    }
+
+    /// One clip covering `[0, 4 s)` of a 640x480 canvas, background blue so
+    /// that the planar sources' black is distinguishable from it.
+    fn split_project(material: &str) -> Project {
+        let mut project = project([0.0, 0.0, 1.0, 1.0]);
+        add_video(&mut project, material);
+        let mut track = Track::new(TrackKind::Video, "V1");
+        track.segments.push(segment(material, 0, 4_000_000));
+        project.tracks.push(track);
+        project
+    }
+
+    /// The two split sources and how to read a rendered pixel back into a
+    /// [`Region`]. Red|blue for the RGBA path; white|black NV12 for the
+    /// hardware path.
+    fn split_cases() -> Vec<(&'static str, TestSource, fn([u8; 4]) -> Region)> {
+        fn classify_rgba(p: [u8; 4]) -> Region {
+            match p {
+                [r, _, b, _] if r > 200 && b < 50 => Region::Left,
+                [r, g, b, _] if b > 200 && r < 50 && g > 200 => Region::Right,
+                [r, g, b, _] if b > 200 && r < 50 && g < 50 => Region::Background,
+                other => panic!("unclassifiable pixel {other:?}"),
+            }
+        }
+        fn classify_planar(p: [u8; 4]) -> Region {
+            match p {
+                [r, g, b, _] if r > 200 && g > 200 && b > 200 => Region::Left,
+                [r, g, b, _] if r < 50 && g < 50 && b < 50 => Region::Right,
+                [r, _, b, _] if b > 200 && r < 50 => Region::Background,
+                other => panic!("unclassifiable pixel {other:?}"),
+            }
+        }
+        vec![
+            (
+                "software (RGBA)",
+                TestSource::SplitRgba([255, 0, 0, 255], [0, 255, 255, 255], 640, 480),
+                classify_rgba,
+            ),
+            (
+                "hardware (NV12)",
+                TestSource::SplitPlanar(255, 0, 640, 480),
+                classify_planar,
+            ),
+        ]
+    }
+
+    /// Cropping to the left half must scale that half to fill the fitted
+    /// quad — the right half must not appear anywhere in the frame — and the
+    /// fit must follow the *cropped* aspect (320x480 pillarboxed on 4:3), not
+    /// the source's.
+    #[test]
+    fn a_crop_keeps_only_the_kept_region_on_both_decode_paths() {
+        let Some(c) = compositor() else {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        };
+        for (name, source, classify) in split_cases() {
+            let mut project = split_project("split");
+            project.tracks[0].segments[0].crop = Some(
+                crate::modules::project::document::Crop {
+                    left: 0.0,
+                    top: 0.0,
+                    right: 0.5,
+                    bottom: 1.0,
+                },
+            );
+            let provider = MixedProvider::default().with("split", source);
+            let f = frame(&c, &project, 0, &provider);
+
+            // Cropped source is 320x480; fitted at 1:1 it spans x = 160..480.
+            assert_eq!(classify(f.pixel(320, 240)), Region::Left, "{name}: centre");
+            assert_eq!(
+                classify(f.pixel(200, 240)),
+                Region::Left,
+                "{name}: left of quad"
+            );
+            assert_eq!(
+                classify(f.pixel(460, 240)),
+                Region::Left,
+                "{name}: the kept half stretches across the whole quad"
+            );
+            assert_eq!(
+                classify(f.pixel(100, 240)),
+                Region::Background,
+                "{name}: pillarbox left"
+            );
+            assert_eq!(
+                classify(f.pixel(550, 240)),
+                Region::Background,
+                "{name}: pillarbox right"
+            );
+            // Nothing from the discarded half anywhere on the centre row.
+            for x in (2..640).step_by(10) {
+                assert_ne!(
+                    classify(f.pixel(x, 240)),
+                    Region::Right,
+                    "{name}: discarded half leaked at x={x}"
+                );
+            }
+        }
+    }
+
+    /// The quarter turns, from `Transform::rotation` rather than from
+    /// container metadata. Clockwise 90 puts the source's left half at the
+    /// top; 180 puts it on the right; 270 at the bottom. Pinned against the
+    /// same expectations on both decode paths.
+    #[test]
+    fn quarter_turn_rotations_put_each_half_where_a_clockwise_turn_says() {
+        let Some(c) = compositor() else {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        };
+        for (name, source, classify) in split_cases() {
+            for (angle, probes) in [
+                // (x, y, expected): the 90° quad is 480 wide, x = 80..560.
+                (
+                    90.0f32,
+                    vec![
+                        (320, 120, Region::Left),
+                        (320, 360, Region::Right),
+                        (30, 240, Region::Background),
+                        (610, 240, Region::Background),
+                    ],
+                ),
+                (
+                    180.0,
+                    vec![(500, 240, Region::Left), (140, 240, Region::Right)],
+                ),
+                (
+                    270.0,
+                    vec![
+                        (320, 360, Region::Left),
+                        (320, 120, Region::Right),
+                        (30, 240, Region::Background),
+                    ],
+                ),
+            ] {
+                let mut project = split_project("split");
+                project.tracks[0].segments[0].transform.rotation = angle;
+                let provider = MixedProvider::default().with("split", source);
+                let f = frame(&c, &project, 0, &provider);
+                for (x, y, expected) in probes {
+                    assert_eq!(
+                        classify(f.pixel(x, y)),
+                        expected,
+                        "{name}: at {angle}°, pixel ({x},{y})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// An arbitrary angle. A square clip at 45° is a diamond `|x|+|y| <= d`
+    /// around the centre with `d = side/√2`, so points just inside and just
+    /// outside that boundary pin the actual rotation angle rather than only
+    /// "it turned by some multiple of 90".
+    #[test]
+    fn an_arbitrary_rotation_draws_the_expected_diamond_on_both_decode_paths() {
+        let Some(c) = compositor() else {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        };
+        for (name, source, is_clip) in [
+            (
+                "software (RGBA)",
+                TestSource::Rgba([255, 0, 0, 255], 480, 480),
+                (|p: [u8; 4]| p[0] > 200 && p[2] < 50) as fn([u8; 4]) -> bool,
+            ),
+            (
+                "hardware (NV12)",
+                TestSource::Planar(255, 128, 128, 480, 480),
+                |p: [u8; 4]| p[0] > 200 && p[1] > 200,
+            ),
+        ] {
+            let mut project = split_project("square");
+            {
+                let transform = &mut project.tracks[0].segments[0].transform;
+                // 480-square fitted to the 480-tall canvas, halved: a 240px
+                // square, whose 45° diamond reaches ±169.7px on the axes.
+                transform.scale = [0.5, 0.5];
+                transform.rotation = 45.0;
+            }
+            let provider = MixedProvider::default().with("square", source);
+            let f = frame(&c, &project, 0, &provider);
+
+            assert!(is_clip(f.pixel(320, 240)), "{name}: centre is the clip");
+            assert!(
+                is_clip(f.pixel(440, 240)),
+                "{name}: (120,0) is inside the diamond"
+            );
+            assert!(
+                is_clip(f.pixel(320, 90)),
+                "{name}: (0,-150) is inside the diamond"
+            );
+            assert!(
+                !is_clip(f.pixel(440, 360)),
+                "{name}: (120,120) is outside the diamond — an unrotated \
+                 square would still cover it"
+            );
+            assert!(
+                !is_clip(f.pixel(440, 120)),
+                "{name}: (120,-120) is outside the diamond"
+            );
+        }
+    }
+
+    /// Crop first, then rotate: the kept half fills the quad and the quad
+    /// turns. The order is what `layout::place_quad` documents; if crop were
+    /// applied after rotation the discarded half would reappear.
+    #[test]
+    fn crop_and_rotation_compose_in_document_order() {
+        let Some(c) = compositor() else {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        };
+        for (name, source, classify) in split_cases() {
+            let mut project = split_project("split");
+            {
+                let segment = &mut project.tracks[0].segments[0];
+                segment.crop = Some(crate::modules::project::document::Crop {
+                    left: 0.0,
+                    top: 0.0,
+                    right: 0.5,
+                    bottom: 1.0,
+                });
+                segment.transform.rotation = 90.0;
+            }
+            let provider = MixedProvider::default().with("split", source);
+            let f = frame(&c, &project, 0, &provider);
+
+            // Cropped 320x480, rotated: a 480x320 quad, y = 80..400.
+            assert_eq!(classify(f.pixel(320, 240)), Region::Left, "{name}: centre");
+            assert_eq!(
+                classify(f.pixel(320, 60)),
+                Region::Background,
+                "{name}: above the rotated quad"
+            );
+            for (x, y) in [(320, 100), (320, 380), (120, 240), (520, 240)] {
+                assert_ne!(
+                    classify(f.pixel(x, y)),
+                    Region::Right,
+                    "{name}: discarded half leaked at ({x},{y})"
+                );
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Colour adjustments
+    // -----------------------------------------------------------------------
+
+    /// Attach a grade to the only clip of `project`.
+    fn grade(project: &mut Project, adjust: [f32; 4]) {
+        let material = crate::modules::project::document::ColorAdjustMaterial {
+            id: "grade".into(),
+            brightness: adjust[0],
+            contrast: adjust[1],
+            saturation: adjust[2],
+            temperature: adjust[3],
+            lut: None,
+        };
+        project.materials.color_adjusts.push(material);
+        project.tracks[0].segments[0].extras.push("grade".into());
+    }
+
+    /// [`grade`], with a LUT file attached as well.
+    fn grade_with_lut(
+        project: &mut Project,
+        adjust: [f32; 4],
+        path: &std::path::Path,
+        intensity: f32,
+    ) {
+        grade(project, adjust);
+        project.materials.color_adjusts[0].lut =
+            Some(crate::modules::project::document::LutRef {
+                path: path.to_string_lossy().into_owned(),
+                intensity,
+            });
+    }
+
+    /// A .cube file on real disk, because the cache is keyed by path + mtime
+    /// and a LUT that only existed in memory would test nothing about that.
+    fn write_lut(name: &str, text: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join("chukcut-lut-tests");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join(format!("{name}-{}.cube", std::process::id()));
+        std::fs::write(&path, text).expect("write LUT fixture");
+        path
+    }
+
+    /// The reference for `apply_color` in `quad.wgsl`, in encoded space.
+    ///
+    /// Written out independently rather than shared, for the reason
+    /// `nv12_pixel` gives: a change to the shader must fail here, not cancel
+    /// out. Takes and returns encoded values because, against an sRGB render
+    /// target, the readback byte *is* the encoded value — the target's encode
+    /// undoes the shader's final decode.
+    fn adjust_encoded(mut c: [f32; 3], adjust: [f32; 4]) -> [f32; 3] {
+        let [brightness, contrast, saturation, temperature] = adjust;
+        c[0] += temperature * 0.2;
+        c[2] -= temperature * 0.2;
+        let grey = 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
+        for channel in &mut c {
+            *channel = grey + (*channel - grey) * saturation;
+            *channel = (*channel - 0.5) * contrast + 0.5;
+            *channel += brightness;
+            *channel = channel.clamp(0.0, 1.0);
+        }
+        c
+    }
+
+    /// The headline requirement: a document that never touched colour renders
+    /// **byte-identical** to one from before the feature existed. An identity
+    /// grade takes the ungraded shader path outright (the `color_active`
+    /// flag), so this asserts full-frame equality, not closeness — a colour
+    /// pass that shifts untouched clips by one code value fails here.
+    #[test]
+    fn an_identity_grade_renders_byte_identical_to_no_grade_at_all() {
+        let Some(c) = srgb_compositor() else {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        };
+        // A hardware-decoded colourful source, where any accidental colour
+        // maths would have the most to distort.
+        let source = TestSource::Planar(173, 90, 200, 640, 480);
+        let provider = MixedProvider::default().with("clip", source);
+
+        let mut project = split_project("clip");
+        let before = frame(&c, &project, 0, &provider);
+
+        grade(&mut project, [0.0, 1.0, 1.0, 0.0]);
+        let with_identity = frame(&c, &project, 0, &provider);
+        assert_eq!(
+            before.data, with_identity.data,
+            "an identity grade changed pixels"
+        );
+
+        // And the machinery is actually live: a non-identity grade differs.
+        project.materials.color_adjusts[0].brightness = 0.1;
+        let brightened = frame(&c, &project, 0, &provider);
+        assert_ne!(before.data, brightened.data, "the grade did nothing");
+    }
+
+    /// The same grade must produce the same pixels whichever decoder produced
+    /// the frame. White and black land on identical values through both
+    /// paths, so one expected number covers both — the same trick the
+    /// transition agreement test uses.
+    #[test]
+    fn a_grade_is_the_same_however_the_clip_was_decoded() {
+        let Some(c) = srgb_compositor() else {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        };
+        let white_sw = TestSource::Rgba([255, 255, 255, 255], 640, 480);
+        let white_hw = TestSource::Planar(255, 128, 128, 640, 480);
+        let black_sw = TestSource::Rgba([0, 0, 0, 255], 640, 480);
+        let black_hw = TestSource::Planar(0, 128, 128, 640, 480);
+
+        // (source, grade, expected RGB) — expectations computed through the
+        // reference, spelled as numbers so a broken reference is also caught.
+        // White at brightness -0.4 sits at 0.6 encoded = 153; warm white
+        // drops only blue, 1 - 0.6*0.2 = 0.88 = 224; black at +0.4 is 102.
+        for (name, source, adjust, expected) in [
+            ("sw darkened", white_sw, [-0.4, 1.0, 1.0, 0.0], [153, 153, 153]),
+            ("hw darkened", white_hw, [-0.4, 1.0, 1.0, 0.0], [153, 153, 153]),
+            ("sw warmed", white_sw, [0.0, 1.0, 1.0, 0.6], [255, 255, 224]),
+            ("hw warmed", white_hw, [0.0, 1.0, 1.0, 0.6], [255, 255, 224]),
+            ("sw lifted black", black_sw, [0.4, 1.0, 1.0, 0.0], [102, 102, 102]),
+            ("hw lifted black", black_hw, [0.4, 1.0, 1.0, 0.0], [102, 102, 102]),
+        ] {
+            let mut project = split_project("clip");
+            grade(&mut project, adjust);
+            let provider = MixedProvider::default().with("clip", source);
+            let f = frame(&c, &project, 0, &provider);
+            let [r, g, b, a] = f.pixel(320, 240);
+            for (channel, actual, wanted) in
+                [("r", r, expected[0]), ("g", g, expected[1]), ("b", b, expected[2])]
+            {
+                assert!(
+                    (actual as i32 - wanted).abs() <= 2,
+                    "{name}: {channel} is {actual}, expected {wanted}"
+                );
+            }
+            assert_eq!(a, 255, "{name}: a grade never touches coverage");
+
+            // The reference agrees with the hand-computed numbers above.
+            let encoded_in = if matches!(source, TestSource::Rgba([0, ..], ..) | TestSource::Planar(0, ..)) {
+                [0.0, 0.0, 0.0]
+            } else {
+                [1.0, 1.0, 1.0]
+            };
+            let reference = adjust_encoded(encoded_in, adjust);
+            for i in 0..3 {
+                assert!(
+                    ((reference[i] * 255.0).round() as i32 - expected[i]).abs() <= 1,
+                    "{name}: the reference and the spelled-out expectation disagree"
+                );
+            }
+        }
+    }
+
+    /// Mid-tones through the full reference, on the hardware path, where the
+    /// arithmetic is exact: a full-range achromatic NV12 sample decodes to
+    /// its own code value, so `readback = adjust_encoded(y/255) * 255`.
+    #[test]
+    fn contrast_brightness_and_saturation_match_the_reference_arithmetic() {
+        let Some(c) = srgb_compositor() else {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        };
+        // Contrast pushes a light grey away from the pivot; brightness slides
+        // it down; both at once compose in the documented order.
+        for (name, adjust) in [
+            ("contrast", [0.0, 1.5, 1.0, 0.0f32]),
+            ("brightness", [-0.2, 1.0, 1.0, 0.0]),
+            ("both", [-0.2, 1.5, 1.0, 0.0]),
+            ("cooled", [0.0, 1.0, 1.0, -0.7]),
+        ] {
+            let mut project = split_project("clip");
+            grade(&mut project, adjust);
+            let provider = MixedProvider::default()
+                .with("clip", TestSource::Planar(200, 128, 128, 640, 480));
+            let f = frame(&c, &project, 0, &provider);
+            let expected = adjust_encoded([200.0 / 255.0; 3], adjust);
+            let got = f.pixel(320, 240);
+            for i in 0..3 {
+                let wanted = (expected[i] * 255.0).round() as i32;
+                assert!(
+                    (got[i] as i32 - wanted).abs() <= 2,
+                    "{name}: channel {i} is {}, reference says {wanted}",
+                    got[i]
+                );
+            }
+        }
+
+        // Saturation zero turns pure red into its BT.601 grey — 0.299, byte
+        // 76 — through the software path, since red needs chroma.
+        let mut project = split_project("clip");
+        grade(&mut project, [0.0, 1.0, 0.0, 0.0]);
+        let provider =
+            MixedProvider::default().with("clip", TestSource::Rgba([255, 0, 0, 255], 640, 480));
+        let f = frame(&c, &project, 0, &provider);
+        let [r, g, b, _] = f.pixel(320, 240);
+        for (channel, value) in [("r", r), ("g", g), ("b", b)] {
+            assert!(
+                (value as i32 - 76).abs() <= 2,
+                "{channel} is {value}, expected desaturated red at 76"
+            );
+        }
+    }
+
+    /// Preview and export must show the same grade. Same shape as the
+    /// transition agreement test and for the same reason: both call
+    /// `render_to_texture`, and this pins that the colour pass went in there
+    /// rather than into one of the two callers.
+    #[test]
+    fn the_preview_and_the_export_agree_on_a_graded_frame() {
+        let Some(c) = srgb_compositor() else {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        };
+        for (name, source) in [
+            ("software", TestSource::Rgba([255, 255, 255, 255], 640, 480)),
+            ("hardware", TestSource::Planar(255, 128, 128, 640, 480)),
+        ] {
+            let mut project = split_project("clip");
+            grade(&mut project, [-0.1, 1.2, 0.8, 0.5]);
+            let provider = MixedProvider::default().with("clip", source);
+
+            let preview = c
+                .render(&project, 0, (640, 480), &provider)
+                .expect("preview render");
+            let Ok(export) = c.render_nv12(&project, 0, (640, 480), &provider) else {
+                eprintln!("skipping: no RGBA to NV12 compute pass on this device");
+                return;
+            };
+
+            for (x, y) in [(0, 0), (320, 240), (639, 479), (17, 300)] {
+                let expected = preview.pixel(x, y);
+                let actual = nv12_pixel(&export, x, y);
+                for channel in 0..3 {
+                    assert!(
+                        (expected[channel] as i32 - actual[channel] as i32).abs() <= 3,
+                        "{name}: at ({x},{y}), preview {expected:?} against export {actual:?}"
+                    );
+                }
+            }
+
+            // And the grade really was live in what we compared.
+            let [r, _, b, _] = preview.pixel(320, 240);
+            assert!(
+                r != 255 || b != 255,
+                "{name}: the graded frame looks ungraded: {:?}",
+                preview.pixel(320, 240)
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // LUTs
+    //
+    // Fixture cubes are built by `render::lut::fixtures` so their effect is
+    // arithmetic, not a file someone once trusted. Full-range achromatic NV12
+    // is the workhorse source again: its encoded value *is* its code value,
+    // so a LUT's expected output is a number a reviewer can recompute in
+    // their head.
+    // -----------------------------------------------------------------------
+
+    /// An identity .cube at full intensity must change nothing — byte for
+    /// byte, which is what the hand-rolled trilinear in `sample_lut` exists
+    /// for: hardware filtering quantises its weights and fails this.
+    #[test]
+    fn an_identity_lut_renders_byte_identical_to_no_lut() {
+        let Some(c) = srgb_compositor() else {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        };
+        let path = write_lut(
+            "identity",
+            &crate::modules::render::lut::fixtures::identity_cube(2),
+        );
+        let source = TestSource::Planar(173, 90, 200, 640, 480);
+        let provider = MixedProvider::default().with("clip", source);
+
+        let mut project = split_project("clip");
+        let before = frame(&c, &project, 0, &provider);
+
+        grade_with_lut(&mut project, [0.0, 1.0, 1.0, 0.0], &path, 1.0);
+        let with_lut = frame(&c, &project, 0, &provider);
+        assert_eq!(before.data, with_lut.data, "an identity LUT changed pixels");
+
+        // A larger identity cube interpolates between grid points and must
+        // still be exact — trilinear over identity data is the identity.
+        let path = write_lut(
+            "identity17",
+            &crate::modules::render::lut::fixtures::identity_cube(17),
+        );
+        project.materials.color_adjusts[0].lut.as_mut().unwrap().path =
+            path.to_string_lossy().into_owned();
+        let with_larger = frame(&c, &project, 0, &provider);
+        assert_eq!(before.data, with_larger.data, "a 17-point identity LUT changed pixels");
+    }
+
+    /// The analytic fixtures, on both decode paths. Inversion and halving on
+    /// achromatic NV12 read straight off in code values; the channel swap
+    /// needs colour, which is the RGBA path's clean case.
+    #[test]
+    fn a_lut_applies_its_analytic_transform_on_both_decode_paths() {
+        let Some(c) = srgb_compositor() else {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        };
+        let invert = write_lut(
+            "invert",
+            &crate::modules::render::lut::fixtures::cube_text(2, |r, g, b| {
+                [1.0 - r, 1.0 - g, 1.0 - b]
+            }),
+        );
+        let swap = write_lut(
+            "swap",
+            &crate::modules::render::lut::fixtures::cube_text(2, |r, g, b| [b, g, r]),
+        );
+        let halve = write_lut(
+            "halve",
+            &crate::modules::render::lut::fixtures::cube_text(2, |r, g, b| {
+                [r * 0.5, g * 0.5, b * 0.5]
+            }),
+        );
+
+        // (name, source, lut, expected RGB at the centre)
+        let cases: Vec<(&str, TestSource, &std::path::Path, [i32; 3])> = vec![
+            // 255 - 200 = 55, through the hardware path.
+            (
+                "invert hw grey",
+                TestSource::Planar(200, 128, 128, 640, 480),
+                &invert,
+                [55, 55, 55],
+            ),
+            // And through the software path at the extremes.
+            (
+                "invert sw white",
+                TestSource::Rgba([255, 255, 255, 255], 640, 480),
+                &invert,
+                [0, 0, 0],
+            ),
+            (
+                "swap sw red",
+                TestSource::Rgba([255, 0, 0, 255], 640, 480),
+                &swap,
+                [0, 0, 255],
+            ),
+            // The 2-point gradient: everything halves, in encoded space.
+            (
+                "halve hw grey",
+                TestSource::Planar(100, 128, 128, 640, 480),
+                &halve,
+                [50, 50, 50],
+            ),
+            (
+                "halve sw white",
+                TestSource::Rgba([255, 255, 255, 255], 640, 480),
+                &halve,
+                [128, 128, 128],
+            ),
+        ];
+        for (name, source, lut, expected) in cases {
+            let mut project = split_project("clip");
+            grade_with_lut(&mut project, [0.0, 1.0, 1.0, 0.0], lut, 1.0);
+            let provider = MixedProvider::default().with("clip", source);
+            let got = frame(&c, &project, 0, &provider).pixel(320, 240);
+            for channel in 0..3 {
+                assert!(
+                    (got[channel] as i32 - expected[channel]).abs() <= 1,
+                    "{name}: channel {channel} is {}, expected {}",
+                    got[channel],
+                    expected[channel]
+                );
+            }
+            assert_eq!(got[3], 255, "{name}: a LUT never touches coverage");
+        }
+    }
+
+    /// Intensity is a lerp between the input and the look, and 0 takes the
+    /// LUT path out entirely — exact code values, not merely "less effect".
+    #[test]
+    fn lut_intensity_lerps_between_input_and_look() {
+        let Some(c) = srgb_compositor() else {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        };
+        let invert = write_lut(
+            "invert-intensity",
+            &crate::modules::render::lut::fixtures::cube_text(2, |r, g, b| {
+                [1.0 - r, 1.0 - g, 1.0 - b]
+            }),
+        );
+        let provider =
+            MixedProvider::default().with("clip", TestSource::Planar(200, 128, 128, 640, 480));
+
+        // 0.75 * 200 + 0.25 * 55 = 163.75.
+        let mut project = split_project("clip");
+        grade_with_lut(&mut project, [0.0, 1.0, 1.0, 0.0], &invert, 0.25);
+        let quarter = frame(&c, &project, 0, &provider).pixel(320, 240);
+        assert!(
+            (quarter[0] as i32 - 164).abs() <= 1,
+            "quarter intensity gave {quarter:?}"
+        );
+
+        // Intensity 0 is not "the LUT, weakly": the resolver drops it, the
+        // flag stays 0, and the clip renders on the untouched path.
+        let mut project = split_project("clip");
+        grade_with_lut(&mut project, [0.0, 1.0, 1.0, 0.0], &invert, 0.0);
+        let off = frame(&c, &project, 0, &provider);
+        let plain = frame(&c, &split_project("clip"), 0, &provider);
+        assert_eq!(off.data, plain.data, "intensity 0 must be byte-identical to no LUT");
+    }
+
+    /// Grade first, look second. Brightness +0.2 then invert on code 100:
+    /// (100/255 + 0.2) inverted is 0.408 → 104. The reversed order would give
+    /// (1 - 100/255) + 0.2 = 0.808 → 206, so this pins the order, not just
+    /// "both ran".
+    #[test]
+    fn the_lut_applies_after_the_grade() {
+        let Some(c) = srgb_compositor() else {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        };
+        let invert = write_lut(
+            "invert-order",
+            &crate::modules::render::lut::fixtures::cube_text(2, |r, g, b| {
+                [1.0 - r, 1.0 - g, 1.0 - b]
+            }),
+        );
+        let mut project = split_project("clip");
+        grade_with_lut(&mut project, [0.2, 1.0, 1.0, 0.0], &invert, 1.0);
+        let provider =
+            MixedProvider::default().with("clip", TestSource::Planar(100, 128, 128, 640, 480));
+        let got = frame(&c, &project, 0, &provider).pixel(320, 240);
+        assert!(
+            (got[0] as i32 - 104).abs() <= 1,
+            "grade-then-look should give 104, got {got:?}"
+        );
+    }
+
+    /// The reopen contract: a LUT whose file is gone renders the clip
+    /// *unadjusted* — byte-identical to no material when the scalars are at
+    /// rest, and byte-identical to the grade alone when they are not. A
+    /// malformed file behaves the same, and neither kills the frame.
+    #[test]
+    fn a_missing_or_malformed_lut_file_renders_the_clip_unadjusted() {
+        let Some(c) = srgb_compositor() else {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        };
+        let source = TestSource::Planar(173, 90, 200, 640, 480);
+        let provider = MixedProvider::default().with("clip", source);
+        let missing = std::path::PathBuf::from("/nonexistent/look.cube");
+        let garbage = write_lut("garbage", "LUT_3D_SIZE 2\nnot numbers at all\n");
+
+        let plain = frame(&c, &split_project("clip"), 0, &provider);
+
+        for path in [&missing, &garbage] {
+            let mut project = split_project("clip");
+            grade_with_lut(&mut project, [0.0, 1.0, 1.0, 0.0], path, 1.0);
+            // Twice, so the second frame exercises the cached-failure path
+            // rather than re-reading the file.
+            let first = frame(&c, &project, 0, &provider);
+            let second = frame(&c, &project, 0, &provider);
+            assert_eq!(plain.data, first.data, "{path:?}: identity scalars, no look");
+            assert_eq!(first.data, second.data);
+        }
+
+        // With real scalars, the grade still applies without the look.
+        let mut graded_only = split_project("clip");
+        grade(&mut graded_only, [0.1, 1.0, 1.0, 0.0]);
+        let expected = frame(&c, &graded_only, 0, &provider);
+
+        let mut project = split_project("clip");
+        grade_with_lut(&mut project, [0.1, 1.0, 1.0, 0.0], &missing, 1.0);
+        let got = frame(&c, &project, 0, &provider);
+        assert_eq!(expected.data, got.data, "the grade must survive a lost LUT");
+    }
+
+    /// The cache is keyed by mtime: editing the file shows up on the next
+    /// frame, with no invalidation call anywhere.
+    #[test]
+    fn an_edited_lut_file_is_picked_up_on_the_next_frame() {
+        let Some(c) = srgb_compositor() else {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        };
+        let path = write_lut(
+            "edited",
+            &crate::modules::render::lut::fixtures::identity_cube(2),
+        );
+        let provider =
+            MixedProvider::default().with("clip", TestSource::Planar(200, 128, 128, 640, 480));
+        let mut project = split_project("clip");
+        grade_with_lut(&mut project, [0.0, 1.0, 1.0, 0.0], &path, 1.0);
+
+        let before = frame(&c, &project, 0, &provider).pixel(320, 240);
+        assert!((before[0] as i32 - 200).abs() <= 1, "identity first: {before:?}");
+
+        // A pause so the rewrite cannot land on the same mtime even on a
+        // coarse-timestamp filesystem.
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        std::fs::write(
+            &path,
+            crate::modules::render::lut::fixtures::cube_text(2, |r, g, b| {
+                [1.0 - r, 1.0 - g, 1.0 - b]
+            }),
+        )
+        .expect("rewrite LUT");
+
+        let after = frame(&c, &project, 0, &provider).pixel(320, 240);
+        assert!(
+            (after[0] as i32 - 55).abs() <= 1,
+            "the edit was not picked up: {after:?}"
+        );
+    }
+
+    /// Preview and export agree on a graded-and-looked frame, both decode
+    /// paths — the same claim the transition and grade parity tests make,
+    /// extended over the LUT.
+    #[test]
+    fn the_preview_and_the_export_agree_on_a_lut_frame() {
+        let Some(c) = srgb_compositor() else {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        };
+        let invert = write_lut(
+            "invert-parity",
+            &crate::modules::render::lut::fixtures::cube_text(2, |r, g, b| {
+                [1.0 - r, 1.0 - g, 1.0 - b]
+            }),
+        );
+        for (name, source) in [
+            ("software", TestSource::Rgba([230, 120, 40, 255], 640, 480)),
+            ("hardware", TestSource::Planar(200, 100, 180, 640, 480)),
+        ] {
+            let mut project = split_project("clip");
+            grade_with_lut(&mut project, [-0.1, 1.2, 0.8, 0.3], &invert, 0.6);
+            let provider = MixedProvider::default().with("clip", source);
+
+            let preview = c
+                .render(&project, 0, (640, 480), &provider)
+                .expect("preview render");
+            let Ok(export) = c.render_nv12(&project, 0, (640, 480), &provider) else {
+                eprintln!("skipping: no RGBA to NV12 compute pass on this device");
+                return;
+            };
+
+            for (x, y) in [(0, 0), (320, 240), (639, 479), (17, 300)] {
+                let expected = preview.pixel(x, y);
+                let actual = nv12_pixel(&export, x, y);
+                for channel in 0..3 {
+                    assert!(
+                        (expected[channel] as i32 - actual[channel] as i32).abs() <= 3,
+                        "{name}: at ({x},{y}), preview {expected:?} against export {actual:?}"
+                    );
+                }
+            }
         }
     }
 

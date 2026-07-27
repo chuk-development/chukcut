@@ -269,6 +269,16 @@ pub struct MaterialPool {
     /// neither should be parsing `serde_json::Value` to do it.
     #[serde(default)]
     pub transitions: Vec<TransitionMaterial>,
+    /// Per-clip colour adjustments, referenced from the `extras` list of the
+    /// segment they grade. See [`ColorAdjustMaterial`].
+    ///
+    /// A typed category for the same two reasons `transitions` above is one:
+    /// the compositor reads these fields on every frame and must not parse
+    /// `serde_json::Value` to do it, and a pool category referenced through
+    /// `extras` changes no existing segment, constructor or test — the exact
+    /// payoff [`TransitionMaterial`] records for the same choice.
+    #[serde(default)]
+    pub color_adjusts: Vec<ColorAdjustMaterial>,
     /// Every link group id that some segment currently belongs to.
     ///
     /// ## Why linkage is on the segment and this is only a type tag
@@ -350,6 +360,21 @@ impl MaterialPool {
 
     pub fn transition_mut(&mut self, id: &str) -> Option<&mut TransitionMaterial> {
         self.transitions.iter_mut().find(|m| m.id == id)
+    }
+
+    pub fn color_adjust(&self, id: &str) -> Option<&ColorAdjustMaterial> {
+        self.color_adjusts.iter().find(|m| m.id == id)
+    }
+
+    /// The colour adjustment applied to `segment`, if it has one.
+    ///
+    /// The resolution step for the colour category, exactly like
+    /// [`Self::transition_of`] is for transitions: `Segment::extras` carries no
+    /// type tag, so an id is a colour adjustment when this pool category
+    /// resolves it. A segment carrying more than one is malformed; this returns
+    /// the first, because rendering *a* grade beats rendering none.
+    pub fn color_adjust_of(&self, segment: &Segment) -> Option<&ColorAdjustMaterial> {
+        segment.extras.iter().find_map(|id| self.color_adjust(id))
     }
 
     /// The transition `segment` is entered through, if it has one.
@@ -648,6 +673,141 @@ impl TransitionMaterial {
             softness: default_softness(),
             zoom: default_zoom(),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Colour adjustments
+// ---------------------------------------------------------------------------
+
+/// One clip's colour adjustments, living in the material pool.
+///
+/// ## Where these live, and why
+///
+/// Three homes were considered. Fields on `Segment` were rejected because a
+/// struct-literal field breaks every existing `Segment { .. }` constructor in
+/// the tree, including ones owned by other modules, for a feature most clips
+/// never use. A `serde_json::Value` in `MaterialPool::extras` was rejected
+/// because the compositor resolves this on **every frame** of every graded
+/// clip, and that map exists for parameter blocks nothing hot reads. So it is
+/// a typed pool category referenced from `Segment::extras`, exactly like
+/// [`TransitionMaterial`] and for the reasons written there: the segment
+/// carries its grade through every move, trim and split for free, and
+/// `RemoveSegment` — which snapshots the whole segment — undoes the loss of
+/// the reference without knowing colour exists.
+///
+/// ## Identity is the default, exactly
+///
+/// Every default is the arithmetic identity of its operation (add 0, multiply
+/// by 1, mix by 1, shift by 0), and the compositor additionally skips the
+/// colour pass entirely for an identity material, so a document that never
+/// touches colour renders byte-identical to one built before the feature
+/// existed. There is a pixel test pinning that.
+///
+/// The fields are what the shader applies, in the order the shader applies
+/// them (temperature, saturation, contrast, brightness — see `quad.wgsl`):
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ColorAdjustMaterial {
+    pub id: Id,
+    /// Added to each channel after contrast. `-1..1`, `0` is identity.
+    #[serde(default = "zero")]
+    pub brightness: f32,
+    /// Scales the distance from mid grey. `0..2`, `1` is identity.
+    #[serde(default = "one")]
+    pub contrast: f32,
+    /// Mixes between the luma-grey image and the original. `0..2`, `1` is
+    /// identity; above 1 oversaturates.
+    #[serde(default = "one")]
+    pub saturation: f32,
+    /// Warm/cool shift: positive pushes red up and blue down. `-1..1`, `0` is
+    /// identity.
+    #[serde(default = "zero")]
+    pub temperature: f32,
+    /// A .cube look, applied *after* the scalar adjustments — grade first,
+    /// look second, the order `quad.wgsl` implements.
+    ///
+    /// On this material rather than a category of its own because the two are
+    /// one gesture in the panel and one uniform block in the shader, and a
+    /// second pool category would force the grade/look ordering question to
+    /// be answered across two materials on every segment. `None` is "no
+    /// look", the identity-is-absence rule the scalars follow.
+    #[serde(default)]
+    pub lut: Option<LutRef>,
+}
+
+/// A reference to a .cube LUT file on disk.
+///
+/// The **path** is what is stored; the parsed cube is runtime state, cached
+/// by `render::lut::LutCache` keyed on path + mtime. A project whose LUT file
+/// has gone must still open: `validate()` reports the missing file as a
+/// warning — the same rule as `VideoMaterial::path` — and the renderer
+/// renders the clip unadjusted.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LutRef {
+    /// Absolute path to the .cube file.
+    pub path: String,
+    /// Blend between the (graded) input and the LUT's output, `0..1`.
+    /// `1` is the LUT as authored; `0` contributes nothing, but the path is
+    /// kept so the slider can come back up without re-picking the file.
+    #[serde(default = "one")]
+    pub intensity: f32,
+}
+
+impl ColorAdjustMaterial {
+    /// A fresh identity adjustment with its own id.
+    pub fn identity() -> Self {
+        Self {
+            id: new_id(),
+            brightness: 0.0,
+            contrast: 1.0,
+            saturation: 1.0,
+            temperature: 0.0,
+            lut: None,
+        }
+    }
+
+    /// Whether the four scalar sliders are all at their identity.
+    ///
+    /// Distinct from [`Self::is_identity`] because the renderer gates the two
+    /// halves independently: a clip with only a LUT must not take the scalar
+    /// grade's encode/adjust path, and — the case that matters for the
+    /// "render unadjusted" contract — a clip whose LUT *file is missing* and
+    /// whose scalars are identity must take no colour path at all.
+    pub fn scalars_are_identity(&self) -> bool {
+        self.brightness == 0.0
+            && self.contrast == 1.0
+            && self.saturation == 1.0
+            && self.temperature == 0.0
+    }
+
+    /// Whether applying this would change nothing.
+    ///
+    /// The compositor uses this to skip the colour pass outright rather than
+    /// trusting floating-point identities to hold through the shader — a
+    /// grade that shifts an untouched clip by one code value is a regression
+    /// for every existing project.
+    pub fn is_identity(&self) -> bool {
+        self.scalars_are_identity() && self.lut.is_none()
+    }
+
+    /// The first field that is not a finite number, by name. Same contract as
+    /// [`Transform::non_finite_field`] and for the same reason: a NaN saves as
+    /// `null` and the project never opens again.
+    pub fn non_finite_field(&self) -> Option<&'static str> {
+        for (name, value) in [
+            ("brightness", self.brightness),
+            ("contrast", self.contrast),
+            ("saturation", self.saturation),
+            ("temperature", self.temperature),
+        ] {
+            if !value.is_finite() {
+                return Some(name);
+            }
+        }
+        if self.lut.as_ref().is_some_and(|l| !l.intensity.is_finite()) {
+            return Some("LUT intensity");
+        }
+        None
     }
 }
 
@@ -1302,6 +1462,34 @@ impl Project {
 
         issues.extend(outside);
 
+        // A colour adjustment is applied on every rendered frame of the clip
+        // that references it, so a non-finite value here is a NaN handed to the
+        // GPU — and, worse, a save that emits `null` and never opens again.
+        // Pushed directly rather than through the `error` closure above, whose
+        // borrow of `issues` has ended by this point.
+        for m in &self.materials.color_adjusts {
+            if let Some(field) = m.non_finite_field() {
+                issues.push(ValidationIssue {
+                    severity: Severity::Error,
+                    message: format!("colour adjustment {field} is not a finite number"),
+                    subject_id: Some(m.id.clone()),
+                });
+            }
+            // A warning, not an error, for the reason a missing video file is
+            // one: the project must still open and play, with the clip
+            // rendered unadjusted. The renderer makes the same check per
+            // frame through `render::lut::LutCache`.
+            if let Some(lut) = &m.lut {
+                if !std::path::Path::new(&lut.path).exists() {
+                    issues.push(ValidationIssue {
+                        severity: Severity::Warning,
+                        message: format!("LUT file is missing: {}", lut.path),
+                        subject_id: Some(m.id.clone()),
+                    });
+                }
+            }
+        }
+
         for m in &self.materials.videos {
             if !std::path::Path::new(&m.path).exists() {
                 issues.push(ValidationIssue {
@@ -1373,6 +1561,142 @@ mod tests {
         // Half a second into the segment at 2x speed = one second into source.
         assert_eq!(seg.source_time_at(1_500_000), Some(1_500_000));
         assert_eq!(seg.source_time_at(0), None);
+    }
+
+    /// A graded project must come back from disk exactly as it went in. The
+    /// grade is a pool material referenced by id from `Segment::extras`, so
+    /// both halves of that — the material's values and the reference — have to
+    /// survive the trip.
+    #[test]
+    fn colour_adjustments_round_trip_through_json() {
+        let mut project = Project::new("t", CanvasConfig::default(), 30.0);
+        let mut adjust = ColorAdjustMaterial::identity();
+        adjust.brightness = 0.25;
+        adjust.contrast = 1.4;
+        adjust.saturation = 0.5;
+        adjust.temperature = -0.3;
+        let adjust_id = adjust.id.clone();
+        project.materials.color_adjusts.push(adjust);
+
+        let mut track = Track::new(TrackKind::Video, "V1");
+        let mut segment = Segment {
+            id: new_id(),
+            material_id: "m".into(),
+            target_range: TimeRange::new(0, 1_000_000),
+            source_range: TimeRange::new(0, 1_000_000),
+            render_index: 0,
+            speed: 1.0,
+            volume: 1.0,
+            transform: Transform::default(),
+            crop: None,
+            extras: Vec::new(),
+            keyframes: Vec::new(),
+        };
+        segment.extras.push(adjust_id.clone());
+        track.segments.push(segment);
+        project.tracks.push(track);
+
+        let json = serde_json::to_string_pretty(&project).expect("serialize");
+        let reloaded: Project = serde_json::from_str(&json).expect("deserialize");
+
+        let segment = &reloaded.tracks[0].segments[0];
+        let resolved = reloaded
+            .materials
+            .color_adjust_of(segment)
+            .expect("the reference survived");
+        assert_eq!(resolved.id, adjust_id);
+        assert_eq!(resolved.brightness, 0.25);
+        assert_eq!(resolved.contrast, 1.4);
+        assert_eq!(resolved.saturation, 0.5);
+        assert_eq!(resolved.temperature, -0.3);
+
+        // And a second save is byte-identical, which is what makes the file
+        // diffable — the property `MaterialPool::extras`' docs demand of every
+        // category.
+        let again = serde_json::to_string_pretty(&reloaded).expect("serialize again");
+        assert_eq!(json, again);
+    }
+
+    /// A file written before the colour category existed has no
+    /// `color_adjusts` key at all, and it must open with the pool empty rather
+    /// than refuse to load.
+    #[test]
+    fn a_project_saved_before_colour_existed_still_opens() {
+        let project = Project::new("old", CanvasConfig::default(), 30.0);
+        let mut json: serde_json::Value = serde_json::to_value(&project).expect("serialize");
+        let materials = json["materials"].as_object_mut().expect("materials object");
+        materials.remove("color_adjusts");
+
+        let reloaded: Project = serde_json::from_value(json).expect("an old file still opens");
+        assert!(reloaded.materials.color_adjusts.is_empty());
+    }
+
+    /// The defaults are the identity, field by field. If one of these drifts,
+    /// every untouched clip in every old project changes appearance.
+    #[test]
+    fn a_default_colour_adjustment_is_the_identity() {
+        let adjust: ColorAdjustMaterial =
+            serde_json::from_str(r#"{ "id": "c1" }"#).expect("defaults fill in");
+        assert!(adjust.is_identity());
+        assert!(ColorAdjustMaterial::identity().is_identity());
+
+        let mut warmed = ColorAdjustMaterial::identity();
+        warmed.temperature = 0.2;
+        assert!(!warmed.is_identity());
+
+        // A LUT alone makes the material non-identity even with every scalar
+        // at rest — the two halves are gated independently.
+        let mut looked = ColorAdjustMaterial::identity();
+        looked.lut = Some(LutRef {
+            path: "/looks/warm.cube".into(),
+            intensity: 1.0,
+        });
+        assert!(!looked.is_identity());
+        assert!(looked.scalars_are_identity());
+    }
+
+    /// A LUT reference round-trips — path and intensity — and a pre-LUT file
+    /// (no `lut` key on the material) still opens with the field `None`.
+    #[test]
+    fn lut_references_round_trip_and_old_materials_open() {
+        let mut adjust = ColorAdjustMaterial::identity();
+        adjust.lut = Some(LutRef {
+            path: "/looks/warm.cube".into(),
+            intensity: 0.7,
+        });
+        let json = serde_json::to_string(&adjust).expect("serialize");
+        let back: ColorAdjustMaterial = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, adjust);
+
+        let old: ColorAdjustMaterial =
+            serde_json::from_str(r#"{ "id": "c1", "brightness": 0.1 }"#).expect("old file opens");
+        assert!(old.lut.is_none());
+
+        // Intensity defaults to 1 when a hand-edited file leaves it off.
+        let bare: ColorAdjustMaterial =
+            serde_json::from_str(r#"{ "id": "c1", "lut": { "path": "/l.cube" } }"#).expect("opens");
+        assert_eq!(bare.lut.as_ref().map(|l| l.intensity), Some(1.0));
+    }
+
+    /// A project referencing a LUT file that no longer exists must open —
+    /// missing look, playable project — and say so as a warning, exactly the
+    /// missing-media rule.
+    #[test]
+    fn a_missing_lut_file_is_a_warning_not_an_error() {
+        let mut project = Project::new("t", CanvasConfig::default(), 30.0);
+        let mut adjust = ColorAdjustMaterial::identity();
+        adjust.lut = Some(LutRef {
+            path: "/nonexistent/look.cube".into(),
+            intensity: 1.0,
+        });
+        project.materials.color_adjusts.push(adjust);
+
+        let issues = project.validate();
+        let issue = issues
+            .iter()
+            .find(|i| i.message.contains("LUT file is missing"))
+            .expect("the missing file is reported");
+        assert_eq!(issue.severity, Severity::Warning);
     }
 
     #[test]

@@ -112,6 +112,41 @@ export interface TransitionMaterial {
   zoom: number;
 }
 
+/**
+ * One clip's colour adjustments, in the pool like a transition.
+ *
+ * The id sits in the segment's `extras`; identity values are never stored —
+ * "no adjustment" is the reference simply being absent. Committing a change
+ * mints a *new* material and swaps the reference, which is what makes colour
+ * edits exactly undoable; see `inspector/edit.rs`.
+ */
+/**
+ * A .cube LUT on disk, applied after the scalar adjustments.
+ *
+ * Only the *path* is stored; parsing and the GPU upload are runtime state in
+ * Rust, keyed by path + mtime. A missing file is a validation warning and the
+ * clip renders without its look — never a load failure.
+ */
+export interface LutRef {
+  path: string;
+  /** Blend between the graded input and the LUT's output, `0..1`. */
+  intensity: number;
+}
+
+export interface ColorAdjustMaterial {
+  id: Id;
+  /** `-1..1`, `0` is identity. */
+  brightness: number;
+  /** `0..2`, `1` is identity. */
+  contrast: number;
+  /** `0..2`, `1` is identity. */
+  saturation: number;
+  /** `-1..1`, `0` is identity; positive is warmer. */
+  temperature: number;
+  /** The look, `null` for none. */
+  lut: LutRef | null;
+}
+
 export interface MaterialPool {
   videos: VideoMaterial[];
   audios: AudioMaterial[];
@@ -128,6 +163,16 @@ export interface MaterialPool {
    * consumer, so the fixtures were fixed instead.
    */
   transitions: TransitionMaterial[];
+  /**
+   * Colour adjustment blocks, referenced from the graded segment's `extras`.
+   *
+   * Optional where `transitions` above is required, and the asymmetry is
+   * deliberate rather than an oversight: Rust always sends the field, but
+   * several other modules' fixtures build `MaterialPool` literals and were
+   * written before this category existed. Consumers use `?? []`; the field
+   * becomes required the next time those fixtures are touched anyway.
+   */
+  color_adjusts?: ColorAdjustMaterial[];
   /**
    * Every link group id some segment belongs to.
    *

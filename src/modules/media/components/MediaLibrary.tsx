@@ -149,7 +149,7 @@ export function MediaLibrary() {
             ) : (
               <EmptyState
                 message="No media imported"
-                hint="Click Import, or drag video and audio files straight from your file manager onto this panel."
+                hint="Click Import, or drag video, image and audio files straight from your file manager onto this panel."
               />
             )
           ) : (

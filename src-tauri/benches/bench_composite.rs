@@ -41,8 +41,9 @@
 use std::sync::{Arc, Mutex};
 
 use chukcut_lib::modules::project::{
-    new_id, AnimatableProperty, CanvasConfig, Crop, Easing, Keyframe, KeyframeTrack, Micros,
-    Project, Segment, TimeRange, Track, TrackKind, Transform, VideoMaterial,
+    new_id, AnimatableProperty, CanvasConfig, ColorAdjustMaterial, Crop, Easing, Keyframe,
+    KeyframeTrack, LutRef, Micros, Project, Segment, TimeRange, Track, TrackKind, Transform,
+    VideoMaterial,
 };
 use chukcut_lib::modules::render::{
     Compositor, RenderContext, SourceFrame, SourceProvider, SourceRequest,
@@ -250,6 +251,58 @@ fn keyframes(property: AnimatableProperty, span: Micros, from: f32, to: f32) -> 
     }
 }
 
+/// A realistic 33-point warm LUT, written to the temp dir once per run.
+///
+/// 33 is the commonest size in shipped looks; the values are a gentle warm so
+/// nothing about the table is degenerate (an identity LUT tempts a future
+/// cache into special-casing it and benchmarking the special case).
+fn warm_lut_file() -> std::path::PathBuf {
+    let path = std::env::temp_dir().join(format!(
+        "chukcut-bench-warm-{}.cube",
+        std::process::id()
+    ));
+    let n = 33u32;
+    let last = (n - 1) as f32;
+    let mut text = format!("LUT_3D_SIZE {n}\n");
+    for b in 0..n {
+        for g in 0..n {
+            for r in 0..n {
+                let (rf, gf, bf) = (r as f32 / last, g as f32 / last, b as f32 / last);
+                text.push_str(&format!(
+                    "{} {} {}\n",
+                    (rf * 1.05).min(1.0),
+                    gf.powf(0.98),
+                    bf * 0.95
+                ));
+            }
+        }
+    }
+    std::fs::write(&path, text).expect("write bench LUT");
+    path
+}
+
+/// Attach a non-identity grade plus the LUT to every layer, so the row
+/// measures the whole colour pass: encode, four scalar ops, eight
+/// `textureLoad`s and the lerp, decode — per covered pixel per layer.
+fn grade_and_lut(project: &mut Project, lut: &std::path::Path) {
+    project.materials.color_adjusts.push(ColorAdjustMaterial {
+        id: "bench-grade".into(),
+        brightness: 0.05,
+        contrast: 1.1,
+        saturation: 0.9,
+        temperature: 0.2,
+        lut: Some(LutRef {
+            path: lut.to_string_lossy().into_owned(),
+            intensity: 0.8,
+        }),
+    });
+    for track in &mut project.tracks {
+        for segment in &mut track.segments {
+            segment.extras.push("bench-grade".into());
+        }
+    }
+}
+
 pub struct Budget {
     pub frames: usize,
     pub rounds: usize,
@@ -302,6 +355,44 @@ pub fn run(ctx: &Arc<RenderContext>, budget: &Budget) -> Vec<Measurement> {
             out.push(without);
         }
     }
+
+    // The colour pass, priced against the `plain` rows above: the same
+    // timeline with a non-identity grade *and* a 33-point LUT on every layer.
+    // The delta against `plain` at the same layer count is what grading a
+    // clip costs per frame — measured rather than asserted, because the LUT
+    // is eight `textureLoad`s per covered pixel and "surely that is free" is
+    // exactly the sentence that precedes a fill-rate regression.
+    let lut = warm_lut_file();
+    for layers in [1usize, 3, 10] {
+        let mut project = timeline(layers, canvas, false);
+        grade_and_lut(&mut project, &lut);
+        let name = format!("{layers} layer(s), grade+lut");
+
+        let samples = rounds::<String>(budget.rounds, |_| {
+            Ok(sweep(&compositor, &project, &provider, canvas, budget.frames, true))
+        })
+        .expect("compositing does not fail once the first frame has");
+        compositor.reset_stats();
+        let with_readback = Measurement::ms(GROUP, name.clone(), samples);
+
+        let samples = rounds::<String>(budget.rounds, |_| {
+            Ok(sweep(&compositor, &project, &provider, canvas, budget.frames, false))
+        })
+        .expect("compositing does not fail once the first frame has");
+        let stats = compositor.stats();
+        compositor.reset_stats();
+
+        let without = Measurement::ms(GROUP, format!("{name}, GPU only"), samples).with_note(
+            format!(
+                "sources {:.2} ms, composite {:.2} ms",
+                stats.per_frame(stats.sources_ns) / 1e6,
+                stats.per_frame(stats.composite_ns) / 1e6
+            ),
+        );
+        out.push(with_readback);
+        out.push(without);
+    }
+    let _ = std::fs::remove_file(&lut);
     out
 }
 

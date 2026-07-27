@@ -61,6 +61,7 @@ pub mod context;
 pub mod dmabuf;
 pub mod error;
 pub mod layout;
+pub mod lut;
 pub mod nv12;
 pub mod source;
 pub mod texture_pool;

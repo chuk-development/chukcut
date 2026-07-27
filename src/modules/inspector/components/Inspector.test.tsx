@@ -248,7 +248,8 @@ describe("the transform buttons", () => {
     ipc.handle("timeline_apply", makeEditResponse(project));
     open(project);
 
-    fireEvent.click(screen.getByRole("button", { name: /reset/i }));
+    // Exact-match: "Reset crop" and "Reset colour" are different buttons.
+    fireEvent.click(screen.getByRole("button", { name: /^reset$/i }));
 
     expect(ipc.count("timeline_apply")).toBe(1);
     expect(ipc.lastCall("timeline_apply")?.command).toEqual({
@@ -256,6 +257,252 @@ describe("the transform buttons", () => {
       segment_id: "segment-1",
       before: moved,
       after: IDENTITY_TRANSFORM,
+    });
+  });
+});
+
+describe("the rotate buttons", () => {
+  it("turns a quarter clockwise through the ordinary transform edit", () => {
+    const project = projectWithSegments(makeSegment("segment-1"));
+    ipc.handle("timeline_apply", makeEditResponse(project));
+    open(project);
+
+    fireEvent.click(screen.getByRole("button", { name: /rotate right/i }));
+
+    expect(ipc.count("timeline_apply")).toBe(1);
+    expect(ipc.lastCall("timeline_apply")?.command).toEqual({
+      type: "set_transform",
+      segment_id: "segment-1",
+      before: IDENTITY_TRANSFORM,
+      after: { ...IDENTITY_TRANSFORM, rotation: 90 },
+    });
+  });
+
+  it("wraps rather than accumulating, so the slider can always show the angle", () => {
+    const project = projectWithSegments(
+      makeSegment("segment-1", { transform: { ...IDENTITY_TRANSFORM, rotation: 135 } }),
+    );
+    ipc.handle("timeline_apply", makeEditResponse(project));
+    open(project);
+
+    fireEvent.click(screen.getByRole("button", { name: /rotate right/i }));
+
+    expect(ipc.lastCall("timeline_apply")?.command).toMatchObject({
+      after: { rotation: -135 },
+    });
+  });
+});
+
+describe("the crop panel", () => {
+  it("commits one inspector_set_crop per release, carrying the whole rectangle", () => {
+    const project = projectWithSegments(makeSegment("segment-1"));
+    ipc.handle("inspector_set_crop", makeEditResponse(project));
+    open(project);
+
+    // The inset sliders run 0..MAX_INSET (0.45); 40% along is an inset of 0.18.
+    drag(slider("Crop left"), 0, 0.4);
+
+    expect(ipc.count("inspector_set_crop")).toBe(1);
+    const payload = ipc.lastCall("inspector_set_crop") as {
+      segmentId: string;
+      crop: { left: number; top: number; right: number; bottom: number };
+    };
+    expect(payload.segmentId).toBe("segment-1");
+    expect(payload.crop.left).toBeCloseTo(0.18, 5);
+    expect(payload.crop.top).toBe(0);
+    expect(payload.crop.right).toBe(1);
+    expect(payload.crop.bottom).toBe(1);
+  });
+
+  it("keeps the other edges while one is dragged", () => {
+    const project = projectWithSegments(
+      makeSegment("segment-1", { crop: { left: 0.1, top: 0.2, right: 0.9, bottom: 1 } }),
+    );
+    ipc.handle("inspector_set_crop", makeEditResponse(project));
+    open(project);
+
+    drag(slider("Crop bottom"), 0, 0.4);
+
+    const payload = ipc.lastCall("inspector_set_crop") as { crop: Record<string, number> };
+    expect(payload.crop.left).toBeCloseTo(0.1, 5);
+    expect(payload.crop.top).toBeCloseTo(0.2, 5);
+    expect(payload.crop.right).toBeCloseTo(0.9, 5);
+    expect(payload.crop.bottom).toBeCloseTo(0.82, 5);
+  });
+
+  it("resets by sending null, and only offers reset once there is a crop", () => {
+    const uncropped = projectWithSegments(makeSegment("segment-1"));
+    const { unmount } = open(uncropped);
+    expect(screen.getByRole("button", { name: /reset crop/i })).toBeDisabled();
+    unmount();
+
+    const cropped = projectWithSegments(
+      makeSegment("segment-1", { crop: { left: 0.25, top: 0, right: 0.75, bottom: 1 } }),
+    );
+    ipc.handle("inspector_set_crop", makeEditResponse(cropped));
+    open(cropped);
+
+    fireEvent.click(screen.getByRole("button", { name: /reset crop/i }));
+
+    expect(ipc.lastCall("inspector_set_crop")).toMatchObject({
+      segmentId: "segment-1",
+      crop: null,
+    });
+  });
+});
+
+describe("the colour panel", () => {
+  it("commits the whole grade with the dragged field changed", () => {
+    const project = projectWithSegments(makeSegment("segment-1"));
+    ipc.handle("inspector_set_color", makeEditResponse(project));
+    open(project);
+
+    // Brightness runs -1..1; three quarters along is +0.5.
+    drag(slider("Brightness"), 0.5, 0.75);
+
+    expect(ipc.count("inspector_set_color")).toBe(1);
+    expect(ipc.lastCall("inspector_set_color")).toEqual({
+      segmentId: "segment-1",
+      color: { brightness: 0.5, contrast: 1, saturation: 1, temperature: 0, lut: null },
+    });
+  });
+
+  it("starts from the applied grade rather than from identity", () => {
+    const project = projectWithSegments(makeSegment("segment-1", { extras: ["grade-1"] }));
+    project.materials.color_adjusts = [
+      {
+        id: "grade-1",
+        brightness: 0.2,
+        contrast: 1.4,
+        saturation: 1,
+        temperature: -0.3,
+        lut: null,
+      },
+    ];
+    ipc.handle("inspector_set_color", makeEditResponse(project));
+    open(project);
+
+    // Saturation runs 0..2; a quarter along is 0.5.
+    drag(slider("Saturation"), 0.5, 0.25);
+
+    expect(ipc.lastCall("inspector_set_color")).toEqual({
+      segmentId: "segment-1",
+      color: { brightness: 0.2, contrast: 1.4, saturation: 0.5, temperature: -0.3, lut: null },
+    });
+  });
+
+  it("picks a LUT through the dialog, probes it, and commits it at full intensity", async () => {
+    const project = projectWithSegments(makeSegment("segment-1"));
+    ipc.handle("plugin:dialog|open", "/looks/warm.cube");
+    ipc.handle("inspector_lut_probe", { title: "Warm Look", size: 33 });
+    ipc.handle("inspector_set_color", makeEditResponse(project));
+    open(project);
+
+    fireEvent.click(screen.getByRole("button", { name: /choose lut/i }));
+    // Let the async dialog → probe → commit chain settle.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(ipc.count("inspector_lut_probe")).toBe(1);
+    expect(ipc.lastCall("inspector_lut_probe")).toEqual({ path: "/looks/warm.cube" });
+    expect(ipc.count("inspector_set_color")).toBe(1);
+    expect(ipc.lastCall("inspector_set_color")).toEqual({
+      segmentId: "segment-1",
+      color: {
+        brightness: 0,
+        contrast: 1,
+        saturation: 1,
+        temperature: 0,
+        lut: { path: "/looks/warm.cube", intensity: 1 },
+      },
+    });
+  });
+
+  it("refuses a malformed LUT at pick time and never touches the document", async () => {
+    const project = projectWithSegments(makeSegment("segment-1"));
+    ipc.handle("plugin:dialog|open", "/looks/broken.cube");
+    ipc.fail("inspector_lut_probe", "line 3: a data line needs three numbers");
+    open(project);
+
+    fireEvent.click(screen.getByRole("button", { name: /choose lut/i }));
+    // Let the async pick settle.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(ipc.count("inspector_set_color")).toBe(0);
+    expect(useProjectStore.getState().error).toContain("line 3");
+  });
+
+  it("shows an applied LUT with its intensity, and drags commit the blend", () => {
+    const project = projectWithSegments(makeSegment("segment-1", { extras: ["grade-1"] }));
+    project.materials.color_adjusts = [
+      {
+        id: "grade-1",
+        brightness: 0,
+        contrast: 1,
+        saturation: 1,
+        temperature: 0,
+        lut: { path: "/looks/warm.cube", intensity: 1 },
+      },
+    ];
+    ipc.handle("inspector_set_color", makeEditResponse(project));
+    open(project);
+
+    expect(screen.getByText("warm.cube")).toBeInTheDocument();
+
+    drag(slider("LUT intensity"), 1, 0.5);
+
+    expect(ipc.lastCall("inspector_set_color")).toEqual({
+      segmentId: "segment-1",
+      color: {
+        brightness: 0,
+        contrast: 1,
+        saturation: 1,
+        temperature: 0,
+        lut: { path: "/looks/warm.cube", intensity: 0.5 },
+      },
+    });
+  });
+
+  it("removes the LUT while keeping the sliders' grade", () => {
+    const project = projectWithSegments(makeSegment("segment-1", { extras: ["grade-1"] }));
+    project.materials.color_adjusts = [
+      {
+        id: "grade-1",
+        brightness: 0.2,
+        contrast: 1,
+        saturation: 1,
+        temperature: 0,
+        lut: { path: "/looks/warm.cube", intensity: 0.7 },
+      },
+    ];
+    ipc.handle("inspector_set_color", makeEditResponse(project));
+    open(project);
+
+    fireEvent.click(screen.getByRole("button", { name: /remove lut/i }));
+
+    expect(ipc.lastCall("inspector_set_color")).toEqual({
+      segmentId: "segment-1",
+      color: { brightness: 0.2, contrast: 1, saturation: 1, temperature: 0, lut: null },
+    });
+  });
+
+  it("resets by sending null, and only offers reset once there is a grade", () => {
+    const ungraded = projectWithSegments(makeSegment("segment-1"));
+    const { unmount } = open(ungraded);
+    expect(screen.getByRole("button", { name: /reset colour/i })).toBeDisabled();
+    unmount();
+
+    const graded = projectWithSegments(makeSegment("segment-1", { extras: ["grade-1"] }));
+    graded.materials.color_adjusts = [
+      { id: "grade-1", brightness: 0.2, contrast: 1, saturation: 1, temperature: 0, lut: null },
+    ];
+    ipc.handle("inspector_set_color", makeEditResponse(graded));
+    open(graded);
+
+    fireEvent.click(screen.getByRole("button", { name: /reset colour/i }));
+
+    expect(ipc.lastCall("inspector_set_color")).toMatchObject({
+      segmentId: "segment-1",
+      color: null,
     });
   });
 });

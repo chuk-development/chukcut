@@ -120,47 +120,38 @@ fn is_still_image(format: &str) -> bool {
     format.ends_with("_pipe") || format == "image2" || format == "png" || format == "jpeg"
 }
 
-/// Add a file to the project's material pool, probing it to fill in the
-/// details.
+/// A "video stream" that is actually text art.
 ///
-/// Importing is not undoable, and deliberately so: a material with no segment
-/// referencing it is inert, and putting library imports in the undo stack
-/// means Ctrl+Z after a cut can silently empty the media panel.
+/// FFmpeg's `tty` demuxer matches on the *extension alone* — `.txt`, `.nfo`,
+/// `.asc` and friends — and presents the bytes as an `ansi` video stream, so
+/// without this check a stray text file imports as a video material whose card
+/// can never render a picture. The bintext family is the same trick for DOS
+/// art files. Nobody edits ANSI art in a video editor; refusing is the honest
+/// answer.
+fn is_text_art(format: &str, video_codec: &str) -> bool {
+    matches!(format, "tty" | "bin" | "xbin" | "idf" | "adf")
+        || matches!(video_codec, "ansi" | "bintext" | "xbin" | "idf")
+}
+
+/// The pure half of [`project_import_media`]: decide what a probed file is and
+/// add it to the pool.
 ///
-/// Importing the same path twice returns the existing material rather than
-/// duplicating it — that is the whole point of the pool being keyed by
-/// identity.
-#[tauri::command]
-pub async fn project_import_media(
-    state: State<'_, Arc<AppState>>,
-    path: String,
+/// Split from the command so the integration suite can drive imports against a
+/// bare [`Project`] — the command itself needs a Tauri `State` and an async
+/// runtime, neither of which a test wants to stand up.
+pub fn import_material(
+    project: &mut Project,
+    path: &str,
+    name: &str,
+    info: &crate::modules::media::MediaInfo,
 ) -> Result<ImportedMaterial, String> {
-    // Probing opens the container and runs FFmpeg's stream-info pass, which is
-    // milliseconds on a warm cache and noticeably longer on a large file over a
-    // network mount. A synchronous command would do that on the main thread and
-    // freeze the window for the duration, so it goes off-thread even though it
-    // is usually quick.
-    let probe_path = path.clone();
-    let info = tauri::async_runtime::spawn_blocking(move || crate::modules::media::probe(&probe_path))
-        .await
-        .map_err(|error| format!("the import task failed: {error}"))?
-        .map_err(|error| error.to_string())?;
-
-    let name = std::path::Path::new(&path)
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| path.clone());
-
-    let mut guard = state.project.write();
-    let project = guard.as_mut().ok_or("no project is open")?;
-
     // Already imported? Hand back what is there.
     if let Some(existing) = project.materials.videos.iter().find(|m| m.path == path) {
         return Ok(ImportedMaterial {
             id: existing.id.clone(),
             kind: MaterialKind::Video,
-            name,
-            path,
+            name: name.to_string(),
+            path: path.to_string(),
             duration: existing.duration,
             width: existing.width,
             height: existing.height,
@@ -171,8 +162,8 @@ pub async fn project_import_media(
         return Ok(ImportedMaterial {
             id: existing.id.clone(),
             kind: MaterialKind::Image,
-            name,
-            path,
+            name: name.to_string(),
+            path: path.to_string(),
             duration: 0,
             width: existing.width,
             height: existing.height,
@@ -183,8 +174,8 @@ pub async fn project_import_media(
         return Ok(ImportedMaterial {
             id: existing.id.clone(),
             kind: MaterialKind::Audio,
-            name,
-            path,
+            name: name.to_string(),
+            path: path.to_string(),
             duration: existing.duration,
             width: 0,
             height: 0,
@@ -192,21 +183,31 @@ pub async fn project_import_media(
         });
     }
 
+    // A "video stream" from the tty family is text, not a picture, and would
+    // otherwise fall through to the video arm below.
+    if let Some(video) = &info.video {
+        if is_text_art(&info.format, &video.codec) {
+            return Err(format!(
+                "{name} is a text file, not video, image or audio"
+            ));
+        }
+    }
+
     let id = new_id();
 
-    let imported = match (&info.video, &info.audio) {
+    match (&info.video, &info.audio) {
         (Some(video), _) if is_still_image(&info.format) => {
             project.materials.images.push(ImageMaterial {
                 id: id.clone(),
-                path: path.clone(),
+                path: path.to_string(),
                 width: video.display_width,
                 height: video.display_height,
             });
             Ok(ImportedMaterial {
                 id,
                 kind: MaterialKind::Image,
-                name,
-                path,
+                name: name.to_string(),
+                path: path.to_string(),
                 duration: 0,
                 width: video.display_width,
                 height: video.display_height,
@@ -283,7 +284,7 @@ pub async fn project_import_media(
 
             project.materials.videos.push(VideoMaterial {
                 id: id.clone(),
-                path: path.clone(),
+                path: path.to_string(),
                 width: video.width,
                 height: video.height,
                 duration: info.duration,
@@ -294,8 +295,8 @@ pub async fn project_import_media(
             Ok(ImportedMaterial {
                 id,
                 kind: MaterialKind::Video,
-                name,
-                path,
+                name: name.to_string(),
+                path: path.to_string(),
                 duration: info.duration,
                 // Display dimensions, so the UI does not have to know about
                 // rotation to lay out a thumbnail.
@@ -308,7 +309,7 @@ pub async fn project_import_media(
         (None, Some(audio)) => {
             project.materials.audios.push(AudioMaterial {
                 id: id.clone(),
-                path: path.clone(),
+                path: path.to_string(),
                 duration: info.duration,
                 sample_rate: audio.sample_rate,
                 channels: audio.channels,
@@ -316,8 +317,8 @@ pub async fn project_import_media(
             Ok(ImportedMaterial {
                 id,
                 kind: MaterialKind::Audio,
-                name,
-                path,
+                name: name.to_string(),
+                path: path.to_string(),
                 duration: info.duration,
                 width: 0,
                 height: 0,
@@ -325,12 +326,53 @@ pub async fn project_import_media(
             })
         }
 
-        (None, None) => Err(format!("{name} contains no video or audio stream")),
-    }?;
+        // The container opened but holds nothing this editor can use — a
+        // subtitle file, a font, a playlist. Naming what was looked for beats
+        // "unsupported format": the user learns the file was readable and
+        // simply is not media.
+        (None, None) => Err(format!("{name} contains no video, image or audio stream")),
+    }
+}
+
+/// Add a file to the project's material pool, probing it to fill in the
+/// details.
+///
+/// Importing is not undoable, and deliberately so: a material with no segment
+/// referencing it is inert, and putting library imports in the undo stack
+/// means Ctrl+Z after a cut can silently empty the media panel.
+///
+/// Importing the same path twice returns the existing material rather than
+/// duplicating it — that is the whole point of the pool being keyed by
+/// identity.
+#[tauri::command]
+pub async fn project_import_media(
+    state: State<'_, Arc<AppState>>,
+    path: String,
+) -> Result<ImportedMaterial, String> {
+    // Probing opens the container and runs FFmpeg's stream-info pass, which is
+    // milliseconds on a warm cache and noticeably longer on a large file over a
+    // network mount. A synchronous command would do that on the main thread and
+    // freeze the window for the duration, so it goes off-thread even though it
+    // is usually quick.
+    let probe_path = path.clone();
+    let info = tauri::async_runtime::spawn_blocking(move || crate::modules::media::probe(&probe_path))
+        .await
+        .map_err(|error| format!("the import task failed: {error}"))?
+        .map_err(|error| error.to_string())?;
+
+    let name = std::path::Path::new(&path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.clone());
+
+    let imported = {
+        let mut guard = state.project.write();
+        let project = guard.as_mut().ok_or("no project is open")?;
+        import_material(project, &path, &name, &info)?
+    };
 
     // The material pool is document state like any other, and an import that a
     // restart forgets means relinking every clip that referenced it.
-    drop(guard);
     if let Some(project) = state.project.read().clone() {
         let origin = state.project_path.read().clone();
         super::autosave::schedule(&project, origin);

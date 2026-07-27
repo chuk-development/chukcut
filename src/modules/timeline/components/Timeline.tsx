@@ -1,5 +1,19 @@
+import { FoldHorizontalIcon, PlusIcon } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
+import { Button } from "@/components/ui/button";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { MEDIA_DRAG_MIME } from "@/lib/dnd";
 import { clamp, MICROS_PER_SECOND } from "@/lib/time";
 import { useMediaStore } from "@/modules/media/store";
@@ -15,6 +29,7 @@ import type {
   Segment as SegmentModel,
   TimeRange,
   Track,
+  TrackKind,
 } from "@/modules/project/types";
 import {
   findSegment,
@@ -52,8 +67,10 @@ import {
   undo,
   unlinkSegment,
 } from "@/modules/timeline/lib/edits";
+import { applyFades, type Fades } from "@/modules/timeline/lib/fades";
 import { buildMaterialIndex } from "@/modules/timeline/lib/materials";
 import { freeSpan, nearestFreeStart } from "@/modules/timeline/lib/placement";
+import { closeGap, gapAt, rippleDeleteSegment } from "@/modules/timeline/lib/ripple";
 import {
   allSelectableIds,
   liveSelection,
@@ -68,6 +85,13 @@ import {
   snapRadius,
   snapRange,
 } from "@/modules/timeline/lib/snapping";
+import {
+  ADDABLE_KINDS,
+  addTrack,
+  deleteTrack,
+  moveTrack,
+  reorderTarget,
+} from "@/modules/timeline/lib/tracks";
 import {
   MAX_ZOOM,
   MIN_ZOOM,
@@ -262,6 +286,59 @@ function partnerPreview(
  * since. `Timeline.paint.test.tsx` pins it.
  */
 export const bodyPaintCount = { renders: 0 };
+
+/**
+ * The empty stretch of a lane: click seeks, drag draws a rubber band, and a
+ * right-click offers to close the gap under the pointer.
+ *
+ * A gap is not a component, so the menu has to work out at open time what it
+ * is pointing at — the instant under the cursor and whether a bounded gap sits
+ * there. That answer is snapshotted into state when the menu opens rather than
+ * derived in the item's handler, because by the time "Close gap" is clicked
+ * the pointer is on the menu, not on the gap.
+ */
+function LaneSurface({
+  track,
+  onPointerDown,
+  timeAtClientX,
+}: {
+  track: Track;
+  onPointerDown: (event: React.PointerEvent) => void;
+  timeAtClientX: (clientX: number) => Micros;
+}) {
+  const [gapMenu, setGapMenu] = useState<{ at: Micros; open: boolean }>({ at: 0, open: false });
+  const gap = gapMenu.open ? gapAt(track, gapMenu.at) : null;
+
+  return (
+    <ContextMenu>
+      <ContextMenuTrigger asChild>
+        {/* Empty lane space: clicking it deselects and moves the playhead,
+            dragging draws a rubber band — except under the razor, where a
+            click on a gap is a cut that has nothing to cut. */}
+        <button
+          type="button"
+          tabIndex={-1}
+          aria-label={`${track.name} lane`}
+          className="absolute inset-0 cursor-default border-none bg-transparent p-0 outline-none"
+          onPointerDown={onPointerDown}
+          onContextMenu={(event) => setGapMenu({ at: timeAtClientX(event.clientX), open: true })}
+        />
+      </ContextMenuTrigger>
+      <ContextMenuContent>
+        <ContextMenuItem
+          disabled={gap === null || track.locked}
+          onSelect={() => {
+            const current = useProjectStore.getState().project;
+            if (current) void closeGap(current, track.id, gapMenu.at);
+          }}
+        >
+          <FoldHorizontalIcon />
+          Close gap
+        </ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
+  );
+}
 
 export function Timeline() {
   bodyPaintCount.renders += 1;
@@ -957,6 +1034,61 @@ export function Timeline() {
     void toggleTrackFlag(track, flag);
   }, []);
 
+  // ---------------------------------------------------------------------
+  // Track management
+  // ---------------------------------------------------------------------
+
+  const handleAddTrack = useCallback((kind: TrackKind) => {
+    const current = useProjectStore.getState().project;
+    if (current) void addTrack(current, kind);
+  }, []);
+
+  const handleDeleteTrack = useCallback(
+    (track: Track) => {
+      const current = useProjectStore.getState().project;
+      if (!current) return;
+      // Whatever was selected on the lane is about to go with it.
+      select(null);
+      void deleteTrack(current, track.id);
+    },
+    [select],
+  );
+
+  /**
+   * Where a header drag would drop, while one is running. Drawn as a line in
+   * the header gutter; null the rest of the time.
+   */
+  const [trackDrop, setTrackDrop] = useState<{ from: number; to: number } | null>(null);
+
+  /**
+   * Drag a lane to a new place in the order.
+   *
+   * The document snapshot from the press is used throughout: the tracks cannot
+   * change mid-drag (edits land on release everywhere in this file), and one
+   * snapshot means the geometry and the final command agree about indices.
+   */
+  const beginTrackReorder = useCallback((event: React.PointerEvent, track: Track) => {
+    const current = useProjectStore.getState().project;
+    if (!current) return;
+    const from = current.tracks.findIndex((candidate) => candidate.id === track.id);
+    if (from === -1) return;
+    event.preventDefault();
+    const startY = event.clientY;
+    let live = from;
+
+    const onMove = (moveEvent: PointerEvent) => {
+      live = reorderTarget(current.tracks, from, moveEvent.clientY - startY);
+      setTrackDrop({ from, to: live });
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      setTrackDrop(null);
+      if (live !== from) void moveTrack(current, track.id, live);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp, { once: true });
+  }, []);
+
   const zoomToFit = useCallback(() => {
     const width = scrollRef.current?.clientWidth ?? 0;
     const span = Math.max(duration, MIN_VISIBLE_SPAN);
@@ -1229,6 +1361,27 @@ export function Timeline() {
     void unlinkSegment(segmentId);
   }, []);
 
+  const handleRippleDeleteSegment = useCallback(
+    (segmentId: Id) => {
+      const current = useProjectStore.getState().project;
+      if (!current) return;
+      select(null);
+      void rippleDeleteSegment(current, segmentId);
+    },
+    [select],
+  );
+
+  /**
+   * A fade handle was released. The segment is re-read from the store rather
+   * than trusted from the clip's props: the fade diff has to be computed
+   * against the document the edit will land on.
+   */
+  const handleFadeSegment = useCallback((segmentId: Id, fades: Fades) => {
+    const current = useProjectStore.getState().project;
+    const found = current ? findSegment(current, segmentId) : null;
+    if (found) void applyFades(found.segment, fades);
+  }, []);
+
   // ---------------------------------------------------------------------
   // The rubber band
   // ---------------------------------------------------------------------
@@ -1371,10 +1524,58 @@ export function Timeline() {
             className="shrink-0 border-b border-border bg-timeline-ruler"
             style={{ height: RULER_HEIGHT }}
           />
-          <div ref={headerScrollRef} className="flex-1 overflow-hidden">
+          <div ref={headerScrollRef} className="relative flex-1 overflow-hidden">
             {project?.tracks.map((track) => (
-              <TrackHeader key={track.id} track={track} onToggle={handleToggleFlag} />
+              <TrackHeader
+                key={track.id}
+                track={track}
+                onToggle={handleToggleFlag}
+                onDelete={handleDeleteTrack}
+                onReorderStart={beginTrackReorder}
+              />
             ))}
+
+            {/* Where a dragged lane would land: a line above the header it
+                would push down, or under the last one. */}
+            {trackDrop && trackDrop.to !== trackDrop.from && project ? (
+              <span
+                aria-hidden
+                data-slot="track-drop-indicator"
+                className="pointer-events-none absolute inset-x-0 z-10 h-[2px] bg-primary"
+                style={{
+                  top: project.tracks
+                    .slice(0, trackDrop.to < trackDrop.from ? trackDrop.to : trackDrop.to + 1)
+                    .reduce((sum, track) => sum + trackHeight(track.kind), 0),
+                }}
+              />
+            ) : null}
+
+            {project ? (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="mx-2 my-1.5 w-[calc(100%-16px)] justify-start text-muted-foreground"
+                    aria-label="Add track"
+                  >
+                    <PlusIcon />
+                    Add track
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="start">
+                  {ADDABLE_KINDS.map((kind) => (
+                    <DropdownMenuItem key={kind} onSelect={() => handleAddTrack(kind)}>
+                      {kind === "video"
+                        ? "Video track"
+                        : kind === "audio"
+                          ? "Audio track"
+                          : "Text track"}
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuContent>
+              </DropdownMenu>
+            ) : null}
           </div>
         </div>
 
@@ -1427,16 +1628,10 @@ export function Timeline() {
                     dropTarget={external !== null}
                     registerLane={registerLane}
                   >
-                    {/* Empty lane space: clicking it deselects and moves the
-                        playhead, dragging draws a rubber band — except under
-                        the razor, where a click on a gap is a cut that has
-                        nothing to cut. */}
-                    <button
-                      type="button"
-                      tabIndex={-1}
-                      aria-label={`${track.name} lane`}
-                      className="absolute inset-0 cursor-default border-none bg-transparent p-0 outline-none"
+                    <LaneSurface
+                      track={track}
                       onPointerDown={beginBand}
+                      timeAtClientX={timeAtClientX}
                     />
 
                     {track.segments.map((segment) => {
@@ -1478,8 +1673,10 @@ export function Timeline() {
                           onSplit={handleSplitSegment}
                           onDuplicate={handleDuplicateSegment}
                           onDelete={handleDeleteSegment}
+                          onRippleDelete={handleRippleDeleteSegment}
                           onUnlink={handleUnlinkSegment}
                           onLink={handleLink}
+                          onFade={handleFadeSegment}
                         />
                       );
                     })}
@@ -1508,8 +1705,10 @@ export function Timeline() {
                         onSplit={handleSplitSegment}
                         onDuplicate={handleDuplicateSegment}
                         onDelete={handleDeleteSegment}
+                        onRippleDelete={handleRippleDeleteSegment}
                         onUnlink={handleUnlinkSegment}
                         onLink={handleLink}
+                        onFade={handleFadeSegment}
                       />
                     ) : null}
 
