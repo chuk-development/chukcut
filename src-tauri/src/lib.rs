@@ -109,6 +109,7 @@ pub fn run() {
             modules::preview::commands::preview_pause,
             modules::preview::commands::preview_stop,
             modules::preview::commands::preview_state,
+            modules::preview::commands::preview_viewport,
             // audio
             modules::audio::commands::audio_status,
             modules::audio::commands::audio_set_volume,

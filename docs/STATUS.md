@@ -53,16 +53,47 @@ bug), and its audio is **not** silent.
 
 ## What is known to be rough
 
-- **Playback and the timeline still stutter, and it is not yet diagnosed.**
-  Reported by the owner on 2026-07-26 against the build that fixed the export
-  stride, in his words "total... leckt immer noch geisteskrank rum". Deferred
-  deliberately, not forgotten — he chose to spend the next work on features.
+- **Playback stutters, and it is now diagnosed.** Full working, with the
+  reproduction commands, in **`docs/research/preview-performance.md`**. The
+  short version, measured 2026-07-27 at `3440e48` with a real `PreviewServer`
+  playing real 1080p footage:
+  - **The stages are not serialised.** The render and encode threads overlap
+    exactly as `server.rs` claims, while there is headroom: with headroom, 0 of
+    155 frames were encoded on the render thread and it idled 88% of the time.
+  - **It is raw throughput after all, and the margin is thin.** At 1080×1920 the
+    pipeline renders 58 fps at load 7 and **34 fps at load 40** — so on a busy
+    machine it drops under a 24 fps demand, the ring empties, and every frame
+    request then blocks for up to `FRAME_WAIT` = 60 ms. Measured at load 33:
+    21.6 fps rendered, the ring at or behind the playhead 47.8% of the time,
+    and 64 of 239 frames answered 204.
+  - **60–76% of the frame is delivering finished pixels to the JPEG encoder** —
+    readback, CPU RGBA→NV12, upload. The fixed-function encoder is 28% of its
+    own path. This is `zero-copy-encode.md` pointed at the preview.
+  - **Rendering at canvas resolution rather than panel resolution is the single
+    biggest recoverable item**: capping the long edge to 960 took 34.1 fps to
+    61.1 fps and every failure symptom to zero, back to back in one process.
+    **This one is now fixed** — the preview renders at the measured size of the
+    player panel, and a second binary arrived at the same conclusion from the
+    other direction (3.1× the frame cost, "The preview renders the panel, not
+    the canvas" below). Whether it is enough to close this entry is not known:
+    nobody has re-measured the reported 11–20 fps with it in place.
+  - The number quoted two rows above as "Preview playback | **10.7 ms**" is a
+    *serial latency* on a generated fixture at load 2.4, not a playback rate.
+    On real 1080p footage at load 10 the serial frame is 15.8 ms. The research
+    document lists five more claims in this repository that it contradicts.
 
-  What is already known, so the next person does not start from zero:
+  Originally reported by the owner on 2026-07-26 against the build that fixed
+  the export stride, in his words "total... leckt immer noch geisteskrank rum",
+  and again on 2026-07-27 as "aber noch lahm".
+
+  What was known before that investigation, kept because the reasoning is why
+  it looked like a tail and was not:
   - The per-frame numbers do not obviously explain it. The last DEBUG session
     logged composite 5–10 ms and encode 6–19 ms against a 33.3 ms budget, with
-    `over_budget=false` throughout. So the *mean* is fine and whatever is wrong
-    is in the tail, in the pacing, or in the webview — not in raw throughput.
+    `over_budget=false` throughout. So the *mean* looked fine — but
+    `stats::record_frame` is given `max(composite, encode)` rather than the
+    frame's real cost, and neither term includes the inline encode that
+    back-pressure forces onto the render thread once the encoder falls behind.
   - Three known contributors, each measured and each insufficient alone:
     backward seeks discard the ring (130–227 ms, the entry below), the frame
     cache is keyed to the session rather than the document (Task #9), and the
@@ -77,10 +108,11 @@ bug), and its audio is **not** silent.
     `preview playback`.**
 
     ```text
-    INFO …preview::stats: preview playback shown=30 dropped=2 rendered=30 scrubs=0
-      over_budget=1 mean_ms=12.7 p99_ms=120.25 max_ms=120.0 budget_ms=33.333
+    INFO …preview::stats: preview playback shown=30 dropped=2 discarded=0 rendered=30
+      scrubs=0 over_budget=1 mean_ms=12.7 p99_ms=120.25 max_ms=120.0 budget_ms=33.333
       window_ms=1000.0 decode="vaapi" encode="vaapi" width=1080 height=1920
-      downscaled=false
+      downscaled=false rung=0 ladder="full" render_width=1080 render_height=1920
+      render_quality=88
     ```
 
     How to read it, because the whole point is that the mean already looked
@@ -88,10 +120,15 @@ bug), and its audio is **not** silent.
     moved and the picture did not. `mean_ms` inside `budget_ms` with `max_ms`
     far outside it is a **tail**, which is where this bug was always going to
     be. `window_ms` much above 1000 means the **pacer itself** was blocked.
-    `dropped` above zero is the renderer losing the race outright. Three more
-    lines, each once per occurrence: `preview decode path` (with the reason,
-    once per run), `preview seek was slow` (over 50 ms, with the direction —
-    backwards is the expensive one), and `preview JPEG encoder changed backend`.
+    `dropped` above zero is the renderer losing the race outright, and
+    `discarded` above zero is it finishing frames that were already too late to
+    show. `rung` above 0 means the quality ladder gave up resolution to keep up,
+    and `render_*` is what a playback frame was actually made of — `width` and
+    `height` stay the size a *paused* frame gets, which the ladder never
+    touches. Four more lines, each once per occurrence: `preview decode path`
+    (with the reason, once per run), `preview seek was slow` (over 50 ms, with
+    the direction — backwards is the expensive one), `preview JPEG encoder
+    changed backend`, and `preview quality ladder moved`.
 
     Two things about it that will otherwise cost time. **The decode path is
     inferred, not asked**: `media::provider::acceleration` is private and the
@@ -169,6 +206,14 @@ keeping — they print things a table cannot, like a DMA-BUF plane layout or a
 PSNR against a reference encode — but the *numbers* belong to `chukcut-bench`,
 because there they are all taken the same way.
 
+One example is a deliberate exception, because it measures something a table of
+absolutes cannot: `examples/preview_waste.rs` runs both arms of a change in one
+process — the preview at the canvas against the preview at the panel, each
+quality-ladder rung, and the two savings behind
+`preview::server::experiment` — and prints the ratio. A ratio taken in one
+minute on one machine survives a busy machine; a "before" taken from a build
+that no longer exists does not survive at all.
+
 Four properties of it are the point:
 
 - **It refuses to report above a load average of 4.** `--force` overrides and
@@ -226,6 +271,79 @@ on a thread that overlaps the next frame's compositing. This number is one
 frame's latency, which is what a seek pays with nothing to overlap. It excludes
 the ring buffer, the pacing clock and the webview's own decode and paint — those
 need a running GUI, which this binary deliberately does not.
+
+### The preview renders the panel, not the canvas
+
+Measured 2026-07-27 by `cargo run --release --example preview_waste`, which
+prints every number below as an A/B **in one process** — same machine, same
+minute, same clip — because a "before" taken from a build that no longer exists
+is not a measurement. Load average 5.9, which is higher than the bench suite
+would accept; the ratios below are stable across runs at load 4–24, the absolute
+milliseconds are not.
+
+The waste was structural and needed no profile to justify. A 1920×1080 project
+in the default 700 px-wide player panel was composited, read back and
+JPEG-encoded at **7.5× the pixels the screen can display**, and then thrown away
+by a CSS downscale in the webview.
+
+| Rendered at | Pixels | Whole frame | Ceiling |
+|---|---:|---:|---:|
+| 1920×1080, the canvas — what shipped | 100% | 11.68 ms | 86 fps |
+| 1400×788, the panel on a 2× display | 53% | 8.11 ms | 123 fps |
+| **700×394, the panel on a 1× display** | **13%** | **3.75 ms** | **267 fps** |
+
+**3.1× the throughput for pixels nobody could see.** Not 7.5×, and the gap is
+worth understanding: the decode is a fixed cost — the source file is 1920×1080
+whatever the preview is — so only the upload, composite, readback and JPEG scale
+with the target. That is also why `settings.preview_max_edge` measures the same
+as no cap at all here (3.68 ms): the panel had already asked for less than the
+cap would have allowed.
+
+The quality ladder (`preview/ladder.rs`) is worth much less at the panel size
+than at the canvas, for the same reason:
+
+| | rung 0 | rung 1 (¾) | rung 2 (½) |
+|---|---:|---:|---:|
+| From the panel size (700×394) | 4.34 ms | 2.93 ms (1.5×) | 2.64 ms (1.6×) |
+| From the canvas (1920×1080) | 13.52 ms | 9.71 ms (1.4×) | 5.52 ms (2.5×) |
+
+So **the ladder is the second lever and not the first**: once the frame is the
+size of the panel it is mostly decode, and no rung reduces decode. It earns its
+keep at full-quality preview, in fullscreen, and on a 4K panel — which is
+exactly when playback is in trouble.
+
+Two smaller findings from the same binary, one of them negative:
+
+- **Skipping the JPEG of a frame the playhead has already passed does almost
+  nothing on this machine.** Driven with an injected clock at 1.5× the frame
+  budget it fires **zero** times; at 8× it fires between 1 and 13 times per
+  twenty steps, and which end of that range depends entirely on how busy the
+  machine is (13 at load 16, 5 at load 4, 1 at load 6). The renderer here is
+  fast enough that a finished frame is rarely more than one interval late, and
+  one interval late
+  is deliberately still encoded — `serve_uri` will hand it to a request for its
+  neighbour. It is kept because it costs nothing when it does not fire and
+  because `discarded` in the summary line answers "is the renderer finishing
+  work that is already useless?" on a machine that is not this one. **Do not
+  quote it as a speedup.**
+- **A frame request that arrives while its frame is being rendered used to start
+  a second render of it.** Four concurrent requests for one uncached frame after
+  a seek: **2 composites of the same frame, now 1.** The webview asks again
+  whenever the handler answers a miss, and a scrub job seeks the decoder — so
+  the duplicate was the most expensive frame there is, paid twice, exactly when
+  the preview was already slow.
+
+Traps this left behind, both of which took a run to find:
+
+- **Discarding late frames can freeze the picture.** A renderer consistently
+  more than one frame behind finds *every* frame it finishes late by the same
+  margin, discards all of them, and shows nothing while staying busy — measured
+  at 1 frame encoded in 14. `render_one` therefore never discards two in a row.
+- **An odd render size costs five times the encode.** NV12 cannot represent one,
+  so `vaapi::size_is_encodable` refuses it and every frame falls back to
+  libjpeg-turbo. Every size the panel or the ladder computes is rounded **down**
+  to even. `session::proxy_size` still returns an odd canvas verbatim, which is
+  a real if rare hole: a 1235×695 project previews on the software encoder.
 
 ### Decode, per frame
 

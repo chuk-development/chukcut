@@ -16,7 +16,7 @@ use tauri::ipc::Channel;
 use tauri::State;
 
 use super::server::{PreviewEvent, PreviewInfo, PreviewServer, PreviewStatus};
-use super::session::PreviewOptions;
+use super::session::{PreviewOptions, Viewport};
 use crate::modules::media::MediaSourceProvider;
 use crate::modules::project::document::{Micros, Project};
 use crate::modules::render::SourceProvider;
@@ -145,6 +145,27 @@ pub fn preview_pause(preview: State<'_, Arc<PreviewServer>>) -> Result<PreviewIn
 pub fn preview_stop(preview: State<'_, Arc<PreviewServer>>) -> Result<(), String> {
     preview.stop();
     Ok(())
+}
+
+/// Tell the preview how large the panel showing it is, in device pixels.
+///
+/// The player measures its own canvas element — CSS size times
+/// `devicePixelRatio` — and sends it here, debounced. Without it the preview
+/// renders at the project's canvas whatever the panel is, which for a 1080p
+/// project in a 700 px panel is nearly eight times the pixels the screen can
+/// display, paid on the composite, the readback and the JPEG of every frame.
+///
+/// Returns the session as it is now, which may be a new one: a size change
+/// supersedes, because the ring holds frames at the old size. A call that does
+/// not change the size returns the live session unchanged and costs nothing.
+#[tauri::command]
+pub fn preview_viewport(
+    preview: State<'_, Arc<PreviewServer>>,
+    width: u32,
+    height: u32,
+) -> Result<PreviewInfo, String> {
+    let viewport = (width > 0 && height > 0).then(|| Viewport::new(width, height));
+    preview.set_viewport(viewport).map_err(|e| e.to_string())
 }
 
 /// Where the playhead is and what the preview is doing, for a frontend that

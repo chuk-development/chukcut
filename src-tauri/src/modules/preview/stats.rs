@@ -16,9 +16,10 @@
 //!
 //! ```text
 //! 2026-07-26T19:03:17.923585Z  INFO chukcut_lib::modules::preview::stats: preview playback \
-//!   shown=30 dropped=2 rendered=30 scrubs=0 over_budget=1 mean_ms=12.7 p99_ms=120.25 \
-//!   max_ms=120.0 budget_ms=33.333 window_ms=1000.0 decode="vaapi" encode="vaapi" \
-//!   width=1080 height=1920 downscaled=false
+//!   shown=30 dropped=2 discarded=1 rendered=30 scrubs=0 over_budget=1 mean_ms=12.7 \
+//!   p99_ms=120.25 max_ms=120.0 budget_ms=33.333 window_ms=1000.0 decode="vaapi" \
+//!   encode="vaapi" width=1080 height=1920 downscaled=false rung=1 ladder="three-quarter" \
+//!   render_width=810 render_height=1440 render_quality=80
 //! ```
 //!
 //! (One line in the file; wrapped here.) How to read it:
@@ -26,6 +27,11 @@
 //! - `shown` — frames the frontend was told to display, counted by the pacer.
 //!   This is what the user saw.
 //! - `dropped` — frames abandoned because the renderer fell behind the clock.
+//! - `discarded` — frames that *were* composited and then thrown away without
+//!   a JPEG, because the playhead had passed them by the time the compositor
+//!   finished. Deliberately a separate number from `dropped`: a dropped frame
+//!   cost nothing, a discarded one cost a whole composite. `discarded` far
+//!   above zero means the renderer is finishing work that is already useless.
 //! - `rendered` — frames composited and encoded. **`shown` far above
 //!   `rendered` is a stalled renderer**: the clock moved and the picture did
 //!   not.
@@ -43,7 +49,14 @@
 //!   a device. `software` is a 20× per-frame regression and the reason is on
 //!   the separate `preview decode path` line.
 //! - `encode` — `vaapi` or `libjpeg-turbo`, the JPEG encoder in use.
-//! - `width`/`height`/`downscaled` — what the preview is actually rendering.
+//! - `width`/`height`/`downscaled` — the session's size: what a *paused* frame
+//!   is rendered at, and whether that is below the project's canvas.
+//! - `rung`/`ladder`/`render_width`/`render_height`/`render_quality` — the
+//!   quality ladder ([`super::ladder`]). `rung=0` is playback at the session's
+//!   own size and quality; a higher rung is what playback gave up to keep up,
+//!   and `render_*` is what a playback frame was actually made of. A summary
+//!   whose `render_width` is below `width` is the ladder working; one that sits
+//!   at rung 2 for a whole session is a machine that cannot hold this project.
 //!
 //! Two more lines, each emitted once per occurrence rather than periodically:
 //! `preview seek was slow` (a seek that cost more than [`SLOW_SEEK`], with the
@@ -319,7 +332,18 @@ pub struct Summary {
     /// what the user saw and not what the renderer made.
     pub shown: u64,
     /// Frames abandoned because the renderer fell behind the clock.
+    ///
+    /// Counted in `pace`, before anything was spent on them.
     pub dropped: u64,
+    /// Frames composited and then thrown away without a JPEG, because the
+    /// playhead had already passed them by the time the compositor was done.
+    ///
+    /// **Not the same as `dropped` and deliberately not folded into it.** A
+    /// dropped frame cost nothing; a discarded one cost a whole composite and
+    /// saved only the encode. `discarded` climbing is the renderer finishing
+    /// frames that are already too late to show, which is a different failure
+    /// from never starting them.
+    pub discarded: u64,
     /// Frames composited and encoded for playback in this window.
     ///
     /// `shown` far above `rendered` is the signature of a stalled renderer: the
@@ -347,6 +371,16 @@ pub struct Summary {
     /// The preview is rendering below the canvas. See
     /// [`SessionFacts::downscaled`] for why it is not called `proxy`.
     pub downscaled: bool,
+    /// Where playback is on the quality ladder: 0 is the paused frame's own
+    /// size and quality, higher rungs are what was given up to keep up. See
+    /// [`super::ladder`].
+    pub rung: u8,
+    /// What a playback frame was actually rendered at in this window, which is
+    /// `width`/`height` shrunk by the rung. Equal to them at rung 0.
+    pub render_width: u32,
+    pub render_height: u32,
+    /// The JPEG quality playback frames were encoded at.
+    pub render_quality: u8,
 }
 
 impl Summary {
@@ -354,7 +388,11 @@ impl Summary {
     /// happened is noise, and one that never existed is a division by zero
     /// waiting to be printed.
     pub fn is_empty(&self) -> bool {
-        self.shown == 0 && self.rendered == 0 && self.dropped == 0 && self.scrubs == 0
+        self.shown == 0
+            && self.rendered == 0
+            && self.dropped == 0
+            && self.discarded == 0
+            && self.scrubs == 0
     }
 }
 
@@ -376,6 +414,7 @@ pub fn emit(summary: &Summary, reason: Reason) {
     tracing::info!(
         shown = summary.shown,
         dropped = summary.dropped,
+        discarded = summary.discarded,
         rendered = summary.rendered,
         scrubs = summary.scrubs,
         over_budget = summary.over_budget,
@@ -389,8 +428,26 @@ pub fn emit(summary: &Summary, reason: Reason) {
         width = summary.width,
         height = summary.height,
         downscaled = summary.downscaled,
+        rung = summary.rung,
+        ladder = super::ladder::rung_label(summary.rung as usize),
+        render_width = summary.render_width,
+        render_height = summary.render_height,
+        render_quality = summary.render_quality,
         "{message}"
     );
+}
+
+/// What the quality ladder turned one playback frame into.
+///
+/// Reported per frame rather than read from the ladder when a line is emitted,
+/// because the ladder can move between the frame and the line and the line has
+/// to describe frames that were actually rendered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rendered {
+    pub rung: u8,
+    pub width: u32,
+    pub height: u32,
+    pub quality: u8,
 }
 
 /// The JPEG encoder changed backend mid-session.
@@ -414,7 +471,14 @@ struct Inner {
     window_started: Instant,
     shown: u64,
     dropped: u64,
+    discarded: u64,
     scrubs: u64,
+    /// The ladder rung and what it turned the session's size and quality into,
+    /// as of the last playback frame. Zero-sized until one is rendered, which
+    /// is why [`Inner::summarise`] falls back to the session's own size.
+    rung: u8,
+    render: (u32, u32),
+    render_quality: u8,
     over_budget: u64,
     frames: Histogram,
     budget_micros: i64,
@@ -430,6 +494,7 @@ impl Inner {
         Summary {
             shown: self.shown,
             dropped: self.dropped,
+            discarded: self.discarded,
             rendered: self.frames.count(),
             scrubs: self.scrubs,
             over_budget: self.over_budget,
@@ -443,6 +508,12 @@ impl Inner {
             width: self.facts.width,
             height: self.facts.height,
             downscaled: self.facts.downscaled(),
+            rung: self.rung,
+            // Before the first playback frame of a window there is no rung to
+            // report, and the session's own size is the truthful answer.
+            render_width: if self.render.0 > 0 { self.render.0 } else { self.facts.width },
+            render_height: if self.render.1 > 0 { self.render.1 } else { self.facts.height },
+            render_quality: self.render_quality,
         }
     }
 
@@ -450,9 +521,13 @@ impl Inner {
         self.window_started = now;
         self.shown = 0;
         self.dropped = 0;
+        self.discarded = 0;
         self.scrubs = 0;
         self.over_budget = 0;
         self.frames.reset();
+        // `rung`, `render` and `render_quality` deliberately survive a window,
+        // for the same reason `encode` does: they describe what playback is
+        // doing, not what happened in one second of it.
         // `encode` and `fallback_reported` deliberately survive a window: which
         // encoder is in use is a property of the session, not of the second.
     }
@@ -483,7 +558,11 @@ impl PlaybackStats {
                 window_started: Instant::now(),
                 shown: 0,
                 dropped: 0,
+                discarded: 0,
                 scrubs: 0,
+                rung: 0,
+                render: (0, 0),
+                render_quality: 0,
                 over_budget: 0,
                 frames: Histogram::new(),
                 budget_micros: frame_interval(30.0),
@@ -515,6 +594,11 @@ impl PlaybackStats {
         inner.budget_micros = frame_interval(fps);
         inner.encode = None;
         inner.fallback_reported = false;
+        // A new session is a new ladder — the server resets it — so a line
+        // raised before the first frame of it must not claim the old rung.
+        inner.rung = 0;
+        inner.render = (0, 0);
+        inner.render_quality = 0;
         inner.roll(now);
     }
 
@@ -541,8 +625,18 @@ impl PlaybackStats {
     /// Returns the backend change to log, if this frame is where it happened.
     /// Returned rather than logged so the `tracing` call happens after the lock
     /// is dropped.
+    ///
+    /// `rendered` is what the ladder turned this frame into, and is `None` for
+    /// a scrub because a scrub never goes through the ladder. Passed here
+    /// rather than through a setter of its own so a frame costs one lock.
     #[must_use]
-    pub fn record_frame(&self, scrub: bool, micros: i64, backend: Backend) -> Option<EncodeFallback> {
+    pub fn record_frame(
+        &self,
+        scrub: bool,
+        micros: i64,
+        backend: Backend,
+        rendered: Option<Rendered>,
+    ) -> Option<EncodeFallback> {
         let mut inner = self.inner.lock();
         let change = match inner.encode {
             Some(previous) if previous != backend && !inner.fallback_reported => {
@@ -560,6 +654,11 @@ impl PlaybackStats {
             inner.scrubs += 1;
             return change;
         }
+        if let Some(rendered) = rendered {
+            inner.rung = rendered.rung;
+            inner.render = (rendered.width, rendered.height);
+            inner.render_quality = rendered.quality;
+        }
         inner.frames.record(micros);
         if micros > inner.budget_micros {
             inner.over_budget += 1;
@@ -568,11 +667,28 @@ impl PlaybackStats {
     }
 
     /// Frames the renderer abandoned because the clock had passed them.
+    ///
+    /// Counted where `pace` decides, i.e. before anything has been spent on
+    /// them. A frame that was composited and *then* found to be too late is
+    /// [`Self::record_discarded`] instead, so the two never count the same
+    /// frame twice.
     pub fn record_dropped(&self, frames: i64) {
         if frames <= 0 {
             return;
         }
         self.inner.lock().dropped += frames as u64;
+    }
+
+    /// Frames composited and then thrown away without being encoded.
+    ///
+    /// Distinct from [`Self::record_dropped`] because they cost different
+    /// things and mean different things: a dropped frame was never started, a
+    /// discarded one paid for a whole composite and saved only the JPEG.
+    pub fn record_discarded(&self, frames: i64) {
+        if frames <= 0 {
+            return;
+        }
+        self.inner.lock().discarded += frames as u64;
     }
 
     /// One frame announced to the frontend.
@@ -911,7 +1027,7 @@ mod tests {
         let stats = PlaybackStats::new();
         stats.begin_session(facts(), 30.0, start);
         stats.record_shown();
-        assert!(stats.record_frame(false, 10_000, Backend::Vaapi).is_none());
+        assert!(stats.record_frame(false, 10_000, Backend::Vaapi, None).is_none());
 
         assert!(stats.tick(start).is_none(), "nothing at the very start");
         assert!(
@@ -986,12 +1102,12 @@ mod tests {
 
         // 30 fps: the budget is 33333 µs.
         for _ in 0..8 {
-            let _ = stats.record_frame(false, 10_000, Backend::Vaapi);
+            let _ = stats.record_frame(false, 10_000, Backend::Vaapi, None);
         }
-        let _ = stats.record_frame(false, 40_000, Backend::Vaapi);
-        let _ = stats.record_frame(false, 90_000, Backend::Vaapi);
+        let _ = stats.record_frame(false, 40_000, Backend::Vaapi, None);
+        let _ = stats.record_frame(false, 90_000, Backend::Vaapi, None);
         // Scrubs are a different workload and stay out of the distribution.
-        let _ = stats.record_frame(true, 200_000, Backend::Vaapi);
+        let _ = stats.record_frame(true, 200_000, Backend::Vaapi, None);
         for _ in 0..12 {
             stats.record_shown();
         }
@@ -1049,6 +1165,64 @@ mod tests {
         let summary = stats.finish(Instant::now()).expect("a summary");
         assert!(summary.downscaled, "1920x1080 of a 4K canvas is downscaled");
         assert_eq!(summary.decode, Some(DecodePath::Software));
+    }
+
+    #[test]
+    fn the_line_says_what_the_quality_ladder_did() {
+        let stats = PlaybackStats::new();
+        stats.begin_session(facts(), 30.0, Instant::now());
+
+        // Before the ladder has done anything the line describes the session
+        // itself rather than guessing.
+        stats.record_shown();
+        let idle = stats.finish(Instant::now()).expect("a summary");
+        assert_eq!(idle.rung, 0);
+        assert_eq!((idle.render_width, idle.render_height), (idle.width, idle.height));
+
+        stats.begin_session(facts(), 30.0, Instant::now());
+        let _ = stats.record_frame(
+            false,
+            10_000,
+            Backend::Vaapi,
+            Some(Rendered {
+                rung: 1,
+                width: 810,
+                height: 1440,
+                quality: 80,
+            }),
+        );
+        // A scrub is not a playback frame and must not be able to claim the
+        // paused frame was rendered at a lower rung.
+        let _ = stats.record_frame(true, 20_000, Backend::Vaapi, None);
+
+        let summary = stats.finish(Instant::now()).expect("a summary");
+        assert_eq!(summary.rung, 1);
+        assert_eq!((summary.render_width, summary.render_height), (810, 1440));
+        assert_eq!(summary.render_quality, 80);
+        assert_eq!(
+            (summary.width, summary.height),
+            (facts().width, facts().height),
+            "the session's own size is still what a paused frame gets"
+        );
+    }
+
+    #[test]
+    fn a_discarded_frame_is_counted_apart_from_a_dropped_one() {
+        // They cost different things — a dropped frame was never started, a
+        // discarded one paid for a whole composite — so folding them together
+        // would hide which of the two is happening.
+        let stats = PlaybackStats::new();
+        stats.begin_session(facts(), 30.0, Instant::now());
+        stats.record_dropped(4);
+        stats.record_discarded(1);
+        stats.record_discarded(0);
+        stats.record_discarded(-3);
+
+        let summary = stats.finish(Instant::now()).expect("a summary");
+        assert_eq!(summary.dropped, 4);
+        assert_eq!(summary.discarded, 1);
+        assert_eq!(summary.rendered, 0, "neither of them was ever encoded");
+        assert!(!summary.is_empty(), "a window of nothing but discards still says so");
     }
 
     /// The decode path outlives a session, because it is a property of the
@@ -1124,7 +1298,7 @@ mod tests {
     fn a_nonsense_frame_rate_does_not_produce_an_infinite_budget() {
         let stats = PlaybackStats::new();
         stats.begin_session(facts(), 0.0, Instant::now());
-        let _ = stats.record_frame(false, 1_000, Backend::Software);
+        let _ = stats.record_frame(false, 1_000, Backend::Software, None);
         let summary = stats.finish(Instant::now()).expect("a summary");
         assert!(summary.budget_ms.is_finite());
         assert!((summary.budget_ms - 33.333).abs() < 0.01, "falls back to 30 fps");
@@ -1140,24 +1314,24 @@ mod tests {
         stats.begin_session(facts(), 30.0, Instant::now());
 
         assert_eq!(
-            stats.record_frame(false, 6_000, Backend::Vaapi),
+            stats.record_frame(false, 6_000, Backend::Vaapi, None),
             None,
             "the first frame establishes the backend rather than reporting a change"
         );
         assert_eq!(
-            stats.record_frame(false, 31_000, Backend::Software),
+            stats.record_frame(false, 31_000, Backend::Software, None),
             Some(EncodeFallback {
                 from: Backend::Vaapi,
                 to: Backend::Software,
             })
         );
         assert_eq!(
-            stats.record_frame(false, 31_000, Backend::Software),
+            stats.record_frame(false, 31_000, Backend::Software, None),
             None,
             "one line, not one per frame"
         );
         assert_eq!(
-            stats.record_frame(false, 6_000, Backend::Vaapi),
+            stats.record_frame(false, 6_000, Backend::Vaapi, None),
             None,
             "and not again when it recovers"
         );
@@ -1167,13 +1341,13 @@ mod tests {
     fn a_new_session_may_report_a_fallback_again() {
         let stats = PlaybackStats::new();
         stats.begin_session(facts(), 30.0, Instant::now());
-        let _ = stats.record_frame(false, 6_000, Backend::Vaapi);
-        let _ = stats.record_frame(false, 31_000, Backend::Software);
+        let _ = stats.record_frame(false, 6_000, Backend::Vaapi, None);
+        let _ = stats.record_frame(false, 31_000, Backend::Software, None);
 
         stats.begin_session(facts(), 30.0, Instant::now());
-        let _ = stats.record_frame(false, 6_000, Backend::Vaapi);
+        let _ = stats.record_frame(false, 6_000, Backend::Vaapi, None);
         assert!(
-            stats.record_frame(false, 31_000, Backend::Software).is_some(),
+            stats.record_frame(false, 31_000, Backend::Software, None).is_some(),
             "a fresh session has not reported anything yet"
         );
     }
@@ -1213,9 +1387,9 @@ mod tests {
         stats.begin_session(facts(), 30.0, start);
         stats.set_decode_path(DecodePath::Vaapi);
         for _ in 0..29 {
-            let _ = stats.record_frame(false, 9_000, Backend::Vaapi);
+            let _ = stats.record_frame(false, 9_000, Backend::Vaapi, None);
         }
-        let _ = stats.record_frame(false, 120_000, Backend::Vaapi);
+        let _ = stats.record_frame(false, 120_000, Backend::Vaapi, None);
         for _ in 0..30 {
             stats.record_shown();
         }

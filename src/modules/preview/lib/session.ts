@@ -21,16 +21,20 @@
 import {
   newPreviewChannel,
   type PreviewEvent,
+  type PreviewOptions,
+  type PreviewViewport,
   previewPause,
   previewPlay,
   previewSeek,
   previewStart,
+  previewViewport,
 } from "@/modules/preview/lib/api";
 import { usePreviewStore } from "@/modules/preview/store";
 import { describeError, useProjectStore } from "@/modules/project/store";
 import type { Micros } from "@/modules/project/types";
 import { projectDuration } from "@/modules/project/types";
 import { useTimelineStore } from "@/modules/timeline/store";
+import { useWorkspaceStore } from "@/modules/workspace/store";
 
 /**
  * How long to wait after an edit before re-snapshotting.
@@ -49,8 +53,47 @@ const RESTART_DEBOUNCE_MS = 160;
  */
 const END_TOLERANCE: Micros = 41_667;
 
+/**
+ * How long to wait after a layout change before telling Rust the new size.
+ *
+ * A window drag is one layout per pointer event, and a size change supersedes
+ * the session and empties the ring — so an undebounced handler would restart
+ * the pipeline a hundred times while the user drags a splitter. Long enough to
+ * cover a drag, short enough that letting go feels immediate. Rust makes the
+ * same call free when the rounded size is unchanged, so this is about the
+ * changes that *are* real.
+ */
+const RESIZE_DEBOUNCE_MS = 180;
+
 let starting: Promise<void> | null = null;
 let restartTimer: ReturnType<typeof setTimeout> | null = null;
+let resizeTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * The last panel size measured, in device pixels.
+ *
+ * Module-level because it has to survive a session restart: `preview_start`
+ * opens a fresh session and it must not go back to rendering the whole canvas
+ * just because the panel has not been resized since.
+ */
+let viewport: PreviewViewport | null = null;
+
+/**
+ * What a session opens with: the panel, plus the three persisted settings.
+ *
+ * These were passed as `null` for as long as the settings existed, so the
+ * dialog wrote values nothing read. The panel is the default and the settings
+ * are overrides — see `preview::session::preview_size`.
+ */
+function options(): PreviewOptions {
+  const settings = useWorkspaceStore.getState().settings;
+  return {
+    longEdge: settings.preview_max_edge > 0 ? settings.preview_max_edge : undefined,
+    quality: settings.preview_quality > 0 ? settings.preview_quality : undefined,
+    fullQuality: settings.preview_full_quality,
+    ...(viewport ? { viewport } : {}),
+  };
+}
 
 function handleEvent(event: PreviewEvent): void {
   const store = usePreviewStore.getState();
@@ -94,6 +137,7 @@ async function open(time: Micros): Promise<void> {
         return channel;
       })(),
       time,
+      options(),
     );
     usePreviewStore.getState().applyInfo(info);
   } catch (error) {
@@ -131,6 +175,42 @@ export const preview = {
         if (wasPlaying) void preview.play();
       });
     }, RESTART_DEBOUNCE_MS);
+  },
+
+  /**
+   * The player panel changed size. Measured in **device** pixels.
+   *
+   * This is what stops the preview from being composited, read back and
+   * JPEG-encoded at the project's canvas whatever the panel is: a 1920x1080
+   * project in a 700 px panel was 7.5× the pixels the screen could display, on
+   * every stage of every frame.
+   *
+   * Debounced, because a drag is one layout per pointer event and a real size
+   * change supersedes the session. Safe to call with the same size repeatedly:
+   * Rust answers a size that rounds to the one it already has without touching
+   * anything.
+   */
+  setViewport(width: number, height: number): void {
+    const next = { width: Math.max(0, Math.round(width)), height: Math.max(0, Math.round(height)) };
+    if (next.width === 0 || next.height === 0) return;
+    if (viewport && viewport.width === next.width && viewport.height === next.height) return;
+    viewport = next;
+
+    if (resizeTimer) clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      resizeTimer = null;
+      // No session yet: the size is remembered and the next `open` carries it,
+      // so the very first frame is already the right size.
+      if (usePreviewStore.getState().session === null) return;
+      const measured = viewport;
+      if (!measured) return;
+      void previewViewport(measured.width, measured.height)
+        .then((info) => usePreviewStore.getState().applySize(info))
+        .catch(() => {
+          // A resize against a closed session is not worth a message; the next
+          // edit or mount opens one, and it will carry this size.
+        });
+    }, RESIZE_DEBOUNCE_MS);
   },
 
   /**

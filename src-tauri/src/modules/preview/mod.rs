@@ -30,10 +30,21 @@
 //!
 //! ## What it owns
 //!
-//! - **The proxy resolution.** Derived from the project canvas so the aspect
-//!   ratio matches the export exactly, capped on the long edge
-//!   ([`session::proxy_size`]). Full resolution is an export concern; the
-//!   preview only has to be good enough to make editing decisions on.
+//! - **The render resolution.** [`session::preview_size`]. The default is the
+//!   size of the panel on screen, in device pixels, because every pixel above
+//!   that is composited, read back and JPEG-encoded so that it can be thrown
+//!   away by a CSS downscale — a 1080p project in a 700 px panel was 7.5× the
+//!   work the screen could use. The project canvas is the ceiling (never
+//!   render above the source), the table in [`session::proxy_long_edge`] and
+//!   `settings.preview_max_edge` cap it further, and
+//!   `settings.preview_full_quality` overrides the lot. The aspect ratio
+//!   always matches the export's.
+//! - **The quality ladder.** [`ladder`]. Playback — and only playback — may
+//!   drop to three-quarter or half size and a lower JPEG quality when the
+//!   renderer cannot hold the frame budget, and climbs back after three quiet
+//!   seconds. A **paused** frame is never on the ladder: pausing after a
+//!   degraded run supersedes the session so the frame the user sits and looks
+//!   at is rendered again at the session's own size and quality.
 //! - **Sessions.** A monotonic id over a project snapshot and a resolution
 //!   ([`PreviewSession`]). The id is in every frame URL, which is what stops a
 //!   frame from a superseded seek painting over the current view — it comes
@@ -44,7 +55,10 @@
 //! - **The clock.** [`PlaybackClock`] over a swappable [`clock::TimeSource`],
 //!   monotonic today and the audio device later, because audio position is the
 //!   authority for the playhead. Late frames are dropped rather than shown
-//!   late; time is never stretched to let the renderer catch up.
+//!   late; time is never stretched to let the renderer catch up. A frame the
+//!   playhead passes *while it is being composited* is thrown away without
+//!   being encoded, counted separately as `discarded` — but never two in a row,
+//!   or a renderer that is permanently behind would show nothing at all.
 //! - **JPEG encoding.** On the GPU where the machine has a VAAPI JPEG
 //!   entrypoint ([`vaapi`]), on libjpeg-turbo everywhere else. The compositor
 //!   already hands back sRGB-encoded bytes, so the software path is a pure
@@ -80,6 +94,8 @@ pub mod clock;
 pub mod commands;
 pub mod encoder;
 pub mod error;
+pub mod ladder;
+pub mod probe;
 pub mod server;
 pub mod session;
 pub mod stats;
@@ -94,15 +110,17 @@ pub use encoder::{
     encode_jpeg, encode_preview_jpeg, hardware_available, Backend, BACKEND_ENV,
 };
 pub use error::{PreviewError, Result};
+pub use ladder::{Ladder, Rung, MIN_QUALITY, RUNGS, STEP_DOWN_AFTER, STEP_UP_AFTER};
+pub use probe::{Counts, Probe, PROBE};
 pub use server::{
     frame_protocol, frame_protocol_async, frame_url, parse_frame_uri, PreviewEvent, PreviewInfo,
     PreviewServer, PreviewStatus, FRAME_WAIT, SCHEME,
 };
 pub use session::{
-    proxy_long_edge, proxy_size, PreviewOptions, PreviewSession, DEFAULT_JPEG_QUALITY,
-    SCRUB_JPEG_QUALITY,
+    preview_size, proxy_long_edge, proxy_size, PreviewOptions, PreviewSession, Viewport,
+    DEFAULT_JPEG_QUALITY, SCRUB_JPEG_QUALITY,
 };
 pub use stats::{
-    decode_path, DecodePath, Histogram, PlaybackStats, SeekKind, SeekWatch, SessionFacts, SlowSeek,
-    Summary, SLOW_SEEK, SUMMARY_INTERVAL,
+    decode_path, DecodePath, Histogram, PlaybackStats, Rendered, SeekKind, SeekWatch, SessionFacts,
+    SlowSeek, Summary, SLOW_SEEK, SUMMARY_INTERVAL,
 };

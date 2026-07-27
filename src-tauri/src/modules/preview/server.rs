@@ -47,8 +47,10 @@ use super::clock::{
 };
 use super::encoder::encode_preview_jpeg;
 use super::error::{PreviewError, Result};
-use super::session::{PreviewOptions, PreviewSession};
-use super::stats::{self, PlaybackStats, SeekKind, SeekWatch, SessionFacts};
+use super::ladder::{self, Ladder};
+use super::probe::{self, PROBE};
+use super::session::{PreviewOptions, PreviewSession, Viewport};
+use super::stats::{self, PlaybackStats, Rendered, SeekKind, SeekWatch, SessionFacts};
 use crate::modules::audio::AudioEngine;
 use crate::modules::project::document::{Micros, Project};
 use crate::modules::render::{Compositor, EmptySourceProvider, RenderContext, SourceProvider};
@@ -68,9 +70,54 @@ pub const FRAME_WAIT: Duration = Duration::from_millis(60);
 /// visibly jumps backwards, and leaving the previous frame up is better.
 const NEAREST_TOLERANCE: i64 = 2;
 
+/// How far behind the playhead a *composited* frame may be and still be worth
+/// a JPEG.
+///
+/// One frame, tied to [`NEAREST_TOLERANCE`]: a frame one interval late is still
+/// served — as the nearest neighbour of the frame the webview asked for — so
+/// encoding it is not waste. It also keeps the renderer out of a livelock. A
+/// renderer that is consistently one frame behind would, at zero tolerance,
+/// discard every frame it ever finished and the picture would stop entirely
+/// while the machine stayed busy.
+const LATE_ENCODE_TOLERANCE: i64 = 1;
+
 /// How long the render thread sleeps when the ring is full enough. Short, so
 /// that a seek or a pause is acted on promptly.
 const IDLE_TICK: Duration = Duration::from_millis(4);
+
+/// The two savings that can be turned off, so that both arms of them can be
+/// measured in one process.
+///
+/// A claim that a change made something faster is worth what its measurement
+/// is worth, and a measurement taken against a build that no longer exists is
+/// worth very little. `examples/preview_waste.rs` runs the same pipeline with
+/// each of these on and off and prints the difference; nothing else ever calls
+/// them, and both default to on.
+pub mod experiment {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static SKIP_LATE_ENCODES: AtomicBool = AtomicBool::new(true);
+    static DEDUPE_SCRUBS: AtomicBool = AtomicBool::new(true);
+
+    /// Throw away a composited frame the playhead has already passed instead of
+    /// spending a JPEG on it.
+    pub fn set_skip_late_encodes(on: bool) {
+        SKIP_LATE_ENCODES.store(on, Ordering::Relaxed);
+    }
+
+    pub fn skip_late_encodes() -> bool {
+        SKIP_LATE_ENCODES.load(Ordering::Relaxed)
+    }
+
+    /// Refuse a frame request for a frame that is already being rendered.
+    pub fn set_dedupe_scrubs(on: bool) {
+        DEDUPE_SCRUBS.store(on, Ordering::Relaxed);
+    }
+
+    pub fn dedupe_scrubs() -> bool {
+        DEDUPE_SCRUBS.load(Ordering::Relaxed)
+    }
+}
 
 /// Upper bound on the pacer's sleep, so shutdown is never more than this away.
 const PACER_TICK: Duration = Duration::from_millis(8);
@@ -198,6 +245,13 @@ struct Shared {
     stats: PlaybackStats,
     /// How long the picture takes to catch up with a moved playhead.
     seeks: SeekWatch,
+    /// What playback is currently giving up to keep up. See [`ladder`].
+    ///
+    /// Its own mutex rather than a field of `Work` because the encode thread
+    /// steps it, and that thread must not take the lock the render thread holds
+    /// while it waits for work. A leaf, like `stats`: nothing under it takes
+    /// another lock.
+    ladder: Mutex<Ladder>,
 }
 
 #[derive(Default)]
@@ -209,6 +263,15 @@ struct Work {
     /// overwritten before the renderer ever sees it, which is what cancelling
     /// an in-flight render amounts to when a render is one frame long.
     scrub: Option<i64>,
+    /// The scrub frame the render thread is working on right now, cleared when
+    /// its bytes reach the ring.
+    ///
+    /// Exists so a second request for a frame that is already being rendered
+    /// does not queue a second render of it. The webview asks again while it
+    /// waits — `serve_uri` answers a miss and the viewer retries — and without
+    /// this each retry composited the same frame again, which on a cold seek is
+    /// the most expensive frame there is.
+    rendering: Option<i64>,
     /// Next frame playback intends to render.
     cursor: i64,
     read_ahead: usize,
@@ -224,9 +287,12 @@ impl Shared {
 
     fn emit(&self, event: PreviewEvent) {
         if let Some(channel) = self.events.read().as_ref() {
+            let sent = std::time::Instant::now();
             if let Err(error) = channel.send(event) {
                 tracing::warn!(%error, "preview event channel is gone");
             }
+            probe::add(&PROBE.emit_ns, sent);
+            probe::bump(&PROBE.emits);
         }
     }
 
@@ -345,6 +411,7 @@ impl PreviewServer {
                 announced: Mutex::new(None),
                 stats: PlaybackStats::new(),
                 seeks: SeekWatch::new(),
+                ladder: Mutex::new(Ladder::new()),
             }),
             threads: Mutex::new(Vec::new()),
         })
@@ -369,6 +436,17 @@ impl PreviewServer {
 
     pub fn clock(&self) -> &PlaybackClock {
         &self.shared.clock
+    }
+
+    /// The playback counters behind the summary line.
+    ///
+    /// For a harness that wants the numbers rather than the log: the counts of
+    /// what was shown, dropped, discarded and rendered are the only way to say
+    /// whether a change to the pipeline did what it claims.
+    /// `examples/preview_waste.rs` reads them; the application only ever emits
+    /// them.
+    pub fn stats(&self) -> &PlaybackStats {
+        &self.shared.stats
     }
 
     pub fn session(&self) -> Option<Arc<PreviewSession>> {
@@ -432,6 +510,12 @@ impl PreviewServer {
         }
         self.shared.clock.play();
 
+        // Every run starts at the top of the ladder. Carrying a rung over from
+        // the last one would mean a machine that stuttered once previews softly
+        // for the rest of the session, and the user has no way to ask for it
+        // back.
+        self.shared.ladder.lock().reset();
+
         // The window starts here, not when the session opened: a session that
         // sat parked for a minute would otherwise put that minute in the first
         // summary's `window_ms`.
@@ -471,11 +555,66 @@ impl PreviewServer {
             stats::emit(&summary, stats::Reason::Stopped);
         }
 
+        // A paused frame is the one the user sits and looks at, so it is the
+        // one thing the quality ladder is never allowed to affect. If playback
+        // gave anything up, the ring is full of frames that are softer than the
+        // project and the frame under the playhead is one of them — so the
+        // session is superseded (which empties the ring) and that frame is
+        // rendered again at the session's own size and `scrub_quality`.
+        //
+        // Only when it actually degraded: a run that held the top rung
+        // throughout already has the right picture in the ring, and superseding
+        // for it would throw away the read-ahead a resume is about to need.
+        if self.shared.ladder.lock().reset() {
+            let refreshed = Arc::new(session.superseded());
+            tracing::debug!(
+                session = refreshed.id,
+                width = refreshed.width(),
+                height = refreshed.height(),
+                "re-rendering the paused frame at full quality"
+            );
+            let info = self.readopt(refreshed, false);
+            self.shared
+                .emit_position(info.session, info.frame, info.position, false, true);
+            return Ok(info);
+        }
+
         let info = self.info(&session);
         // Authoritative: pausing *is* where the playhead is now.
         self.shared
             .emit_position(session.id, info.frame, info.position, false, true);
         Ok(info)
+    }
+
+    /// Tell the preview how big the panel showing it is, in device pixels.
+    ///
+    /// This is what stops the compositor and the JPEG encoder from working at
+    /// eight times the pixels the screen can display. `None` goes back to
+    /// sizing from the canvas alone.
+    ///
+    /// A no-op when the size does not change, which is most calls: the frontend
+    /// debounces a window drag, but a debounce still delivers several sizes and
+    /// only some of them cross a rounding boundary. Restarting the pipeline for
+    /// the rest would empty the ring for nothing.
+    pub fn set_viewport(&self, viewport: Option<Viewport>) -> Result<PreviewInfo> {
+        let (session, playing) = {
+            let work = self.shared.work.lock();
+            let session = work.session.clone().ok_or(PreviewError::NoSession)?;
+            (session, work.playing)
+        };
+        let Some(resized) = session.with_viewport(viewport) else {
+            return Ok(self.info(&session));
+        };
+        tracing::info!(
+            width = resized.width(),
+            height = resized.height(),
+            was_width = session.width(),
+            was_height = session.height(),
+            canvas_width = resized.project.canvas.width,
+            canvas_height = resized.project.canvas.height,
+            "preview resized to the panel"
+        );
+        Ok(self.readopt(Arc::new(resized), playing))
     }
 
     /// Close the session and stop the threads. The ring is dropped: its frames
@@ -585,6 +724,15 @@ impl PreviewServer {
         if work.playing {
             return;
         }
+        // Already being made. The webview asks again while it waits — the
+        // handler answers a miss after `FRAME_WAIT` and the viewer retries —
+        // and queueing a second render of a frame that is halfway through the
+        // first one is the most expensive possible way to answer, because a
+        // scrub job seeks the decoder and the frame it is seeking to is the one
+        // the decoder is already on.
+        if work.rendering == Some(frame) && experiment::dedupe_scrubs() {
+            return;
+        }
         work.scrub = Some(frame);
         drop(work);
         self.shared.wake.notify_all();
@@ -603,17 +751,38 @@ impl PreviewServer {
             );
         };
 
+        let served = std::time::Instant::now();
+        probe::bump(&PROBE.serve_calls);
         match self.shared.cache.get(session, frame) {
-            Lookup::Hit(bytes) => return jpeg_response(&bytes),
-            Lookup::Stale => return gone(session),
+            Lookup::Hit(bytes) => {
+                probe::bump(&PROBE.serve_hit);
+                probe::add(&PROBE.serve_ns, served);
+                return jpeg_response(&bytes);
+            }
+            Lookup::Stale => {
+                probe::bump(&PROBE.serve_stale);
+                probe::add(&PROBE.serve_ns, served);
+                return gone(session);
+            }
             Lookup::Miss => {}
         }
 
         // Not rendered yet. Nudge the renderer and wait briefly.
         self.request_frame(session, frame);
-        match self.shared.cache.wait(session, frame, FRAME_WAIT) {
-            Lookup::Hit(bytes) => return jpeg_response(&bytes),
-            Lookup::Stale => return gone(session),
+        let waited = std::time::Instant::now();
+        let found = self.shared.cache.wait(session, frame, FRAME_WAIT);
+        probe::add(&PROBE.serve_wait_ns, waited);
+        match found {
+            Lookup::Hit(bytes) => {
+                probe::bump(&PROBE.serve_wait_hit);
+                probe::add(&PROBE.serve_ns, served);
+                return jpeg_response(&bytes);
+            }
+            Lookup::Stale => {
+                probe::bump(&PROBE.serve_stale);
+                probe::add(&PROBE.serve_ns, served);
+                return gone(session);
+            }
             Lookup::Miss => {}
         }
 
@@ -625,16 +794,21 @@ impl PreviewServer {
         // at 30 requests a second a renderer that falls momentarily behind
         // produces exactly that stream. A neighbouring frame is a few
         // milliseconds stale and looks identical to a late one.
-        if let Some((served, bytes)) = self.shared.cache.nearest(session, frame, NEAREST_TOLERANCE) {
-            if served != frame {
+        if let Some((neighbour, bytes)) = self.shared.cache.nearest(session, frame, NEAREST_TOLERANCE)
+        {
+            if neighbour != frame {
                 tracing::debug!(
                     requested = frame,
-                    served,
+                    served = neighbour,
                     "served a neighbouring frame; the renderer is behind"
                 );
             }
+            probe::bump(&PROBE.serve_nearest);
+            probe::add(&PROBE.serve_ns, served);
             return jpeg_response(&bytes);
         }
+        probe::bump(&PROBE.serve_empty);
+        probe::add(&PROBE.serve_ns, served);
 
         // Nothing has been rendered for this session at all — the very first
         // frame, on a cold decoder. 204 rather than 404: it is a *successful*
@@ -707,9 +881,47 @@ impl PreviewServer {
             let mut work = self.shared.work.lock();
             work.session = Some(Arc::clone(&session));
             work.scrub = Some(frame);
+            work.rendering = None;
             work.cursor = frame;
             work.playing = keep_playing;
             work.reported_error = false;
+        }
+        self.shared.wake.notify_all();
+
+        self.info(&session)
+    }
+
+    /// Replace the live session with one that differs only in how it is
+    /// rendered, leaving the playhead exactly where it is.
+    ///
+    /// [`Self::adopt`] is for a *move*: it seeks the clock and the audio engine
+    /// and arms the seek watch. A resize and the re-render after a pause move
+    /// nothing — the picture has to change, the time does not — and putting
+    /// them through `adopt` would seek the audio engine for a window drag.
+    ///
+    /// What it still has to do is supersede: the ring holds frames at the old
+    /// size or the old quality, and a frame URL is answered from the ring
+    /// without anything looking at how big the picture in it is.
+    fn readopt(&self, session: Arc<PreviewSession>, keep_playing: bool) -> PreviewInfo {
+        self.shared.cache.reset(session.id);
+        self.shared.stats.begin_session(
+            SessionFacts {
+                width: session.width(),
+                height: session.height(),
+                canvas: (session.project.canvas.width, session.project.canvas.height),
+            },
+            session.fps,
+            std::time::Instant::now(),
+        );
+
+        let frame = self.shared.clock.frame();
+        {
+            let mut work = self.shared.work.lock();
+            work.session = Some(Arc::clone(&session));
+            work.scrub = Some(frame);
+            work.rendering = None;
+            work.cursor = frame;
+            work.playing = keep_playing;
         }
         self.shared.wake.notify_all();
 
@@ -824,8 +1036,26 @@ fn render_loop(shared: Arc<Shared>) {
     shared.stats.set_decode_path(path);
     tracing::info!(decode = path.label(), reason = why, "preview decode path");
 
-    while let Some(job) = next_job(&shared) {
-        render_one(&shared, &ctx, &compositor, job);
+    // Whether the frame before this one was composited and then thrown away for
+    // being late. The render thread's own state, so no lock and no atomic: it
+    // is the only thread that reads or writes it. See [`render_one`] for what
+    // it guarantees.
+    let mut discarded_last = false;
+
+    loop {
+        // Timed around `next_job` rather than inside it, so one counter covers
+        // every reason this thread is not rendering: no session, paused, or the
+        // read-ahead window already full. See `probe`: that last case is the
+        // one that says the renderer is not the bottleneck.
+        let waited = std::time::Instant::now();
+        let Some(job) = next_job(&shared) else {
+            return;
+        };
+        probe::add(&PROBE.render_wait_ns, waited);
+        if job.scrub {
+            probe::bump(&PROBE.scrub_jobs);
+        }
+        discarded_last = render_one(&shared, &ctx, &compositor, job, discarded_last);
     }
 }
 
@@ -843,6 +1073,10 @@ fn next_job(shared: &Shared) -> Option<Job> {
         };
 
         if let Some(frame) = work.scrub.take() {
+            // Held until the bytes are in the ring, so a retry for the same
+            // frame while this one is in flight is answered by the ring rather
+            // than by a second render. See `Work::rendering`.
+            work.rendering = Some(frame);
             return Some(Job {
                 session,
                 frame,
@@ -886,6 +1120,14 @@ fn next_job(shared: &Shared) -> Option<Job> {
                 // so there is no order to invert. It is a single add and it
                 // never logs — the count reaches the file in the next summary.
                 shared.stats.record_dropped(to - from);
+                // The ladder is a leaf for the same reason. A drop is the
+                // loudest evidence there is that the renderer cannot hold this
+                // size, so it steps down at once rather than after a streak.
+                // Silently: this runs under the `work` guard, and a `tracing`
+                // call here would be a `write` syscall with the render thread's
+                // own lock held. The rung reaches the file on the next summary
+                // line, and the step itself is logged from the encode thread.
+                let _ = shared.ladder.lock().dropped(to - from);
                 work.cursor = to;
             }
             Pacing::Idle => {
@@ -956,7 +1198,10 @@ fn encode_queue() -> &'static std::sync::mpsc::SyncSender<EncodeJob> {
                 // Ends when the sender is dropped, which only happens at
                 // process exit: the queue outlives any one session, exactly as
                 // rayon's pool did.
-                while let Ok(job) = receiver.recv() {
+                loop {
+                    let idle = std::time::Instant::now();
+                    let Ok(job) = receiver.recv() else { return };
+                    probe::add(&PROBE.encode_idle_ns, idle);
                     job();
                     PENDING_ENCODES.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                 }
@@ -966,22 +1211,89 @@ fn encode_queue() -> &'static std::sync::mpsc::SyncSender<EncodeJob> {
     })
 }
 
-fn render_one(shared: &Arc<Shared>, ctx: &Arc<RenderContext>, compositor: &Compositor, job: Job) {
+/// Release the in-flight scrub mark, however the frame ended.
+///
+/// Every exit from [`render_one`] has to reach this for a scrub, or a frame
+/// that failed to render would be refused forever after: `request_frame` would
+/// keep seeing it as still in flight and never queue it again.
+fn done_rendering(shared: &Shared, frame: i64) {
+    let mut work = shared.work.lock();
+    if work.rendering == Some(frame) {
+        work.rendering = None;
+    }
+}
+
+/// One line when the quality ladder moves.
+///
+/// Worth INFO and not DEBUG for the same reason the encoder's backend change
+/// is: the picture got softer or sharper on its own, and without this the only
+/// evidence is a number in a summary line that a reader has to notice changed.
+/// Rare by construction — a step needs three bad frames or three good seconds.
+fn log_rung(rung: usize, why: &'static str) {
+    tracing::info!(
+        rung,
+        ladder = ladder::rung_label(rung),
+        reason = why,
+        "preview quality ladder moved"
+    );
+}
+
+/// Whether a frame that has just been composited is already past showing.
+///
+/// The tolerance is not zero, and that is deliberate. A frame one interval
+/// behind is still shown: `serve_uri` answers a request for the current frame
+/// with a neighbour within [`NEAREST_TOLERANCE`], so it has a reader. Two or
+/// more and the pacer has moved past anything it could substitute for.
+///
+/// `discarded_last` is the guarantee of progress: see [`render_one`].
+fn too_late_to_encode(frame: i64, position: Micros, fps: f64, discarded_last: bool) -> bool {
+    if discarded_last {
+        return false;
+    }
+    frame_at(position, fps) - frame > LATE_ENCODE_TOLERANCE
+}
+
+/// Composite one frame, and encode it unless nobody can still see it.
+///
+/// Returns whether the frame was thrown away for being late, which the caller
+/// hands back on the next call. That is the whole of the guarantee that this
+/// cannot stop the picture: **two composited frames are never discarded in a
+/// row**. A renderer that is consistently more than a frame behind would
+/// otherwise discard every frame it ever finished — each one is late by the
+/// same margin as the last — and the viewer would sit in front of a frozen
+/// picture while the machine stayed busy. Measured, in
+/// `examples/preview_waste.rs`: at eight times the frame budget the unguarded
+/// version encoded 1 frame in 14.
+fn render_one(
+    shared: &Arc<Shared>,
+    ctx: &Arc<RenderContext>,
+    compositor: &Compositor,
+    job: Job,
+    discarded_last: bool,
+) -> bool {
     let session = &job.session;
     let time = frame_time(job.frame, session.fps);
-    let quality = if job.scrub {
-        session.scrub_quality
-    } else {
-        session.quality
-    };
-    // One resolution, whatever the frame is for.
+
+    // What this frame is made of, and the one asymmetry that matters.
     //
-    // Playback used to render smaller than a parked frame, because at 1080x1920
-    // the JPEG encode alone overran the 33 ms budget. With the encode on the
-    // GPU it is about 7 ms and runs on another thread besides, so the reason is
-    // gone and playback is as sharp as the project is. What is left in the
-    // budget is compositing and decoding.
-    let size = ctx.clamp_size(session.size);
+    // A **scrub** — a seek, a pause, the first frame of a session — is the
+    // frame somebody sits and looks at, so it is always the session's own size
+    // and `scrub_quality`. The ladder cannot touch it.
+    //
+    // A **playback** frame may be smaller and softer than that, because the
+    // alternative when the machine cannot hold the size is not a sharper
+    // picture, it is a picture that stops moving. See [`ladder`].
+    let (target, quality, rung) = if job.scrub {
+        (session.size, session.scrub_quality, 0)
+    } else {
+        let ladder = *shared.ladder.lock();
+        (
+            ladder.size(session.size),
+            ladder.quality(session.quality),
+            ladder.rung(),
+        )
+    };
+    let size = ctx.clamp_size(target);
     let sources = Arc::clone(&*shared.sources.read());
 
     let composite_started = std::time::Instant::now();
@@ -990,15 +1302,46 @@ fn render_one(shared: &Arc<Shared>, ctx: &Arc<RenderContext>, compositor: &Compo
         Err(error) => {
             let message = format!("cannot render the preview frame: {error}");
             if job.scrub {
+                done_rendering(shared, job.frame);
                 shared.emit_error_once(message);
             } else {
                 tracing::warn!(%error, frame = job.frame, "preview render failed");
             }
-            return;
+            return false;
         }
     };
 
     let composite_micros = composite_started.elapsed().as_micros();
+    probe::add(&PROBE.composite_ns, composite_started);
+    probe::bump(&PROBE.composites);
+
+    // The frame is finished and already too late to show. Do not spend a JPEG
+    // on it.
+    //
+    // `pace` drops frames it has not started; this is the other end of the same
+    // rule, for a frame the clock passed *while* it was being composited. The
+    // two never count the same frame — this one was taken off the queue before
+    // `pace` looked at it — so it has its own counter, `discarded`.
+    //
+    if !job.scrub && shared.clock.is_playing() && experiment::skip_late_encodes() {
+        let position = shared.clock.position();
+        if too_late_to_encode(job.frame, position, session.fps, discarded_last) {
+            shared.stats.record_discarded(1);
+            tracing::debug!(
+                frame = job.frame,
+                behind = frame_at(position, session.fps) - job.frame,
+                composite_ms = composite_micros as f64 / 1000.0,
+                "the playhead passed this frame while it was being composited; \
+                 not encoding it"
+            );
+            if let Some(rung) = shared.ladder.lock().dropped(1) {
+                log_rung(rung, "a composited frame was already too late to show");
+            }
+            return true;
+        }
+    }
+
+    let dispatch_started = std::time::Instant::now();
 
     // Encoding moves off this thread so the next frame can be composited while
     // this one is turned into JPEG. Ordering does not matter: the ring is keyed
@@ -1022,11 +1365,19 @@ fn render_one(shared: &Arc<Shared>, ctx: &Arc<RenderContext>, compositor: &Compo
             let (bytes, backend) = match encode_preview_jpeg(&rgba, size.0, size.1, quality) {
                 Ok(encoded) => encoded,
                 Err(error) => {
+                    if scrub {
+                        done_rendering(&shared, frame_no);
+                    }
                     shared.emit_error_once(error.to_string());
                     return;
                 }
             };
             let encode_micros = encode_started.elapsed().as_micros();
+            probe::add(&PROBE.encode_ns, encode_started);
+            probe::bump(&PROBE.encodes);
+            PROBE
+                .encoded_bytes
+                .fetch_add(bytes.len() as u64, std::sync::atomic::Ordering::Relaxed);
 
             // The two halves are reported separately because they now run in
             // parallel: what fits in the budget is the larger of them, not the
@@ -1034,10 +1385,19 @@ fn render_one(shared: &Arc<Shared>, ctx: &Arc<RenderContext>, compositor: &Compo
             let slowest = composite_micros.max(encode_micros) as i64;
             let slowest_ms = slowest as f64 / 1000.0;
 
+            // What playback gave up for this frame, so the summary line can say
+            // it. `None` for a scrub: a scrub never goes through the ladder.
+            let rendered = (!scrub).then_some(Rendered {
+                rung: rung as u8,
+                width: size.0,
+                height: size.1,
+                quality,
+            });
+
             // Three integer adds and a bucket increment. Everything that costs
             // anything — the divisions, the percentile, the formatting —
             // happens once a second in the pacer, not here.
-            if let Some(fallback) = shared.stats.record_frame(scrub, slowest, backend) {
+            if let Some(fallback) = shared.stats.record_frame(scrub, slowest, backend, rendered) {
                 // The encoder changed backend under us. `encode_preview_jpeg`
                 // falls back silently by design, and on a 1080x1920 frame that
                 // is 31 ms of CPU against 6.2 ms of GPU — enough on its own to
@@ -1057,27 +1417,54 @@ fn render_one(shared: &Arc<Shared>, ctx: &Arc<RenderContext>, compositor: &Compo
                 );
             }
 
+            let budget_ms = frame_interval(fps) as f64 / 1000.0;
+            let over_budget = slowest_ms > budget_ms;
+
             tracing::debug!(
                 session = session_id,
                 frame = frame_no,
                 at_ms = time / 1000,
                 scrub,
+                width = size.0,
+                height = size.1,
+                quality,
+                rung,
                 composite_ms = composite_micros as f64 / 1000.0,
                 encode_ms = encode_micros as f64 / 1000.0,
                 slowest_ms,
-                budget_ms = frame_interval(fps) as f64 / 1000.0,
-                over_budget = slowest_ms > frame_interval(fps) as f64 / 1000.0,
+                budget_ms,
+                over_budget,
                 bytes = bytes.len(),
                 encoder = backend.label(),
                 "preview frame ready"
             );
 
+            // The ladder is stepped from here rather than from the render
+            // thread because this is where a frame's real cost is known — the
+            // encode is half of it and it happens on this thread — and because
+            // nothing is locked here, so the one INFO line a step is worth can
+            // be written without a `write` syscall under somebody's mutex.
+            if !scrub {
+                if let Some(moved) = shared.ladder.lock().frame(over_budget) {
+                    log_rung(
+                        moved,
+                        if over_budget {
+                            "playback has been over budget for several frames"
+                        } else {
+                            "playback has had room to spare for three seconds"
+                        },
+                    );
+                }
+            }
+
+            let inserted = std::time::Instant::now();
             let stored = shared.cache.insert(CachedFrame {
                 session: session_id,
                 frame: frame_no,
                 time,
                 bytes: Arc::from(bytes.into_boxed_slice()),
             });
+            probe::add(&PROBE.insert_ns, inserted);
 
             // The picture has caught up with wherever the playhead was moved
             // to. This — and not how long `seek` took to return — is the wait
@@ -1101,6 +1488,13 @@ fn render_one(shared: &Arc<Shared>, ctx: &Arc<RenderContext>, compositor: &Compo
             // decision is taken under the same lock as the send. The whole
             // account, and why the obvious version of the check is not enough,
             // is on that function.
+            if scrub {
+                // Cleared only now, not when the composite finished: the point
+                // of the mark is that a request arriving *while* this frame is
+                // being made does not start a second one, and the ring is the
+                // first moment a request can be answered without one.
+                done_rendering(&shared, frame_no);
+            }
             if stored && scrub {
                 shared.emit_position(
                     session_id,
@@ -1115,7 +1509,9 @@ fn render_one(shared: &Arc<Shared>, ctx: &Arc<RenderContext>, compositor: &Compo
 
     if inline {
         finish();
-        return;
+        probe::add(&PROBE.inline_encode_ns, dispatch_started);
+        probe::bump(&PROBE.inline_encodes);
+        return false;
     }
 
     PENDING_ENCODES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1129,7 +1525,12 @@ fn render_one(shared: &Arc<Shared>, ctx: &Arc<RenderContext>, compositor: &Compo
             std::sync::mpsc::TrySendError::Disconnected(job) => job,
         };
         job();
+        probe::add(&PROBE.inline_encode_ns, dispatch_started);
+        probe::bump(&PROBE.inline_encodes);
+        return false;
     }
+    probe::add(&PROBE.dispatch_ns, dispatch_started);
+    false
 }
 
 // ---------------------------------------------------------------------------
@@ -1576,6 +1977,194 @@ mod tests {
         let server = PreviewServer::with_capacity(8);
         let response = server.serve_uri("chukcut-frame://preview/1/0");
         assert_eq!(response.status(), tauri::http::StatusCode::GONE);
+    }
+
+    // -----------------------------------------------------------------------
+    // Rendering only what the screen can show
+    // -----------------------------------------------------------------------
+
+    /// A server with a session installed and no threads, so the decisions
+    /// around a session can be checked on a machine with no GPU.
+    fn parked() -> (Arc<PreviewServer>, PreviewInfo) {
+        let server = PreviewServer::with_capacity(8);
+        let info = server.adopt(
+            Arc::new(PreviewSession::new(project(), PreviewOptions::default())),
+            0,
+            false,
+            SeekKind::SessionStart,
+        );
+        (server, info)
+    }
+
+    #[test]
+    fn the_panel_decides_the_render_size_and_supersedes_when_it_changes() {
+        let (server, info) = parked();
+        assert_eq!(
+            (info.width, info.height),
+            (1920, 1080),
+            "no panel measured yet, so the canvas stands"
+        );
+
+        let resized = server
+            .set_viewport(Some(Viewport::new(700, 394)))
+            .expect("a session is open");
+        assert_eq!(
+            (resized.width, resized.height),
+            (700, 394),
+            "the panel, not the canvas"
+        );
+        assert!(resized.session > info.session, "a new size is a new session");
+        assert_eq!(
+            server.cache().session(),
+            resized.session,
+            "and the ring holding frames at the old size was emptied"
+        );
+
+        // A window drag is hundreds of layouts and only a few of them change
+        // the rounded size. The rest must cost nothing at all.
+        let again = server
+            .set_viewport(Some(Viewport::new(701, 395)))
+            .expect("a session is open");
+        assert_eq!(
+            again.session, resized.session,
+            "a resize that rounds to the same size did not restart the pipeline"
+        );
+
+        // Going back to no panel restores the canvas.
+        let full = server.set_viewport(None).expect("a session is open");
+        assert_eq!((full.width, full.height), (1920, 1080));
+        assert!(full.session > resized.session);
+    }
+
+    #[test]
+    fn the_playhead_survives_a_resize() {
+        let (server, _) = parked();
+        server.seek(1_000_000).expect("a session is open");
+        let before = server.clock().position();
+        let resized = server
+            .set_viewport(Some(Viewport::new(640, 360)))
+            .expect("a session is open");
+        assert_eq!(server.clock().position(), before, "a resize is not a seek");
+        assert_eq!(resized.frame, 30);
+        assert_eq!(server.shared.work.lock().scrub, Some(30), "and it re-renders");
+    }
+
+    #[test]
+    fn pausing_after_a_degraded_run_re_renders_the_frame_at_full_quality() {
+        let (server, info) = parked();
+        server.play().expect("a session is open");
+
+        // What a machine that cannot hold the size does to the ladder. Every
+        // frame in the ring is now smaller and softer than the session's own
+        // size, and one of them is the frame the user is about to sit and look
+        // at.
+        assert!(server.shared.ladder.lock().dropped(1).is_some());
+
+        let paused = server.pause().expect("a session is open");
+        assert!(
+            paused.session > info.session,
+            "the degraded ring was not thrown away"
+        );
+        assert_eq!(
+            (paused.width, paused.height),
+            (info.width, info.height),
+            "the paused frame is the session's own size"
+        );
+        assert_eq!(server.shared.ladder.lock().rung(), 0, "and back at the top");
+        assert_eq!(
+            server.shared.work.lock().scrub,
+            Some(paused.frame),
+            "the frame under the playhead was queued for a fresh render"
+        );
+
+        // A run that never had to give anything up keeps its ring: superseding
+        // for it would throw away the read-ahead a resume needs.
+        server.play().expect("a session is open");
+        let again = server.pause().expect("a session is open");
+        assert_eq!(again.session, paused.session);
+    }
+
+    #[test]
+    fn a_paused_frame_is_never_encoded_worse_than_a_playing_one() {
+        // The owner's requirement, as an assertion: whatever the settings say
+        // about playback quality, the frame he stops on is at least as good.
+        for quality in [40u8, 88, 94, 100] {
+            let session = PreviewSession::new(
+                project(),
+                PreviewOptions {
+                    quality: Some(quality),
+                    ..PreviewOptions::default()
+                },
+            );
+            assert!(
+                session.scrub_quality >= session.quality,
+                "quality {quality}: scrub {} against playback {}",
+                session.scrub_quality,
+                session.quality
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Work that reaches nobody
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_frame_the_playhead_has_passed_is_not_worth_a_jpeg() {
+        let fps = 30.0;
+        let now = frame_time(40, fps);
+        // On time, and one frame late, are both still worth encoding: the
+        // handler serves a neighbour within `NEAREST_TOLERANCE`, so somebody
+        // sees it.
+        assert!(!too_late_to_encode(40, now, fps, false));
+        assert!(!too_late_to_encode(41, now, fps, false));
+        assert!(!too_late_to_encode(39, now, fps, false));
+        // Two or more behind and nothing will ask for it.
+        assert!(too_late_to_encode(38, now, fps, false));
+        assert!(too_late_to_encode(10, now, fps, false));
+    }
+
+    #[test]
+    fn two_frames_in_a_row_are_never_discarded() {
+        // Otherwise a renderer that is consistently three frames behind throws
+        // away every frame it finishes and the picture stops entirely — which
+        // is worse than the softness the ladder would have traded for it.
+        let fps = 30.0;
+        let now = frame_time(40, fps);
+        assert!(too_late_to_encode(30, now, fps, false));
+        assert!(!too_late_to_encode(30, now, fps, true));
+    }
+
+    #[test]
+    fn a_request_for_a_frame_already_being_rendered_does_not_queue_a_second_render() {
+        let (server, info) = parked();
+
+        // What the render thread does when it picks the job up.
+        {
+            let mut work = server.shared.work.lock();
+            assert_eq!(work.scrub.take(), Some(0), "the session queued its first frame");
+            work.rendering = Some(0);
+        }
+
+        server.request_frame(info.session, 0);
+        assert_eq!(
+            server.shared.work.lock().scrub,
+            None,
+            "the webview asking again while it waits must not start a second render"
+        );
+
+        server.request_frame(info.session, 1);
+        assert_eq!(
+            server.shared.work.lock().scrub,
+            Some(1),
+            "a different frame is still a real request"
+        );
+
+        // Once the bytes are in the ring the mark is released, so a later
+        // request for the same frame is honoured again.
+        done_rendering(&server.shared, 0);
+        server.request_frame(info.session, 0);
+        assert_eq!(server.shared.work.lock().scrub, Some(0));
     }
 
     // -----------------------------------------------------------------------

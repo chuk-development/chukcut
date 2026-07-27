@@ -40,6 +40,16 @@ interface PreviewState {
   fullscreen: boolean;
 
   applyInfo: (info: PreviewInfo) => void;
+  /**
+   * Adopt a session that differs only in what it renders at.
+   *
+   * Not [`applyInfo`]: that one clears the error, which is right for a command
+   * the user asked for — pressing play answers whatever went wrong last time —
+   * and wrong for a panel resize, which arrives on a debounce a fifth of a
+   * second after a layout the user may not even have caused. It would erase a
+   * message they were still reading.
+   */
+  applySize: (info: PreviewInfo) => void;
   setFrame: (frame: number, playing: boolean) => void;
   setPlaying: (playing: boolean) => void;
   setError: (error: string | null) => void;
@@ -72,6 +82,15 @@ export const usePreviewStore = create<PreviewState>((set) => ({
       frame: info.frame,
       playing: info.playing,
       error: null,
+    }),
+
+  applySize: (info) =>
+    set({
+      session: info.session,
+      frameUrl: info.frameUrl,
+      width: info.width,
+      height: info.height,
+      frame: info.frame,
     }),
 
   setFrame: (frame, playing) => set({ frame, playing }),

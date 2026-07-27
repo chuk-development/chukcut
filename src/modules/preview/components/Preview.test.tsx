@@ -47,6 +47,8 @@ async function mountPreview() {
 beforeEach(() => {
   ipc = installIpc();
   ipc.handle("preview_start", makePreviewInfo({ session: 1, frame: 12 }));
+  // The panel measures itself on every layout, so every mount reports a size.
+  ipc.handle("preview_viewport", makePreviewInfo({ session: 1, frame: 12 }));
   fetchMock = vi.fn();
   vi.stubGlobal("fetch", fetchMock);
   vi.stubGlobal(
@@ -90,6 +92,27 @@ describe("painting the frame the pacer says is due", () => {
   });
 });
 
+describe("the size the panel asks Rust for", () => {
+  it("reports the picture as it is displayed, in device pixels rather than CSS ones", async () => {
+    // The whole point of the change: Rust renders what the panel can show, not
+    // what the project's canvas is. A 700 px canvas on a 2x display really does
+    // show 1400 columns, so the CSS size is multiplied by `devicePixelRatio`
+    // before it crosses.
+    fetchMock.mockResolvedValue(respondWith(200));
+    const { canvas } = await mountPreview();
+
+    await waitFor(() => expect(ipc.count("preview_viewport")).toBeGreaterThan(0));
+    const reported = ipc.lastCall("preview_viewport") as { width: number; height: number };
+    const ratio = window.devicePixelRatio || 1;
+
+    // Against the element's own style, which is what the user is looking at,
+    // rather than against a number this test made up.
+    expect(reported.width).toBe(Math.round(Number.parseFloat(canvas.style.width) * ratio));
+    expect(reported.height).toBe(Math.round(Number.parseFloat(canvas.style.height) * ratio));
+    expect(reported.width).toBeGreaterThan(0);
+  });
+});
+
 describe("a superseded frame", () => {
   it("is dropped without painting anything", async () => {
     fetchMock.mockResolvedValue(respondWith(410));
@@ -121,27 +144,48 @@ describe("a superseded frame", () => {
 });
 
 describe("a frame that is not encoded yet", () => {
-  it("is retried exactly once", async () => {
+  /**
+   * Three attempts, not one.
+   *
+   * Each one blocks in Rust for up to `FRAME_WAIT`, so this is about 180 ms of
+   * patience — which is what a cold decoder seek costs, and what the
+   * full-quality re-render after a pause costs. It is still a fixed number: a
+   * loop would spin for as long as the encoder is behind.
+   */
+  const ATTEMPTS = 3;
+
+  it("is retried a bounded number of times", async () => {
     fetchMock.mockResolvedValue(respondWith(404));
     await mountPreview();
 
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(ATTEMPTS));
     await new Promise((resolve) => setTimeout(resolve, 20));
-    // A loop here would spin the CPU for as long as the encoder is behind.
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(ATTEMPTS);
   });
 
-  it("leaves the previous picture up when the retry misses too", async () => {
+  it("treats a 204 as pending too, because that is a session with nothing in it yet", async () => {
+    // `fetch` calls 204 a success and hands back an empty body, so without
+    // this it fell through to `createImageBitmap` and came back as an error
+    // nobody retried.
+    fetchMock.mockResolvedValue(respondWith(204));
+    const { canvas, usePreviewStore } = await mountPreview();
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(ATTEMPTS));
+    expect(contextOf(canvas).drawn).toEqual([]);
+    expect(usePreviewStore.getState().error).toBeNull();
+  });
+
+  it("leaves the previous picture up when the retries miss too", async () => {
     fetchMock.mockResolvedValue(respondWith(404));
     const { canvas } = await mountPreview();
 
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(ATTEMPTS));
     // Blanking the viewer while the encoder catches up reads as a crash.
     expect(contextOf(canvas).drawn).toEqual([]);
     expect(contextOf(canvas).calls.filter((call) => call.op === "clearRect")).toEqual([]);
   });
 
-  it("paints the frame when the retry finds it", async () => {
+  it("paints the frame when the retry finds it, and stops asking", async () => {
     fetchMock.mockResolvedValueOnce(respondWith(404)).mockResolvedValueOnce(respondWith(200));
     const { canvas } = await mountPreview();
 
@@ -153,12 +197,26 @@ describe("a frame that is not encoded yet", () => {
     fetchMock.mockResolvedValue(respondWith(404));
     const { usePreviewStore } = await mountPreview();
 
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(ATTEMPTS));
     expect(usePreviewStore.getState().error).toBeNull();
   });
 });
 
 describe("the error bar", () => {
+  it("survives the panel reporting its size, which is not an answer to anything", async () => {
+    // A resize lands on a debounce a fifth of a second after a layout the user
+    // may not have caused. Clearing the message they are reading because the
+    // window manager moved something is the bug this asserts against.
+    fetchMock.mockResolvedValue(respondWith(200));
+    const { usePreviewStore } = await mountPreview();
+    ipc.channel("preview_start").emit({ type: "error", message: "decoder gave up on clip 3" });
+
+    await waitFor(() => expect(ipc.count("preview_viewport")).toBeGreaterThan(0));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(usePreviewStore.getState().error).toBe("decoder gave up on clip 3");
+  });
+
   it("shows an error event from the render thread and nothing else", async () => {
     fetchMock.mockResolvedValue(respondWith(410));
     const { usePreviewStore } = await mountPreview();

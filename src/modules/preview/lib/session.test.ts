@@ -21,12 +21,14 @@ async function freshSession() {
   const { usePreviewStore } = await import("@/modules/preview/store");
   const { useProjectStore } = await import("@/modules/project/store");
   const { useTimelineStore } = await import("@/modules/timeline/store");
+  const { useWorkspaceStore } = await import("@/modules/workspace/store");
   return {
     preview: session.preview,
     watchDocumentForPreview: session.watchDocumentForPreview,
     usePreviewStore,
     useProjectStore,
     useTimelineStore,
+    useWorkspaceStore,
   };
 }
 
@@ -233,7 +235,7 @@ describe("restarting after an edit", () => {
     app.useProjectStore.getState().applyEditResponse(makeEditResponse(makeProject()));
     await vi.advanceTimersByTimeAsync(PAST_THE_DEBOUNCE);
 
-    expect(ipc.calls("preview_start")[1]).toMatchObject({ time: 3_500_000, options: null });
+    expect(ipc.calls("preview_start")[1]).toMatchObject({ time: 3_500_000 });
     stop();
   });
 
@@ -394,6 +396,151 @@ describe("what reaches the user", () => {
     await app.preview.play();
 
     expect(app.usePreviewStore.getState().error).toBe("audio device is busy");
+  });
+});
+
+describe("rendering only what the panel can show", () => {
+  it("carries the panel size and the persisted settings into a new session", async () => {
+    const app = await freshSession();
+    ipc.handle("preview_start", makePreviewInfo({ session: 1 }));
+    app.useWorkspaceStore.setState({
+      settings: {
+        ...app.useWorkspaceStore.getState().settings,
+        preview_max_edge: 1280,
+        preview_quality: 72,
+        preview_full_quality: false,
+      },
+    });
+    app.useProjectStore.getState().loadProject(makeProject());
+
+    // Measured before the session exists, which is the ordinary order: the
+    // panel is laid out and only then does the first frame get asked for.
+    app.preview.setViewport(1400, 788);
+    await app.preview.ensureStarted();
+
+    expect(ipc.lastCall("preview_start")).toMatchObject({
+      options: {
+        viewport: { width: 1400, height: 788 },
+        longEdge: 1280,
+        quality: 72,
+        fullQuality: false,
+      },
+    });
+    // The settings used to be written and never read: `open()` passed null.
+    expect(ipc.count("preview_viewport")).toBe(0);
+  });
+
+  it("rounds the panel to whole device pixels and ignores a zero-sized one", async () => {
+    const app = await freshSession();
+    ipc.handle("preview_start", makePreviewInfo({ session: 1 }));
+    app.useProjectStore.getState().loadProject(makeProject());
+
+    app.preview.setViewport(0, 0);
+    app.preview.setViewport(699.6, 393.2);
+    await app.preview.ensureStarted();
+
+    expect(ipc.lastCall("preview_start")).toMatchObject({
+      options: { viewport: { width: 700, height: 393 } },
+    });
+  });
+
+  it("debounces a drag into one call, and says nothing when the size is unchanged", async () => {
+    const app = await started();
+    ipc.handle("preview_viewport", makePreviewInfo({ session: 7, width: 700, height: 394 }));
+
+    // A splitter drag: one layout per pointer event.
+    for (let width = 600; width <= 700; width++) app.preview.setViewport(width, 394);
+    await settle();
+    expect(ipc.count("preview_viewport")).toBe(0);
+
+    await vi.advanceTimersByTimeAsync(PAST_THE_DEBOUNCE);
+    expect(ipc.count("preview_viewport")).toBe(1);
+    expect(ipc.lastCall("preview_viewport")).toEqual({ width: 700, height: 394 });
+
+    // A re-render that measures the same panel is not a resize.
+    app.preview.setViewport(700, 394);
+    await vi.advanceTimersByTimeAsync(PAST_THE_DEBOUNCE);
+    expect(ipc.count("preview_viewport")).toBe(1);
+  });
+
+  it("adopts the size Rust answers with, because Rust may have capped it", async () => {
+    const app = await started();
+    ipc.handle(
+      "preview_viewport",
+      makePreviewInfo({
+        session: 9,
+        width: 640,
+        height: 360,
+        frameUrl: "chukcut-frame://preview/9",
+      }),
+    );
+
+    app.preview.setViewport(1400, 788);
+    await vi.advanceTimersByTimeAsync(PAST_THE_DEBOUNCE);
+
+    const state = app.usePreviewStore.getState();
+    expect([state.width, state.height]).toEqual([640, 360]);
+    expect(state.session).toBe(9);
+    expect(state.frameUrl).toBe("chukcut-frame://preview/9");
+  });
+
+  it("remembers the panel across a restart, so the new session is not full-size again", async () => {
+    const app = await started();
+    const stop = app.watchDocumentForPreview();
+    app.preview.setViewport(700, 394);
+    await vi.advanceTimersByTimeAsync(PAST_THE_DEBOUNCE);
+    ipc.handle("preview_viewport", makePreviewInfo({ session: 7 }));
+
+    app.useProjectStore.getState().applyEditResponse(makeEditResponse(makeProject()));
+    await vi.advanceTimersByTimeAsync(PAST_THE_DEBOUNCE);
+
+    expect(ipc.lastCall("preview_start")).toMatchObject({
+      options: { viewport: { width: 700, height: 394 } },
+    });
+    stop();
+  });
+
+  it("does not call Rust before a session exists; the size rides in on the first start", async () => {
+    const app = await freshSession();
+    ipc.handle("preview_start", makePreviewInfo({ session: 1 }));
+
+    app.preview.setViewport(700, 394);
+    await vi.advanceTimersByTimeAsync(PAST_THE_DEBOUNCE);
+    expect(ipc.count("preview_viewport")).toBe(0);
+
+    app.useProjectStore.getState().loadProject(makeProject());
+    await app.preview.ensureStarted();
+    expect(ipc.lastCall("preview_start")).toMatchObject({
+      options: { viewport: { width: 700, height: 394 } },
+    });
+  });
+
+  it("keeps quiet when a resize lands on a session Rust has already closed", async () => {
+    const app = await started();
+    ipc.fail("preview_viewport", "no session");
+
+    app.preview.setViewport(700, 394);
+    await vi.advanceTimersByTimeAsync(PAST_THE_DEBOUNCE);
+
+    expect(app.usePreviewStore.getState().error).toBeNull();
+  });
+
+  it("asks for the canvas when the full-quality setting is on", async () => {
+    const app = await freshSession();
+    ipc.handle("preview_start", makePreviewInfo({ session: 1 }));
+    app.useWorkspaceStore.setState({
+      settings: { ...app.useWorkspaceStore.getState().settings, preview_full_quality: true },
+    });
+    app.useProjectStore.getState().loadProject(makeProject());
+
+    app.preview.setViewport(700, 394);
+    await app.preview.ensureStarted();
+
+    // The panel is still reported — Rust is the one that decides it does not
+    // matter — but the toggle rides alongside it.
+    expect(ipc.lastCall("preview_start")).toMatchObject({
+      options: { fullQuality: true, viewport: { width: 700, height: 394 } },
+    });
   });
 });
 

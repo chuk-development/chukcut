@@ -53,10 +53,25 @@ export interface PreviewStatus {
   frameUrl: string | null;
 }
 
+/** The size of the panel a frame is painted into, in **device** pixels. */
+export interface PreviewViewport {
+  width: number;
+  height: number;
+}
+
 export interface PreviewOptions {
-  /** Raise or lower the proxy cap on the long edge. */
+  /** Raise or lower the proxy cap on the long edge. `settings.preview_max_edge`. */
   longEdge?: number;
+  /** JPEG quality of a playback frame. `settings.preview_quality`. */
   quality?: number;
+  /**
+   * The player panel, in device pixels. The default that decides the render
+   * size: a 1080p project in a 700 px panel is otherwise composited and
+   * encoded at nearly eight times the pixels the screen can show.
+   */
+  viewport?: PreviewViewport;
+  /** `settings.preview_full_quality`: render the canvas, ignore the panel. */
+  fullQuality?: boolean;
 }
 
 /**
@@ -87,6 +102,22 @@ export function previewStart(
     time: time ?? null,
     options: options ?? null,
     onEvent,
+  });
+}
+
+/**
+ * Tell Rust how large the player panel is, in device pixels.
+ *
+ * Returns the session as it is now, which is a *new* one whenever the size
+ * actually changed — the ring holds frames at the old size, so a change has to
+ * supersede. A call that does not change the rounded size is free and returns
+ * the live session unchanged, which is what makes it safe to call from a
+ * resize handler.
+ */
+export function previewViewport(width: number, height: number): Promise<PreviewInfo> {
+  return invoke<PreviewInfo>("preview_viewport", {
+    width: Math.max(0, Math.round(width)),
+    height: Math.max(0, Math.round(height)),
   });
 }
 
@@ -143,7 +174,13 @@ export async function fetchFrame(base: string, frame: number): Promise<FrameResu
   try {
     const response = await fetch(`${base}/${frame}`);
     if (response.status === 410) return { status: "gone" };
-    if (response.status === 404) return { status: "pending" };
+    // 204 is "the session is live and nothing has been rendered for it yet",
+    // which is a cold seek or a session that opened microseconds ago. It is
+    // `ok` as far as `fetch` is concerned and an empty blob, so without this it
+    // fell through to `createImageBitmap` and came back as an error nobody
+    // retried — the viewer then kept the previous picture until the next
+    // position event, which after a restart at the same playhead never came.
+    if (response.status === 204 || response.status === 404) return { status: "pending" };
     if (!response.ok) {
       return { status: "error", message: `frame ${frame}: ${response.status}` };
     }

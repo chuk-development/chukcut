@@ -166,6 +166,24 @@ export function Preview() {
     };
   }, [stage, canvas.width, canvas.height, zoom, fullscreen]);
 
+  /**
+   * Tell Rust how many pixels the picture actually occupies.
+   *
+   * `display` is CSS pixels and `devicePixelRatio` turns them into the ones the
+   * screen has, which is what the frame has to be rendered at: on a 2× display
+   * a 700 px canvas really does show 1400 columns, and rendering 700 would be
+   * visibly soft. Measured from the *displayed* size rather than from the
+   * stage, so a zoom above "fit" and fullscreen both ask for more pixels by
+   * themselves, with no separate rule.
+   *
+   * Debounced inside `preview.setViewport`; a size that rounds to the one Rust
+   * already has costs nothing there either.
+   */
+  useEffect(() => {
+    const ratio = typeof window === "undefined" ? 1 : window.devicePixelRatio || 1;
+    preview.setViewport(display.width * ratio, display.height * ratio);
+  }, [display]);
+
   // Paint the frame the pacer says is due.
   //
   // 410 means the session was superseded: drop it, a newer frame is already
@@ -197,8 +215,15 @@ export function Preview() {
     let bitmap: ImageBitmap | null = null;
 
     void (async () => {
+      // Each attempt already blocks in Rust for up to `FRAME_WAIT`, so three of
+      // them is about 180 ms of patience — enough to cover a cold decoder seek
+      // and the full-quality re-render that follows a pause, and short enough
+      // that a frame that is never coming does not hold the canvas hostage.
       let result = await fetchFrame(frameUrl, frame);
-      if (result.status === "pending") result = await fetchFrame(frameUrl, frame);
+      for (let attempt = 0; attempt < 2 && result.status === "pending"; attempt++) {
+        if (token !== paintToken.current) return;
+        result = await fetchFrame(frameUrl, frame);
+      }
       if (token !== paintToken.current) {
         if (result.status === "ok") result.bitmap.close();
         return;
@@ -321,8 +346,12 @@ export function Preview() {
       {fullscreen ? null : (
         <header className="flex h-8 shrink-0 items-center justify-between border-b border-border px-3">
           <h2 className="text-[12px] font-semibold tracking-tight text-panel-foreground">Player</h2>
+          {/* What Rust is rendering, which is now the panel rather than the
+              canvas. Deliberately not called "proxy": `modules::proxy` is
+              proxy *media*, and conflating the two has already cost a reader
+              an afternoon — see the note on `SessionFacts::downscaled`. */}
           <span className="font-mono text-[10px] text-muted-foreground">
-            {proxy.width}×{proxy.height} proxy
+            {proxy.width}×{proxy.height} preview
             {session === null ? " · connecting" : ""}
           </span>
         </header>
