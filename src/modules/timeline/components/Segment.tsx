@@ -2,6 +2,7 @@ import {
   ClipboardPasteIcon,
   CopyIcon,
   GaugeIcon,
+  ImageOffIcon,
   LinkIcon,
   LockIcon,
   PencilIcon,
@@ -95,6 +96,12 @@ export interface ClipMaterial {
   hasAudio: boolean;
   /** The file is nothing but sound, so the waveform is the clip rather than a band on it. */
   audioOnly: boolean;
+  /**
+   * The file is gone from disk. The clip draws in the missing state — the
+   * same state a `material` of null (removed from the pool) draws, because to
+   * the user both mean "this clip has no media right now".
+   */
+  missing: boolean;
 }
 
 interface SegmentProps {
@@ -285,6 +292,12 @@ function ClipBody({
   const visibleWidth = Math.max(0, toPx - fromPx);
   const onScreen = visibleWidth > 0;
 
+  // The clip's media is gone — its material was removed from the pool
+  // (`material` is null; every pool entry, text included, has an index row),
+  // or the file behind it is gone from disk. The clip itself stays: it draws
+  // in an unmistakable offline state instead of pretending to be playable.
+  const missing = material === null || material.missing;
+
   // Trimmed to the material's own limit: there is nothing left to pull out on
   // that side and the handle will simply refuse to move. Saying so is the
   // difference between a boundary and a bug.
@@ -297,12 +310,12 @@ function ClipBody({
   // audio lane is there to be heard, so it gets the full waveform rather than a
   // filmstrip with a band under it.
   const soundOnly = kind === "audio" || material?.audioOnly === true;
-  const showsFilmstrip = onScreen && material?.path != null && !soundOnly;
+  const showsFilmstrip = onScreen && material?.path != null && !soundOnly && !missing;
 
   // The clip is what wants a filmstrip, not the filmstrip layer: scrolling past
   // a clip must not cancel a decode that is halfway done, whereas deleting the
   // clip should. Held here, released when the clip goes.
-  const stripPath = material?.path && !soundOnly ? material.path : null;
+  const stripPath = material?.path && !soundOnly && !missing ? material.path : null;
   const retainStrip = useThumbnailStore((state) => state.retain);
   const releaseStrip = useThumbnailStore((state) => state.release);
   useEffect(() => {
@@ -315,7 +328,7 @@ function ClipBody({
   // waveform too — the audio clip below is already drawing exactly it, and two
   // copies of one waveform read as two pieces of audio.
   const showsWaveform =
-    onScreen && material?.path != null && material.hasAudio && !soundOnPartnerLane;
+    onScreen && material?.path != null && material.hasAudio && !soundOnPartnerLane && !missing;
   const waveformHeight = soundOnly
     ? Math.max(1, height - LABEL_BAND)
     : Math.min(STRIP_WAVEFORM_HEIGHT, Math.max(0, height - LABEL_BAND));
@@ -328,7 +341,7 @@ function ClipBody({
   // gets them — a video clip whose sound lives on its linked audio lane fades
   // there, next to the waveform, like everything else about its sound.
   // -----------------------------------------------------------------------
-  const carriesSound = material?.hasAudio === true && !soundOnPartnerLane;
+  const carriesSound = material?.hasAudio === true && !soundOnPartnerLane && !missing;
   const fades = useMemo(() => fadesOf(segment), [segment]);
   /** Live handle position while a fade is being dragged. Never reaches Rust. */
   const [fadeDrag, setFadeDrag] = useState<Fades | null>(null);
@@ -378,9 +391,14 @@ function ClipBody({
           data-selected={selected || undefined}
           data-locked={locked || undefined}
           data-muted={muted || undefined}
+          data-missing={missing || undefined}
           className={cn(
             "group absolute top-[3px] bottom-[3px] overflow-hidden rounded-[3px] border text-left",
             KIND_STYLE[kind],
+            // An offline clip overrides the lane colour outright: the red has
+            // to read at a glance as "no media here", not as another lane
+            // kind. Selection still wins the border below.
+            missing && "border-destructive/80 bg-destructive/25",
             // Selection is a ring *and* a light border: over a filmstrip a
             // border alone disappears into whatever frame happens to be under it.
             selected
@@ -506,7 +524,10 @@ function ClipBody({
           />
 
           <span
-            className={cn("pointer-events-none absolute inset-x-0 top-0 h-[2px]", KIND_BAR[kind])}
+            className={cn(
+              "pointer-events-none absolute inset-x-0 top-0 h-[2px]",
+              missing ? "bg-destructive" : KIND_BAR[kind],
+            )}
           />
 
           {/* The scrim under the label is unconditional. A filename is
@@ -520,6 +541,15 @@ function ClipBody({
           />
 
           <span className="pointer-events-none absolute inset-x-0 top-0 flex min-w-0 items-start gap-1.5 px-1.5 pt-[5px]">
+            {/* The offline badge sits in front of the label and survives any
+                clip width: a red sliver with no explanation is a paint bug,
+                a red sliver with this icon is a diagnosis. */}
+            {missing ? (
+              <ImageOffIcon
+                className="size-3 shrink-0 text-destructive"
+                aria-label="Media offline"
+              />
+            ) : null}
             {width >= MIN_LABEL_WIDTH ? (
               <span className="truncate text-[11px] font-medium leading-none text-foreground/90">
                 {label}

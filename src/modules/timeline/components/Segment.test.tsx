@@ -24,6 +24,7 @@ const VIDEO: ClipMaterial = {
   duration: 10 * SECOND,
   hasAudio: true,
   audioOnly: false,
+  missing: false,
 };
 
 const noop = () => {};
@@ -297,6 +298,46 @@ describe("the states a glance has to tell apart", () => {
 
     expect(screen.queryByText("a.mp4")).toBeNull();
     expect(screen.getByRole("button", { name: "a.mp4" })).toHaveAttribute("title", "a.mp4");
+  });
+});
+
+describe("a clip whose media is missing", () => {
+  /**
+   * The two causes draw the same state on purpose: a material removed from
+   * the pool (`material` is null) and a file gone from disk (`missing` on the
+   * material). To the user both mean "this clip has no media right now", and
+   * either way the clip itself must stay — deleting the cut is exactly what
+   * removing a library entry must never do.
+   */
+  it("marks a clip whose material was removed from the pool, keeping its label", () => {
+    renderClip({ material: null });
+
+    const clip = document.querySelector('[data-slot="segment"]');
+    expect(clip).toHaveAttribute("data-missing");
+    expect(screen.getByLabelText("Media offline")).toBeInTheDocument();
+    // The label survives: the user has to be able to tell *which* file to
+    // bring back.
+    expect(screen.getByText("a.mp4")).toBeInTheDocument();
+    // Nothing pretends there are frames to show.
+    expect(filmstrip()).toBeNull();
+  });
+
+  it("marks a clip whose file is gone from disk the same way", () => {
+    renderClip({ material: { ...VIDEO, missing: true } });
+
+    expect(document.querySelector('[data-slot="segment"]')).toHaveAttribute("data-missing");
+    expect(screen.getByLabelText("Media offline")).toBeInTheDocument();
+    expect(filmstrip()).toBeNull();
+    // No waveform and no fade handles either: there is no sound to shape.
+    expect(document.querySelector('[data-slot="waveform"]')).toBeNull();
+    expect(screen.queryByRole("button", { name: "Fade in" })).toBeNull();
+  });
+
+  it("does not mark a healthy clip", () => {
+    renderClip();
+
+    expect(document.querySelector('[data-slot="segment"]')).not.toHaveAttribute("data-missing");
+    expect(screen.queryByLabelText("Media offline")).toBeNull();
   });
 });
 

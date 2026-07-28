@@ -107,6 +107,7 @@ pub fn run() {
             modules::text::commands::text_set,
             // media
             modules::media::commands::media_probe,
+            modules::media::commands::media_missing_files,
             modules::media::commands::media_thumbnails,
             modules::media::commands::media_thumbnails_cancel,
             modules::media::commands::media_waveform,

@@ -1188,16 +1188,27 @@ impl Compositor {
                 continue;
             }
 
-            let Some(kind) = project.materials.kind_of(&segment.material_id) else {
-                // `Project::validate` reports this as an error; refusing to
-                // render because of it would make a broken document
-                // un-openable, which is worse.
-                tracing::warn!(
-                    segment = %segment.id,
-                    material = %segment.material_id,
-                    "segment references a material that is not in the pool"
-                );
-                continue;
+            let kind = match project.materials.kind_of(&segment.material_id) {
+                Some(kind) => kind,
+                // The material was removed from the pool. `RemoveMaterial`
+                // leaves the clip behind on purpose and `Project::validate`
+                // warns about it; the honest picture is a placeholder where
+                // the clip would be, not a silent hole. On an audio lane there
+                // is nothing to draw, and everywhere else the segment is
+                // treated as video so the provider can answer with its
+                // missing-media field.
+                None if track.kind == crate::modules::project::document::TrackKind::Audio => {
+                    continue;
+                }
+                None => {
+                    tracing::debug!(
+                        segment = %segment.id,
+                        material = %segment.material_id,
+                        "segment references a material that is not in the pool; \
+                         drawing the missing-media placeholder"
+                    );
+                    MaterialKind::Video
+                }
             };
 
             let Some(source_time) = segment.source_time_at(time) else {

@@ -59,6 +59,25 @@ pub async fn media_probe(path: String) -> std::result::Result<MediaInfo, String>
     off_thread(move || super::probe(&path)).await
 }
 
+/// Which of `paths` are gone from disk right now.
+///
+/// How the library cards and the timeline clips learn to draw their missing
+/// state — the webview may not touch the filesystem itself. Async and off the
+/// runtime for the same reason as everything here: a `stat` is instant on a
+/// local disk and unbounded on a dead network mount, and the window must not
+/// wait on either.
+#[tauri::command]
+pub async fn media_missing_files(paths: Vec<String>) -> std::result::Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        paths
+            .into_iter()
+            .filter(|path| !std::path::Path::new(path).exists())
+            .collect()
+    })
+    .await
+    .map_err(|error| format!("the media task failed: {error}"))
+}
+
 /// Adapts Tauri's channel to the thumbnail job's sink.
 ///
 /// A wrapper rather than an impl on `Channel` itself so `thumbnails.rs` stays

@@ -11,6 +11,10 @@
  *   or `React.memo` on the clip is worthless and a pointer move repaints the
  *   whole timeline. Building a fresh descriptor inside the render was exactly
  *   that bug.
+ *
+ * Every pool category is in the index — including text, which has no file —
+ * so that a clip whose lookup misses can read the miss for what it is: its
+ * material was removed from the pool, and the clip is offline.
  */
 
 import type { Id, Project } from "@/modules/project/types";
@@ -18,9 +22,13 @@ import type { ClipMaterial } from "@/modules/timeline/components/Segment";
 
 const DEFAULT_ASPECT = 16 / 9;
 
-export function buildMaterialIndex(project: Project | null): Map<Id, ClipMaterial> {
+export function buildMaterialIndex(
+  project: Project | null,
+  missingPaths: readonly string[] = [],
+): Map<Id, ClipMaterial> {
   const index = new Map<Id, ClipMaterial>();
   if (!project) return index;
+  const missing = new Set(missingPaths);
 
   for (const video of project.materials.videos) {
     // Coded dimensions; a rotated clip reports its display size swapped.
@@ -33,6 +41,7 @@ export function buildMaterialIndex(project: Project | null): Map<Id, ClipMateria
       duration: video.duration,
       hasAudio: video.has_audio,
       audioOnly: false,
+      missing: missing.has(video.path),
     });
   }
 
@@ -43,6 +52,7 @@ export function buildMaterialIndex(project: Project | null): Map<Id, ClipMateria
       duration: audio.duration,
       hasAudio: true,
       audioOnly: true,
+      missing: missing.has(audio.path),
     });
   }
 
@@ -55,10 +65,23 @@ export function buildMaterialIndex(project: Project | null): Map<Id, ClipMateria
       duration: 0,
       hasAudio: false,
       audioOnly: false,
+      missing: missing.has(image.path),
     });
   }
 
-  // Text materials are deliberately absent: they have no file, so there is
-  // nothing to decode and the clip draws as flat colour.
+  // Text has no file — nothing to decode, nothing to go missing — but the
+  // entry has to exist: `material === null` is the clip's "my material was
+  // removed from the pool" signal, and a title must never read as offline.
+  for (const text of project.materials.texts) {
+    index.set(text.id, {
+      path: null,
+      aspect: DEFAULT_ASPECT,
+      duration: 0,
+      hasAudio: false,
+      audioOnly: false,
+      missing: false,
+    });
+  }
+
   return index;
 }

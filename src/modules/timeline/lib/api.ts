@@ -14,8 +14,10 @@ import { invoke } from "@tauri-apps/api/core";
 
 import type {
   AnimatableProperty,
+  AudioMaterial,
   Easing,
   Id,
+  ImageMaterial,
   Keyframe,
   Marker,
   Micros,
@@ -24,7 +26,22 @@ import type {
   TimeRange,
   Track,
   Transform,
+  VideoMaterial,
 } from "@/modules/project/types";
+
+/**
+ * A file-backed material as it travels inside `remove_material`.
+ *
+ * Mirrors `PoolMaterial` in `timeline/ops.rs`, which is internally tagged on
+ * `kind` — the material's own fields sit alongside the tag. The whole material
+ * travels rather than its id, because undo has to put back exactly what was
+ * there. Text materials are absent on purpose: they live and die through the
+ * text module.
+ */
+export type PoolMaterial =
+  | ({ kind: "video" } & VideoMaterial)
+  | ({ kind: "audio" } & AudioMaterial)
+  | ({ kind: "image" } & ImageMaterial);
 
 /**
  * The per-track switches, snapshotted together.
@@ -109,6 +126,15 @@ export type EditCommand =
   | { type: "add_marker"; marker: Marker }
   | { type: "remove_marker"; marker: Marker }
   | { type: "set_marker"; before: Marker; after: Marker }
+  /**
+   * Take a material out of the pool, or put it back. Removing deliberately
+   * leaves every clip that references it on the timeline — they go offline
+   * and one undo brings the picture back. `index` is the material's position
+   * in its pool category, checked by Rust so a stale panel cannot remove
+   * somebody else's import.
+   */
+  | { type: "remove_material"; material: PoolMaterial; index: number }
+  | { type: "add_material"; material: PoolMaterial; index: number }
   | { type: "composite"; label: string; commands: EditCommand[] };
 
 /** What every mutating command answers with: the whole document plus history state. */

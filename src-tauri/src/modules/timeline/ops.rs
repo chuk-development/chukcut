@@ -12,10 +12,36 @@
 use serde::{Deserialize, Serialize};
 
 use crate::modules::project::{
-    source_duration_for, speed_slack, AnimatableProperty, Easing, Keyframe, KeyframeTrack, Marker,
-    Micros, Project, Segment, TimeRange, Track, Transform, TransitionMaterial,
+    source_duration_for, speed_slack, AnimatableProperty, AudioMaterial, Easing, ImageMaterial,
+    Keyframe, KeyframeTrack, Marker, Micros, Project, Segment, TimeRange, Track, Transform,
+    TransitionMaterial, VideoMaterial,
 };
 use crate::modules::transitions;
+
+/// A file-backed material as it travels inside [`EditCommand::RemoveMaterial`].
+///
+/// The whole material rather than its id, for the reason `RemoveSegment`
+/// carries the whole segment: undo has to put back exactly what was there, and
+/// an id cannot rebuild a probe result. Text materials are deliberately absent
+/// — they are created and deleted through the text module and have no file to
+/// go missing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PoolMaterial {
+    Video(VideoMaterial),
+    Audio(AudioMaterial),
+    Image(ImageMaterial),
+}
+
+impl PoolMaterial {
+    pub fn id(&self) -> &str {
+        match self {
+            PoolMaterial::Video(m) => &m.id,
+            PoolMaterial::Audio(m) => &m.id,
+            PoolMaterial::Image(m) => &m.id,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -185,6 +211,27 @@ pub enum EditCommand {
     SetMarker {
         before: Marker,
         after: Marker,
+    },
+    /// Take an imported material out of the project's pool.
+    ///
+    /// Deliberately does **not** touch the segments that reference it: they
+    /// stay on the timeline and go offline — `validate()` warns, the timeline
+    /// draws them in the missing state, and the preview composites a
+    /// placeholder. That asymmetry is the point: removing a library entry must
+    /// never silently delete a cut, and one undo step brings the material and
+    /// every clip's picture back at once. The file on disk is never touched.
+    ///
+    /// `index` is the material's position in its pool category, so undo
+    /// restores the library order exactly — the same contract as
+    /// `RemoveSegment`.
+    RemoveMaterial {
+        material: PoolMaterial,
+        index: usize,
+    },
+    /// The inverse of `RemoveMaterial`; exists so the pair inverts exactly.
+    AddMaterial {
+        material: PoolMaterial,
+        index: usize,
     },
     /// Several commands that undo as one unit, applied in order.
     Composite {
@@ -387,6 +434,8 @@ impl EditCommand {
             }
             EditCommand::AddMarker { .. } => "Add marker".into(),
             EditCommand::RemoveMarker { .. } => "Delete marker".into(),
+            EditCommand::RemoveMaterial { .. } => "Remove media".into(),
+            EditCommand::AddMaterial { .. } => "Add media".into(),
             EditCommand::SetMarker { before, after } => {
                 // Dragging is the common gesture and deserves its own label;
                 // anything else changed the name or the colour.
@@ -904,6 +953,14 @@ impl EditCommand {
                 Ok(())
             }
 
+            EditCommand::RemoveMaterial { material, index } => {
+                remove_pool_material(project, material, *index)
+            }
+
+            EditCommand::AddMaterial { material, index } => {
+                add_pool_material(project, material, *index)
+            }
+
             EditCommand::Composite { commands, .. } => {
                 for (i, cmd) in commands.iter().enumerate() {
                     if let Err(e) = cmd.apply(project) {
@@ -1108,12 +1165,81 @@ impl EditCommand {
                 before: after.clone(),
                 after: before.clone(),
             },
+            EditCommand::RemoveMaterial { material, index } => EditCommand::AddMaterial {
+                material: material.clone(),
+                index: *index,
+            },
+            EditCommand::AddMaterial { material, index } => EditCommand::RemoveMaterial {
+                material: material.clone(),
+                index: *index,
+            },
             EditCommand::Composite { label, commands } => EditCommand::Composite {
                 label: label.clone(),
                 // Undoing a composite means undoing its parts in reverse.
                 commands: commands.iter().rev().map(EditCommand::invert).collect(),
             },
         }
+    }
+}
+
+/// Take `material` out of its pool category, checking it is exactly where the
+/// command says it is.
+///
+/// The same stale-gesture guard as `RemoveTrack`: the index is where the
+/// material *was* when the menu opened, and the entry there now has to be the
+/// one the command names — otherwise a slow round trip removes somebody else's
+/// import, and the inverse would put this one back in the wrong place.
+fn remove_pool_material(
+    project: &mut Project,
+    material: &PoolMaterial,
+    index: usize,
+) -> EditResult {
+    fn take<T>(list: &mut Vec<T>, index: usize, wanted: &str, id_of: fn(&T) -> &str) -> EditResult {
+        match list.get(index) {
+            Some(entry) if id_of(entry) == wanted => {
+                list.remove(index);
+                Ok(())
+            }
+            _ => Err(
+                "that media is no longer where this edit expected it; the project changed \
+                 underneath it"
+                    .into(),
+            ),
+        }
+    }
+    match material {
+        PoolMaterial::Video(m) => take(&mut project.materials.videos, index, &m.id, |m| &m.id),
+        PoolMaterial::Audio(m) => take(&mut project.materials.audios, index, &m.id, |m| &m.id),
+        PoolMaterial::Image(m) => take(&mut project.materials.images, index, &m.id, |m| &m.id),
+    }
+}
+
+/// Put `material` back at `index`, refusing a duplicate id.
+///
+/// Two pool entries with one id would make `kind_of` and every segment
+/// resolving `material_id` land on whichever comes first — the same reason a
+/// duplicate track id is refused.
+fn add_pool_material(project: &mut Project, material: &PoolMaterial, index: usize) -> EditResult {
+    if project.materials.kind_of(material.id()).is_some() {
+        return Err(format!(
+            "a material with the id {} is already in the project",
+            material.id()
+        ));
+    }
+    fn put<T: Clone>(list: &mut Vec<T>, index: usize, entry: &T) -> EditResult {
+        // Refused rather than clamped, for the reason `AddTrack` refuses: an
+        // add that quietly landed elsewhere produces a remove that cannot undo
+        // it.
+        if index > list.len() {
+            return Err("there is no such place in the media pool".into());
+        }
+        list.insert(index, entry.clone());
+        Ok(())
+    }
+    match material {
+        PoolMaterial::Video(m) => put(&mut project.materials.videos, index, m),
+        PoolMaterial::Audio(m) => put(&mut project.materials.audios, index, m),
+        PoolMaterial::Image(m) => put(&mut project.materials.images, index, m),
     }
 }
 
@@ -3858,5 +3984,143 @@ mod tests {
             split_all_at(&project, 0).is_err(),
             "a cut on the very first edge has nothing to its left"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Removing a material from the pool
+    // -----------------------------------------------------------------------
+
+    fn video_material(id: &str) -> VideoMaterial {
+        VideoMaterial {
+            id: id.into(),
+            path: format!("/media/{id}.mp4"),
+            width: 1920,
+            height: 1080,
+            duration: 10_000_000,
+            fps: 30.0,
+            has_audio: true,
+            rotation: 0,
+        }
+    }
+
+    #[test]
+    fn removing_a_material_leaves_the_clips_that_reference_it() {
+        let (mut project, track_id, segment_id) = project_with_clip();
+        project.materials.videos.push(video_material("m"));
+
+        EditCommand::RemoveMaterial {
+            material: PoolMaterial::Video(video_material("m")),
+            index: 0,
+        }
+        .apply(&mut project)
+        .unwrap();
+
+        assert!(project.materials.videos.is_empty());
+        // The clip is the user's cut; the library entry going away must not
+        // take it along.
+        assert_eq!(
+            project.track(&track_id).unwrap().segments[0].id,
+            segment_id
+        );
+        // And validate says the reference dangles — as a warning, because the
+        // document is still openable and playable.
+        let issues = project.validate();
+        assert!(
+            issues.iter().any(|i| {
+                i.severity == crate::modules::project::Severity::Warning
+                    && i.message.contains("unknown material")
+            }),
+            "{issues:?}"
+        );
+    }
+
+    #[test]
+    fn removing_a_material_undoes_exactly_including_pool_order() {
+        let (mut project, _, _) = project_with_clip();
+        project.materials.videos.push(video_material("m"));
+        project.materials.videos.push(video_material("m2"));
+        let before = serde_json::to_value(&project).unwrap();
+
+        let mut history = History::new();
+        history
+            .apply(
+                &mut project,
+                EditCommand::RemoveMaterial {
+                    material: PoolMaterial::Video(video_material("m")),
+                    index: 0,
+                },
+            )
+            .unwrap();
+        assert_eq!(project.materials.videos.len(), 1);
+        assert_eq!(project.materials.videos[0].id, "m2");
+
+        history.undo(&mut project).unwrap();
+        // Byte-exact, not merely present: the material is back at index 0, in
+        // front of m2, with every probed field it was removed with.
+        assert_eq!(serde_json::to_value(&project).unwrap(), before);
+    }
+
+    #[test]
+    fn removing_a_material_that_moved_is_refused() {
+        let (mut project, _, _) = project_with_clip();
+        project.materials.videos.push(video_material("m"));
+
+        // The menu opened on index 0, but another entry has since been put in
+        // front — a stale gesture must not remove somebody else's import.
+        let stale = EditCommand::RemoveMaterial {
+            material: PoolMaterial::Video(video_material("m")),
+            index: 1,
+        };
+        assert!(stale.apply(&mut project).is_err());
+        assert_eq!(project.materials.videos.len(), 1);
+
+        let wrong_id = EditCommand::RemoveMaterial {
+            material: PoolMaterial::Video(video_material("other")),
+            index: 0,
+        };
+        assert!(wrong_id.apply(&mut project).is_err());
+        assert_eq!(project.materials.videos.len(), 1);
+    }
+
+    /// The wire shape the frontend builds by hand in `timeline/lib/api.ts`:
+    /// the command tagged on `type`, the material tagged on `kind` with its
+    /// own fields flattened alongside. `ipc-contract.test.ts` pins the same
+    /// bytes from the other side.
+    #[test]
+    fn remove_material_serializes_with_the_material_flattened_under_kind() {
+        let command = EditCommand::RemoveMaterial {
+            material: PoolMaterial::Video(video_material("m")),
+            index: 3,
+        };
+        let json = serde_json::to_value(&command).unwrap();
+        assert_eq!(json["type"], "remove_material");
+        assert_eq!(json["index"], 3);
+        assert_eq!(json["material"]["kind"], "video");
+        assert_eq!(json["material"]["id"], "m");
+        assert_eq!(json["material"]["path"], "/media/m.mp4");
+
+        let back: EditCommand = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            back,
+            EditCommand::RemoveMaterial { index: 3, material: PoolMaterial::Video(_) }
+        ));
+    }
+
+    #[test]
+    fn adding_a_material_refuses_a_duplicate_id_in_any_category() {
+        let (mut project, _, _) = project_with_clip();
+        project.materials.videos.push(video_material("m"));
+
+        let duplicate = EditCommand::AddMaterial {
+            material: PoolMaterial::Image(crate::modules::project::ImageMaterial {
+                id: "m".into(),
+                path: "/media/still.png".into(),
+                width: 100,
+                height: 100,
+            }),
+            index: 0,
+        };
+        assert!(duplicate.apply(&mut project).is_err());
+        assert!(project.materials.images.is_empty());
     }
 }

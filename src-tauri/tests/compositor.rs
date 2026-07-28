@@ -546,14 +546,22 @@ fn rendering_at_a_smaller_size_is_the_same_composition_scaled_down() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn a_missing_media_file_leaves_a_hole_rather_than_failing_the_frame() {
+fn a_missing_media_file_draws_the_placeholder_rather_than_failing_the_frame() {
     let media = require_media!();
     let mut p = project((160, 120), [0.0, 1.0, 0.0, 1.0]);
     place(&mut p, "red", &media.solid_red_landscape, 2_000_000);
     // Relink is a UI concern; a project with a dead link still has to open and
-    // still has to preview, showing everything that is still there.
+    // still has to preview. It used to leave a hole — the background showed
+    // through — which read as the clip having been deleted. Now the clip's
+    // area is an unmistakable flat field; `tests/missing_media.rs` covers the
+    // whole missing-media contract around it.
     p.materials.videos[0].path = "/nonexistent/gone.mp4".into();
 
     let frame = rendered!(&p, 500_000, (160, 120));
-    assert_pixel_near(frame.pixel(80, 60), [0, 255, 0, 255], 2, "the background survives");
+    assert_pixel_near(
+        frame.pixel(80, 60),
+        chukcut_lib::modules::media::MISSING_MEDIA_RGBA,
+        6,
+        "the clip's area is the missing-media placeholder",
+    );
 }

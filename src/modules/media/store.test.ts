@@ -1,14 +1,25 @@
 /**
- * Importing media.
+ * Importing and removing media.
  *
  * The media store and the thumbnail queue are module-level singletons with a
  * sticky per-path status, so each test reloads the module graph rather than
  * trying to scrub that state clean.
+ *
+ * The library rows themselves live in the *document* — `libraryItems` over the
+ * pool — so these tests assert on the project store where the old ones
+ * asserted on a session list. That session list was the bug: a saved and
+ * reopened project had a full pool and an empty panel.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { makeMaterial, makeProject } from "@/test/fixtures";
+import {
+  makeEditResponse,
+  makeMaterial,
+  makeProject,
+  makeSegment,
+  makeTrack,
+} from "@/test/fixtures";
 import { type IpcHarness, installIpc } from "@/test/ipc";
 
 async function freshMedia() {
@@ -16,7 +27,8 @@ async function freshMedia() {
   const { useMediaStore } = await import("@/modules/media/store");
   const { useThumbnailStore } = await import("@/modules/media/lib/thumbnails");
   const { useProjectStore } = await import("@/modules/project/store");
-  return { useMediaStore, useThumbnailStore, useProjectStore };
+  const { libraryItems } = await import("@/modules/media/lib/library");
+  return { useMediaStore, useThumbnailStore, useProjectStore, libraryItems };
 }
 
 /** Rust answers a probe from the path, the way the real command does. */
@@ -28,11 +40,36 @@ function probeByPath(byPath: Record<string, ReturnType<typeof makeMaterial>>) {
   };
 }
 
+/** A project whose pool holds one video, with `clips` segments referencing it. */
+function projectWithVideo(clips = 0) {
+  const project = makeProject();
+  project.materials.videos.push({
+    id: "v1",
+    path: "/media/v1.mp4",
+    width: 1920,
+    height: 1080,
+    duration: 4_000_000,
+    fps: 30,
+    has_audio: true,
+    rotation: 0,
+  });
+  const segments = Array.from({ length: clips }, (_, i) =>
+    makeSegment(`s${i}`, {
+      material_id: "v1",
+      target_range: { start: i * 1_000_000, duration: 1_000_000 },
+      source_range: { start: 0, duration: 1_000_000 },
+    }),
+  );
+  project.tracks.push(makeTrack("t1", { segments }));
+  return project;
+}
+
 let ipc: IpcHarness;
 
 beforeEach(() => {
   ipc = installIpc();
   ipc.handle("media_thumbnails", "job-1");
+  ipc.handle("media_missing_files", []);
 });
 
 afterEach(() => {
@@ -40,22 +77,45 @@ afterEach(() => {
 });
 
 describe("importing", () => {
-  it("imports every path and keeps them in the order they were given", async () => {
-    const { useMediaStore } = await freshMedia();
+  it("imports every path and the library sees them through the pool", async () => {
+    const { useMediaStore, useProjectStore, libraryItems } = await freshMedia();
     const video = makeMaterial("v1", { path: "/media/v1.mp4" });
     const song = makeMaterial("a1", { kind: "audio", path: "/media/a1.mp3", name: "a1.mp3" });
     ipc.handle(
       "project_import_media",
       probeByPath({ "/media/v1.mp4": video, "/media/a1.mp3": song }),
     );
-    ipc.handle("project_get", makeProject());
+    // What Rust's pool looks like after both imports — the library renders
+    // this, not a session list.
+    const refreshed = makeProject();
+    refreshed.materials.videos.push({
+      id: "v1",
+      path: "/media/v1.mp4",
+      width: 1920,
+      height: 1080,
+      duration: 4_000_000,
+      fps: 30,
+      has_audio: true,
+      rotation: 0,
+    });
+    refreshed.materials.audios.push({
+      id: "a1",
+      path: "/media/a1.mp3",
+      duration: 4_000_000,
+      sample_rate: 48_000,
+      channels: 2,
+    });
+    ipc.handle("project_get", refreshed);
 
     const imported = await useMediaStore.getState().importPaths(["/media/v1.mp4", "/media/a1.mp3"]);
 
     expect(imported.map((item) => item.id)).toEqual(["v1", "a1"]);
-    expect(useMediaStore.getState().items.map((item) => item.id)).toEqual(["v1", "a1"]);
     expect(useMediaStore.getState().error).toBeNull();
     expect(useMediaStore.getState().importing).toBe(false);
+    expect(libraryItems(useProjectStore.getState().project).map((item) => item.id)).toEqual([
+      "v1",
+      "a1",
+    ]);
   });
 
   it("asks for a filmstrip for the video and not for the song", async () => {
@@ -73,30 +133,6 @@ describe("importing", () => {
     // Decoding a strip is expensive and an audio tile has nowhere to put one.
     await vi.waitFor(() => expect(ipc.count("media_thumbnails")).toBe(1));
     expect(ipc.lastCall("media_thumbnails")).toMatchObject({ path: "/media/v1.mp4" });
-  });
-
-  it("does not add a second tile when the same file is imported again", async () => {
-    const { useMediaStore } = await freshMedia();
-    // Rust answers a repeat import with the material already in the pool.
-    const video = makeMaterial("v1", { path: "/media/v1.mp4" });
-    ipc.handle("project_import_media", video);
-    ipc.handle("project_get", makeProject());
-
-    await useMediaStore.getState().importPaths(["/media/v1.mp4"]);
-    await useMediaStore.getState().importPaths(["/media/v1.mp4"]);
-
-    expect(ipc.count("project_import_media")).toBe(2);
-    expect(useMediaStore.getState().items).toHaveLength(1);
-  });
-
-  it("does not add a second tile when one call contains the same file twice", async () => {
-    const { useMediaStore } = await freshMedia();
-    ipc.handle("project_import_media", makeMaterial("v1", { path: "/media/v1.mp4" }));
-    ipc.handle("project_get", makeProject());
-
-    await useMediaStore.getState().importPaths(["/media/v1.mp4", "/media/v1.mp4"]);
-
-    expect(useMediaStore.getState().items).toHaveLength(1);
   });
 
   it("re-reads the document, because the material pool changed under it", async () => {
@@ -128,7 +164,7 @@ describe("importing", () => {
 });
 
 describe("when a file cannot be probed", () => {
-  it("ends with an empty library and Rust's sentence, not an exception", async () => {
+  it("ends with Rust's sentence, not an exception", async () => {
     const { useMediaStore } = await freshMedia();
     ipc.fail("project_import_media", "cannot read /media/broken.mp4: no such file");
 
@@ -136,7 +172,6 @@ describe("when a file cannot be probed", () => {
 
     expect(imported).toEqual([]);
     const state = useMediaStore.getState();
-    expect(state.items).toEqual([]);
     expect(state.error).toBe("cannot read /media/broken.mp4: no such file");
     // A stuck spinner would make the Import button dead for the session.
     expect(state.importing).toBe(false);
@@ -169,17 +204,6 @@ describe("when a file cannot be probed", () => {
     expect(useMediaStore.getState().error).toBe("cannot read /media/broken.mp4: no such file");
   });
 
-  it("keeps the imported files when only the document re-read failed", async () => {
-    const { useMediaStore } = await freshMedia();
-    ipc.handle("project_import_media", makeMaterial("v1"));
-    ipc.fail("project_get", "the project lock is poisoned");
-
-    await useMediaStore.getState().importPaths(["/media/v1.mp4"]);
-
-    expect(useMediaStore.getState().items).toHaveLength(1);
-    expect(useMediaStore.getState().error).toBe("the project lock is poisoned");
-  });
-
   it("does nothing at all for an empty selection", async () => {
     const { useMediaStore } = await freshMedia();
 
@@ -191,18 +215,101 @@ describe("when a file cannot be probed", () => {
   });
 });
 
-describe("removing a library tile", () => {
-  it("takes the row away without asking Rust to touch the pool", async () => {
-    const { useMediaStore } = await freshMedia();
-    ipc.handle("project_import_media", makeMaterial("v1"));
-    ipc.handle("project_get", makeProject());
-    await useMediaStore.getState().importPaths(["/media/v1.mp4"]);
-    ipc.reset();
+describe("removing a material from the project", () => {
+  it("sends an undoable remove_material edit carrying the whole pool entry", async () => {
+    const { useMediaStore, useProjectStore } = await freshMedia();
+    const project = projectWithVideo(2);
+    useProjectStore.getState().loadProject(project);
+    const after = makeProject({ name: "after removal" });
+    ipc.handle("timeline_apply", makeEditResponse(after, { undo_label: "Remove media" }));
 
-    useMediaStore.getState().remove("v1");
+    await useMediaStore.getState().removeFromProject("v1");
 
-    // A clip on the timeline may still reference the material.
-    expect(useMediaStore.getState().items).toEqual([]);
-    expect(ipc.log).toEqual([]);
+    // The whole material plus its index, so Rust can undo exactly and refuse
+    // a stale gesture — and the clips are deliberately not in the payload:
+    // removing a library entry never deletes a cut.
+    expect(ipc.lastCall("timeline_apply")).toMatchObject({
+      command: {
+        type: "remove_material",
+        index: 0,
+        material: { kind: "video", id: "v1", path: "/media/v1.mp4" },
+      },
+    });
+    // The response replaces the document and moves the undo state, like every
+    // other edit.
+    expect(useProjectStore.getState().project).toBe(after);
+    expect(useProjectStore.getState().undoLabel).toBe("Remove media");
+  });
+
+  it("asks Rust for nothing when the id is not in the pool", async () => {
+    const { useMediaStore, useProjectStore } = await freshMedia();
+    useProjectStore.getState().loadProject(makeProject());
+
+    await useMediaStore.getState().removeFromProject("ghost");
+
+    expect(ipc.count("timeline_apply")).toBe(0);
+  });
+
+  it("surfaces a refusal instead of throwing", async () => {
+    const { useMediaStore, useProjectStore } = await freshMedia();
+    useProjectStore.getState().loadProject(projectWithVideo(0));
+    ipc.fail("timeline_apply", "that media is no longer where this edit expected it");
+
+    await useMediaStore.getState().removeFromProject("v1");
+
+    expect(useProjectStore.getState().error).toBe(
+      "that media is no longer where this edit expected it",
+    );
+  });
+});
+
+describe("the missing-on-disk check", () => {
+  it("asks Rust about every pool file and keeps the ones that are gone", async () => {
+    const { useMediaStore, useProjectStore } = await freshMedia();
+    useProjectStore.getState().loadProject(projectWithVideo(0));
+    ipc.handle("media_missing_files", ["/media/v1.mp4"]);
+
+    await useMediaStore.getState().refreshMissing();
+
+    expect(ipc.lastCall("media_missing_files")).toMatchObject({ paths: ["/media/v1.mp4"] });
+    expect(useMediaStore.getState().missingPaths).toEqual(["/media/v1.mp4"]);
+  });
+
+  it("keeps the same array reference when the answer has not changed", async () => {
+    // Memos on the timeline key off this reference; a fresh but equal array
+    // every check would repaint every clip for nothing.
+    const { useMediaStore, useProjectStore } = await freshMedia();
+    useProjectStore.getState().loadProject(projectWithVideo(0));
+    ipc.handle("media_missing_files", ["/media/v1.mp4"]);
+
+    await useMediaStore.getState().refreshMissing();
+    const first = useMediaStore.getState().missingPaths;
+    await useMediaStore.getState().refreshMissing();
+
+    expect(useMediaStore.getState().missingPaths).toBe(first);
+  });
+
+  it("keeps the last answer when the check itself fails", async () => {
+    const { useMediaStore, useProjectStore } = await freshMedia();
+    useProjectStore.getState().loadProject(projectWithVideo(0));
+    ipc.handle("media_missing_files", ["/media/v1.mp4"]);
+    await useMediaStore.getState().refreshMissing();
+
+    ipc.fail("media_missing_files", "the media task failed");
+    await useMediaStore.getState().refreshMissing();
+
+    // Advisory, not authoritative: a failed round trip must not flash the
+    // whole library offline or silently clear a true answer.
+    expect(useMediaStore.getState().missingPaths).toEqual(["/media/v1.mp4"]);
+  });
+
+  it("answers empty without asking when the pool has no files", async () => {
+    const { useMediaStore, useProjectStore } = await freshMedia();
+    useProjectStore.getState().loadProject(makeProject());
+
+    await useMediaStore.getState().refreshMissing();
+
+    expect(ipc.count("media_missing_files")).toBe(0);
+    expect(useMediaStore.getState().missingPaths).toEqual([]);
   });
 });

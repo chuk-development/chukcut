@@ -18,6 +18,7 @@ import { MEDIA_DRAG_MIME } from "@/lib/dnd";
 import { clamp, MICROS_PER_SECOND } from "@/lib/time";
 import { pasteAttributes, renameClip } from "@/modules/inspector/lib/clip";
 import { useInspectorStore } from "@/modules/inspector/store";
+import { libraryItems } from "@/modules/media/lib/library";
 import { useMediaStore } from "@/modules/media/store";
 import { preview } from "@/modules/preview/lib/session";
 import { usePreviewStore } from "@/modules/preview/store";
@@ -1334,7 +1335,9 @@ export function Timeline() {
       const current = useProjectStore.getState().project;
       if (!current) return;
 
-      const item = useMediaStore.getState().items.find((entry) => entry.id === materialId);
+      // The library renders the pool, so the pool is where a dragged tile is
+      // looked up — a tile that exists to be dragged is by definition in it.
+      const item = libraryItems(current).find((entry) => entry.id === materialId);
       if (!item) {
         setError("That library item is no longer available; import it again.");
         return;
@@ -1389,7 +1392,19 @@ export function Timeline() {
    * deleted mid-decode releases the job rather than leaving it to finish for a
    * lane that no longer exists.
    */
-  const materials = useMemo(() => buildMaterialIndex(project), [project]);
+  // Which pool files are gone from disk, so an offline clip draws as one. The
+  // check lives in the media store and is re-run whenever the document
+  // changes; `missingPaths` only gets a new reference when the answer does,
+  // so this memo — and with it every clip's props — stays stable otherwise.
+  const missingPaths = useMediaStore((s) => s.missingPaths);
+  // biome-ignore lint/correctness/useExhaustiveDependencies(project): the document is the trigger, not an input — refreshMissing reads it from the store itself
+  useEffect(() => {
+    void useMediaStore.getState().refreshMissing();
+  }, [project]);
+  const materials = useMemo(
+    () => buildMaterialIndex(project, missingPaths),
+    [project, missingPaths],
+  );
 
   /**
    * The time window clips draw into.

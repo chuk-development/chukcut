@@ -5,11 +5,15 @@ Sessions are long and are not reopened, so nothing important is allowed to live
 only in a conversation. If you learn something that would change how the next
 person works, it belongs in this repository, not in a chat log.
 
-Last updated: 2026-07-27 (**the preview stopped copying its frames** — the JPEG
-encoder now reads a surface the compositor drew into, 2.7–2.9× on a whole frame;
-and earlier the same day, the attempt that went the other way round and the
-`vkDeviceWaitIdle` crash it found). Previously 2026-07-26: the preview hang, and
-the last of the VAAPI device consolidation.
+Last updated: 2026-07-28 (**the media library is now a view of the project's
+pool, and missing media is a state** — removing an import is an undoable edit
+that leaves the clips offline instead of deleting them; decision 0009. The bug
+behind "saving does not save my imports" was never the save: the pool was
+always persisted, but `MediaLibrary` rendered a session list a restart
+forgets). Previously 2026-07-27: the preview stopped copying its frames — the
+JPEG encoder now reads a surface the compositor drew into, 2.7–2.9× on a whole
+frame; and earlier the same day, the attempt that went the other way round and
+the `vkDeviceWaitIdle` crash it found.
 
 ## What this is
 
@@ -50,6 +54,7 @@ Each of these was measured or checked against an independent tool, not assumed.
 | Hardware decode (VAAPI) | H.264, HEVC, VP9 **and AV1**, each probed by decoding a real embedded frame. `tests/decode.rs` — 34 tests, 22 of them run against both the software and hardware decoders and pass identically, including every seek, VFR and rotation case. The two decoders produce the same picture to a mean channel difference under 2 |
 | Zero-copy decode into wgpu | `examples/dmabuf_import.rs` — a decoded VA surface exported as DMA-BUF and imported as two wgpu textures reconstructs the software decode's picture to a mean channel difference of **0.32**, with a deliberately chroma-swapped control at 41.9 |
 | Hardware decode through the compositor | `examples/hwdecode_pipeline.rs` — the imported surface is composited by the quad shader and matches a software-decoded composite of the same instant to a mean channel difference of **1.1–1.4**, against 9.4 for a deliberately wrong colour matrix. Decode to texture falls from 20–66 ms to 0.8–3.3 ms; a whole preview frame from 39–72 ms to 7.5–16 ms. **On by default** |
+| Media survives the session, and losing it is survivable | The library renders `project.materials` (decision 0009), so a reopened project shows its imports; "Remove from project" is `EditCommand::RemoveMaterial` — exact undo, clips kept, file untouched. An offline clip (material removed, or file gone from disk) draws red with an offline icon on the timeline and the library card, composites as a flat dark-red field (`media::MISSING_MEDIA_RGBA`, served by the provider), is a validate *warning*, and the export refuses it by name ("2 clips reference media that is missing: …"). `tests/missing_media.rs` is the whole scenario, pixel assertion included |
 | Export range and frame snapshots | `tests/export.rs` — a 1 s..3 s range of a 4 s counter timeline yields exactly 60 decodable frames whose first/middle/last are source frames 30/59/89 (rebased to zero), with 2.0 s ± 0.1 of AAC; marks past the end clamp rather than fail; `export_snapshot` writes a decodable canvas-size PNG of the requested frame through the export compositor, never the preview's panel-sized picture. Dialog wiring (range select, long-edge resolutions, estimated size, remember-settings, snapshot button) in `src/modules/export/**.test.*`, 106 vitest |
 
 Two of those deserve emphasis because they are the failure modes that usually

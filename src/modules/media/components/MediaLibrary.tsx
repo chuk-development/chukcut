@@ -5,16 +5,17 @@ import {
   Loader2Icon,
   MusicIcon,
 } from "lucide-react";
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { openFileDialog, VIDEO_FILTERS } from "@/lib/dialog";
 import { MediaItem } from "@/modules/media/components/MediaItem";
+import { libraryItems, materialUseCount } from "@/modules/media/lib/library";
 import { useMediaStore } from "@/modules/media/store";
-import { describeError } from "@/modules/project/store";
-import type { ImportedMaterial } from "@/modules/project/types";
+import { describeError, useProjectStore } from "@/modules/project/store";
+import type { Id, ImportedMaterial } from "@/modules/project/types";
 import { TextPanel } from "@/modules/text/components/TextPanel";
 
 function EmptyState({
@@ -59,12 +60,28 @@ function ImportingGrid() {
   );
 }
 
-function Grid({ items, onRemove }: { items: ImportedMaterial[]; onRemove: (id: string) => void }) {
+function Grid({
+  items,
+  usedCounts,
+  missing,
+  onRemove,
+}: {
+  items: ImportedMaterial[];
+  usedCounts: Map<Id, number>;
+  missing: ReadonlySet<string>;
+  onRemove: (id: string) => void;
+}) {
   return (
     <ScrollArea className="h-full">
       <div className="grid grid-cols-[repeat(auto-fill,minmax(104px,1fr))] gap-2 p-2.5">
         {items.map((item) => (
-          <MediaItem key={item.id} item={item} onRemove={onRemove} />
+          <MediaItem
+            key={item.id}
+            item={item}
+            usedCount={usedCounts.get(item.id) ?? 0}
+            missing={missing.has(item.path)}
+            onRemove={onRemove}
+          />
         ))}
       </div>
     </ScrollArea>
@@ -72,13 +89,34 @@ function Grid({ items, onRemove }: { items: ImportedMaterial[]; onRemove: (id: s
 }
 
 export function MediaLibrary() {
-  const items = useMediaStore((s) => s.items);
+  // The library is a view of the project's material pool — the same pool the
+  // timeline resolves clips against, which is what links the two panels. A
+  // saved and reopened project therefore shows its media with no session
+  // state involved.
+  const project = useProjectStore((s) => s.project);
+  const items = useMemo(() => libraryItems(project), [project]);
+  const usedCounts = useMemo(() => {
+    const counts = new Map<Id, number>();
+    if (!project) return counts;
+    for (const item of items) counts.set(item.id, materialUseCount(project, item.id));
+    return counts;
+  }, [project, items]);
+
   const importing = useMediaStore((s) => s.importing);
   const error = useMediaStore((s) => s.error);
   const importPaths = useMediaStore((s) => s.importPaths);
-  const remove = useMediaStore((s) => s.remove);
+  const removeFromProject = useMediaStore((s) => s.removeFromProject);
   const clearError = useMediaStore((s) => s.clearError);
   const [dialogError, setDialogError] = useState<string | null>(null);
+
+  // Which pool files are gone from disk right now. Re-checked whenever the
+  // document changes — an import, a removal or an undo all change the answer.
+  const missingPaths = useMediaStore((s) => s.missingPaths);
+  const missing = useMemo(() => new Set(missingPaths), [missingPaths]);
+  // biome-ignore lint/correctness/useExhaustiveDependencies(project): the document is the trigger, not an input — refreshMissing reads it from the store itself
+  useEffect(() => {
+    void useMediaStore.getState().refreshMissing();
+  }, [project]);
 
   const handleImport = useCallback(async () => {
     setDialogError(null);
@@ -93,6 +131,13 @@ export function MediaLibrary() {
       setDialogError(describeError(caught));
     }
   }, [importPaths]);
+
+  const handleRemove = useCallback(
+    (id: string) => {
+      void removeFromProject(id);
+    },
+    [removeFromProject],
+  );
 
   const audio = items.filter((item) => item.kind === "audio");
   const problem = dialogError ?? error;
@@ -153,7 +198,7 @@ export function MediaLibrary() {
               />
             )
           ) : (
-            <Grid items={items} onRemove={remove} />
+            <Grid items={items} usedCounts={usedCounts} missing={missing} onRemove={handleRemove} />
           )}
         </TabsContent>
 
@@ -165,7 +210,7 @@ export function MediaLibrary() {
               hint="Music and voice-over files show up here as well as in Media."
             />
           ) : (
-            <Grid items={audio} onRemove={remove} />
+            <Grid items={audio} usedCounts={usedCounts} missing={missing} onRemove={handleRemove} />
           )}
         </TabsContent>
 

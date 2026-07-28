@@ -41,6 +41,16 @@ export function mediaProbe(path: string): Promise<MediaInfo> {
   return invoke<MediaInfo>("media_probe", { path });
 }
 
+/**
+ * Which of `paths` are gone from disk right now.
+ *
+ * How the library cards and the timeline clips learn to draw their missing
+ * state; the webview never touches the filesystem itself.
+ */
+export function mediaMissingFiles(paths: string[]): Promise<string[]> {
+  return invoke<string[]>("media_missing_files", { paths });
+}
+
 // ---------------------------------------------------------------------------
 // Thumbnails
 // ---------------------------------------------------------------------------

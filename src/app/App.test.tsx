@@ -132,9 +132,23 @@ describe("with a working webview", () => {
 
   it("puts a file dropped from the desktop into the library", async () => {
     ipc.handle("project_import_media", makeMaterial("v1", { name: "clip.mp4" }));
+    // The library renders the project's pool, so the tile comes from the
+    // re-read document — the same round trip the real import takes.
+    const withPool = makeProject();
+    withPool.materials.videos.push({
+      id: "v1",
+      path: "/media/clip.mp4",
+      width: 1920,
+      height: 1080,
+      duration: 4_000_000,
+      fps: 30,
+      has_audio: true,
+      rotation: 0,
+    });
     render(<App />);
     await expectTheEditorIsUp();
     expect(screen.getByText("No media imported")).toBeInTheDocument();
+    ipc.handle("project_get", withPool);
 
     await ipc.emitWindowEvent("tauri://drag-drop", {
       paths: ["/media/clip.mp4"],

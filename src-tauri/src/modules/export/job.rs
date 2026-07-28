@@ -511,11 +511,71 @@ pub struct ExportOutcome {
 ///
 /// Blocking: the caller owns the thread. Sends progress as it goes and one
 /// terminal message before returning.
+/// One line per clip whose media cannot be read: the material was removed from
+/// the project, or its file is gone from disk.
+///
+/// Public because the refusal message is a contract worth testing — "2 clips
+/// reference media that is missing" with each clip named is what turns a
+/// refused export from a mystery into a fixable timeline.
+pub fn missing_media(project: &Project) -> Vec<String> {
+    let mut lines = Vec::new();
+    for track in &project.tracks {
+        for segment in &track.segments {
+            let at = segment.target_range.start as f64 / 1_000_000.0;
+            let materials = &project.materials;
+            match materials.kind_of(&segment.material_id) {
+                None => lines.push(format!(
+                    "the clip at {at:.1}s on \"{}\" references media that was removed from the \
+                     project",
+                    track.name
+                )),
+                Some(_) => {
+                    let path = materials
+                        .video(&segment.material_id)
+                        .map(|m| m.path.as_str())
+                        .or_else(|| materials.audio(&segment.material_id).map(|m| m.path.as_str()))
+                        .or_else(|| materials.image(&segment.material_id).map(|m| m.path.as_str()));
+                    if let Some(path) = path {
+                        if !Path::new(path).exists() {
+                            lines.push(format!(
+                                "the clip at {at:.1}s on \"{}\": {path} is gone from disk",
+                                track.name
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    lines
+}
+
 pub fn run_export(job: &ExportJob, sink: &dyn ProgressSink) -> Result<ExportOutcome> {
     let settings = &job.settings;
     let mut tracker =
         ProgressTracker::new(job.job_id.clone(), settings.total_frames, Instant::now());
     sink.send(tracker.snapshot(ExportStage::Preparing, 0, Instant::now()));
+
+    // Refuse missing media up front, by name. The preview composites a
+    // placeholder for an offline clip because an editor must keep working; a
+    // delivered file with dark-red fields in it is a different matter, and the
+    // strict compositor's per-frame error could only say "a source failed" —
+    // this says which clips and why, before a single frame is rendered.
+    let missing = missing_media(&job.project);
+    if !missing.is_empty() {
+        let error = ExportError::Settings(format!(
+            "{count} clip{s} reference{verb} media that is missing:\n{list}",
+            count = missing.len(),
+            s = if missing.len() == 1 { "" } else { "s" },
+            verb = if missing.len() == 1 { "s" } else { "" },
+            list = missing.join("\n"),
+        ));
+        tracing::error!(%error, "the export was refused over missing media");
+        let mut failed = tracker.snapshot(ExportStage::Failed, 0, Instant::now());
+        failed.message = Some(error.to_string());
+        sink.send(failed);
+        return Err(error);
+    }
 
     // Open the file first: a codec that is not in this build, a directory that
     // does not exist or a path that is not writable all fail here, in

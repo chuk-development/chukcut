@@ -243,6 +243,23 @@ const EDIT_COMMANDS: EditCommand[] = [
     before: null,
     after: "link-1",
   },
+  // `PoolMaterial` is itself internally tagged, on `kind` — the material's
+  // fields sit alongside the tag, exactly as serde flattens the variant.
+  {
+    type: "remove_material",
+    material: {
+      kind: "video",
+      id: "material-1",
+      path: "/media/clip.mp4",
+      width: 1920,
+      height: 1080,
+      duration: 4_000_000,
+      fps: 30,
+      has_audio: true,
+      rotation: 0,
+    },
+    index: 0,
+  },
 ];
 
 function keysDeep(value: unknown, into: string[] = []): string[] {

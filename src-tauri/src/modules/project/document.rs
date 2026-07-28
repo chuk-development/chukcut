@@ -1423,11 +1423,21 @@ impl Project {
                     );
                 }
 
+                // A warning, not an error, and the distinction is load-bearing:
+                // `RemoveMaterial` deliberately leaves the clips that reference
+                // the removed entry on the timeline, so a dangling reference is
+                // a normal state a user can be in — the clip draws as missing,
+                // the preview composites a placeholder, and undo makes it whole
+                // again. An error would brand every such document as corrupt.
                 if self.materials.kind_of(&seg.material_id).is_none() {
-                    error(
-                        format!("segment references unknown material {}", seg.material_id),
-                        Some(seg.id.clone()),
-                    );
+                    outside.push(ValidationIssue {
+                        severity: Severity::Warning,
+                        message: format!(
+                            "segment references unknown material {}",
+                            seg.material_id
+                        ),
+                        subject_id: Some(seg.id.clone()),
+                    });
                 }
 
                 if let Some(field) = seg.non_finite_field() {
@@ -1570,12 +1580,22 @@ impl Project {
             }
         }
 
-        for m in &self.materials.videos {
-            if !std::path::Path::new(&m.path).exists() {
+        // Every file-backed category, not only video: an audio bed or a still
+        // whose file went away is the same situation — the project must open
+        // and play, with the clip in the missing state, and the user told.
+        let file_backed = self
+            .materials
+            .videos
+            .iter()
+            .map(|m| (&m.id, &m.path))
+            .chain(self.materials.audios.iter().map(|m| (&m.id, &m.path)))
+            .chain(self.materials.images.iter().map(|m| (&m.id, &m.path)));
+        for (id, path) in file_backed {
+            if !std::path::Path::new(path).exists() {
                 issues.push(ValidationIssue {
                     severity: Severity::Warning,
-                    message: format!("media file is missing: {}", m.path),
-                    subject_id: Some(m.id.clone()),
+                    message: format!("media file is missing: {path}"),
+                    subject_id: Some(id.clone()),
                 });
             }
         }

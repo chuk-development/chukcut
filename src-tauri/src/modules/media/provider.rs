@@ -191,6 +191,14 @@ fn acceleration(ctx: &RenderContext) -> Acceleration {
     }
 }
 
+/// What a clip whose media is gone gets composited as: a flat dark-red field.
+///
+/// sRGB bytes, chosen to be unmistakable next to anything a camera produces —
+/// the point of a placeholder is that nobody watches it and thinks the edit is
+/// fine. Public so the tests that assert on the rendered pixel and the
+/// frontend's missing tint have one value to agree on.
+pub const MISSING_MEDIA_RGBA: [u8; 4] = [122, 26, 26, 255];
+
 pub struct MediaSourceProvider {
     /// Material id → where its pixels live. Built once from a project snapshot.
     sources: HashMap<Id, MaterialSource>,
@@ -211,6 +219,14 @@ pub struct MediaSourceProvider {
     /// `docs/STATUS.md` keeps having to point out — and the process-wide choice
     /// cannot be changed twice.
     forced: Option<Acceleration>,
+    /// The missing-media placeholder, built on first use and shared by every
+    /// material that needs it.
+    ///
+    /// Deliberately *not* in the per-material texture cache: a placeholder
+    /// cached under a material's id would keep serving after the file came
+    /// back, and the existence check that decides between the two is one
+    /// `stat` per frame, which is nothing next to a decode.
+    placeholder: Mutex<Option<SourceFrame>>,
     /// Cached uploads and imports, keyed by material.
     ///
     /// Declared before `decoders` so it is dropped first: a mapped frame in
@@ -267,9 +283,29 @@ impl MediaSourceProvider {
             sources,
             canvas: (project.canvas.width.max(1), project.canvas.height.max(1)),
             forced,
+            placeholder: Mutex::new(None),
             decoders: Mutex::new(HashMap::new()),
             textures: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// The flat field a clip composites as when its media is gone — removed
+    /// from the pool, or the file no longer on disk.
+    ///
+    /// Canvas-aspect so the compositor's fit stretches it over exactly the
+    /// area the clip would have covered, at a sixteenth of the canvas per axis
+    /// because every texel is the same colour anyway.
+    fn missing_frame(&self, ctx: &RenderContext) -> SourceFrame {
+        let mut cached = self.placeholder.lock();
+        if let Some(frame) = cached.as_ref() {
+            return frame.clone();
+        }
+        let width = (self.canvas.0 / 16).max(2);
+        let height = (self.canvas.1 / 16).max(2);
+        let data: Vec<u8> = MISSING_MEDIA_RGBA.repeat((width * height) as usize);
+        let frame = upload_rgba(ctx, &data, width, height);
+        *cached = Some(frame.clone());
+        frame
     }
 
     /// Drop every cached decoder and texture. Called when a render session
@@ -282,6 +318,7 @@ impl MediaSourceProvider {
         // is the order that stays obviously correct if any of that changes.
         self.textures.lock().clear();
         self.decoders.lock().clear();
+        *self.placeholder.lock() = None;
     }
 
     /// Number of materials this provider can serve, for diagnostics.
@@ -501,15 +538,16 @@ impl SourceProvider for MediaSourceProvider {
         request: &SourceRequest<'_>,
     ) -> anyhow::Result<Option<SourceFrame>> {
         let Some(source) = self.sources.get(request.material_id) else {
-            // A segment pointing at a material that is not in the pool is a
-            // document bug, caught by Project::validate. Skipping it here
-            // keeps the rest of the frame renderable instead of failing the
-            // whole composite.
-            tracing::warn!(
+            // The material is not in the pool — normally because
+            // `RemoveMaterial` took it out and the clip was deliberately left
+            // behind. `Project::validate` warns about it; the frame's job is
+            // to show the clip as unmistakably offline rather than to leave a
+            // silent hole in the composite.
+            tracing::debug!(
                 material_id = request.material_id,
-                "no source for material; skipping"
+                "no source for material; compositing the missing-media placeholder"
             );
-            return Ok(None);
+            return Ok(Some(self.missing_frame(ctx)));
         };
 
         // Audio contributes nothing to a video frame.
@@ -524,18 +562,30 @@ impl SourceProvider for MediaSourceProvider {
         }
 
         match source {
-            MaterialSource::Video { path, display } => self
-                .video_frame(
+            MaterialSource::Video { path, display } => {
+                // A file gone from disk is the same honest picture as a
+                // material gone from the pool. Checked here rather than left
+                // to the decoder's open error, because the placeholder is a
+                // *result*, not a failure: strict consumers (the export)
+                // refuse missing media by name before rendering anything.
+                if !path.exists() {
+                    return Ok(Some(self.missing_frame(ctx)));
+                }
+                self.video_frame(
                     ctx,
                     request.material_id,
                     path,
                     request.source_time,
                     fitted_height(*display, request.max_size),
                 )
-                .map(Some),
-            MaterialSource::Image { path } => self
-                .image_frame(ctx, request.material_id, path)
-                .map(Some),
+                .map(Some)
+            }
+            MaterialSource::Image { path } => {
+                if !path.exists() {
+                    return Ok(Some(self.missing_frame(ctx)));
+                }
+                self.image_frame(ctx, request.material_id, path).map(Some)
+            }
             MaterialSource::Text(material) => self
                 .text_frame(ctx, request.material_id, material, request.max_size)
                 .map(Some),
@@ -818,6 +868,52 @@ mod tests {
             .expect("rasterise")
             .expect("a text material draws something");
         assert_eq!(full.size(), (1080, 1920));
+    }
+
+    /// The two ways a clip loses its media — the material removed from the
+    /// pool, and the file removed from disk — both answer the placeholder
+    /// rather than `None` or an error: the compositor draws it where the clip
+    /// would be, so the missing state is visible instead of being a hole.
+    /// The *pixels* of the placeholder are asserted through the real
+    /// compositor in `tests/missing_media.rs`.
+    #[test]
+    fn missing_media_answers_the_placeholder_frame() {
+        let Some(ctx) = crate::modules::render::test_context() else {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        };
+        // Every path in this fixture points at /nonexistent.
+        let provider = MediaSourceProvider::from_project(&project_with_materials());
+
+        let request = |id: &'static str, kind: MaterialKind| SourceRequest {
+            material_id: id,
+            kind,
+            source_time: 0,
+            segment_id: "seg",
+            max_size: (640, 360),
+        };
+
+        let ghost = provider
+            .frame(&ctx, &request("not-in-the-pool", MaterialKind::Video))
+            .expect("a dangling reference is not an error")
+            .expect("and it draws something");
+        let gone_file = provider
+            .frame(&ctx, &request("v1", MaterialKind::Video))
+            .expect("a file gone from disk is not an error")
+            .expect("and it draws something");
+        let gone_image = provider
+            .frame(&ctx, &request("i1", MaterialKind::Image))
+            .expect("a still gone from disk is not an error")
+            .expect("and it draws something");
+
+        // One shared canvas-aspect field, not three: the placeholder is built
+        // once per provider and stretched by the compositor's fit.
+        for frame in [&ghost, &gone_file, &gone_image] {
+            assert!(!frame.is_planar(), "the placeholder is a plain RGBA field");
+            assert_eq!(frame.size(), ghost.size());
+        }
+        let (w, h) = ghost.size();
+        assert!(w >= 2 && h >= 2);
     }
 
     #[test]

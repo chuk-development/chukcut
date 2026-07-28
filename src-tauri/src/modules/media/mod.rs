@@ -50,7 +50,7 @@ pub mod waveform;
 pub use decoder::{Acceleration, DecodedFrame, VideoDecoder};
 pub use dmabuf::DmabufFrame;
 pub use hwdecode::{HwCodec, HwDecodeSupport};
-pub use provider::MediaSourceProvider;
+pub use provider::{MediaSourceProvider, MISSING_MEDIA_RGBA};
 pub use probe::{probe, AudioStreamInfo, MediaInfo, VideoStreamInfo};
 pub use thumbnails::{thumbnail_strip, thumbnail_stream, BatchSink, Thumbnail, ThumbnailBatch};
 pub use waveform::{waveform, Waveform};
