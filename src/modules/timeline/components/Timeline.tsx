@@ -1265,9 +1265,20 @@ export function Timeline() {
           event.preventDefault();
           useTimelineStore.getState().clearMarks();
           break;
-        case "escape":
+        case "escape": {
+          // Escape backs out of the most recent commitment first: a tool that
+          // is not Select returns to Select, and only a second press clears
+          // the selection. Collapsing both into one press would throw away a
+          // selection the user still wanted just because they were done
+          // cutting.
+          const tool = useTimelineStore.getState().tool;
+          if (tool !== "select") {
+            setTool("select");
+            break;
+          }
           select(null);
           break;
+        }
         default:
           break;
       }

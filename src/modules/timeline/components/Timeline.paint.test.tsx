@@ -230,6 +230,32 @@ describe("playback moving the playhead", () => {
   });
 });
 
+describe("escape backs out in order", () => {
+  it("returns the razor to select first, and clears the selection second", () => {
+    mount();
+    useTimelineStore.setState({ tool: "razor" });
+    const firstClip = useProjectStore.getState().project?.tracks[0]?.segments[0]?.id;
+    if (!firstClip) throw new Error("the crowded project has no clips");
+    act(() => {
+      useTimelineStore.getState().select(firstClip);
+    });
+
+    // First press: done cutting, back on Select — the selection survives,
+    // because throwing it away for leaving a tool punishes the wrong action.
+    act(() => {
+      fireEvent.keyDown(window, { key: "Escape" });
+    });
+    expect(useTimelineStore.getState().tool).toBe("select");
+    expect(useTimelineStore.getState().selection).toContain(firstClip);
+
+    // Second press: now it means "nothing selected".
+    act(() => {
+      fireEvent.keyDown(window, { key: "Escape" });
+    });
+    expect(useTimelineStore.getState().selection).toHaveLength(0);
+  });
+});
+
 describe("following the playhead during playback", () => {
   function viewport(): HTMLElement {
     const element = document.querySelector<HTMLElement>('[data-slot="timeline-viewport"]');
