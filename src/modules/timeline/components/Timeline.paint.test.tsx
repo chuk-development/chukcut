@@ -230,6 +230,77 @@ describe("playback moving the playhead", () => {
   });
 });
 
+describe("dragging left past a touching neighbour", () => {
+  it("moves into a free gap instead of minting a dissolve", async () => {
+    // The reported shape: a gap, then two touching clips. Dragging the last
+    // clip leftward INTO the gap is a move — the first version of the
+    // transition gesture read any leftward drag against a touching neighbour
+    // as "make a dissolve", threw the move away, and dropped the user into
+    // the transition inspector while the clip snapped home.
+    const project = makeProject({
+      materials: {
+        videos: ["a", "b", "x"].map((id) => ({
+          id: `material-${id}`,
+          path: `/media/${id}.mp4`,
+          width: 1920,
+          height: 1080,
+          duration: 20 * SECOND,
+          fps: 30,
+          has_audio: false,
+          rotation: 0,
+        })),
+        audios: [],
+        images: [],
+        texts: [],
+        links: [],
+        transitions: [],
+        extras: {},
+      },
+      tracks: [
+        makeTrack("t0", {
+          segments: [
+            // A [0..1s], a 2.5s gap, B [3.5..5.5], X [5.5..7.5] touching B.
+            makeSegment("clip-a", {
+              material_id: "material-a",
+              target_range: range(0, 1 * SECOND),
+              source_range: range(0, 1 * SECOND),
+            }),
+            makeSegment("clip-b", {
+              material_id: "material-b",
+              target_range: range(3_500_000, 2 * SECOND),
+              source_range: range(0, 2 * SECOND),
+            }),
+            makeSegment("clip-x", {
+              material_id: "material-x",
+              target_range: range(5_500_000, 2 * SECOND),
+              source_range: range(0, 2 * SECOND),
+            }),
+          ],
+        }),
+      ],
+    });
+    useProjectStore.setState({ project });
+    mount();
+
+    const zoom = useTimelineStore.getState().zoom;
+    const clip = document.querySelector<HTMLElement>('button[aria-label="x.mp4"]');
+    if (!clip) throw new Error("clip-x has no drag surface");
+
+    // Grab X in its middle and put the pointer where X would start at 1.2s —
+    // inside the gap, with room for the whole clip.
+    const grabAt = (5_500_000 + SECOND) * zoom;
+    const dropAt = (1_200_000 + SECOND) * zoom;
+    fireEvent.pointerDown(clip, { button: 0, clientX: grabAt, clientY: 0 });
+    fireEvent.pointerMove(window, { clientX: dropAt, clientY: 0 });
+    fireEvent.pointerUp(window);
+    await Promise.resolve();
+
+    expect(ipc.count("transitions_add")).toBe(0);
+    const moves = ipc.count("timeline_apply") + ipc.count("timeline_apply_many");
+    expect(moves).toBeGreaterThan(0);
+  });
+});
+
 describe("escape backs out in order", () => {
   it("returns the razor to select first, and clears the selection second", () => {
     mount();

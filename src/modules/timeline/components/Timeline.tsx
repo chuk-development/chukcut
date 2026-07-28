@@ -922,9 +922,21 @@ export function Timeline() {
           //
           // Single clip, same lane, dragged leftwards — a batch drag has no one
           // unambiguous join to attach to, so it stays an ordinary move.
+          //
+          // And, decisively: only when the clamp REFUSED the drag
+          // (`start === originStart`). That refusal is the entire reading — the
+          // clip could not go where the pointer went because the neighbour is
+          // in the way, so the overlap the user drew means a transition. When
+          // the clamp found the clip a real landing spot, the user was moving
+          // it, and they get a move. The first version omitted this line and
+          // turned every leftward drag past a touching neighbour into a
+          // surprise dissolve while the clip snapped home — reported as
+          // "plötzlich bin ich in einem Dissolve-Menü drin, und das Ganze ist
+          // wieder zurück".
           if (
             alsoMoving.length === 0 &&
             final.toTrackId === final.fromTrackId &&
+            final.start === final.originStart &&
             final.proposedStart < final.originStart
           ) {
             const document = useProjectStore.getState().project;
