@@ -518,7 +518,22 @@ impl PreviewServer {
         // the last one would mean a machine that stuttered once previews softly
         // for the rest of the session, and the user has no way to ask for it
         // back.
-        self.shared.ladder.lock().reset();
+        //
+        // And every run starts with the adoption grace, because starting IS the
+        // third way into the empty-ring trap that resize and seek were already
+        // graced against: an edit restarts the session, the restart resumes
+        // play against a ring that is empty and a decoder that is cold — 1.5
+        // seconds cold with two open files, measured — and the first composites
+        // inevitably finish behind the clock. Counting those as "too late"
+        // stepped the ladder down after every edit and the resolution pumped
+        // between full and three-quarter, at over_budget=0, mean 7 ms: the
+        // owner's "es spielt ein bisschen rum". The grace is spent in
+        // *finished* frames, so a slow cold start cannot outlive it.
+        {
+            let mut ladder = self.shared.ladder.lock();
+            let _ = ladder.reset();
+            ladder.begin_grace(Self::LADDER_ADOPT_GRACE);
+        }
 
         // The window starts here, not when the session opened: a session that
         // sat parked for a minute would otherwise put that minute in the first
@@ -2521,8 +2536,15 @@ mod tests {
             .expect("a session is open");
         server.play().expect("a session is open");
 
-        // The state of a machine that had genuinely struggled at the old size.
-        assert!(server.shared.ladder.lock().dropped(1).is_some());
+        // The state of a machine that had genuinely struggled at the old size —
+        // through the ungraced route, real over-budget measurements, because
+        // play() itself now grants the adoption grace against drops.
+        {
+            let mut ladder = server.shared.ladder.lock();
+            assert_eq!(ladder.frame(true), None);
+            assert_eq!(ladder.frame(true), None);
+            assert!(ladder.frame(true).is_some());
+        }
         assert_ne!(server.shared.ladder.lock().rung(), 0);
 
         // Fullscreen: the panel is suddenly much larger.
@@ -2540,6 +2562,25 @@ mod tests {
         );
     }
 
+    /// The third way into the empty-ring trap: play after a restart. An edit
+    /// restarts the session and resumes play against an empty ring and a cold
+    /// decoder; the first composites finish behind the clock and were counted
+    /// as "too late", stepping the ladder down after every edit — resolution
+    /// pumping between full and three-quarter at over_budget=0.
+    #[test]
+    fn starting_playback_does_not_charge_the_ladder_for_the_cold_start() {
+        let (server, _info) = parked();
+        server.play().expect("a session is open");
+
+        let mut ladder = server.shared.ladder.lock();
+        assert_eq!(
+            ladder.dropped(5),
+            None,
+            "the ramp-up's late frames are the start's own, not load"
+        );
+        assert_eq!(ladder.rung(), 0);
+    }
+
     #[test]
     fn pausing_after_a_degraded_run_re_renders_the_frame_at_full_quality() {
         let (server, info) = parked();
@@ -2548,8 +2589,14 @@ mod tests {
         // What a machine that cannot hold the size does to the ladder. Every
         // frame in the ring is now smaller and softer than the session's own
         // size, and one of them is the frame the user is about to sit and look
-        // at.
-        assert!(server.shared.ladder.lock().dropped(1).is_some());
+        // at. Degraded through over-budget frames — the route the play-time
+        // grace deliberately leaves open.
+        {
+            let mut ladder = server.shared.ladder.lock();
+            assert_eq!(ladder.frame(true), None);
+            assert_eq!(ladder.frame(true), None);
+            assert!(ladder.frame(true).is_some());
+        }
 
         let paused = server.pause().expect("a session is open");
         assert!(
