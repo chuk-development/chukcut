@@ -431,6 +431,35 @@ export function Timeline() {
     if (headerScrollRef.current) headerScrollRef.current.scrollTop = element.scrollTop;
   }, [setScrollX]);
 
+  // Follow the playhead during playback, the way every editor does.
+  //
+  // An *imperative* store subscription, deliberately: the playhead is not a
+  // subscription of this component (see `bodyPaintCount`), and following it
+  // continuously would write `scrollX` per position event — which IS a body
+  // subscription — putting the 24-a-second render storm back one field over.
+  // So it pages instead: when the playhead crosses the right edge, one jump
+  // places it near the left edge, costing one body render every few seconds.
+  // Only while playing — a paused timeline belongs to the user's own scroll.
+  useEffect(() => {
+    return useTimelineStore.subscribe((state, previous) => {
+      if (state.playhead === previous.playhead) return;
+      if (!usePreviewStore.getState().playing) return;
+      const element = scrollRef.current;
+      if (!element) return;
+      const width = element.clientWidth;
+      if (width <= 0) return;
+      const playheadPx = state.playhead * state.zoom;
+      const left = element.scrollLeft;
+      // Off the right edge: page forward so the playhead lands at 10% and the
+      // next page of clips is readable. Off the left edge (a loop, a jump
+      // home): same placement, backwards.
+      if (playheadPx > left + width * 0.95 || playheadPx < left) {
+        element.scrollLeft = Math.max(0, playheadPx - width * 0.1);
+        setScrollX(element.scrollLeft);
+      }
+    });
+  }, [setScrollX]);
+
   // Wheel has to be a native non-passive listener: React routes it through a
   // passive root listener, where preventDefault is ignored.
   useEffect(() => {

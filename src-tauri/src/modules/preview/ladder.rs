@@ -97,6 +97,8 @@ pub const STEP_UP_AFTER: u32 = 90;
 pub struct Ladder {
     rung: usize,
     over_budget: u32,
+    /// Finished frames left in the post-adopt grace window; see `begin_grace`.
+    grace: u32,
     healthy: u32,
     /// Whether this run has been below the top rung at all. What
     /// [`PreviewServer::pause`] asks, because a ring filled entirely at rung 0
@@ -117,6 +119,7 @@ impl Ladder {
         Self {
             rung: 0,
             over_budget: 0,
+            grace: 0,
             healthy: 0,
             degraded_this_run: false,
         }
@@ -157,6 +160,7 @@ impl Ladder {
     /// One playback frame finished. Returns the new rung if it moved.
     #[must_use]
     pub fn frame(&mut self, over_budget: bool) -> Option<usize> {
+        self.grace = self.grace.saturating_sub(1);
         if over_budget {
             self.healthy = 0;
             self.over_budget += 1;
@@ -177,14 +181,32 @@ impl Ladder {
     ///
     /// A drop is louder than an over-budget frame — the picture visibly did not
     /// move — so it steps down immediately rather than after a streak.
+    ///
+    /// Unless the drop was **ours**. Superseding the session — a resize, a seek
+    /// — resets the ring by construction, and the pacer then reports missing
+    /// frames until the read-ahead refills. Those drops are the supersede's
+    /// physics, not the machine's load, and for a while they were counted:
+    /// entering fullscreen during playback stepped the ladder down within a
+    /// frame and the picture stayed soft until a pause reset it — with
+    /// `over_budget=0` in every telemetry line, the machine never having
+    /// struggled at all. That is what [`Self::begin_grace`] exists to absorb.
     #[must_use]
     pub fn dropped(&mut self, frames: i64) -> Option<usize> {
-        if frames <= 0 {
+        if frames <= 0 || self.grace > 0 {
             return None;
         }
         self.healthy = 0;
         self.over_budget = STEP_DOWN_AFTER;
         self.step_down()
+    }
+
+    /// Ignore dropped frames for the next `frames` finished frames.
+    ///
+    /// Called when a session is adopted mid-playback. Only drops are graced:
+    /// an over-budget frame during the refill is a real measurement of a real
+    /// render and still counts.
+    pub fn begin_grace(&mut self, frames: u32) {
+        self.grace = frames;
     }
 
     /// Back to the top. Returns whether anything had been given up, which is
@@ -230,6 +252,35 @@ pub fn rung_label(rung: usize) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The fullscreen bug, distilled: a supersede's own drops must not move
+    /// the ladder. `over_budget=0` in every telemetry line while the picture
+    /// stayed soft is how it was caught.
+    #[test]
+    fn drops_during_the_adopt_grace_are_construction_not_load() {
+        let mut ladder = Ladder::new();
+        ladder.begin_grace(30);
+        assert_eq!(ladder.dropped(3), None, "the refill's drops are ours");
+        assert_eq!(ladder.rung(), 0);
+
+        // The grace is spent by finished frames, and then a drop is a drop.
+        for _ in 0..30 {
+            let _ = ladder.frame(false);
+        }
+        assert!(ladder.dropped(1).is_some(), "grace over, real drops count");
+    }
+
+    #[test]
+    fn over_budget_frames_still_count_during_the_grace() {
+        // The grace covers only the drops the adoption caused. A frame that
+        // genuinely costs more than the budget is a real measurement of the
+        // new size, and three of them must still step down.
+        let mut ladder = Ladder::new();
+        ladder.begin_grace(30);
+        assert_eq!(ladder.frame(true), None);
+        assert_eq!(ladder.frame(true), None);
+        assert_eq!(ladder.frame(true), Some(1), "real cost steps the ladder, graced or not");
+    }
 
     #[test]
     fn the_top_rung_changes_nothing() {

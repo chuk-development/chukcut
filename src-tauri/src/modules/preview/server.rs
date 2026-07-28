@@ -865,7 +865,16 @@ impl PreviewServer {
         // The ring is reset before the session is installed so a render already
         // in flight for the old session cannot land in the new one's ring.
         self.shared.cache.reset(session.id);
-        if !keep_playing {
+        if keep_playing {
+            // Same rule as `readopt`: the reset ring will drop frames while the
+            // read-ahead refills, and those drops are this seek's doing, not
+            // the machine's load. Without the grace, every seek during playback
+            // stepped the quality ladder down.
+            self.shared
+                .ladder
+                .lock()
+                .begin_grace(Self::LADDER_ADOPT_GRACE);
+        } else {
             self.shared.clock.pause();
         }
         // Audio first, always. The engine flushes its ring and marks where
@@ -925,8 +934,29 @@ impl PreviewServer {
     /// What it still has to do is supersede: the ring holds frames at the old
     /// size or the old quality, and a frame URL is answered from the ring
     /// without anything looking at how big the picture in it is.
+    /// Finished frames after a mid-playback adoption during which dropped
+    /// frames do not move the quality ladder.
+    ///
+    /// An adoption resets the ring, and the pacer then reports misses until the
+    /// read-ahead refills — drops the adoption itself caused. A window of about
+    /// a second covers the refill with margin; real overload keeps announcing
+    /// itself through over-budget frames, which the grace deliberately does not
+    /// cover.
+    const LADDER_ADOPT_GRACE: u32 = 30;
+
     fn readopt(&self, session: Arc<PreviewSession>, keep_playing: bool) -> PreviewInfo {
         self.shared.cache.reset(session.id);
+        if keep_playing {
+            // The old rung's evidence was collected at the old size and means
+            // nothing at the new one; start honest and let real measurements
+            // re-step. Without this — and without the grace — entering
+            // fullscreen mid-play dropped the ring, the drop stepped the
+            // ladder, and the picture stayed soft until a pause: the owner's
+            // "aendere ich die Groesse, aendert sich die Qualitaet".
+            let mut ladder = self.shared.ladder.lock();
+            let _ = ladder.reset();
+            ladder.begin_grace(Self::LADDER_ADOPT_GRACE);
+        }
         self.shared.stats.begin_session(
             SessionFacts {
                 width: session.width(),
@@ -2473,6 +2503,41 @@ mod tests {
         assert_eq!(server.clock().position(), before, "a resize is not a seek");
         assert_eq!(resized.frame, 30);
         assert_eq!(server.shared.work.lock().scrub, Some(30), "and it re-renders");
+    }
+
+    /// The fullscreen bug, at the wiring level. Entering fullscreen during
+    /// playback supersedes the session; the reset ring then drops frames, and
+    /// those drops used to step the quality ladder — the picture went soft on
+    /// a machine with `over_budget=0` and stayed soft until a pause. A resize
+    /// must reset the ladder (its evidence belongs to the old size) and grace
+    /// the refill's drops.
+    #[test]
+    fn a_resize_during_playback_neither_keeps_nor_earns_a_degraded_rung() {
+        let (server, _info) = parked();
+        // The panel measured first, as it does in the app; fullscreen below is
+        // then a real size change, not a no-op against the canvas default.
+        let _ = server
+            .set_viewport(Some(Viewport::new(700, 394)))
+            .expect("a session is open");
+        server.play().expect("a session is open");
+
+        // The state of a machine that had genuinely struggled at the old size.
+        assert!(server.shared.ladder.lock().dropped(1).is_some());
+        assert_ne!(server.shared.ladder.lock().rung(), 0);
+
+        // Fullscreen: the panel is suddenly much larger.
+        let resized = server
+            .set_viewport(Some(Viewport::new(1920, 1080)))
+            .expect("a session is open");
+        assert!(resized.playing, "the resize must not pause playback");
+
+        let mut ladder = server.shared.ladder.lock();
+        assert_eq!(ladder.rung(), 0, "old-size evidence does not survive a resize");
+        assert_eq!(
+            ladder.dropped(5),
+            None,
+            "the refill's drops right after the resize are the resize's own"
+        );
     }
 
     #[test]

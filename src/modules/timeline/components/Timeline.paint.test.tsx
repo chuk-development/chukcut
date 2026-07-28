@@ -230,6 +230,56 @@ describe("playback moving the playhead", () => {
   });
 });
 
+describe("following the playhead during playback", () => {
+  function viewport(): HTMLElement {
+    const element = document.querySelector<HTMLElement>('[data-slot="timeline-viewport"]');
+    if (!element) throw new Error("the timeline has no viewport");
+    // jsdom lays nothing out, so the follower's guard would bail on width 0.
+    Object.defineProperty(element, "clientWidth", { value: 1000, configurable: true });
+    return element;
+  }
+
+  it("pages forward when the playhead crosses the right edge, and only then", async () => {
+    mount();
+    const element = viewport();
+    const { usePreviewStore } = await import("@/modules/preview/store");
+    usePreviewStore.setState({ playing: true });
+    const zoom = useTimelineStore.getState().zoom;
+    const bodyBefore = bodyPaintCount.renders;
+
+    // Inside the page: playback position events must not move the scroll.
+    act(() => {
+      useTimelineStore.getState().setPlayhead(Math.round((500 / zoom) * 0.5) * 2);
+    });
+    expect(element.scrollLeft).toBe(0);
+
+    // Past 95% of the viewport: one page turn, playhead re-placed at 10%.
+    const past = Math.ceil(960 / zoom);
+    act(() => {
+      useTimelineStore.getState().setPlayhead(past);
+    });
+    expect(element.scrollLeft).toBeCloseTo(past * zoom - 100, 0);
+    // The page turn costs a couple of body renders (scrollX, then the snapped
+    // viewport window), once every page — versus a render per position event,
+    // which is what continuous following would cost. The bound guards against
+    // the 24-a-second storm coming back, not against the second render.
+    expect(bodyPaintCount.renders - bodyBefore).toBeLessThanOrEqual(2);
+  });
+
+  it("stays put when paused, whoever moves the playhead", async () => {
+    mount();
+    const element = viewport();
+    const { usePreviewStore } = await import("@/modules/preview/store");
+    usePreviewStore.setState({ playing: false });
+
+    act(() => {
+      useTimelineStore.getState().setPlayhead(10_000_000);
+    });
+    // A paused timeline belongs to the user's own scroll position.
+    expect(element.scrollLeft).toBe(0);
+  });
+});
+
 describe("scrolling a crowded timeline", () => {
   it("leaves the clips alone until the visible window has actually moved", () => {
     mount();
