@@ -23,7 +23,7 @@ sudo apt install \
   libwebkit2gtk-4.1-dev libsoup-3.0-dev librsvg2-dev \
   libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev \
   libavdevice-dev libswscale-dev libswresample-dev \
-  libva-dev libshaderc-dev
+  libva-dev libasound2-dev libshaderc-dev
 
 pnpm install
 pnpm tauri dev

@@ -47,9 +47,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # Tauri's shell, FFmpeg's headers, VAAPI, and libshaderc. Without the
-      # last one shaderc-sys builds glslang from source with CMake, which works
-      # but adds several minutes to a cold build.
+      # Tauri's shell, FFmpeg's headers, VAAPI, ALSA for cpal, and libshaderc.
+      # Without the last one shaderc-sys builds glslang from source with CMake,
+      # which works but adds several minutes to a cold build.
       - name: System dependencies
         run: |
           sudo apt-get update
@@ -57,7 +57,7 @@ jobs:
             libwebkit2gtk-4.1-dev libsoup-3.0-dev librsvg2-dev \
             libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev \
             libavdevice-dev libswscale-dev libswresample-dev \
-            libva-dev libshaderc-dev
+            libva-dev libasound2-dev libshaderc-dev
 
       - uses: dtolnay/rust-toolchain@stable
         with:
