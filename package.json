@@ -2,6 +2,16 @@
   "name": "chukcut",
   "private": true,
   "version": "0.1.0",
+  "description": "A fast, modern video editor for Linux. Rust engine, GPU compositor, web UI.",
+  "license": "GPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/chukfinley/chukcut.git"
+  },
+  "bugs": {
+    "url": "https://github.com/chukfinley/chukcut/issues"
+  },
+  "homepage": "https://github.com/chukfinley/chukcut",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -9,7 +19,11 @@
     "preview": "vite preview",
     "test": "vitest",
     "test:watch": "vitest watch",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "lint": "biome check .",
+    "format": "biome check --write .",
+    "typecheck": "tsc --noEmit",
+    "test:run": "vitest run"
   },
   "dependencies": {
     "@radix-ui/react-context-menu": "^2.3.7",

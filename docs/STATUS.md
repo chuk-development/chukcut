@@ -5,7 +5,17 @@ Sessions are long and are not reopened, so nothing important is allowed to live
 only in a conversation. If you learn something that would change how the next
 person works, it belongs in this repository, not in a chat log.
 
-Last updated: 2026-07-28 (**the media library is now a view of the project's
+Last updated: 2026-08-05 (**the project is public, under GPL-3.0** — decision
+0010. Two things follow that are not paperwork: the licence question 0002 was
+built around is settled, so linking the distribution's ordinary `--enable-gpl`
+FFmpeg and using `libx264`/`libx265` in-process is now allowed and the
+LGPL-clean build is no longer required; and the repository now runs `cargo fmt`,
+clippy and both test suites in CI, which meant formatting the whole tree once —
+rustfmt had never been enforced, 483 sites — and taking clippy's
+machine-applicable fixes. **Clippy is reported but not fatal**: about 28 style
+lints remain, none of them correctness, and `-D warnings` belongs in CI only
+once that list is empty). Previously 2026-07-28: (**the media
+library is now a view of the project's
 pool, and missing media is a state** — removing an import is an undoable edit
 that leaves the clips offline instead of deleting them; decision 0009. The bug
 behind "saving does not save my imports" was never the save: the pool was

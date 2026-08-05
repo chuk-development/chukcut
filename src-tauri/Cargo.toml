@@ -6,8 +6,17 @@ version = "0.1.0"
 # with "failed to find main binary", which names the symptom and not the
 # cause: a benchmark target was added and the app stopped being unambiguous.
 default-run = "chukcut"
-description = "A Tauri App"
-authors = ["you"]
+description = "A fast, modern video editor for Linux. Rust engine, GPU compositor, web UI."
+authors = ["chukfinley <chuk@chuk.dev>"]
+license = "GPL-3.0-or-later"
+repository = "https://github.com/chukfinley/chukcut"
+homepage = "https://github.com/chukfinley/chukcut"
+readme = "../README.md"
+keywords = ["video", "editor", "ffmpeg", "wgpu", "tauri"]
+categories = ["multimedia::video"]
+# Not a library anyone should depend on, and the binary is distributed as an
+# app rather than through crates.io.
+publish = false
 edition = "2021"
 # `benches/main.rs` is a [[bin]], declared below. Without this cargo also picks
 # it up as a bench target and warns about one file backing two.
