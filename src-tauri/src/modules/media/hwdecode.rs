@@ -273,7 +273,9 @@ impl Drop for VaapiDevice {
 
 impl std::fmt::Debug for VaapiDevice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("VaapiDevice").field("node", &self.node).finish()
+        f.debug_struct("VaapiDevice")
+            .field("node", &self.node)
+            .finish()
     }
 }
 
@@ -586,12 +588,9 @@ fn declares_vaapi(decoder: &ffmpeg::Codec) -> bool {
         }
         // SAFETY: non-null by the check above, and the struct is plain data in
         // static storage.
-        let (pix_fmt, methods, device_type) = unsafe {
-            ((*config).pix_fmt, (*config).methods, (*config).device_type)
-        };
-        let by_device = methods
-            & ffmpeg::ffi::AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX as i32
-            != 0;
+        let (pix_fmt, methods, device_type) =
+            unsafe { ((*config).pix_fmt, (*config).methods, (*config).device_type) };
+        let by_device = methods & ffmpeg::ffi::AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX as i32 != 0;
         if by_device
             && pix_fmt == ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_VAAPI
             && device_type == ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI

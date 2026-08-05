@@ -48,7 +48,9 @@ fn four_k_fixture() -> PathBuf {
     static BUILDING: std::sync::Mutex<()> = std::sync::Mutex::new(());
     // Poison is not interesting here: one test panicking must not turn the
     // other two into a cascade of `PoisonError` that hides the real failure.
-    let _guard = BUILDING.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = BUILDING
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
 
     let path = fixture_dir().join("4k_h264.mp4");
     if path.exists() {
@@ -117,10 +119,8 @@ struct Scratch(PathBuf);
 
 impl Scratch {
     fn new(name: &str) -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "chukcut-proxy-e2e-{name}-{}",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("chukcut-proxy-e2e-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).expect("scratch");
         Self(path)
@@ -144,7 +144,10 @@ fn a_four_k_source_is_proxied_and_the_proxy_decodes() {
 
     // 1. The rule says yes, without anybody having measured anything.
     let (profile, spec) = generate::plan(&source).expect("plan a proxy");
-    assert_eq!((profile.width, profile.height), (FIXTURE_WIDTH, FIXTURE_HEIGHT));
+    assert_eq!(
+        (profile.width, profile.height),
+        (FIXTURE_WIDTH, FIXTURE_HEIGHT)
+    );
     let decision = decide(&profile, None);
     assert!(
         decision.build,
@@ -157,8 +160,8 @@ fn a_four_k_source_is_proxied_and_the_proxy_decodes() {
     let scratch = Scratch::new("fourk");
     let dest = scratch.path().join("proxy.mp4");
     let cancel = AtomicBool::new(false);
-    let generated = generate::generate(&source, &dest, &spec, &cancel, &|_, _| {})
-        .expect("build the proxy");
+    let generated =
+        generate::generate(&source, &dest, &spec, &cancel, &|_, _| {}).expect("build the proxy");
 
     assert_eq!((generated.width, generated.height), (1280, 720));
     assert!(
@@ -279,10 +282,8 @@ fn the_queue_builds_a_proxy_and_the_cache_serves_it() {
     let source = four_k_fixture();
     let scratch = Scratch::new("queue");
     let cache = Arc::new(ProxyCache::open(scratch.path().join("cache"), 1 << 30));
-    let queue = ProxyQueue::with_transcoder(
-        Arc::clone(&cache),
-        Arc::new(super::queue::FfmpegTranscoder),
-    );
+    let queue =
+        ProxyQueue::with_transcoder(Arc::clone(&cache), Arc::new(super::queue::FfmpegTranscoder));
 
     // Nothing cached: the preview decodes the original, immediately, with no
     // waiting. This is the "never block an import" property.

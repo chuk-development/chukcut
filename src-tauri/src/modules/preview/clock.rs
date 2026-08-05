@@ -130,14 +130,14 @@ struct Inner {
 
 impl PlaybackClock {
     pub fn new(fps: f64, duration: Micros) -> Self {
-        Self::with_source(std::sync::Arc::new(MonotonicSource::default()), fps, duration)
+        Self::with_source(
+            std::sync::Arc::new(MonotonicSource::default()),
+            fps,
+            duration,
+        )
     }
 
-    pub fn with_source(
-        source: std::sync::Arc<dyn TimeSource>,
-        fps: f64,
-        duration: Micros,
-    ) -> Self {
+    pub fn with_source(source: std::sync::Arc<dyn TimeSource>, fps: f64, duration: Micros) -> Self {
         let origin = source.now();
         Self {
             source,

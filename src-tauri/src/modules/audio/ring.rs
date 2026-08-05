@@ -285,7 +285,11 @@ mod tests {
 
         let mut out = [0.0; 4];
         rx.pop(&mut out);
-        assert_eq!(out, [1.0, 2.0, 3.0, 4.0], "the tail was dropped, not the head");
+        assert_eq!(
+            out,
+            [1.0, 2.0, 3.0, 4.0],
+            "the tail was dropped, not the head"
+        );
     }
 
     #[test]
@@ -331,7 +335,11 @@ mod tests {
         assert_eq!(rx.pop(&mut out), 2);
         assert_eq!(out[0], 1.0);
         assert_eq!(out[1], 2.0);
-        assert_eq!(&out[2..], &[-1.0, -1.0, -1.0], "the tail is the caller's job");
+        assert_eq!(
+            &out[2..],
+            &[-1.0, -1.0, -1.0],
+            "the tail is the caller's job"
+        );
         assert_eq!(rx.starved(), 3);
 
         // And an empty ring is not an error, it is zero samples.
@@ -345,7 +353,11 @@ mod tests {
         tx.flush();
 
         let mut out = [0.0; 4];
-        assert_eq!(rx.pop(&mut out), 0, "stale audio must not be heard after a seek");
+        assert_eq!(
+            rx.pop(&mut out),
+            0,
+            "stale audio must not be heard after a seek"
+        );
 
         // And the room comes back once the consumer has acted on the flush.
         assert_eq!(tx.free(), 16);
@@ -408,7 +420,10 @@ mod tests {
         while received < TOTAL {
             let count = rx.pop(&mut out);
             for value in out.iter().take(count) {
-                assert_eq!(*value, received as f32, "sample {received} arrived out of order");
+                assert_eq!(
+                    *value, received as f32,
+                    "sample {received} arrived out of order"
+                );
                 received += 1;
             }
             if count == 0 {

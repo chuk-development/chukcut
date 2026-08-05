@@ -977,7 +977,11 @@ mod tests {
         assert_eq!(black.chroma(0, 0), (128, 128), "black is colourless");
 
         let white = convert_solid_in([255, 255, 255, 255], 64, 32, YuvRange::Full).expect("white");
-        assert_eq!(white.luma(0, 0), 255, "full-range white must be 255, not 235");
+        assert_eq!(
+            white.luma(0, 0),
+            255,
+            "full-range white must be 255, not 235"
+        );
         assert_eq!(white.chroma(0, 0), (128, 128), "white is colourless");
 
         // And the other arm is untouched, because the export depends on it.

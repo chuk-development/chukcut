@@ -86,10 +86,11 @@ impl SerializedFile {
             // information a typed reader needs and libyaml would demand a
             // resolver for them.
             let body = body.replace("!<str> ", "");
-            let value: Value = serde_yaml_ng::from_str(&body).map_err(|e| AssetError::Malformed {
-                path: path.to_string(),
-                message: format!("document !{tag}: {e}"),
-            })?;
+            let value: Value =
+                serde_yaml_ng::from_str(&body).map_err(|e| AssetError::Malformed {
+                    path: path.to_string(),
+                    message: format!("document !{tag}: {e}"),
+                })?;
             documents.push((tag, anchor, value));
         }
         Ok(Self {
@@ -290,7 +291,10 @@ impl XShader {
 
         let mut passes = Vec::new();
         let empty = Vec::new();
-        for entry in get(root, "passes").and_then(Value::as_sequence).unwrap_or(&empty) {
+        for entry in get(root, "passes")
+            .and_then(Value::as_sequence)
+            .unwrap_or(&empty)
+        {
             passes.push(parse_pass(&file, entry));
         }
 
@@ -339,10 +343,16 @@ fn parse_pass(file: &SerializedFile, entry: &Value) -> Pass {
         };
         let source = ShaderSource {
             kind,
-            source_path: as_str(get(document, "sourcePath")).unwrap_or_default().to_string(),
+            source_path: as_str(get(document, "sourcePath"))
+                .unwrap_or_default()
+                .to_string(),
             macros: get(document, "macros")
                 .and_then(Value::as_sequence)
-                .map(|s| s.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                .map(|s| {
+                    s.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
                 .unwrap_or_default(),
         };
         match kind {
@@ -366,11 +376,21 @@ fn parse_pass(file: &SerializedFile, entry: &Value) -> Pass {
         .and_then(Value::as_sequence)
         .and_then(|a| a.first())
         .map(|a| BlendState {
-            enabled: get(a, "blendEnable").and_then(Value::as_bool).unwrap_or(false),
-            src_color: enum_value(get(a, "srcColorBlendFactor")).unwrap_or("ONE").to_string(),
-            dst_color: enum_value(get(a, "dstColorBlendFactor")).unwrap_or("ZERO").to_string(),
-            src_alpha: enum_value(get(a, "srcAlphaBlendFactor")).unwrap_or("ONE").to_string(),
-            dst_alpha: enum_value(get(a, "dstAlphaBlendFactor")).unwrap_or("ZERO").to_string(),
+            enabled: get(a, "blendEnable")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            src_color: enum_value(get(a, "srcColorBlendFactor"))
+                .unwrap_or("ONE")
+                .to_string(),
+            dst_color: enum_value(get(a, "dstColorBlendFactor"))
+                .unwrap_or("ZERO")
+                .to_string(),
+            src_alpha: enum_value(get(a, "srcAlphaBlendFactor"))
+                .unwrap_or("ONE")
+                .to_string(),
+            dst_alpha: enum_value(get(a, "dstAlphaBlendFactor"))
+                .unwrap_or("ZERO")
+                .to_string(),
         })
         .unwrap_or_default();
 
@@ -383,7 +403,10 @@ fn parse_pass(file: &SerializedFile, entry: &Value) -> Pass {
         semantics,
         render_texture: AssetRef::read(get(entry, "renderTexture")),
         clear_color,
-        clear: matches!(enum_value(get(entry, "clearType")), Some("COLOR") | Some("ALL")),
+        clear: matches!(
+            enum_value(get(entry, "clearType")),
+            Some("COLOR") | Some("ALL")
+        ),
         blend,
         depth_test: depth
             .and_then(|d| get(d, "depthTestEnable"))
@@ -450,7 +473,9 @@ impl Material {
         let mut material = Self {
             name: as_str(get(root, "name")).unwrap_or(path).to_string(),
             xshader: AssetRef::read(get(root, "xshader")),
-            render_queue: get(root, "renderQueue").and_then(Value::as_i64).unwrap_or(3000),
+            render_queue: get(root, "renderQueue")
+                .and_then(Value::as_i64)
+                .unwrap_or(3000),
             ..Default::default()
         };
 
@@ -533,7 +558,9 @@ impl RenderTargetDesc {
                 as_f32(get(root, "pecentX")).unwrap_or(1.0),
                 as_f32(get(root, "pecentY")).unwrap_or(1.0),
             ],
-            shared: get(root, "shared").and_then(Value::as_bool).unwrap_or(false),
+            shared: get(root, "shared")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
             filter_linear: !matches!(enum_value(get(root, "filterMin")), Some("NEAREST")),
             clamp: !matches!(enum_value(get(root, "wrapModeS")), Some("REPEAT")),
         })
@@ -570,7 +597,12 @@ impl MeshAsset {
         let root = file.require("Mesh")?;
         let vertices = get(root, "vertices")
             .and_then(Value::as_sequence)
-            .map(|s| s.iter().filter_map(|v| v.as_f64()).map(|v| v as f32).collect())
+            .map(|s| {
+                s.iter()
+                    .filter_map(|v| v.as_f64())
+                    .map(|v| v as f32)
+                    .collect()
+            })
             .unwrap_or_default();
         let attributes = get(root, "vertexAttribs")
             .and_then(Value::as_sequence)
@@ -585,7 +617,12 @@ impl MeshAsset {
             .and_then(|s| s.first())
             .and_then(|s| get(s, "indices16"))
             .and_then(Value::as_sequence)
-            .map(|s| s.iter().filter_map(|v| v.as_u64()).map(|v| v as u16).collect())
+            .map(|s| {
+                s.iter()
+                    .filter_map(|v| v.as_u64())
+                    .map(|v| v as u16)
+                    .collect()
+            })
             .unwrap_or_default();
         Ok(Self {
             name: as_str(get(root, "name")).unwrap_or(path).to_string(),
@@ -630,13 +667,13 @@ pub struct ScriptComponentDesc {
 impl SceneEntry {
     pub fn parse(path: &str, bytes: &[u8]) -> Result<Self> {
         let file = SerializedFile::parse(path, bytes)?;
-        let root = file
-            .first("Scene")
-            .or_else(|| file.first("Prefab"))
-            .ok_or(AssetError::Missing {
-                path: path.to_string(),
-                kind: "Scene or Prefab",
-            })?;
+        let root =
+            file.first("Scene")
+                .or_else(|| file.first("Prefab"))
+                .ok_or(AssetError::Missing {
+                    path: path.to_string(),
+                    kind: "Scene or Prefab",
+                })?;
 
         let mut entry = Self::default();
         let empty = Vec::new();
@@ -659,7 +696,8 @@ impl SceneEntry {
                                 }
                             }
                         }
-                        if let Some(path) = as_str(get(component, "mesh").and_then(|m| get(m, "path")))
+                        if let Some(path) =
+                            as_str(get(component, "mesh").and_then(|m| get(m, "path")))
                         {
                             entry.meshes.push(path.to_string());
                         }
@@ -745,8 +783,14 @@ macros: [SAMPLETIIMES1]
 
         let pass = &shader.passes[0];
         assert_eq!(pass.name, "Tint");
-        assert_eq!(pass.vertex.as_ref().unwrap().source_path, "xshader/tint.vert");
-        assert_eq!(pass.fragment.as_ref().unwrap().source_path, "xshader/tint.frag");
+        assert_eq!(
+            pass.vertex.as_ref().unwrap().source_path,
+            "xshader/tint.vert"
+        );
+        assert_eq!(
+            pass.fragment.as_ref().unwrap().source_path,
+            "xshader/tint.frag"
+        );
         assert_eq!(pass.fragment.as_ref().unwrap().macros, ["SAMPLETIIMES1"]);
     }
 

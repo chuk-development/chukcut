@@ -313,8 +313,14 @@ impl Gpu {
         // libavutil keeps its own and closes that one itself.
         let hal_texture = unsafe {
             let hal = self.device.as_hal::<wgpu_hal::api::Vulkan>()?;
-            hal.texture_from_dmabuf_fd(fd, &hal_descriptor, plane.modifier, plane.pitch, plane.offset)
-                .ok()?
+            hal.texture_from_dmabuf_fd(
+                fd,
+                &hal_descriptor,
+                plane.modifier,
+                plane.pitch,
+                plane.offset,
+            )
+            .ok()?
         };
 
         // SAFETY: the wgpu descriptor has to agree with the hal one, and does.
@@ -322,20 +328,21 @@ impl Gpu {
         // read, which is what stops wgpu treating it as uninitialised and
         // clearing the decoded picture before anything samples it.
         Some(unsafe {
-            self.device.create_texture_from_hal::<wgpu_hal::api::Vulkan>(
-                hal_texture,
-                &wgpu::TextureDescriptor {
-                    label: Some("imported decode surface"),
-                    size,
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format,
-                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
-                    view_formats: &[],
-                },
-                wgpu::TextureUses::RESOURCE,
-            )
+            self.device
+                .create_texture_from_hal::<wgpu_hal::api::Vulkan>(
+                    hal_texture,
+                    &wgpu::TextureDescriptor {
+                        label: Some("imported decode surface"),
+                        size,
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format,
+                        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+                        view_formats: &[],
+                    },
+                    wgpu::TextureUses::RESOURCE,
+                )
         })
     }
 

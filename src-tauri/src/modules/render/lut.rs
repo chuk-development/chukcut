@@ -61,8 +61,7 @@ impl Cube {
         let mut t = [0f32; 3];
         for c in 0..3 {
             let span = self.domain_max[c] - self.domain_min[c];
-            let coord =
-                ((rgb[c] - self.domain_min[c]) / span).clamp(0.0, 1.0) * (n - 1) as f32;
+            let coord = ((rgb[c] - self.domain_min[c]) / span).clamp(0.0, 1.0) * (n - 1) as f32;
             let i = (coord.floor() as usize).min(n - 2);
             base[c] = i;
             t[c] = coord - i as f32;
@@ -159,7 +158,9 @@ pub fn parse(text: &str) -> Result<Cube, String> {
                     ));
                 }
                 if ![r, g, b].iter().all(|v| v.is_finite()) {
-                    return Err(format!("line {line_no}: a LUT value is not a finite number"));
+                    return Err(format!(
+                        "line {line_no}: a LUT value is not a finite number"
+                    ));
                 }
                 data.push([r, g, b]);
             }
@@ -293,7 +294,10 @@ impl LutCache {
             tracing::warn!(path, "LUT file is missing; rendering without it");
             None
         } else {
-            match std::fs::read_to_string(path).map_err(|e| e.to_string()).and_then(|text| parse(&text)) {
+            match std::fs::read_to_string(path)
+                .map_err(|e| e.to_string())
+                .and_then(|text| parse(&text))
+            {
                 Ok(cube) => Some(Arc::new(upload(ctx, &cube))),
                 Err(error) => {
                     tracing::warn!(path, %error, "LUT file did not parse; rendering without it");
@@ -376,7 +380,10 @@ mod tests {
         assert!(error.contains("line 2"), "{error}");
 
         let error = parse("BANANA 4\n").unwrap_err();
-        assert!(error.contains("line 1") && error.contains("BANANA"), "{error}");
+        assert!(
+            error.contains("line 1") && error.contains("BANANA"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -388,7 +395,10 @@ mod tests {
     #[test]
     fn wrong_entry_counts_and_missing_size_are_refused() {
         let error = parse("LUT_3D_SIZE 2\n0 0 0\n").unwrap_err();
-        assert!(error.contains("promises 8") && error.contains("has 1"), "{error}");
+        assert!(
+            error.contains("promises 8") && error.contains("has 1"),
+            "{error}"
+        );
 
         let error = parse("0 0 0\n").unwrap_err();
         assert!(error.contains("LUT_3D_SIZE"), "{error}");

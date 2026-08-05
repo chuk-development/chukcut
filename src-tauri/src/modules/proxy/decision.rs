@@ -146,17 +146,60 @@ impl CodecClass {
 pub fn classify(codec: &str) -> CodecClass {
     let codec = codec.trim().to_ascii_lowercase();
     const INTRA: &[&str] = &[
-        "mjpeg", "mjpegb", "jpeg2000", "jpegls", "png", "tiff", "bmp", "qtrle", "rawvideo",
-        "v210", "v308", "v410", "y41p", "yuv4", "huffyuv", "ffvhuff", "ffv1", "utvideo",
-        "magicyuv", "dv", "cfhd", "sheervideo", "prores", "dnxhd", "avrp", "r210", "r10k",
+        "mjpeg",
+        "mjpegb",
+        "jpeg2000",
+        "jpegls",
+        "png",
+        "tiff",
+        "bmp",
+        "qtrle",
+        "rawvideo",
+        "v210",
+        "v308",
+        "v410",
+        "y41p",
+        "yuv4",
+        "huffyuv",
+        "ffvhuff",
+        "ffv1",
+        "utvideo",
+        "magicyuv",
+        "dv",
+        "cfhd",
+        "sheervideo",
+        "prores",
+        "dnxhd",
+        "avrp",
+        "r210",
+        "r10k",
     ];
-    if INTRA.iter().any(|name| codec == *name || codec.starts_with(name)) {
+    if INTRA
+        .iter()
+        .any(|name| codec == *name || codec.starts_with(name))
+    {
         return CodecClass::IntraOnly;
     }
     const LONG_GOP: &[&str] = &[
-        "h264", "hevc", "h265", "av1", "vp8", "vp9", "vc1", "mpeg1video", "mpeg2video",
-        "mpeg4", "msmpeg4v1", "msmpeg4v2", "msmpeg4v3", "wmv1", "wmv2", "wmv3", "theora",
-        "vvc", "h266",
+        "h264",
+        "hevc",
+        "h265",
+        "av1",
+        "vp8",
+        "vp9",
+        "vc1",
+        "mpeg1video",
+        "mpeg2video",
+        "mpeg4",
+        "msmpeg4v1",
+        "msmpeg4v2",
+        "msmpeg4v3",
+        "wmv1",
+        "wmv2",
+        "wmv3",
+        "theora",
+        "vvc",
+        "h266",
     ];
     if LONG_GOP.iter().any(|name| codec == *name) {
         return CodecClass::LongGop;
@@ -358,7 +401,11 @@ pub fn decide(profile: &SourceProfile, measured: Option<f64>) -> Decision {
             profile.codec,
             profile.width,
             profile.height,
-            if decision.measured { "measured" } else { "costs" },
+            if decision.measured {
+                "measured"
+            } else {
+                "costs"
+            },
             cost_ms,
             allowance_ms,
             profile.fps.max(0.0),
@@ -370,7 +417,11 @@ pub fn decide(profile: &SourceProfile, measured: Option<f64>) -> Decision {
             profile.codec,
             profile.width,
             profile.height,
-            if decision.measured { "measured" } else { "costs" },
+            if decision.measured {
+                "measured"
+            } else {
+                "costs"
+            },
             cost_ms,
             allowance_ms,
         );
@@ -402,70 +453,201 @@ mod tests {
     fn the_rule_against_a_table_of_sources() {
         const CASES: &[Case] = &[
             // The two the brief names explicitly.
-            Case { what: "H.264 1080p — the everyday case, plays fine",
-                   width: 1920, height: 1080, fps: 30.0, codec: "h264", build: false },
-            Case { what: "HEVC 4K — the case proxies exist for",
-                   width: 3840, height: 2160, fps: 30.0, codec: "hevc", build: true },
+            Case {
+                what: "H.264 1080p — the everyday case, plays fine",
+                width: 1920,
+                height: 1080,
+                fps: 30.0,
+                codec: "h264",
+                build: false,
+            },
+            Case {
+                what: "HEVC 4K — the case proxies exist for",
+                width: 3840,
+                height: 2160,
+                fps: 30.0,
+                codec: "hevc",
+                build: true,
+            },
             // Resolution alone is not the rule: same pixels, different codecs.
-            Case { what: "H.264 4K at 30 — heavy but not hopeless",
-                   width: 3840, height: 2160, fps: 30.0, codec: "h264", build: true },
-            Case { what: "AV1 1440p — half the pixels of 4K, twice the codec",
-                   width: 2560, height: 1440, fps: 30.0, codec: "av1", build: true },
-            Case { what: "VP9 1080p — inside budget",
-                   width: 1920, height: 1080, fps: 30.0, codec: "vp9", build: false },
-            Case { what: "HEVC 1080p — inside budget at 30",
-                   width: 1920, height: 1080, fps: 30.0, codec: "hevc", build: false },
+            Case {
+                what: "H.264 4K at 30 — heavy but not hopeless",
+                width: 3840,
+                height: 2160,
+                fps: 30.0,
+                codec: "h264",
+                build: true,
+            },
+            Case {
+                what: "AV1 1440p — half the pixels of 4K, twice the codec",
+                width: 2560,
+                height: 1440,
+                fps: 30.0,
+                codec: "av1",
+                build: true,
+            },
+            Case {
+                what: "VP9 1080p — inside budget",
+                width: 1920,
+                height: 1080,
+                fps: 30.0,
+                codec: "vp9",
+                build: false,
+            },
+            Case {
+                what: "HEVC 1080p — inside budget at 30",
+                width: 1920,
+                height: 1080,
+                fps: 30.0,
+                codec: "hevc",
+                build: false,
+            },
             // Frame rate is part of the budget, so the same file at 60 is a
             // different answer. This is the clause a resolution-only rule
             // cannot express at all.
-            Case { what: "HEVC 1080p at 60 — half the budget, now over it",
-                   width: 1920, height: 1080, fps: 60.0, codec: "hevc", build: true },
-            Case { what: "H.264 1080p at 60 — still inside",
-                   width: 1920, height: 1080, fps: 60.0, codec: "h264", build: false },
+            Case {
+                what: "HEVC 1080p at 60 — half the budget, now over it",
+                width: 1920,
+                height: 1080,
+                fps: 60.0,
+                codec: "hevc",
+                build: true,
+            },
+            Case {
+                what: "H.264 1080p at 60 — still inside",
+                width: 1920,
+                height: 1080,
+                fps: 60.0,
+                codec: "h264",
+                build: false,
+            },
             // Intra-only. Cheap per pixel and free to seek, so it takes real
             // size before one is worth building.
-            Case { what: "ProRes 1080p — no proxy, obviously",
-                   width: 1920, height: 1080, fps: 30.0, codec: "prores", build: false },
-            Case { what: "ProRes 4K — intra, but 8 megapixels is 8 megapixels",
-                   width: 3840, height: 2160, fps: 30.0, codec: "prores", build: true },
-            Case { what: "DNxHD 1080p — cheapest of the intra family",
-                   width: 1920, height: 1080, fps: 30.0, codec: "dnxhd", build: false },
-            Case { what: "MJPEG 4K at 30 — intra bonus covers it",
-                   width: 3840, height: 2160, fps: 30.0, codec: "mjpeg", build: false },
-            Case { what: "MJPEG 4K at 60 — half the budget, no longer covered",
-                   width: 3840, height: 2160, fps: 60.0, codec: "mjpeg", build: true },
+            Case {
+                what: "ProRes 1080p — no proxy, obviously",
+                width: 1920,
+                height: 1080,
+                fps: 30.0,
+                codec: "prores",
+                build: false,
+            },
+            Case {
+                what: "ProRes 4K — intra, but 8 megapixels is 8 megapixels",
+                width: 3840,
+                height: 2160,
+                fps: 30.0,
+                codec: "prores",
+                build: true,
+            },
+            Case {
+                what: "DNxHD 1080p — cheapest of the intra family",
+                width: 1920,
+                height: 1080,
+                fps: 30.0,
+                codec: "dnxhd",
+                build: false,
+            },
+            Case {
+                what: "MJPEG 4K at 30 — intra bonus covers it",
+                width: 3840,
+                height: 2160,
+                fps: 30.0,
+                codec: "mjpeg",
+                build: false,
+            },
+            Case {
+                what: "MJPEG 4K at 60 — half the budget, no longer covered",
+                width: 3840,
+                height: 2160,
+                fps: 60.0,
+                codec: "mjpeg",
+                build: true,
+            },
             // Small sources are never proxied whatever the codec costs,
             // because the proxy would not be smaller.
-            Case { what: "AV1 720p — expensive codec, nothing to shrink",
-                   width: 1280, height: 720, fps: 30.0, codec: "av1", build: false },
-            Case { what: "H.264 480p — nothing to shrink",
-                   width: 854, height: 480, fps: 30.0, codec: "h264", build: false },
+            Case {
+                what: "AV1 720p — expensive codec, nothing to shrink",
+                width: 1280,
+                height: 720,
+                fps: 30.0,
+                codec: "av1",
+                build: false,
+            },
+            Case {
+                what: "H.264 480p — nothing to shrink",
+                width: 854,
+                height: 480,
+                fps: 30.0,
+                codec: "h264",
+                build: false,
+            },
             // Portrait: the long side is the height, and the rule has to see
             // that. A height-capped rule would proxy nothing here.
-            Case { what: "HEVC 2160×3840 portrait — 4K on its side",
-                   width: 2160, height: 3840, fps: 30.0, codec: "hevc", build: true },
-            Case { what: "H.264 1080×1920 portrait — the phone footage we test with",
-                   width: 1080, height: 1920, fps: 60.0, codec: "h264", build: false },
+            Case {
+                what: "HEVC 2160×3840 portrait — 4K on its side",
+                width: 2160,
+                height: 3840,
+                fps: 30.0,
+                codec: "hevc",
+                build: true,
+            },
+            Case {
+                what: "H.264 1080×1920 portrait — the phone footage we test with",
+                width: 1080,
+                height: 1920,
+                fps: 60.0,
+                codec: "h264",
+                build: false,
+            },
             // 6K/8K: nothing decodes this in real time.
-            Case { what: "H.264 8K",
-                   width: 7680, height: 4320, fps: 30.0, codec: "h264", build: true },
-            Case { what: "Raw 4K — trivially decoded, but 8 MP of memcpy",
-                   width: 3840, height: 2160, fps: 30.0, codec: "rawvideo", build: false },
+            Case {
+                what: "H.264 8K",
+                width: 7680,
+                height: 4320,
+                fps: 30.0,
+                codec: "h264",
+                build: true,
+            },
+            Case {
+                what: "Raw 4K — trivially decoded, but 8 MP of memcpy",
+                width: 3840,
+                height: 2160,
+                fps: 30.0,
+                codec: "rawvideo",
+                build: false,
+            },
             // A codec we have never heard of is treated as expensive.
-            Case { what: "Unknown codec at 4K",
-                   width: 3840, height: 2160, fps: 30.0, codec: "notacodec", build: true },
-            Case { what: "Unknown codec at 1080p",
-                   width: 1920, height: 1080, fps: 30.0, codec: "notacodec", build: true },
+            Case {
+                what: "Unknown codec at 4K",
+                width: 3840,
+                height: 2160,
+                fps: 30.0,
+                codec: "notacodec",
+                build: true,
+            },
+            Case {
+                what: "Unknown codec at 1080p",
+                width: 1920,
+                height: 1080,
+                fps: 30.0,
+                codec: "notacodec",
+                build: true,
+            },
         ];
 
         for case in CASES {
             let profile = SourceProfile::new(case.width, case.height, case.fps, case.codec);
             let decision = decide(&profile, None);
             assert_eq!(
-                decision.build, case.build,
+                decision.build,
+                case.build,
                 "{}: expected build={} but got {} — {} ({:.1} ms against {:.1} ms)",
-                case.what, case.build, decision.build, decision.reason,
-                decision.cost_ms, decision.allowance_ms
+                case.what,
+                case.build,
+                decision.build,
+                decision.reason,
+                decision.cost_ms,
+                decision.allowance_ms
             );
         }
     }
@@ -494,7 +676,10 @@ mod tests {
         let profile = SourceProfile::new(3840, 2160, 30.0, "hevc");
         for bad in [f64::NAN, f64::INFINITY, -1.0] {
             let decision = decide(&profile, Some(bad));
-            assert!(!decision.measured, "{bad} should not count as a measurement");
+            assert!(
+                !decision.measured,
+                "{bad} should not count as a measurement"
+            );
             assert!(decision.build);
         }
     }

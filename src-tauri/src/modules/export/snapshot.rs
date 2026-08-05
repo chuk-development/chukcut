@@ -64,7 +64,10 @@ pub fn encode_png(rgba: Vec<u8>, width: u32, height: u32) -> Result<Vec<u8>, Str
         .ok_or_else(|| "the rendered frame is not the size it claims".to_string())?;
     let mut bytes = Vec::new();
     image::DynamicImage::ImageRgba8(image)
-        .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+        .write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
         .map_err(|e| format!("encoding the PNG failed: {e}"))?;
     Ok(bytes)
 }
@@ -134,19 +137,21 @@ mod tests {
             rotation: 0,
         });
         let mut track = Track::new(TrackKind::Video, "V1");
-        track.segments.push(crate::modules::project::document::Segment {
-            id: "s1".into(),
-            material_id: "v1".into(),
-            target_range: crate::modules::project::document::TimeRange::new(0, 2_000_000),
-            source_range: crate::modules::project::document::TimeRange::new(0, 2_000_000),
-            render_index: 0,
-            speed: 1.0,
-            volume: 1.0,
-            transform: Default::default(),
-            crop: None,
-            extras: Vec::new(),
-            keyframes: Vec::new(),
-        });
+        track
+            .segments
+            .push(crate::modules::project::document::Segment {
+                id: "s1".into(),
+                material_id: "v1".into(),
+                target_range: crate::modules::project::document::TimeRange::new(0, 2_000_000),
+                source_range: crate::modules::project::document::TimeRange::new(0, 2_000_000),
+                render_index: 0,
+                speed: 1.0,
+                volume: 1.0,
+                transform: Default::default(),
+                crop: None,
+                extras: Vec::new(),
+                keyframes: Vec::new(),
+            });
         project.tracks.push(track);
 
         assert_eq!(clamp_time(&project, -5), Ok(0));

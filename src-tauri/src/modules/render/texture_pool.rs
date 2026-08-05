@@ -130,7 +130,9 @@ impl PooledTexture {
 
 impl std::fmt::Debug for PooledTexture {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PooledTexture").field("key", &self.key).finish()
+        f.debug_struct("PooledTexture")
+            .field("key", &self.key)
+            .finish()
     }
 }
 

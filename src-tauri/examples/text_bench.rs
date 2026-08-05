@@ -130,7 +130,10 @@ fn main() {
         ..TextRequest::default()
     };
 
-    for (name, size) in [("1920x1080", (1920u32, 1080u32)), ("1080x1920", (1080, 1920))] {
+    for (name, size) in [
+        ("1920x1080", (1920u32, 1080u32)),
+        ("1080x1920", (1080, 1920)),
+    ] {
         let options = RasterOptions::canvas(size.0, size.1);
         println!("-- {name} --");
         bench("short title", &renderer, &title, &options);

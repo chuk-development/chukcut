@@ -546,7 +546,9 @@ pub(super) fn fingerprint(path: &Path) -> String {
     // untouched.
     if length > FINGERPRINT_SAMPLE as u64 {
         let mut tail = vec![0u8; FINGERPRINT_SAMPLE];
-        if file.seek(SeekFrom::End(-(FINGERPRINT_SAMPLE as i64))).is_ok()
+        if file
+            .seek(SeekFrom::End(-(FINGERPRINT_SAMPLE as i64)))
+            .is_ok()
             && file.read_exact(&mut tail).is_ok()
         {
             hash = fnv1a(hash, &tail);
@@ -718,7 +720,10 @@ mod tests {
     #[test]
     fn a_batch_goes_out_when_it_is_full_or_when_it_has_waited() {
         assert!(!is_due(0, Duration::from_secs(10)), "nothing to send");
-        assert!(!is_due(1, Duration::ZERO), "one fresh tile waits for company");
+        assert!(
+            !is_due(1, Duration::ZERO),
+            "one fresh tile waits for company"
+        );
         assert!(is_due(BATCH_MAX, Duration::ZERO), "a full batch goes now");
         assert!(
             is_due(1, BATCH_INTERVAL),
@@ -770,7 +775,10 @@ mod tests {
         assert_eq!(batches.len(), 3);
         assert_eq!(batches[0].produced, 2);
         assert_eq!(batches[1].produced, 3);
-        assert_eq!(batches[2].produced, 3, "the terminal batch carries no tiles");
+        assert_eq!(
+            batches[2].produced, 3,
+            "the terminal batch carries no tiles"
+        );
         assert!(batches.iter().all(|b| b.total == 5));
         assert!(batches[2].complete && !batches[2].cancelled);
         assert!(!batches[0].complete);
@@ -857,7 +865,10 @@ mod tests {
             &cancel,
             &recorder,
         );
-        assert!(result.is_err(), "a file that is not there cannot be striped");
+        assert!(
+            result.is_err(),
+            "a file that is not there cannot be striped"
+        );
         assert!(
             recorder.batches.lock().is_empty(),
             "a job that never started sends nothing"

@@ -193,7 +193,7 @@ fn walk(
     want: Want,
 ) -> Result<f64, String> {
     let mut decoder = VideoDecoder::open_with(file, acceleration).map_err(|e| e.to_string())?;
-    let mut pull = |decoder: &mut VideoDecoder, at: i64| -> Result<(), String> {
+    let pull = |decoder: &mut VideoDecoder, at: i64| -> Result<(), String> {
         match want {
             Want::Rgba => decoder.seek_and_decode(at).map(drop),
             // The mapped frame is dropped immediately, which returns the

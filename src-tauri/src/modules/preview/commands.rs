@@ -56,7 +56,9 @@ fn material_fingerprint(project: &Project) -> u64 {
 
 fn source_provider_for(project: &Project) -> Arc<dyn SourceProvider> {
     let fingerprint = material_fingerprint(project);
-    let mut cached = CACHED_PROVIDER.lock().expect("provider cache is not poisoned");
+    let mut cached = CACHED_PROVIDER
+        .lock()
+        .expect("provider cache is not poisoned");
 
     if let Some((known, provider)) = cached.as_ref() {
         if *known == fingerprint {

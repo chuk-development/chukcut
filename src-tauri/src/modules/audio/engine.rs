@@ -177,7 +177,9 @@ impl AudioEngine {
     /// decoders of segments that survived the edit are kept open.
     pub fn set_project(&self, project: Arc<Project>) {
         *self.shared.project.lock() = Some(project);
-        self.shared.project_generation.fetch_add(1, Ordering::Release);
+        self.shared
+            .project_generation
+            .fetch_add(1, Ordering::Release);
         self.shared.wanted.store(true, Ordering::Relaxed);
         self.shared.wake();
     }
@@ -211,7 +213,9 @@ impl AudioEngine {
         self.shared.playing.store(false, Ordering::Relaxed);
         self.shared.wanted.store(false, Ordering::Relaxed);
         *self.shared.project.lock() = None;
-        self.shared.project_generation.fetch_add(1, Ordering::Release);
+        self.shared
+            .project_generation
+            .fetch_add(1, Ordering::Release);
         self.shared.wake();
     }
 
@@ -223,7 +227,9 @@ impl AudioEngine {
         } else {
             1.0
         };
-        self.shared.volume.store(volume.to_bits(), Ordering::Relaxed);
+        self.shared
+            .volume
+            .store(volume.to_bits(), Ordering::Relaxed);
         self.shared.wake();
     }
 
@@ -417,7 +423,8 @@ fn manage_device(shared: &Arc<Shared>, state: &mut Filling) {
             }
             state.seen_project = shared.project_generation.load(Ordering::Acquire);
             state.mixer = Some(mixer);
-            state.position = micros_to_frames(shared.seek_target.load(Ordering::Relaxed), state.rate);
+            state.position =
+                micros_to_frames(shared.seek_target.load(Ordering::Relaxed), state.rate);
             state.seen_seek = shared.seek_generation.load(Ordering::Acquire);
         }
         Err(error) => {

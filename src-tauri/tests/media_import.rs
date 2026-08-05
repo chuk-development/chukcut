@@ -41,14 +41,16 @@ struct TempFile {
 
 impl TempFile {
     fn bytes(name: &str, bytes: &[u8]) -> Self {
-        let path = std::env::temp_dir().join(format!("chukcut-import-{}-{name}", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("chukcut-import-{}-{name}", std::process::id()));
         std::fs::write(&path, bytes).expect("write the fixture");
         Self { path }
     }
 
     /// A solid-colour still, in whatever format the extension of `name` says.
     fn image(name: &str, width: u32, height: u32, rgba: [u8; 4]) -> Self {
-        let path = std::env::temp_dir().join(format!("chukcut-import-{}-{name}", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("chukcut-import-{}-{name}", std::process::id()));
         // RGB rather than RGBA, because the JPEG encoder refuses an alpha
         // channel; the tests only ever assert on opaque colours anyway.
         let picture =
@@ -105,7 +107,10 @@ fn blank_project() -> Project {
 }
 
 /// Probe and import in one move, the way the command does.
-fn import(project: &mut Project, file: &TempFile) -> Result<chukcut_lib::modules::project::commands::ImportedMaterial, String> {
+fn import(
+    project: &mut Project,
+    file: &TempFile,
+) -> Result<chukcut_lib::modules::project::commands::ImportedMaterial, String> {
     let info = media::probe(file.path()).map_err(|e| e.to_string())?;
     let name = file
         .path()
@@ -131,7 +136,10 @@ fn a_png_imports_as_an_image_with_its_pixel_size() {
     assert!(!imported.has_audio);
 
     assert_eq!(project.materials.images.len(), 1);
-    assert!(project.materials.videos.is_empty(), "a still is not a one-frame video");
+    assert!(
+        project.materials.videos.is_empty(),
+        "a still is not a one-frame video"
+    );
     let pooled = &project.materials.images[0];
     assert_eq!((pooled.width, pooled.height), (320, 200));
 }
@@ -167,7 +175,11 @@ fn an_imported_image_survives_save_and_load() {
 
     let json = serde_json::to_string_pretty(&project).expect("serialize");
     let loaded = migrate::load(&json).expect("a file this build wrote must open");
-    assert!(loaded.warnings.is_empty(), "no repairs on a fresh save: {:?}", loaded.warnings);
+    assert!(
+        loaded.warnings.is_empty(),
+        "no repairs on a fresh save: {:?}",
+        loaded.warnings
+    );
 
     assert_eq!(loaded.project.materials.images.len(), 1);
     let reloaded = &loaded.project.materials.images[0];
@@ -285,8 +297,18 @@ fn a_still_composites_into_the_frame_with_its_own_pixels() {
     let frame = compositor
         .render(&project, 1_000_000, (320, 240), &sources)
         .expect("render a still");
-    assert_pixel_near(frame.pixel(160, 120), GREEN, TOLERANCE, "centre of the still");
-    assert_pixel_near(frame.pixel(2, 2), GREEN, TOLERANCE, "corner: the still fills its canvas");
+    assert_pixel_near(
+        frame.pixel(160, 120),
+        GREEN,
+        TOLERANCE,
+        "centre of the still",
+    );
+    assert_pixel_near(
+        frame.pixel(2, 2),
+        GREEN,
+        TOLERANCE,
+        "corner: the still fills its canvas",
+    );
 
     // Twice as wide as the canvas is tall-for: letterboxed, background above.
     let wide = TempFile::image("wide.png", 640, 240, GREEN);
@@ -301,9 +323,24 @@ fn a_still_composites_into_the_frame_with_its_own_pixels() {
         .render(&project, 1_000_000, (320, 240), &sources)
         .expect("render the wide still");
     // 640x240 fit into 320 wide is 320x120, centred: rows 60..180.
-    assert_pixel_near(frame.pixel(160, 120), GREEN, TOLERANCE, "centre of the letterboxed still");
-    assert_pixel_near(frame.pixel(160, 20), RED, TOLERANCE, "letterbox above shows the background");
-    assert_pixel_near(frame.pixel(160, 220), RED, TOLERANCE, "letterbox below shows the background");
+    assert_pixel_near(
+        frame.pixel(160, 120),
+        GREEN,
+        TOLERANCE,
+        "centre of the letterboxed still",
+    );
+    assert_pixel_near(
+        frame.pixel(160, 20),
+        RED,
+        TOLERANCE,
+        "letterbox above shows the background",
+    );
+    assert_pixel_near(
+        frame.pixel(160, 220),
+        RED,
+        TOLERANCE,
+        "letterbox below shows the background",
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -341,7 +378,9 @@ fn a_wav_imports_as_audio_with_its_duration() {
 fn a_text_file_is_refused_with_a_sentence_not_imported_as_video() {
     let file = TempFile::bytes(
         "notes.txt",
-        b"these are somebody's notes, not media, and must not become a clip\n".repeat(50).as_slice(),
+        b"these are somebody's notes, not media, and must not become a clip\n"
+            .repeat(50)
+            .as_slice(),
     );
     let mut project = blank_project();
 
@@ -360,7 +399,9 @@ fn a_text_file_is_refused_with_a_sentence_not_imported_as_video() {
 fn a_text_file_wearing_a_video_extension_fails_at_probe_time() {
     let file = TempFile::bytes(
         "lies.mp4",
-        b"this is prose pretending to be an MP4 container\n".repeat(100).as_slice(),
+        b"this is prose pretending to be an MP4 container\n"
+            .repeat(100)
+            .as_slice(),
     );
     let error = media::probe(file.path()).expect_err("text is not an MP4");
     let message = error.to_string();
@@ -376,7 +417,9 @@ fn random_bytes_wearing_a_video_extension_fail_at_probe_time() {
     let mut state: u64 = 0x2545_F491_4F6C_DD1D;
     let bytes: Vec<u8> = (0..64 * 1024)
         .map(|_| {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (state >> 56) as u8
         })
         .collect();

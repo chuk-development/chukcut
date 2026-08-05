@@ -17,14 +17,10 @@ mod support;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use chukcut_lib::modules::export::{
-    job, resolve_settings, run_export, ExportJob, ExportRequest,
-};
+use chukcut_lib::modules::export::{job, resolve_settings, run_export, ExportJob, ExportRequest};
 use chukcut_lib::modules::media::{self, MediaSourceProvider, MISSING_MEDIA_RGBA};
 use chukcut_lib::modules::project::commands::import_material;
-use chukcut_lib::modules::project::document::{
-    CanvasConfig, Project, Severity, Track, TrackKind,
-};
+use chukcut_lib::modules::project::document::{CanvasConfig, Project, Severity, Track, TrackKind};
 use chukcut_lib::modules::project::migrate;
 use chukcut_lib::modules::render::{Compositor, CompositorConfig, SourceProvider};
 use chukcut_lib::modules::timeline::ops::{EditCommand, PoolMaterial};
@@ -166,10 +162,8 @@ fn a_file_gone_from_disk_warns_and_composites_the_placeholder() {
     let ctx = require_gpu!();
 
     // The imported file lives outside the fixture cache so it can be deleted.
-    let doomed = std::env::temp_dir().join(format!(
-        "chukcut-missing-media-{}.mp4",
-        std::process::id()
-    ));
+    let doomed =
+        std::env::temp_dir().join(format!("chukcut-missing-media-{}.mp4", std::process::id()));
     std::fs::copy(&media.solid_red_landscape, &doomed).expect("copy the fixture");
 
     let mut project = blank_project();
@@ -213,8 +207,10 @@ fn an_export_refuses_missing_media_and_names_the_clips() {
     // one whose file is gone from disk.
     let mut project = blank_project();
     let healthy = import(&mut project, &media.counter);
-    project.materials.videos.push(
-        chukcut_lib::modules::project::document::VideoMaterial {
+    project
+        .materials
+        .videos
+        .push(chukcut_lib::modules::project::document::VideoMaterial {
             id: "ghost-file".into(),
             path: "/nonexistent/chukcut-gone.mp4".into(),
             width: 320,
@@ -223,8 +219,7 @@ fn an_export_refuses_missing_media_and_names_the_clips() {
             fps: 30.0,
             has_audio: false,
             rotation: 0,
-        },
-    );
+        });
     let mut track = Track::new(TrackKind::Video, "V1");
     track.segments.push(segment(&healthy, 0, 1_000_000));
     track

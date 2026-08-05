@@ -256,7 +256,13 @@ fn encode_hardware(rgba: &[u8], width: u32, height: u32, quality: u8) -> Option<
             if !slot.as_ref().is_some_and(|s| s.matches(width, height)) {
                 *slot = Some(vaapi::Nv12Scratch::new(width, height));
             }
-            stage_and_encode(slot.as_mut().expect("just allocated"), rgba, width, height, quality)
+            stage_and_encode(
+                slot.as_mut().expect("just allocated"),
+                rgba,
+                width,
+                height,
+                quality,
+            )
         }
         // Re-entered on this thread, which is not a bug and is not rare enough
         // to ignore: `Nv12Scratch::fill` dispatches onto rayon, and a rayon
@@ -305,7 +311,11 @@ fn encode_staged(
         return None;
     }
 
-    if !hw.encoder.as_ref().is_some_and(|e| e.matches(width, height, quality)) {
+    if !hw
+        .encoder
+        .as_ref()
+        .is_some_and(|e| e.matches(width, height, quality))
+    {
         if hw.encoder.is_some() {
             REBUILDS.fetch_add(1, Ordering::Relaxed);
         }
@@ -373,9 +383,13 @@ pub fn encode_preview_jpeg_dmabuf(
     buffer: &crate::modules::export::hwframes::Nv12Dmabuf<'_>,
     quality: u8,
 ) -> Option<(Vec<u8>, ffmpeg_next::util::frame::Video)> {
-    with_hardware(buffer.width, buffer.height, quality, "zero-copy", |encoder| {
-        encoder.encode_dmabuf(buffer)
-    })
+    with_hardware(
+        buffer.width,
+        buffer.height,
+        quality,
+        "zero-copy",
+        |encoder| encoder.encode_dmabuf(buffer),
+    )
 }
 
 /// Encode a VA surface the compositor drew NV12 into.
@@ -435,7 +449,11 @@ fn with_hardware<T>(
     if hw.disabled {
         return None;
     }
-    if !hw.encoder.as_ref().is_some_and(|e| e.matches(width, height, quality)) {
+    if !hw
+        .encoder
+        .as_ref()
+        .is_some_and(|e| e.matches(width, height, quality))
+    {
         if hw.encoder.is_some() {
             REBUILDS.fetch_add(1, Ordering::Relaxed);
         }
@@ -502,7 +520,10 @@ pub fn encode_preview_jpeg(
              for a {width}x{height} frame"
         )));
     }
-    Ok((encode_jpeg(rgba, width, height, quality)?, Backend::Software))
+    Ok((
+        encode_jpeg(rgba, width, height, quality)?,
+        Backend::Software,
+    ))
 }
 
 /// Encode one frame on the CPU, with libjpeg-turbo.

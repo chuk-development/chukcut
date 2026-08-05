@@ -107,7 +107,7 @@ pub fn emoji_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
         // Playing cards (U+1F0xx) through symbols and pictographs extended-A,
         // which includes the regional indicators that make up flags, the skin
         // tone modifiers, and the emoticon block.
-        matches!(c as u32, 0x1F000..=0x1FAFF | 0x1FB00..=0x1FBFF)
+        matches!(c as u32, 0x1F000..=0x1FBFF)
     }
 
     let chars: Vec<(usize, char)> = text.char_indices().collect();

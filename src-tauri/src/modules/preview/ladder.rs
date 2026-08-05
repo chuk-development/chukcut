@@ -279,7 +279,11 @@ mod tests {
         ladder.begin_grace(30);
         assert_eq!(ladder.frame(true), None);
         assert_eq!(ladder.frame(true), None);
-        assert_eq!(ladder.frame(true), Some(1), "real cost steps the ladder, graced or not");
+        assert_eq!(
+            ladder.frame(true),
+            Some(1),
+            "real cost steps the ladder, graced or not"
+        );
     }
 
     #[test]
@@ -319,7 +323,11 @@ mod tests {
         assert_eq!(ladder.dropped(4), Some(2));
         assert_eq!(ladder.size((1920, 1080)), (960, 540));
         assert_eq!(ladder.quality(88), 70);
-        assert_eq!(ladder.dropped(1), None, "there is no fourth rung to fall to");
+        assert_eq!(
+            ladder.dropped(1),
+            None,
+            "there is no fourth rung to fall to"
+        );
         assert_eq!(ladder.rung(), RUNGS.len() - 1);
     }
 

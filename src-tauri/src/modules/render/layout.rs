@@ -246,10 +246,7 @@ mod tests {
         // exactly onto the full clip volume: a plain doubling, no rotation, no
         // translation, no aspect correction left over.
         let m = Mat4::from_cols_array(&placement.mvp);
-        assert!(m.abs_diff_eq(
-            Mat4::from_scale(Vec3::new(2.0, 2.0, 1.0)),
-            1e-5
-        ));
+        assert!(m.abs_diff_eq(Mat4::from_scale(Vec3::new(2.0, 2.0, 1.0)), 1e-5));
         for (x, y) in [(-0.5, -0.5), (0.5, -0.5), (0.5, 0.5), (-0.5, 0.5)] {
             let c = corner(&placement.mvp, x, y);
             assert!(close(c.x, x * 2.0) && close(c.y, y * 2.0));
@@ -338,7 +335,13 @@ mod tests {
             bottom: 1.0,
         };
         assert_eq!(crop_uv(Some(inverted)), None);
-        assert!(place_quad((100, 100), (100, 100), &Transform::default(), Some(inverted)).is_none());
+        assert!(place_quad(
+            (100, 100),
+            (100, 100),
+            &Transform::default(),
+            Some(inverted)
+        )
+        .is_none());
     }
 
     #[test]
@@ -351,8 +354,13 @@ mod tests {
             right: 0.75,
             bottom: 1.0,
         };
-        let placement =
-            place_quad((1000, 1000), (1920, 1080), &Transform::default(), Some(crop)).unwrap();
+        let placement = place_quad(
+            (1000, 1000),
+            (1920, 1080),
+            &Transform::default(),
+            Some(crop),
+        )
+        .unwrap();
         let top = corner(&placement.mvp, 0.0, 0.5);
         let right = corner(&placement.mvp, 0.5, 0.0);
         assert!(close(top.y, 1.0));
@@ -438,7 +446,10 @@ mod tests {
         let mut video = Track::new(TrackKind::Video, "V1");
         assert!(track_is_visible(&video));
         video.muted = true;
-        assert!(track_is_visible(&video), "muting silences, it does not hide");
+        assert!(
+            track_is_visible(&video),
+            "muting silences, it does not hide"
+        );
         video.hidden = true;
         assert!(!track_is_visible(&video));
 

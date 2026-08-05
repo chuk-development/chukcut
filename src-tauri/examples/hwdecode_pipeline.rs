@@ -364,9 +364,7 @@ fn verify_pixels(ctx: &Arc<RenderContext>, file: &Path) {
     let hardware = MediaSourceProvider::from_project_with(&project, Some(Acceleration::Vaapi));
     let software = MediaSourceProvider::from_project_with(&project, Some(Acceleration::Software));
     let render = |provider: &dyn SourceProvider, at: i64| {
-        compositor
-            .render(&project, at, size, provider)
-            .ok()
+        compositor.render(&project, at, size, provider).ok()
     };
 
     let (Some(hw), Some(sw), Some(sw_next)) = (

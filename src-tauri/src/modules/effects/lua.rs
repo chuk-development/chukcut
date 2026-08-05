@@ -391,9 +391,15 @@ impl LuaRuntime {
                             other => format!("{other:?}"),
                         };
                         match level {
-                            tracing::Level::ERROR => tracing::error!(target: "effect", %tag, "{text}"),
-                            tracing::Level::WARN => tracing::warn!(target: "effect", %tag, "{text}"),
-                            tracing::Level::INFO => tracing::info!(target: "effect", %tag, "{text}"),
+                            tracing::Level::ERROR => {
+                                tracing::error!(target: "effect", %tag, "{text}")
+                            }
+                            tracing::Level::WARN => {
+                                tracing::warn!(target: "effect", %tag, "{text}")
+                            }
+                            tracing::Level::INFO => {
+                                tracing::info!(target: "effect", %tag, "{text}")
+                            }
                             _ => tracing::debug!(target: "effect", %tag, "{text}"),
                         }
                         Ok(())
@@ -474,12 +480,10 @@ impl LuaRuntime {
     /// Instantiate a class: `<ClassName>.new(true)`.
     pub fn instantiate(&self, path: &str, class: &str) -> Result<ScriptInstance> {
         let globals = self.lua.globals();
-        let table: mlua::Table = globals
-            .get(class)
-            .map_err(|_| ScriptError::NoSuchClass {
-                script: path.to_string(),
-                class: class.to_string(),
-            })?;
+        let table: mlua::Table = globals.get(class).map_err(|_| ScriptError::NoSuchClass {
+            script: path.to_string(),
+            class: class.to_string(),
+        })?;
         let new: mlua::Function = table.get("new").map_err(|_| ScriptError::NoConstructor {
             script: path.to_string(),
             class: class.to_string(),
@@ -526,21 +530,20 @@ impl LuaRuntime {
             let renderer_for_get = renderer.clone();
             entity.set(
                 "getComponent",
-                self.lua
-                    .create_function(move |_, args: Variadic<Value>| {
-                        // Called both as `entity:getComponent("X")` and as
-                        // `entity.getComponent("X")`, so the type name is the
-                        // last string argument either way.
-                        let kind = args.iter().rev().find_map(lua_string).unwrap_or_default();
-                        Ok(match kind.as_str() {
-                            "MeshRenderer" | "Renderer" => Value::Table(renderer_for_get.clone()),
-                            // A component this single-entity scene does not
-                            // have. Returning nil is what the engine does, and
-                            // it is what lets a script's `if not x then` guard
-                            // work rather than erroring.
-                            _ => Value::Nil,
-                        })
-                    })?,
+                self.lua.create_function(move |_, args: Variadic<Value>| {
+                    // Called both as `entity:getComponent("X")` and as
+                    // `entity.getComponent("X")`, so the type name is the
+                    // last string argument either way.
+                    let kind = args.iter().rev().find_map(lua_string).unwrap_or_default();
+                    Ok(match kind.as_str() {
+                        "MeshRenderer" | "Renderer" => Value::Table(renderer_for_get.clone()),
+                        // A component this single-entity scene does not
+                        // have. Returning nil is what the engine does, and
+                        // it is what lets a script's `if not x then` guard
+                        // work rather than erroring.
+                        _ => Value::Nil,
+                    })
+                })?,
             )?;
             // A single-entity scene: searching finds only this entity, and a
             // script that wants another gets nil rather than a wrong one.
@@ -569,17 +572,12 @@ impl LuaRuntime {
             let for_get = stored.clone();
             vector.set(
                 "get",
-                self.lua
-                    .create_function(move |_, args: Variadic<Value>| {
-                        // Zero-indexed on the Lua side, one-indexed in the
-                        // table that backs it.
-                        let index = args
-                            .iter()
-                            .rev()
-                            .find_map(|v| v.as_integer())
-                            .unwrap_or(0);
-                        for_get.get::<Value>(index + 1)
-                    })?,
+                self.lua.create_function(move |_, args: Variadic<Value>| {
+                    // Zero-indexed on the Lua side, one-indexed in the
+                    // table that backs it.
+                    let index = args.iter().rev().find_map(|v| v.as_integer()).unwrap_or(0);
+                    for_get.get::<Value>(index + 1)
+                })?,
             )?;
             let for_size = stored.clone();
             vector.set(
@@ -633,7 +631,10 @@ impl ScriptInstance {
     pub fn on_update(&self, comp: &mlua::Table, delta_seconds: f32) -> Result<()> {
         self.call(
             "onUpdate",
-            multi([Value::Table(comp.clone()), Value::Number(delta_seconds as f64)]),
+            multi([
+                Value::Table(comp.clone()),
+                Value::Number(delta_seconds as f64),
+            ]),
         )
     }
 
@@ -745,7 +746,9 @@ end
             ..Default::default()
         });
         runtime.load_script("lua/TintScript.lua", SCRIPT).unwrap();
-        let instance = runtime.instantiate("lua/TintScript.lua", "TintScript").unwrap();
+        let instance = runtime
+            .instantiate("lua/TintScript.lua", "TintScript")
+            .unwrap();
         let material = MaterialHandle::new("tint", MaterialValues::default());
         let comp = runtime
             .make_component("Quad", Some(material.clone()), BTreeMap::new())
@@ -810,7 +813,12 @@ end
 
         let event = runtime
             .make_event(vec![
-                Value::String(runtime.lua().create_string("effects_adjust_intensity").unwrap()),
+                Value::String(
+                    runtime
+                        .lua()
+                        .create_string("effects_adjust_intensity")
+                        .unwrap(),
+                ),
                 Value::Number(0.35),
             ])
             .unwrap();
@@ -842,7 +850,9 @@ end
             )
             .unwrap();
         let instance = runtime.instantiate("lua/Bare.lua", "Bare").unwrap();
-        let comp = runtime.make_component("Quad", None, BTreeMap::new()).unwrap();
+        let comp = runtime
+            .make_component("Quad", None, BTreeMap::new())
+            .unwrap();
         assert!(!instance.has_hook("onUpdate"));
         instance.on_start(&comp).unwrap();
         instance.on_update(&comp, 0.016).unwrap();
@@ -882,7 +892,9 @@ end
             )
             .unwrap();
         let instance = runtime.instantiate("lua/Broken.lua", "Broken").unwrap();
-        let comp = runtime.make_component("Quad", None, BTreeMap::new()).unwrap();
+        let comp = runtime
+            .make_component("Quad", None, BTreeMap::new())
+            .unwrap();
         let error = instance.on_start(&comp).unwrap_err().to_string();
         assert!(error.contains("lua/Broken.lua:onStart"), "{error}");
         assert!(error.contains("deliberate"), "{error}");

@@ -79,7 +79,10 @@ pub fn project_open(state: State<'_, Arc<AppState>>, path: String) -> Result<Pro
 }
 
 #[tauri::command]
-pub fn project_save(state: State<'_, Arc<AppState>>, path: Option<String>) -> Result<String, String> {
+pub fn project_save(
+    state: State<'_, Arc<AppState>>,
+    path: Option<String>,
+) -> Result<String, String> {
     let target = match path {
         Some(p) => PathBuf::from(p),
         None => state
@@ -187,9 +190,7 @@ pub fn import_material(
     // otherwise fall through to the video arm below.
     if let Some(video) = &info.video {
         if is_text_art(&info.format, &video.codec) {
-            return Err(format!(
-                "{name} is a text file, not video, image or audio"
-            ));
+            return Err(format!("{name} is a text file, not video, image or audio"));
         }
     }
 
@@ -355,10 +356,11 @@ pub async fn project_import_media(
     // freeze the window for the duration, so it goes off-thread even though it
     // is usually quick.
     let probe_path = path.clone();
-    let info = tauri::async_runtime::spawn_blocking(move || crate::modules::media::probe(&probe_path))
-        .await
-        .map_err(|error| format!("the import task failed: {error}"))?
-        .map_err(|error| error.to_string())?;
+    let info =
+        tauri::async_runtime::spawn_blocking(move || crate::modules::media::probe(&probe_path))
+            .await
+            .map_err(|error| format!("the import task failed: {error}"))?
+            .map_err(|error| error.to_string())?;
 
     let name = std::path::Path::new(&path)
         .file_name()

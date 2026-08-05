@@ -57,7 +57,11 @@ pub fn predecessor<'a>(project: &'a Project, segment_id: &str) -> Option<(&'a Tr
 ///
 /// The message is user-facing prose because it goes straight back through the
 /// command result to the UI.
-pub fn check_placement(project: &Project, segment_id: &str, duration: Micros) -> Result<(), String> {
+pub fn check_placement(
+    project: &Project,
+    segment_id: &str,
+    duration: Micros,
+) -> Result<(), String> {
     let (_, segment) = project
         .segment(segment_id)
         .ok_or_else(|| format!("unknown segment {segment_id}"))?;
@@ -82,7 +86,10 @@ pub fn check_placement(project: &Project, segment_id: &str, duration: Micros) ->
 /// `0` when there is no clip before it, which is also the answer to "may the
 /// user drag a transition onto this edge".
 pub fn allowed_duration(project: &Project, segment_id: &str) -> Micros {
-    match (project.segment(segment_id), predecessor(project, segment_id)) {
+    match (
+        project.segment(segment_id),
+        predecessor(project, segment_id),
+    ) {
         (Some((_, segment)), Some((_, previous))) => max_duration(previous, segment),
         _ => 0,
     }
@@ -144,7 +151,10 @@ pub fn remove(
     if segment.extras.len() == before {
         return Err("this clip has no such transition".into());
     }
-    project.materials.transitions.retain(|m| m.id != material.id);
+    project
+        .materials
+        .transitions
+        .retain(|m| m.id != material.id);
     Ok(())
 }
 
@@ -344,8 +354,13 @@ mod tests {
 
     fn with_transition() -> (Project, String, String, String, String) {
         let (mut project, track_id, left_id, right_id) = cut_project();
-        let command =
-            add_command(&project, &right_id, TransitionKind::Dissolve, Some(1_000_000)).unwrap();
+        let command = add_command(
+            &project,
+            &right_id,
+            TransitionKind::Dissolve,
+            Some(1_000_000),
+        )
+        .unwrap();
         let id = match &command {
             EditCommand::AddTransition { transition, .. } => transition.id.clone(),
             _ => unreachable!(),
@@ -399,8 +414,7 @@ mod tests {
     #[test]
     fn a_second_transition_on_the_same_edge_is_refused() {
         let (project, _, _, right_id, _) = with_transition();
-        let again =
-            add_command(&project, &right_id, TransitionKind::Wipe, Some(500_000)).unwrap();
+        let again = add_command(&project, &right_id, TransitionKind::Wipe, Some(500_000)).unwrap();
         let mut project = project;
         let error = again.apply(&mut project).unwrap_err();
         assert!(error.contains("already has a transition"), "{error}");

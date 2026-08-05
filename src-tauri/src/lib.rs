@@ -28,7 +28,9 @@ pub fn run() {
 
     // Frames left over from a previous run describe a document that no longer
     // exists, so the cache starts empty every time.
-    if let Err(error) = std::fs::remove_dir_all(modules::workspace::paths::cache_root().join("preview")) {
+    if let Err(error) =
+        std::fs::remove_dir_all(modules::workspace::paths::cache_root().join("preview"))
+    {
         if error.kind() != std::io::ErrorKind::NotFound {
             tracing::warn!(%error, "could not clear the preview cache");
         }

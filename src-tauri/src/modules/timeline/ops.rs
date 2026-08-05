@@ -729,7 +729,11 @@ impl EditCommand {
                     .ok_or_else(|| format!("unknown segment {segment_id}"))?;
                 check_keyframe_time(keyframe.time)?;
 
-                let index = match segment.keyframes.iter().position(|t| t.property == *property) {
+                let index = match segment
+                    .keyframes
+                    .iter()
+                    .position(|t| t.property == *property)
+                {
                     Some(index) => index,
                     None => {
                         // Tracks are kept in a canonical order rather than in
@@ -755,9 +759,7 @@ impl EditCommand {
 
                 let track = &mut segment.keyframes[index];
                 if track.keyframes.iter().any(|k| k.time == keyframe.time) {
-                    return Err(
-                        "there is already a keyframe at that point; drag it instead".into()
-                    );
+                    return Err("there is already a keyframe at that point; drag it instead".into());
                 }
                 let at = track.keyframes.partition_point(|k| k.time < keyframe.time);
                 track.keyframes.insert(at, *keyframe);
@@ -873,7 +875,7 @@ impl EditCommand {
                     .ok_or_else(|| format!("unknown segment {segment_id}"))?;
                 if known.first() != before.as_ref() {
                     return Err(
-                        "this clip's links changed underneath the edit; try it again".into()
+                        "this clip's links changed underneath the edit; try it again".into(),
                     );
                 }
 
@@ -1970,7 +1972,9 @@ pub fn split_all_at(project: &Project, at: Micros) -> Result<EditCommand, String
         // sound because the clusters touch disjoint segments: at most one clip
         // per lane contains `at`, and link partners are claimed above.
         match split_at(project, &segment.id, at)? {
-            EditCommand::Composite { commands: parts, .. } => commands.extend(parts),
+            EditCommand::Composite {
+                commands: parts, ..
+            } => commands.extend(parts),
             other => commands.push(other),
         }
     }
@@ -2162,10 +2166,7 @@ mod tests {
 
         // And the frame each half shows at the cut is the same frame the
         // unsplit clip showed there, which is the property a user would notice.
-        assert_eq!(
-            track.segments[1].source_time_at(1_000_000),
-            Some(2_000_000)
-        );
+        assert_eq!(track.segments[1].source_time_at(1_000_000), Some(2_000_000));
         assert!(errors(&project).is_empty(), "{:?}", errors(&project));
     }
 
@@ -2427,7 +2428,9 @@ mod tests {
             // The index it had before a lane was inserted above it.
             index: 0,
         };
-        let error = stale.apply(&mut project).expect_err("a stale index refuses");
+        let error = stale
+            .apply(&mut project)
+            .expect_err("a stale index refuses");
         assert!(error.contains("A1"), "the message names the lane: {error}");
         assert_eq!(project.tracks.len(), 2, "and nothing was deleted");
         assert_eq!(project.tracks[0].name, "V1");
@@ -2503,7 +2506,12 @@ mod tests {
         }
     }
 
-    fn add(segment_id: &str, property: AnimatableProperty, time: Micros, value: f32) -> EditCommand {
+    fn add(
+        segment_id: &str,
+        property: AnimatableProperty,
+        time: Micros,
+        value: f32,
+    ) -> EditCommand {
         EditCommand::AddKeyframe {
             segment_id: segment_id.to_string(),
             property,
@@ -2824,7 +2832,11 @@ mod tests {
             2,
             "and both clips are in it"
         );
-        assert!(errors(&pair.project).is_empty(), "{:?}", errors(&pair.project));
+        assert!(
+            errors(&pair.project).is_empty(),
+            "{:?}",
+            errors(&pair.project)
+        );
     }
 
     #[test]
@@ -2850,7 +2862,10 @@ mod tests {
             )
             .expect("the move is accepted");
 
-        assert_eq!(range_of(&project, "v"), TimeRange::new(3_000_000, 4_000_000));
+        assert_eq!(
+            range_of(&project, "v"),
+            TimeRange::new(3_000_000, 4_000_000)
+        );
         assert_eq!(
             range_of(&project, "a"),
             TimeRange::new(3_000_000, 4_000_000),
@@ -2909,7 +2924,10 @@ mod tests {
             TrackKind::Audio,
             "the sound is still on the audio lane"
         );
-        assert_eq!(range_of(&project, "a"), TimeRange::new(1_000_000, 4_000_000));
+        assert_eq!(
+            range_of(&project, "a"),
+            TimeRange::new(1_000_000, 4_000_000)
+        );
     }
 
     #[test]
@@ -2954,8 +2972,14 @@ mod tests {
             )
             .expect("trimming from the audio side works the same way");
 
-        assert_eq!(range_of(&project, "v"), TimeRange::new(1_500_000, 2_000_000));
-        assert_eq!(range_of(&project, "a"), TimeRange::new(1_500_000, 2_000_000));
+        assert_eq!(
+            range_of(&project, "v"),
+            TimeRange::new(1_500_000, 2_000_000)
+        );
+        assert_eq!(
+            range_of(&project, "a"),
+            TimeRange::new(1_500_000, 2_000_000)
+        );
     }
 
     #[test]
@@ -3026,7 +3050,10 @@ mod tests {
             TimeRange::new(1_000_000, 2_000_000),
             "the left half stayed put"
         );
-        assert_eq!(range_of(&project, "a"), TimeRange::new(1_000_000, 2_000_000));
+        assert_eq!(
+            range_of(&project, "a"),
+            TimeRange::new(1_000_000, 2_000_000)
+        );
 
         // And the whole session undoes back to where it started, including the
         // group that the split invented.
@@ -3108,7 +3135,10 @@ mod tests {
             )
             .expect("the move is accepted");
 
-        assert_eq!(range_of(&project, "v"), TimeRange::new(5_000_000, 4_000_000));
+        assert_eq!(
+            range_of(&project, "v"),
+            TimeRange::new(5_000_000, 4_000_000)
+        );
         assert_eq!(
             range_of(&project, "a"),
             TimeRange::new(1_000_000, 4_000_000),
@@ -3240,7 +3270,10 @@ mod tests {
     fn row_of_three() -> (Project, String, Vec<String>) {
         let mut project = Project::new("t", CanvasConfig::default(), 30.0);
         let mut track = Track::new(TrackKind::Video, "V1");
-        let ids: Vec<String> = ["one", "two", "three"].iter().map(|s| s.to_string()).collect();
+        let ids: Vec<String> = ["one", "two", "three"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         for (index, id) in ids.iter().enumerate() {
             track.segments.push(Segment {
                 id: id.clone(),
@@ -3347,12 +3380,24 @@ mod tests {
         history.apply(&mut project, command).unwrap();
         // Moved once, by the distance the user dragged — not twice, which would
         // have landed it at 7s.
-        assert_eq!(range_of(&project, &video), TimeRange::new(3_000_000, 4_000_000));
-        assert_eq!(range_of(&project, &audio), TimeRange::new(3_000_000, 4_000_000));
+        assert_eq!(
+            range_of(&project, &video),
+            TimeRange::new(3_000_000, 4_000_000)
+        );
+        assert_eq!(
+            range_of(&project, &audio),
+            TimeRange::new(3_000_000, 4_000_000)
+        );
 
         history.undo(&mut project).unwrap();
-        assert_eq!(range_of(&project, &video), TimeRange::new(1_000_000, 4_000_000));
-        assert_eq!(range_of(&project, &audio), TimeRange::new(1_000_000, 4_000_000));
+        assert_eq!(
+            range_of(&project, &video),
+            TimeRange::new(1_000_000, 4_000_000)
+        );
+        assert_eq!(
+            range_of(&project, &audio),
+            TimeRange::new(1_000_000, 4_000_000)
+        );
     }
 
     #[test]
@@ -3368,19 +3413,23 @@ mod tests {
         // A second, unlinked clip on the picture lane, selected along with the
         // half of the pair. The sound is *not* selected, so the batch has to
         // bring it along itself.
-        project.track_mut(&video_track).unwrap().segments.push(Segment {
-            id: "loose".into(),
-            material_id: "m".into(),
-            target_range: TimeRange::new(6_000_000, 1_000_000),
-            source_range: TimeRange::new(0, 1_000_000),
-            render_index: 0,
-            speed: 1.0,
-            volume: 1.0,
-            transform: Transform::default(),
-            crop: None,
-            extras: Vec::new(),
-            keyframes: Vec::new(),
-        });
+        project
+            .track_mut(&video_track)
+            .unwrap()
+            .segments
+            .push(Segment {
+                id: "loose".into(),
+                material_id: "m".into(),
+                target_range: TimeRange::new(6_000_000, 1_000_000),
+                source_range: TimeRange::new(0, 1_000_000),
+                render_index: 0,
+                speed: 1.0,
+                volume: 1.0,
+                transform: Transform::default(),
+                crop: None,
+                extras: Vec::new(),
+                keyframes: Vec::new(),
+            });
 
         let batch = vec![
             move_command(&project, &video, 2_000_000),
@@ -3590,10 +3639,16 @@ mod tests {
         };
         let mut video_track = Track::new(TrackKind::Video, "V1");
         video_track.segments.push(make("head", 0, 1_000_000, 0));
-        video_track.segments.push(make("v2", 6_000_000, 1_000_000, 0));
+        video_track
+            .segments
+            .push(make("v2", 6_000_000, 1_000_000, 0));
         let mut audio_track = Track::new(TrackKind::Audio, "A1");
-        audio_track.segments.push(make("bed", 5_200_000, 500_000, 1));
-        audio_track.segments.push(make("a2", 6_000_000, 1_000_000, 1));
+        audio_track
+            .segments
+            .push(make("bed", 5_200_000, 500_000, 1));
+        audio_track
+            .segments
+            .push(make("a2", 6_000_000, 1_000_000, 1));
         project.tracks.push(video_track);
         project.tracks.push(audio_track);
         link(&project, &["v2".into(), "a2".into()])
@@ -3761,13 +3816,27 @@ mod tests {
         // Added out of time order on purpose: the list has to come out sorted
         // whatever order the user pressed M in.
         history
-            .apply(&mut project, EditCommand::AddMarker { marker: marker("m2", 2_000_000) })
+            .apply(
+                &mut project,
+                EditCommand::AddMarker {
+                    marker: marker("m2", 2_000_000),
+                },
+            )
             .unwrap();
         history
-            .apply(&mut project, EditCommand::AddMarker { marker: marker("m1", 1_000_000) })
+            .apply(
+                &mut project,
+                EditCommand::AddMarker {
+                    marker: marker("m1", 1_000_000),
+                },
+            )
             .unwrap();
         assert_eq!(
-            project.markers.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            project
+                .markers
+                .iter()
+                .map(|m| m.id.as_str())
+                .collect::<Vec<_>>(),
             vec!["m1", "m2"]
         );
 
@@ -3786,7 +3855,11 @@ mod tests {
             .unwrap();
         // Moving past m2 re-sorted the list.
         assert_eq!(
-            project.markers.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            project
+                .markers
+                .iter()
+                .map(|m| m.id.as_str())
+                .collect::<Vec<_>>(),
             vec!["m2", "m1"]
         );
         assert_eq!(project.markers[1].label, "chorus");
@@ -3809,17 +3882,23 @@ mod tests {
     #[test]
     fn nonsense_and_stale_marker_edits_are_refused() {
         let (mut project, _, _) = project_with_clip();
-        EditCommand::AddMarker { marker: marker("m1", 1_000_000) }
-            .apply(&mut project)
-            .unwrap();
+        EditCommand::AddMarker {
+            marker: marker("m1", 1_000_000),
+        }
+        .apply(&mut project)
+        .unwrap();
 
         // No second marker under one id, and no instant before the timeline.
-        assert!(EditCommand::AddMarker { marker: marker("m1", 2_000_000) }
-            .apply(&mut project)
-            .is_err());
-        assert!(EditCommand::AddMarker { marker: marker("m2", -1) }
-            .apply(&mut project)
-            .is_err());
+        assert!(EditCommand::AddMarker {
+            marker: marker("m1", 2_000_000)
+        }
+        .apply(&mut project)
+        .is_err());
+        assert!(EditCommand::AddMarker {
+            marker: marker("m2", -1)
+        }
+        .apply(&mut project)
+        .is_err());
         assert!(EditCommand::SetMarker {
             before: marker("m1", 1_000_000),
             after: marker("m1", -5),
@@ -3829,9 +3908,11 @@ mod tests {
 
         // A stale panel: the marker moved since the menu was opened. Deleting
         // or editing it anyway would make undo restore the wrong marker.
-        assert!(EditCommand::RemoveMarker { marker: marker("m1", 999) }
-            .apply(&mut project)
-            .is_err());
+        assert!(EditCommand::RemoveMarker {
+            marker: marker("m1", 999)
+        }
+        .apply(&mut project)
+        .is_err());
         assert!(EditCommand::SetMarker {
             before: marker("m1", 999),
             after: marker("m1", 2_000_000),
@@ -4018,10 +4099,7 @@ mod tests {
         assert!(project.materials.videos.is_empty());
         // The clip is the user's cut; the library entry going away must not
         // take it along.
-        assert_eq!(
-            project.track(&track_id).unwrap().segments[0].id,
-            segment_id
-        );
+        assert_eq!(project.track(&track_id).unwrap().segments[0].id, segment_id);
         // And validate says the reference dangles — as a warning, because the
         // document is still openable and playable.
         let issues = project.validate();
@@ -4102,7 +4180,10 @@ mod tests {
         let back: EditCommand = serde_json::from_value(json).unwrap();
         assert!(matches!(
             back,
-            EditCommand::RemoveMaterial { index: 3, material: PoolMaterial::Video(_) }
+            EditCommand::RemoveMaterial {
+                index: 3,
+                material: PoolMaterial::Video(_)
+            }
         ));
     }
 

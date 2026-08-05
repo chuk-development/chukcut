@@ -126,7 +126,13 @@ pub fn run(budget: &Budget) -> Vec<Measurement> {
         let json = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
         let (parsed, ms) = time_ms(|| serde_json::from_str::<Project>(&json));
         let parsed = parsed.map_err(|e| e.to_string())?;
-        if parsed.tracks.iter().map(|t| t.segments.len()).sum::<usize>() != budget.segments {
+        if parsed
+            .tracks
+            .iter()
+            .map(|t| t.segments.len())
+            .sum::<usize>()
+            != budget.segments
+        {
             return Err("the round trip lost segments".into());
         }
         Ok(ms)

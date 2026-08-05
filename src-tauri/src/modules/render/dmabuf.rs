@@ -113,8 +113,7 @@ impl ExportableBuffer {
         // state through a physical device handle that is live for the lifetime
         // of the wgpu instance we just borrowed it from, and writes only its
         // return value. It cannot fail.
-        let memory_properties =
-            unsafe { instance.get_physical_device_memory_properties(physical) };
+        let memory_properties = unsafe { instance.get_physical_device_memory_properties(physical) };
 
         let mut external_info = vk::ExternalMemoryBufferCreateInfo::default()
             .handle_types(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT);
@@ -166,8 +165,7 @@ impl ExportableBuffer {
         // every driver that supports DMA-BUF export supports it and it removes
         // the question of what the fd's offset is: with a dedicated allocation
         // the exported object *is* this buffer, starting at zero.
-        let mut dedicated_info =
-            vk::MemoryDedicatedAllocateInfo::default().buffer(raw_buffer);
+        let mut dedicated_info = vk::MemoryDedicatedAllocateInfo::default().buffer(raw_buffer);
         let allocate_info = vk::MemoryAllocateInfo::default()
             .allocation_size(requirements.size)
             .memory_type_index(type_index)
@@ -468,8 +466,12 @@ mod tests {
         // Every buffer in one lap is a different allocation; lap two repeats
         // lap one. A ring that handed out the same buffer twice in a lap would
         // reintroduce exactly the corruption it exists to prevent.
-        let first: Vec<usize> = (0..RING).map(|_| ring.take().buffer() as *const wgpu::Buffer as usize).collect();
-        let second: Vec<usize> = (0..RING).map(|_| ring.take().buffer() as *const wgpu::Buffer as usize).collect();
+        let first: Vec<usize> = (0..RING)
+            .map(|_| ring.take().buffer() as *const wgpu::Buffer as usize)
+            .collect();
+        let second: Vec<usize> = (0..RING)
+            .map(|_| ring.take().buffer() as *const wgpu::Buffer as usize)
+            .collect();
         let mut unique = first.clone();
         unique.sort_unstable();
         unique.dedup();
@@ -673,8 +675,14 @@ pub fn import_plane_with(
     // duplicate itself, which is why there is no cleanup here.
     let hal_texture = unsafe {
         let hal = ctx.device().as_hal::<wgpu_hal::api::Vulkan>()?;
-        hal.texture_from_dmabuf_fd(fd, &hal_descriptor, plane.modifier, plane.pitch, plane.offset)
-            .ok()?
+        hal.texture_from_dmabuf_fd(
+            fd,
+            &hal_descriptor,
+            plane.modifier,
+            plane.pitch,
+            plane.offset,
+        )
+        .ok()?
     };
 
     // SAFETY: the wgpu descriptor agrees with the hal one field for field. The
@@ -682,19 +690,20 @@ pub fn import_plane_with(
     // texture already holds the decoded picture, and telling wgpu it is
     // uninitialised invites it to clear the frame before anything samples it.
     Some(unsafe {
-        ctx.device().create_texture_from_hal::<wgpu_hal::api::Vulkan>(
-            hal_texture,
-            &wgpu::TextureDescriptor {
-                label: Some(label),
-                size,
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format,
-                usage: wgpu_usage,
-                view_formats: &[],
-            },
-            initial,
-        )
+        ctx.device()
+            .create_texture_from_hal::<wgpu_hal::api::Vulkan>(
+                hal_texture,
+                &wgpu::TextureDescriptor {
+                    label: Some(label),
+                    size,
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage: wgpu_usage,
+                    view_formats: &[],
+                },
+                initial,
+            )
     })
 }

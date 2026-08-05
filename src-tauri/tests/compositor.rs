@@ -128,13 +128,28 @@ fn a_wide_clip_on_a_square_canvas_is_letterboxed_with_the_background_showing() {
     let frame = rendered!(&p, 500_000, (320, 320));
 
     assert_pixel_near(frame.pixel(160, 160), WHITE, CODEC_TOLERANCE, "centre");
-    assert_pixel_near(frame.pixel(160, 100), WHITE, CODEC_TOLERANCE, "inside the top edge");
-    assert_pixel_near(frame.pixel(160, 220), WHITE, CODEC_TOLERANCE, "inside the bottom edge");
+    assert_pixel_near(
+        frame.pixel(160, 100),
+        WHITE,
+        CODEC_TOLERANCE,
+        "inside the top edge",
+    );
+    assert_pixel_near(
+        frame.pixel(160, 220),
+        WHITE,
+        CODEC_TOLERANCE,
+        "inside the bottom edge",
+    );
     // 70 rows of letterbox: sample a few pixels clear of the seam so a
     // half-pixel of bilinear blur is not what the test is measuring.
     assert_pixel_near(frame.pixel(160, 5), BLUE, 2, "the top band is background");
     assert_pixel_near(frame.pixel(160, 60), BLUE, 2, "still background at row 60");
-    assert_pixel_near(frame.pixel(160, 314), BLUE, 2, "the bottom band is background");
+    assert_pixel_near(
+        frame.pixel(160, 314),
+        BLUE,
+        2,
+        "the bottom band is background",
+    );
     // And nothing is pillarboxed: the clip reaches both side walls.
     assert_pixel_near(frame.pixel(2, 160), WHITE, CODEC_TOLERANCE, "left edge");
     assert_pixel_near(frame.pixel(317, 160), WHITE, CODEC_TOLERANCE, "right edge");
@@ -152,7 +167,12 @@ fn a_tall_clip_on_a_wide_canvas_is_pillarboxed_instead() {
 
     assert_pixel_near(frame.pixel(160, 120), GREEN, CODEC_TOLERANCE, "centre");
     assert_pixel_near(frame.pixel(5, 120), BLUE, 2, "the left band is background");
-    assert_pixel_near(frame.pixel(314, 120), BLUE, 2, "the right band is background");
+    assert_pixel_near(
+        frame.pixel(314, 120),
+        BLUE,
+        2,
+        "the right band is background",
+    );
     assert_pixel_near(frame.pixel(160, 3), GREEN, CODEC_TOLERANCE, "top edge");
     assert_pixel_near(frame.pixel(160, 236), GREEN, CODEC_TOLERANCE, "bottom edge");
 }
@@ -198,10 +218,30 @@ fn the_higher_track_paints_over_the_lower_one() {
 
     // The quadrant clip is fully opaque and the same shape as the canvas, so
     // none of the red underneath should be visible anywhere.
-    assert_pixel_near(frame.pixel(80, 60), RED, CODEC_TOLERANCE, "top left quadrant");
-    assert_pixel_near(frame.pixel(240, 60), GREEN, CODEC_TOLERANCE, "top right quadrant");
-    assert_pixel_near(frame.pixel(80, 180), BLUE, CODEC_TOLERANCE, "bottom left quadrant");
-    assert_pixel_near(frame.pixel(240, 180), WHITE, CODEC_TOLERANCE, "bottom right quadrant");
+    assert_pixel_near(
+        frame.pixel(80, 60),
+        RED,
+        CODEC_TOLERANCE,
+        "top left quadrant",
+    );
+    assert_pixel_near(
+        frame.pixel(240, 60),
+        GREEN,
+        CODEC_TOLERANCE,
+        "top right quadrant",
+    );
+    assert_pixel_near(
+        frame.pixel(80, 180),
+        BLUE,
+        CODEC_TOLERANCE,
+        "bottom left quadrant",
+    );
+    assert_pixel_near(
+        frame.pixel(240, 180),
+        WHITE,
+        CODEC_TOLERANCE,
+        "bottom right quadrant",
+    );
 }
 
 #[test]
@@ -235,7 +275,12 @@ fn a_half_transparent_clip_blends_with_the_one_underneath_in_linear_light() {
     // The white clip is 16:9 on a 4:3 canvas, so the letterbox bands show the
     // red underneath at full strength — which also proves the blend is per
     // pixel and not a whole-frame fade.
-    assert_pixel_near(frame.pixel(160, 5), RED, CODEC_TOLERANCE, "above the wide clip");
+    assert_pixel_near(
+        frame.pixel(160, 5),
+        RED,
+        CODEC_TOLERANCE,
+        "above the wide clip",
+    );
 }
 
 #[test]
@@ -271,8 +316,18 @@ fn a_crop_keeps_only_the_selected_region_and_grows_it_to_fit() {
     let frame = rendered!(&p, 500_000, (320, 240));
 
     assert_pixel_near(frame.pixel(160, 60), RED, CODEC_TOLERANCE, "kept top left");
-    assert_pixel_near(frame.pixel(160, 180), BLUE, CODEC_TOLERANCE, "kept bottom left");
-    assert_pixel_near(frame.pixel(100, 60), RED, CODEC_TOLERANCE, "left of centre, still kept");
+    assert_pixel_near(
+        frame.pixel(160, 180),
+        BLUE,
+        CODEC_TOLERANCE,
+        "kept bottom left",
+    );
+    assert_pixel_near(
+        frame.pixel(100, 60),
+        RED,
+        CODEC_TOLERANCE,
+        "left of centre, still kept",
+    );
     // The cropped-away half is gone rather than blank: the background shows.
     assert_pixel_near(frame.pixel(10, 120), BLUE, 2, "cropped away on the left");
     assert_pixel_near(frame.pixel(310, 120), BLUE, 2, "cropped away on the right");
@@ -294,9 +349,24 @@ fn a_transform_moves_and_scales_the_clip_by_the_documented_amounts() {
     let frame = rendered!(&p, 500_000, (320, 240));
 
     // The clip is 160x120 centred on (240, 120): x in 160..320, y in 60..180.
-    assert_pixel_near(frame.pixel(240, 120), RED, CODEC_TOLERANCE, "the clip's new centre");
-    assert_pixel_near(frame.pixel(170, 120), RED, CODEC_TOLERANCE, "inside the left edge");
-    assert_pixel_near(frame.pixel(310, 120), RED, CODEC_TOLERANCE, "inside the right edge");
+    assert_pixel_near(
+        frame.pixel(240, 120),
+        RED,
+        CODEC_TOLERANCE,
+        "the clip's new centre",
+    );
+    assert_pixel_near(
+        frame.pixel(170, 120),
+        RED,
+        CODEC_TOLERANCE,
+        "inside the left edge",
+    );
+    assert_pixel_near(
+        frame.pixel(310, 120),
+        RED,
+        CODEC_TOLERANCE,
+        "inside the right edge",
+    );
     assert_pixel_near(frame.pixel(140, 120), BLACK, 2, "outside it to the left");
     assert_pixel_near(frame.pixel(240, 30), BLACK, 2, "above it");
     assert_pixel_near(frame.pixel(240, 210), BLACK, 2, "below it");
@@ -346,7 +416,10 @@ fn a_keyframed_opacity_ramp_reads_correctly_at_three_points_along_it() {
         (r as i32 - half).abs() <= CODEC_TOLERANCE,
         "halfway through the fade the red channel should be {half}, got {r}"
     );
-    assert!(g < 16 && b < 16, "and nothing else should appear, got {g} and {b}");
+    assert!(
+        g < 16 && b < 16,
+        "and nothing else should appear, got {g} and {b}"
+    );
 
     // The last instant of the clip: all but opaque.
     let end = rendered!(&p, 1_999_999, (320, 240));
@@ -372,10 +445,30 @@ fn a_rotated_source_composites_upright_and_at_its_display_aspect() {
 
     let frame = rendered!(&p, 500_000, (240, 320));
 
-    assert_pixel_near(frame.pixel(60, 80), BLUE, CODEC_TOLERANCE, "displayed top left");
-    assert_pixel_near(frame.pixel(180, 80), RED, CODEC_TOLERANCE, "displayed top right");
-    assert_pixel_near(frame.pixel(60, 240), WHITE, CODEC_TOLERANCE, "displayed bottom left");
-    assert_pixel_near(frame.pixel(180, 240), GREEN, CODEC_TOLERANCE, "displayed bottom right");
+    assert_pixel_near(
+        frame.pixel(60, 80),
+        BLUE,
+        CODEC_TOLERANCE,
+        "displayed top left",
+    );
+    assert_pixel_near(
+        frame.pixel(180, 80),
+        RED,
+        CODEC_TOLERANCE,
+        "displayed top right",
+    );
+    assert_pixel_near(
+        frame.pixel(60, 240),
+        WHITE,
+        CODEC_TOLERANCE,
+        "displayed bottom left",
+    );
+    assert_pixel_near(
+        frame.pixel(180, 240),
+        GREEN,
+        CODEC_TOLERANCE,
+        "displayed bottom right",
+    );
     // Nothing letterboxed: the rotated picture fills the portrait canvas.
     // Sampled off the vertical midline, which is the seam between two
     // quadrants and therefore a blend of both.
@@ -463,8 +556,7 @@ fn a_speed_change_maps_timeline_time_onto_source_time() {
 
     let mut segment = support::segment("counter", 0, 2_000_000);
     segment.speed = 2.0;
-    segment.source_range =
-        chukcut_lib::modules::project::document::TimeRange::new(0, 4_000_000);
+    segment.source_range = chukcut_lib::modules::project::document::TimeRange::new(0, 4_000_000);
     let mut track = Track::new(TrackKind::Video, "V1");
     track.segments.push(segment);
     p.tracks.push(track);
@@ -505,7 +597,10 @@ fn rendering_the_same_frame_twice_produces_the_same_bytes() {
     let second = compositor
         .render(&p, 500_000, (320, 240), sources.as_ref())
         .expect("render");
-    assert_eq!(first.data, second.data, "the same frame rendered differently");
+    assert_eq!(
+        first.data, second.data,
+        "the same frame rendered differently"
+    );
 
     // A fresh provider decodes from scratch rather than answering out of its
     // texture cache, which is the version an export would produce.
@@ -537,8 +632,18 @@ fn rendering_at_a_smaller_size_is_the_same_composition_scaled_down() {
     assert_pixel_near(full.pixel(160, 5), BLUE, 2, "full letterbox");
     assert_pixel_near(half.pixel(80, 2), BLUE, 2, "half letterbox");
     // Just inside the clip on both.
-    assert_pixel_near(full.pixel(160, 40), WHITE, CODEC_TOLERANCE, "full, below the band");
-    assert_pixel_near(half.pixel(80, 20), WHITE, CODEC_TOLERANCE, "half, below the band");
+    assert_pixel_near(
+        full.pixel(160, 40),
+        WHITE,
+        CODEC_TOLERANCE,
+        "full, below the band",
+    );
+    assert_pixel_near(
+        half.pixel(80, 20),
+        WHITE,
+        CODEC_TOLERANCE,
+        "half, below the band",
+    );
 }
 
 // ---------------------------------------------------------------------------

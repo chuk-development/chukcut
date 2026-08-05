@@ -30,9 +30,7 @@ use chukcut_lib::modules::export::{
     ExportStage, FnSink,
 };
 use chukcut_lib::modules::media::{MediaSourceProvider, VideoDecoder};
-use chukcut_lib::modules::project::document::{
-    CanvasConfig, Micros, Project, Track, TrackKind,
-};
+use chukcut_lib::modules::project::document::{CanvasConfig, Micros, Project, Track, TrackKind};
 use chukcut_lib::modules::render::{Compositor, CompositorConfig, SourceProvider};
 
 use support::{material_for, probe_output, read_counter_rgba, segment, Probed};
@@ -76,7 +74,11 @@ fn scratch(name: &str) -> std::path::PathBuf {
     dir.join(name)
 }
 
-fn request(path: &std::path::Path, overrides: Option<ExportOverrides>, audio: bool) -> ExportRequest {
+fn request(
+    path: &std::path::Path,
+    overrides: Option<ExportOverrides>,
+    audio: bool,
+) -> ExportRequest {
     ExportRequest {
         output_path: path.to_string_lossy().into_owned(),
         preset_id: None,
@@ -352,7 +354,9 @@ fn a_hardware_export_is_not_truncated_and_holds_the_right_frames() {
     let mut decoder = VideoDecoder::open(&result.path).expect("open the hardware export");
     for n in [0u64, 1, 29, 30, 59] {
         let at = (n as f64 * 1_000_000.0 / 30.0).round() as i64 + 16_000;
-        let frame = decoder.seek_and_decode(at).expect("decode the hardware export");
+        let frame = decoder
+            .seek_and_decode(at)
+            .expect("decode the hardware export");
         assert_eq!(
             read_counter_rgba(&frame.data, frame.width, frame.height),
             Some(n),
@@ -406,11 +410,14 @@ fn every_hardware_encoder_shows_the_same_picture_as_the_software_path() {
             .iter()
             .map(|n| (*n as f64 * 1_000_000.0 / 30.0).round() as i64 + 16_000)
             .collect();
-        let mut sw_decoder =
-            VideoDecoder::open(&software.path).expect("open the software export");
+        let mut sw_decoder = VideoDecoder::open(&software.path).expect("open the software export");
         let sw_frames: Vec<_> = sample_times
             .iter()
-            .map(|at| sw_decoder.seek_and_decode(*at).expect("decode the software export"))
+            .map(|at| {
+                sw_decoder
+                    .seek_and_decode(*at)
+                    .expect("decode the software export")
+            })
             .collect();
 
         for hardware in &encoders {
@@ -421,7 +428,9 @@ fn every_hardware_encoder_shows_the_same_picture_as_the_software_path() {
 
             let mut decoder = VideoDecoder::open(&result.path).expect("open the hardware export");
             for (at, reference) in sample_times.iter().zip(&sw_frames) {
-                let frame = decoder.seek_and_decode(*at).expect("decode the hardware export");
+                let frame = decoder
+                    .seek_and_decode(*at)
+                    .expect("decode the hardware export");
                 assert_eq!(
                     (frame.width, frame.height),
                     (reference.width, reference.height),
@@ -465,7 +474,10 @@ fn a_hardware_export_is_shaped_like_a_software_one() {
     assert_eq!((result.probe.width, result.probe.height), (320, 240));
     assert_eq!(result.probe.decoded_frames, 30);
     assert_eq!(result.probe.avg_frame_rate, (30, 1));
-    assert!(result.probe.has_audio, "no audio stream in the hardware file");
+    assert!(
+        result.probe.has_audio,
+        "no audio stream in the hardware file"
+    );
     let _ = std::fs::remove_file(&result.path);
 }
 
@@ -507,7 +519,9 @@ fn a_range_export_holds_exactly_the_ranged_frames_rebased_to_zero() {
     let mut decoder = VideoDecoder::open(&result.path).expect("open the range export");
     for (out_frame, source_frame) in [(0u64, 30u64), (29, 59), (59, 89)] {
         let at = (out_frame as f64 * 1_000_000.0 / 30.0).round() as i64 + 16_000;
-        let frame = decoder.seek_and_decode(at).expect("decode the range export");
+        let frame = decoder
+            .seek_and_decode(at)
+            .expect("decode the range export");
         assert_eq!(
             read_counter_rgba(&frame.data, frame.width, frame.height),
             Some(source_frame),
@@ -551,9 +565,12 @@ fn a_range_export_audio_is_as_long_as_the_range() {
     req.range = Some((1_000_000, 3_000_000));
     let result = exported!(&project, req);
 
-    assert!(result.probe.has_audio, "no audio stream in the range export");
-    let audio = stream_duration_seconds(&result.path, "a:0")
-        .expect("the audio stream has a duration");
+    assert!(
+        result.probe.has_audio,
+        "no audio stream in the range export"
+    );
+    let audio =
+        stream_duration_seconds(&result.path, "a:0").expect("the audio stream has a duration");
     // AAC pads to its 1024-sample frame and the muxer may carry priming
     // samples, so the tolerance is a couple of codec frames, not zero.
     assert!(
@@ -616,7 +633,11 @@ fn a_snapshot_is_a_decodable_png_of_the_canvas_at_the_requested_frame() {
     let time = (45.0f64 * 1_000_000.0 / 30.0).round() as i64 + 16_000;
     let asked = scratch("snapshot.jpg"); // deliberately the wrong extension
     let written = chukcut_lib::modules::export::snapshot::write_png(
-        &project, time, &compositor, &sources, &asked,
+        &project,
+        time,
+        &compositor,
+        &sources,
+        &asked,
     )
     .expect("write the snapshot");
 
@@ -638,7 +659,11 @@ fn a_snapshot_is_a_decodable_png_of_the_canvas_at_the_requested_frame() {
     // rendering black.
     let past = scratch("snapshot_past.png");
     let written = chukcut_lib::modules::export::snapshot::write_png(
-        &project, 99_000_000, &compositor, &sources, &past,
+        &project,
+        99_000_000,
+        &compositor,
+        &sources,
+        &past,
     )
     .expect("write the clamped snapshot");
     let decoded = image::open(&written).expect("the PNG decodes").to_rgba8();
@@ -814,9 +839,8 @@ fn a_job_cancelled_before_the_first_frame_writes_nothing_and_says_so() {
 
     let stages: Arc<Mutex<Vec<ExportStage>>> = Arc::new(Mutex::new(Vec::new()));
     let recorder = Arc::clone(&stages);
-    let sink = FnSink(move |message: ExportProgress| {
-        recorder.lock().expect("lock").push(message.stage)
-    });
+    let sink =
+        FnSink(move |message: ExportProgress| recorder.lock().expect("lock").push(message.stage));
 
     let outcome = run_export(&job, &sink).expect("cancellation is not a failure");
     assert!(outcome.cancelled);
@@ -870,7 +894,11 @@ fn an_export_to_a_directory_that_cannot_be_written_fails_with_prose() {
     assert!(!error.is_cancellation());
     // The string reaches the user unchanged, so it has to read as a sentence
     // and name the file.
-    let reported = failed.lock().expect("lock").clone().expect("a failure message");
+    let reported = failed
+        .lock()
+        .expect("lock")
+        .clone()
+        .expect("a failure message");
     assert!(
         reported.contains("inside.mp4"),
         "the failure message does not say which file: {reported}"

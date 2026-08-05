@@ -176,7 +176,10 @@ pub fn have_ffmpeg() -> bool {
 }
 
 pub fn ffmpeg_version() -> String {
-    let Ok(out) = Command::new("ffmpeg").args(["-hide_banner", "-version"]).output() else {
+    let Ok(out) = Command::new("ffmpeg")
+        .args(["-hide_banner", "-version"])
+        .output()
+    else {
         return "not found".into();
     };
     String::from_utf8_lossy(&out.stdout)
@@ -265,7 +268,10 @@ pub fn ensure(dir: &Path, seconds: f64, fps: u32) -> std::io::Result<Fixtures> {
                         dir.display()
                     );
                 }
-                eprintln!("  {} …", path.file_name().unwrap_or_default().to_string_lossy());
+                eprintln!(
+                    "  {} …",
+                    path.file_name().unwrap_or_default().to_string_lossy()
+                );
                 if let Err(error) = generate(recipe, &path, width, height, seconds, fps) {
                     missing.push((
                         format!("{} {width}x{height}", recipe.codec),

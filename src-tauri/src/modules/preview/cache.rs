@@ -272,7 +272,10 @@ mod tests {
     fn a_stored_frame_comes_back() {
         let cache = cache(8, 1);
         assert!(cache.insert(frame(1, 3)));
-        assert_eq!(cache.get(1, 3), Lookup::Hit(Arc::from(vec![3u8; 4].into_boxed_slice())));
+        assert_eq!(
+            cache.get(1, 3),
+            Lookup::Hit(Arc::from(vec![3u8; 4].into_boxed_slice()))
+        );
         assert_eq!(cache.get(1, 4), Lookup::Miss);
         assert_eq!(cache.len(), 1);
     }

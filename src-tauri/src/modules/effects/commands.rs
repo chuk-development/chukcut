@@ -63,12 +63,12 @@ pub fn effects_describe(path: String) -> Result<EffectDescription, String> {
             continue;
         };
         match package.read(root) {
-            Ok(bytes) if bytes.starts_with(super::assets::BINARY_MAGIC) => limitations.push(
-                format!(
+            Ok(bytes) if bytes.starts_with(super::assets::BINARY_MAGIC) => {
+                limitations.push(format!(
                     "{root} is in the binary %SerializedFormat%@ encoding. This runtime reads \
                      the YAML twin of that format only; see modules/effects/assets.rs."
-                ),
-            ),
+                ))
+            }
             Ok(_) => {}
             Err(error) => limitations.push(format!("{root}: {error}")),
         }

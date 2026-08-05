@@ -277,7 +277,11 @@ impl VideoDecoder {
     /// The height is a *display* height, so a rotated portrait video scaled to
     /// 80 comes out 80 tall after rotation, not 80 wide.
     pub fn open_scaled(path: impl AsRef<Path>, target_height: u32) -> Result<Self> {
-        Self::open_inner(path.as_ref(), Some(target_height.max(1)), Acceleration::Software)
+        Self::open_inner(
+            path.as_ref(),
+            Some(target_height.max(1)),
+            Acceleration::Software,
+        )
     }
 
     /// [`Self::open_scaled`] with a chosen decoder.
@@ -318,12 +322,13 @@ impl VideoDecoder {
         let codec_id = parameters.id();
         let codec_name = codec_id.name().to_string();
 
-        let mut context = ffmpeg::codec::context::Context::from_parameters(parameters).map_err(
-            |source| MediaError::Decode {
-                path: path.to_path_buf(),
-                source,
-            },
-        )?;
+        let mut context =
+            ffmpeg::codec::context::Context::from_parameters(parameters).map_err(|source| {
+                MediaError::Decode {
+                    path: path.to_path_buf(),
+                    source,
+                }
+            })?;
 
         // Attach the GPU *before* opening. `get_format` is consulted on the
         // first packet, but `hw_device_ctx` has to be in place by then and
@@ -590,10 +595,7 @@ impl VideoDecoder {
 
     /// [`Self::decode_until`], with "there was nothing there" as a value rather
     /// than an error.
-    fn try_decode_until(
-        &mut self,
-        target: Micros,
-    ) -> Result<Option<(Micros, frame::Video)>> {
+    fn try_decode_until(&mut self, target: Micros) -> Result<Option<(Micros, frame::Video)>> {
         match self.decode_until(target) {
             Ok(found) => Ok(Some(found)),
             Err(MediaError::NoFrameAt { .. }) => Ok(None),

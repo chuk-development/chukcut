@@ -168,8 +168,18 @@ pub fn run(ctx: &Arc<RenderContext>, media: &Fixtures, budget: &Budget) -> Vec<M
     ];
     match &usable_h264 {
         Some(id) => {
-            configurations.push(("VAAPI tier 1: CPU swscale + upload", Some(id.clone()), false, false));
-            configurations.push(("VAAPI tier 2: GPU NV12, read back", Some(id.clone()), true, false));
+            configurations.push((
+                "VAAPI tier 1: CPU swscale + upload",
+                Some(id.clone()),
+                false,
+                false,
+            ));
+            configurations.push((
+                "VAAPI tier 2: GPU NV12, read back",
+                Some(id.clone()),
+                true,
+                false,
+            ));
             configurations.push(("VAAPI tier 3: zero-copy", Some(id.clone()), true, true));
         }
         None => {
@@ -235,10 +245,7 @@ pub fn run(ctx: &Arc<RenderContext>, media: &Fixtures, budget: &Budget) -> Vec<M
             if outcome.frames != total_frames {
                 // A short export is the classic un-flushed-encoder bug, and it
                 // is also very fast. Refusing to report it is the point.
-                return Err(format!(
-                    "wrote {} of {total_frames} frames",
-                    outcome.frames
-                ));
+                return Err(format!("wrote {} of {total_frames} frames", outcome.frames));
             }
             let stats = compositor.stats();
             breakdown = format!(

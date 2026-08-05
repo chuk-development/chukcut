@@ -309,7 +309,9 @@ impl Claim {
 
     /// The surface, for the encoder.
     pub fn surface_mut(&mut self) -> &mut frame::Video {
-        self.surface.as_mut().expect("a live claim holds its surface")
+        self.surface
+            .as_mut()
+            .expect("a live claim holds its surface")
     }
 
     /// Give the surface back.
@@ -473,13 +475,18 @@ pub(crate) fn round_trip(
     let (rgb, got_w, got_h) = super::encoder::decode_jpeg_rgb(&jpeg)
         .map_err(|e| format!("the result is not a JPEG: {e}"))?;
     if (got_w, got_h) != (width, height) {
-        return Err(format!("it came back {got_w}x{got_h} rather than {width}x{height}"));
+        return Err(format!(
+            "it came back {got_w}x{got_h} rather than {width}x{height}"
+        ));
     }
 
     let (w, h) = (width as usize, height as usize);
     Ok((0..h)
         .map(|row| {
-            let mean: u32 = (0..w).map(|col| rgb[(row * w + col) * 3] as u32).sum::<u32>() / w as u32;
+            let mean: u32 = (0..w)
+                .map(|col| rgb[(row * w + col) * 3] as u32)
+                .sum::<u32>()
+                / w as u32;
             // The ramp repeats every 256 rows, which is what a picture taller
             // than 256 rows would otherwise fail on for no good reason.
             mean.abs_diff((row as u32).wrapping_add(offset) % 256)

@@ -212,7 +212,9 @@ fn choose_config(device: &cpal::Device) -> Result<cpal::SupportedStreamConfig> {
             let score = (range.sample_format() == SampleFormat::F32) as u32 * 4
                 + (range.channels() == 2) as u32 * 2
                 + range.contains_rate(PREFERRED_RATE) as u32;
-            range.try_with_sample_rate(rate).map(|config| (score, config))
+            range
+                .try_with_sample_rate(rate)
+                .map(|config| (score, config))
         })
         .max_by_key(|(score, _)| *score);
 
@@ -421,7 +423,10 @@ mod tests {
         ));
         // A device that cannot go as low as we would like gets what it can.
         assert!(matches!(
-            preferred_buffer_size(&cpal::SupportedBufferSize::Range { min: 1024, max: 4096 }),
+            preferred_buffer_size(&cpal::SupportedBufferSize::Range {
+                min: 1024,
+                max: 4096
+            }),
             cpal::BufferSize::Fixed(1024)
         ));
     }

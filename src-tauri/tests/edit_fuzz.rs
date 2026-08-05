@@ -107,7 +107,9 @@ fn seed_project() -> Project {
         let mut at: Micros = 0;
         for n in 0..6 {
             let mut segment = support::segment(
-                ["video-0", "video-1", "video-2", "audio-0", "image-0", "text-0"][n % 6],
+                [
+                    "video-0", "video-1", "video-2", "audio-0", "image-0", "text-0",
+                ][n % 6],
                 at,
                 1_000_000,
             );
@@ -205,9 +207,7 @@ fn invariants(project: &Project) -> Vec<String> {
                     broken.push(format!(
                         "segment {id} shows {} µs of source for {} µs of timeline at {}x, \
                          which should be {implied} µs",
-                        segment.source_range.duration,
-                        segment.target_range.duration,
-                        segment.speed
+                        segment.source_range.duration, segment.target_range.duration, segment.speed
                     ));
                 }
             }
@@ -447,26 +447,28 @@ fn transition_command(project: &Project, rng: &mut Lcg) -> Option<EditCommand> {
         rng.between(1, (limit / 100_000).max(1)) * 100_000
     };
 
-    Some(match (attached_transition(project, &segment_id), rng.below(3)) {
-        (Some(transition), 0) => EditCommand::RemoveTransition {
-            segment_id,
-            transition,
-        },
-        (Some(before), _) => {
-            let mut after = before.clone();
-            after.duration = duration;
-            after.kind = *rng.pick(&kinds)?;
-            EditCommand::SetTransition {
+    Some(
+        match (attached_transition(project, &segment_id), rng.below(3)) {
+            (Some(transition), 0) => EditCommand::RemoveTransition {
                 segment_id,
-                before,
-                after,
+                transition,
+            },
+            (Some(before), _) => {
+                let mut after = before.clone();
+                after.duration = duration;
+                after.kind = *rng.pick(&kinds)?;
+                EditCommand::SetTransition {
+                    segment_id,
+                    before,
+                    after,
+                }
             }
-        }
-        (None, _) => EditCommand::AddTransition {
-            segment_id,
-            transition: TransitionMaterial::new(*rng.pick(&kinds)?, duration),
+            (None, _) => EditCommand::AddTransition {
+                segment_id,
+                transition: TransitionMaterial::new(*rng.pick(&kinds)?, duration),
+            },
         },
-    })
+    )
 }
 
 /// Values `serde_json` cannot write.
@@ -780,9 +782,8 @@ fn transitions_survive_the_edits_that_move_the_clips_they_join() {
         // Exactly what the app does with a command before it applies it: an
         // edit that breaks a cut carries the removal of the transition that
         // was sitting on it, so that one undo brings both back.
-        let command = chukcut_lib::modules::timeline::ops::detach_broken_transitions(
-            &project, command,
-        );
+        let command =
+            chukcut_lib::modules::timeline::ops::detach_broken_transitions(&project, command);
         let is_transition = matches!(
             command,
             EditCommand::AddTransition { .. }
@@ -948,7 +949,10 @@ fn speed_changes_and_splits_interleave_without_the_two_ranges_drifting() {
         assert!(errors(&project).is_empty(), "{:?}", errors(&project));
     }
 
-    assert!(speeds > 100 && splits > 100, "{speeds} speeds, {splits} splits");
+    assert!(
+        speeds > 100 && splits > 100,
+        "{speeds} speeds, {splits} splits"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -998,7 +1002,10 @@ fn undoing_a_long_session_completely_returns_the_document_it_started_from() {
             .undo(&mut project)
             .unwrap_or_else(|e| panic!("undo {undone} of {depth} failed: {e}"));
         undone += 1;
-        assert!(undone <= depth, "undo produced more steps than were applied");
+        assert!(
+            undone <= depth,
+            "undo produced more steps than were applied"
+        );
     }
 
     assert_eq!(undone, depth, "every applied edit is one undo step");
@@ -1058,7 +1065,11 @@ fn undo_and_redo_can_be_walked_back_and_forth_without_drifting() {
     while history.can_undo() {
         history.undo(&mut project).expect("undo");
     }
-    assert_eq!(canonical(&project), initial, "after wandering, undo still lands home");
+    assert_eq!(
+        canonical(&project),
+        initial,
+        "after wandering, undo still lands home"
+    );
 
     while history.can_redo() {
         history.redo(&mut project).expect("redo");

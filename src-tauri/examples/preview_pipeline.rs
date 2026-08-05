@@ -52,12 +52,11 @@ use std::time::{Duration, Instant};
 use chukcut_lib::modules::media::MediaSourceProvider;
 use chukcut_lib::modules::preview::encoder::{encode_preview_jpeg, hardware_available};
 use chukcut_lib::modules::preview::probe::PROBE;
-use chukcut_lib::modules::preview::{vasurface, zerocopy};
 use chukcut_lib::modules::preview::vaapi::VaapiJpegEncoder;
 use chukcut_lib::modules::preview::{
-    frame_url, Counts, PreviewOptions, PreviewServer, DEFAULT_JPEG_QUALITY,
-    DEFAULT_READ_AHEAD,
+    frame_url, Counts, PreviewOptions, PreviewServer, DEFAULT_JPEG_QUALITY, DEFAULT_READ_AHEAD,
 };
+use chukcut_lib::modules::preview::{vasurface, zerocopy};
 use chukcut_lib::modules::project::document::{
     CanvasConfig, Micros, Project, Segment, TimeRange, Track, TrackKind, Transform, VideoMaterial,
 };
@@ -430,7 +429,10 @@ fn live_phase(
             while !stop.load(Ordering::Relaxed) {
                 let due = server.status().frame;
                 if let Some(furthest) = cache.frames().last().copied() {
-                    lead_samples.lock().expect("lead samples").push(furthest - due);
+                    lead_samples
+                        .lock()
+                        .expect("lead samples")
+                        .push(furthest - due);
                 }
                 std::thread::sleep(Duration::from_millis(4));
             }
@@ -491,7 +493,10 @@ fn report_live(live: &Live, fps: f64, label: &str) {
     let pct = |ns: u64| ns as f64 / wall_ns * 100.0;
     let budget = 1000.0 / fps;
 
-    println!("  {label}: {:.2} s of wall clock, demand {fps:.0} fps", live.wall);
+    println!(
+        "  {label}: {:.2} s of wall clock, demand {fps:.0} fps",
+        live.wall
+    );
     println!(
         "    frames  announced {:>4} ({:>5.1}/s)   reached the ring {:>4} ({:>5.1}/s)   dropped by the pacer {:>4}",
         live.shown,
@@ -558,7 +563,8 @@ fn report_live(live: &Live, fps: f64, label: &str) {
 
     // The claim the whole exercise is about, stated as arithmetic.
     let serial = Counts::per(c.composite_ns, c.composites) + Counts::per(c.encode_ns, c.encodes);
-    let pipelined = Counts::per(c.composite_ns, c.composites).max(Counts::per(c.encode_ns, c.encodes));
+    let pipelined =
+        Counts::per(c.composite_ns, c.composites).max(Counts::per(c.encode_ns, c.encodes));
     println!(
         "    ⇒ composite {:.2} + encode {:.2}: {:.2} ms if serialised ({:.1} fps), {:.2} ms if pipelined ({:.1} fps); observed {:.1} fps",
         Counts::per(c.composite_ns, c.composites),
@@ -604,8 +610,7 @@ fn main() {
             .unwrap_or_default()
             .split_whitespace()
             .next()
-            .unwrap_or("?")
-            .to_string(),
+            .unwrap_or("?"),
         if hardware_available() { "yes" } else { "no" },
         if ctx.can_import_dmabuf() { "yes" } else { "no" },
         DEFAULT_READ_AHEAD,
@@ -631,7 +636,10 @@ fn main() {
     }
 
     for canvas in &options.canvases {
-        println!("== {}x{} canvas, {} fps ==", canvas.0, canvas.1, options.fps);
+        println!(
+            "== {}x{} canvas, {} fps ==",
+            canvas.0, canvas.1, options.fps
+        );
         let project = Arc::new(single_clip(&options.clip, *canvas, options.fps, span));
 
         if !options.live_only {
@@ -644,7 +652,8 @@ fn main() {
         // One server per canvas, torn down after, so a phase never inherits the
         // previous one's warm decoder or its half-full ring.
         let server = PreviewServer::new();
-        let sources: Arc<dyn SourceProvider> = Arc::new(MediaSourceProvider::from_project(&project));
+        let sources: Arc<dyn SourceProvider> =
+            Arc::new(MediaSourceProvider::from_project(&project));
         server.set_source_provider(sources);
 
         // The control arm, and it runs **first and in this same process** on
@@ -694,7 +703,11 @@ fn main() {
                 &reduced_options,
                 options.seconds,
             );
-            report_live(&reduced, options.fps, &format!("live, proxy capped at {long_edge}"));
+            report_live(
+                &reduced,
+                options.fps,
+                &format!("live, proxy capped at {long_edge}"),
+            );
             println!(
                 "    ⇒ capping the proxy moved the composite from {:.2} to {:.2} ms a frame and the rendered rate from {:.1} to {:.1} fps",
                 Counts::per(live.counts.composite_ns, live.counts.composites),

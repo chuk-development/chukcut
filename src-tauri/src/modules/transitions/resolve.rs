@@ -95,7 +95,12 @@ fn material_extent(materials: &MaterialPool, id: &str) -> Option<Micros> {
 /// still has to come out.
 ///
 /// `None` when the duration is not positive, which is not a window at all.
-pub fn window_for(cut: Micros, duration: Micros, from: &Segment, to: &Segment) -> Option<TimeRange> {
+pub fn window_for(
+    cut: Micros,
+    duration: Micros,
+    from: &Segment,
+    to: &Segment,
+) -> Option<TimeRange> {
     if duration <= 0 {
         return None;
     }
@@ -239,7 +244,9 @@ pub fn instant_for<'a>(
     time: Micros,
 ) -> Option<TransitionInstant<'a>> {
     let span = span_at(track, materials, time)?;
-    span.joins(&segment.id).then(|| span.instant(time)).flatten()
+    span.joins(&segment.id)
+        .then(|| span.instant(time))
+        .flatten()
 }
 
 /// Every transition live at `time`, with the track it is on.
@@ -470,11 +477,7 @@ mod tests {
             TransitionMaterial::new(TransitionKind::Dissolve, 1_000_000),
         );
         // Trim the outgoing clip's tail so the two no longer meet.
-        project
-            .segment_mut(&left_id)
-            .unwrap()
-            .target_range
-            .duration = 3_000_000;
+        project.segment_mut(&left_id).unwrap().target_range.duration = 3_000_000;
 
         let track = project.track(&track_id).unwrap();
         assert!(spans(track, &project.materials).is_empty());

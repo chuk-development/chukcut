@@ -336,6 +336,10 @@ mod tests {
             loaded.project.materials.extras["effect-0"],
             serde_json::json!({ "keep": null, "nested": [null, 1] })
         );
-        assert!(!loaded.warnings[0].contains("extras"), "{:?}", loaded.warnings);
+        assert!(
+            !loaded.warnings[0].contains("extras"),
+            "{:?}",
+            loaded.warnings
+        );
     }
 }

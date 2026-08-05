@@ -342,8 +342,7 @@ pub fn paste_attributes_command(
     // expands into is always the same one — a stale selection entry is skipped
     // like `removalCommands` skips it, because the rest of the selection is
     // still there to paste onto.
-    let wanted: std::collections::BTreeSet<&str> =
-        targets.iter().map(String::as_str).collect();
+    let wanted: std::collections::BTreeSet<&str> = targets.iter().map(String::as_str).collect();
     let ordered: Vec<&Segment> = project
         .tracks
         .iter()
@@ -723,8 +722,7 @@ mod tests {
         let mut history = History::new();
         history.apply(&mut project, command).unwrap();
 
-        let (material, command) =
-            set_color_command(&project, &segment_id, Some(identity)).unwrap();
+        let (material, command) = set_color_command(&project, &segment_id, Some(identity)).unwrap();
         assert!(material.is_none());
         history.apply(&mut project, command).unwrap();
         let (_, segment) = project.segment(&segment_id).unwrap();
@@ -794,8 +792,7 @@ mod tests {
             }),
         };
 
-        let (material, _) =
-            set_color_command(&project, &segment_id, Some(base.clone())).unwrap();
+        let (material, _) = set_color_command(&project, &segment_id, Some(base.clone())).unwrap();
         assert_eq!(material.unwrap().lut.unwrap().intensity, 1.0);
 
         let mut nan = base.clone();
@@ -1038,7 +1035,10 @@ mod tests {
         assert_eq!(history.undo_label().as_deref(), Some("Rename clip"));
 
         let (_, segment) = project.segment(&segment_id).unwrap();
-        assert_eq!(clip_name_entry(&project, &segment.extras[0]), Some("Opening shot"));
+        assert_eq!(
+            clip_name_entry(&project, &segment.extras[0]),
+            Some("Opening shot")
+        );
 
         // Renaming again swaps to a fresh entry; only one name at a time.
         let (entry, command) =

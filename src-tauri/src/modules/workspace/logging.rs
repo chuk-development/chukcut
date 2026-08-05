@@ -169,7 +169,9 @@ impl DailyFile {
     /// last thing that should stop working while the app is falling over, so
     /// the guard is taken anyway.
     fn lock(&self) -> std::sync::MutexGuard<'_, Open> {
-        self.open.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.open
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn append(&self, buf: &[u8]) -> io::Result<usize> {
@@ -380,11 +382,15 @@ mod tests {
         let dir = scratch("append");
         {
             let file = DailyFile::new(&dir, KEEP_FILES).expect("first run");
-            LogWriter::new(Arc::new(file)).write_all(b"first\n").unwrap();
+            LogWriter::new(Arc::new(file))
+                .write_all(b"first\n")
+                .unwrap();
         }
         let file = DailyFile::new(&dir, KEEP_FILES).expect("second run");
         let path = file.path();
-        LogWriter::new(Arc::new(file)).write_all(b"second\n").unwrap();
+        LogWriter::new(Arc::new(file))
+            .write_all(b"second\n")
+            .unwrap();
 
         assert_eq!(fs::read_to_string(&path).unwrap(), "first\nsecond\n");
         let _ = fs::remove_dir_all(&dir);
@@ -414,10 +420,20 @@ mod tests {
             "the newest two of five, one of which is today's: {surviving:?}"
         );
         assert!(
-            surviving.contains(&file.path().file_name().unwrap().to_string_lossy().to_string()),
+            surviving.contains(
+                &file
+                    .path()
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string()
+            ),
             "today's file is never pruned: {surviving:?}"
         );
-        assert!(dir.join("notes.txt").exists(), "foreign files are not ours to delete");
+        assert!(
+            dir.join("notes.txt").exists(),
+            "foreign files are not ours to delete"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

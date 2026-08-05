@@ -245,11 +245,13 @@ fn main() -> anyhow::Result<()> {
         },
     ));
 
-    let overrides = size.map(|(width, height)| chukcut_lib::modules::export::ExportOverrides {
-        width: Some(width),
-        height: Some(height),
-        ..Default::default()
-    });
+    let overrides = size.map(
+        |(width, height)| chukcut_lib::modules::export::ExportOverrides {
+            width: Some(width),
+            height: Some(height),
+            ..Default::default()
+        },
+    );
 
     let request = ExportRequest {
         output_path: output.clone(),

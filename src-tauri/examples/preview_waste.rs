@@ -112,7 +112,12 @@ fn render_size(ctx: &Arc<RenderContext>, project: &Project) {
         ),
         Case::new(
             "settings cap 960",
-            preview_size(canvas, Some(Viewport::new(PANEL.0, PANEL.1)), Some(960), false),
+            preview_size(
+                canvas,
+                Some(Viewport::new(PANEL.0, PANEL.1)),
+                Some(960),
+                false,
+            ),
             88,
         ),
     ];
@@ -292,10 +297,9 @@ fn late_encodes(project: &Project) {
     // it is asked for — and the honest answer there may well be "this changes
     // nothing". The second is the pathological one, where it is the difference
     // between a busy encode thread and an idle one.
-    for (label, frames_per_step, step_ms) in [
-        ("1.5x over budget", 1i64, 22u64),
-        ("8x over budget", 3, 12),
-    ] {
+    for (label, frames_per_step, step_ms) in
+        [("1.5x over budget", 1i64, 22u64), ("8x over budget", 3, 12)]
+    {
         println!("  {label}:");
         for skip in [false, true] {
             experiment::set_skip_late_encodes(skip);
@@ -336,7 +340,9 @@ fn drive_behind(project: &Project, frames_per_step: i64, step_ms: u64) -> (Count
     );
     // Let the first frame land, so the decoder is warm and the measurement is
     // about pacing rather than about opening a file.
-    let _ = server.cache().wait(info.session, 0, Duration::from_secs(10));
+    let _ = server
+        .cache()
+        .wait(info.session, 0, Duration::from_secs(10));
 
     PROBE.reset();
     server.play().expect("a session is open");
@@ -396,7 +402,9 @@ fn ask_for_one_frame_repeatedly(project: &Project) -> u64 {
     // long enough for a second request to arrive during it. The probe is reset
     // *before* the seek, so the seek's own render is in the count: one is the
     // right answer, and anything above it is a frame rendered twice.
-    let _ = server.cache().wait(info.session, 0, Duration::from_secs(10));
+    let _ = server
+        .cache()
+        .wait(info.session, 0, Duration::from_secs(10));
     PROBE.reset();
     let info = server.seek(2_500_000).expect("a session is open");
 

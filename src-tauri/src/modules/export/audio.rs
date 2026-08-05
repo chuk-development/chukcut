@@ -853,7 +853,7 @@ mod tests {
     /// channel, so the slice's *content* can be asserted, not only its length.
     fn counting_mix(frames: usize, channels: usize) -> Vec<f32> {
         (0..frames)
-            .flat_map(|n| std::iter::repeat(n as f32).take(channels))
+            .flat_map(|n| std::iter::repeat_n(n as f32, channels))
             .collect()
     }
 

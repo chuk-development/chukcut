@@ -301,7 +301,8 @@ impl TimelineMixer {
         let source_span = (count.saturating_sub(1)) as f64 * planned.speed;
         let first_source = source_base.floor() as i64;
         // One extra frame for the interpolation partner of the last sample.
-        let source_frames = ((source_base + source_span).floor() as i64 - first_source + 2) as usize;
+        let source_frames =
+            ((source_base + source_span).floor() as i64 - first_source + 2) as usize;
 
         self.source.clear();
         self.source.resize(source_frames * MIX_CHANNELS, 0.0);
@@ -331,7 +332,11 @@ impl TimelineMixer {
                 // offset is the frame's position inside the segment and not on
                 // the timeline.
                 let offset = frames_to_micros((start + i as i64 - segment_start) as u64, self.rate);
-                if let Some(value) = planned.volume.as_ref().and_then(|track| track.sample(offset)) {
+                if let Some(value) = planned
+                    .volume
+                    .as_ref()
+                    .and_then(|track| track.sample(offset))
+                {
                     gain *= finite_or(value, 1.0);
                 }
             }
@@ -641,7 +646,11 @@ mod tests {
         assert_eq!(sane_speed(0.0), 1.0);
         assert_eq!(sane_speed(-2.0), 1.0);
         assert_eq!(sane_speed(2.0), 2.0);
-        assert_eq!(sane_speed(1_000.0), MAX_SPEED, "one block cannot ask for an hour");
+        assert_eq!(
+            sane_speed(1_000.0),
+            MAX_SPEED,
+            "one block cannot ask for an hour"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -843,7 +852,10 @@ mod tests {
         assert!(out[0].abs() < 1e-3, "the fade starts at silence");
 
         mixer.fill(RATE as i64 / 2, &mut out);
-        assert!((out[0] - 0.25).abs() < 0.01, "half way through is half volume");
+        assert!(
+            (out[0] - 0.25).abs() < 0.01,
+            "half way through is half volume"
+        );
 
         mixer.fill(RATE as i64 - 2, &mut out);
         assert!(out[0] > 0.49);
@@ -901,7 +913,10 @@ mod tests {
             "the sum was {} and would wrap in any integer format",
             out[0]
         );
-        assert!(out[0] > 0.9, "and it is still loud, not attenuated to nothing");
+        assert!(
+            out[0] > 0.9,
+            "and it is still loud, not attenuated to nothing"
+        );
     }
 
     #[test]
@@ -994,6 +1009,10 @@ mod tests {
         trimmed.tracks[0].segments[0].target_range = TimeRange::new(0, 3 * MICROS_PER_SECOND);
         mixer.set_plan(plan(&trimmed));
         mixer.fill(0, &mut out);
-        assert_eq!(factory.opened.lock().len(), 1, "a trim must not reopen the file");
+        assert_eq!(
+            factory.opened.lock().len(),
+            1,
+            "a trim must not reopen the file"
+        );
     }
 }

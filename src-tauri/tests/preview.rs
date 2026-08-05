@@ -316,7 +316,9 @@ fn a_new_session_serves_the_frame_under_the_playhead_and_it_is_the_right_one() {
         .await_event("a position update", |e| e["type"] == "position");
     let latest = running.events.positions();
     assert!(
-        latest.iter().any(|p| p.session == running.session && p.frame == 30),
+        latest
+            .iter()
+            .any(|p| p.session == running.session && p.frame == 30),
         "no position update named frame 30: {latest:?}"
     );
 }
@@ -340,7 +342,9 @@ fn moving_the_playhead_serves_the_frame_it_moved_to() {
 
         let found = running.server.cache().wait(session, info.frame, DEADLINE);
         assert!(found.is_hit(), "frame {} never arrived", info.frame);
-        let response = running.server.serve_uri(&format!("{}/{}", info.frame_url, info.frame));
+        let response = running
+            .server
+            .serve_uri(&format!("{}/{}", info.frame_url, info.frame));
         assert_eq!(response.status(), tauri::http::StatusCode::OK);
         assert_eq!(
             counter_of(response.body(), &format!("seek_{at}")).0,
@@ -382,7 +386,10 @@ fn a_frame_from_a_superseded_session_is_refused_rather_than_shown() {
 
     // The refusal is about the session, not about the frame number: the same
     // number under the *live* session is served normally.
-    running.server.cache().wait(second.session, second.frame, DEADLINE);
+    running
+        .server
+        .cache()
+        .wait(second.session, second.frame, DEADLINE);
     assert_eq!(
         running
             .server
@@ -393,14 +400,15 @@ fn a_frame_from_a_superseded_session_is_refused_rather_than_shown() {
 
     // A render that was in flight when the seek happened is dropped on the
     // floor rather than landing in the new session's ring.
-    assert!(!running.server.cache().insert(
-        chukcut_lib::modules::preview::CachedFrame {
+    assert!(!running
+        .server
+        .cache()
+        .insert(chukcut_lib::modules::preview::CachedFrame {
             session: stale_session,
             frame: 0,
             time: 0,
             bytes: Arc::from(vec![0xFF, 0xD8].into_boxed_slice()),
-        }
-    ));
+        }));
 }
 
 // ---------------------------------------------------------------------------
@@ -453,11 +461,13 @@ fn position_updates_arrive_in_order_as_the_playhead_advances() {
     // skip numbers and there would be nothing to assert.
     for frame in 1..=8i64 {
         running.time.set(frame_time(frame, 30.0));
-        running.events.await_event(&format!("frame {frame}"), |event| {
-            event["type"] == "position"
-                && event["frame"].as_i64() == Some(frame)
-                && event["playing"].as_bool() == Some(true)
-        });
+        running
+            .events
+            .await_event(&format!("frame {frame}"), |event| {
+                event["type"] == "position"
+                    && event["frame"].as_i64() == Some(frame)
+                    && event["playing"].as_bool() == Some(true)
+            });
     }
 
     let positions: Vec<Position> = running
@@ -572,14 +582,23 @@ fn playback_stops_at_the_end_of_the_project_and_says_so() {
         .events
         .await_event("the end of the project", |event| event["type"] == "ended");
 
-    assert!(!running.server.clock().is_playing(), "playback did not stop");
+    assert!(
+        !running.server.clock().is_playing(),
+        "playback did not stop"
+    );
     assert_eq!(
         running.server.clock().position(),
         4_000_000,
         "the playhead should rest exactly on the end"
     );
     assert!(
-        running.events.kinds().iter().filter(|k| *k == "ended").count() >= 1,
+        running
+            .events
+            .kinds()
+            .iter()
+            .filter(|k| *k == "ended")
+            .count()
+            >= 1,
         "the frontend was never told"
     );
 

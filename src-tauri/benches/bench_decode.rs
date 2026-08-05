@@ -77,7 +77,13 @@ pub fn run(media: &Fixtures, budget: &Budget) -> Vec<Measurement> {
 
         // Software, sequential. The baseline every other row is read against.
         match rounds(budget.rounds, |_| {
-            walk(&clip.path, Acceleration::Software, budget.frames, step, Want::Rgba)
+            walk(
+                &clip.path,
+                Acceleration::Software,
+                budget.frames,
+                step,
+                Want::Rgba,
+            )
         }) {
             Ok(samples) => out.push(
                 Measurement::ms(GROUP, format!("{label} sw →RGBA seq"), samples)
@@ -108,15 +114,16 @@ pub fn run(media: &Fixtures, budget: &Budget) -> Vec<Measurement> {
                 reason,
             ));
         } else {
-            for (want, suffix) in [(Want::Rgba, "hw →RGBA seq"), (Want::Dmabuf, "hw →DMA-BUF seq")] {
+            for (want, suffix) in [
+                (Want::Rgba, "hw →RGBA seq"),
+                (Want::Dmabuf, "hw →DMA-BUF seq"),
+            ] {
                 match rounds(budget.rounds, |_| {
                     walk(&clip.path, Acceleration::Vaapi, budget.frames, step, want)
                 }) {
-                    Ok(samples) => out.push(Measurement::ms(
-                        GROUP,
-                        format!("{label} {suffix}"),
-                        samples,
-                    )),
+                    Ok(samples) => {
+                        out.push(Measurement::ms(GROUP, format!("{label} {suffix}"), samples))
+                    }
                     Err(error) => {
                         out.push(Measurement::skip(GROUP, format!("{label} {suffix}"), error))
                     }
@@ -139,7 +146,9 @@ pub fn run(media: &Fixtures, budget: &Budget) -> Vec<Measurement> {
                     Measurement::ms(GROUP, format!("{label} {suffix}"), samples)
                         .with_note(format!("{} seeks", budget.seeks)),
                 ),
-                Err(error) => out.push(Measurement::skip(GROUP, format!("{label} {suffix}"), error)),
+                Err(error) => {
+                    out.push(Measurement::skip(GROUP, format!("{label} {suffix}"), error))
+                }
             }
         }
     }
@@ -192,7 +201,8 @@ fn walk(
     for n in 1..frames {
         pull(&mut decoder, n as i64 * step + step / 2, want)?;
     }
-    let per_frame = started.elapsed().as_secs_f64() * 1000.0 / frames.saturating_sub(1).max(1) as f64;
+    let per_frame =
+        started.elapsed().as_secs_f64() * 1000.0 / frames.saturating_sub(1).max(1) as f64;
     Ok(per_frame)
 }
 

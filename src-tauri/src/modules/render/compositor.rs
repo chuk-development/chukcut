@@ -559,8 +559,7 @@ impl Compositor {
                 depth_or_array_layers: 1,
             },
         );
-        let chroma_placeholder =
-            placeholder.create_view(&wgpu::TextureViewDescriptor::default());
+        let chroma_placeholder = placeholder.create_view(&wgpu::TextureViewDescriptor::default());
 
         // The dead LUT binding: one black texel, never read, because the
         // shader's `lut_active` branch does not run without a real LUT bound.
@@ -599,8 +598,7 @@ impl Compositor {
             .write_buffer(&indices, 0, bytemuck::cast_slice(&QUAD_INDICES));
 
         let align = ctx.limits().min_uniform_buffer_offset_alignment.max(1) as u64;
-        let uniform_stride =
-            (std::mem::size_of::<QuadUniform>() as u64).div_ceil(align) * align;
+        let uniform_stride = (std::mem::size_of::<QuadUniform>() as u64).div_ceil(align) * align;
 
         Self {
             ctx,
@@ -674,8 +672,7 @@ impl Compositor {
     /// of otherwise interchangeable textures, and the flag costs nothing on a
     /// texture nobody reinterprets.
     fn target_key(&self, size: (u32, u32)) -> TextureKey {
-        TextureKey::new(size.0, size.1, self.config.format, TARGET_USAGE)
-            .viewable_as(READ_FORMAT)
+        TextureKey::new(size.0, size.1, self.config.format, TARGET_USAGE).viewable_as(READ_FORMAT)
     }
 
     /// Composite at `time` and hand back NV12 rather than RGBA.
@@ -1154,7 +1151,8 @@ impl Compositor {
             // contains any instant of the window — the cut is the boundary
             // between them — so no transition is ever drawn twice, and the
             // segment on the far side of the cut is not separately visible.
-            if let Some(instant) = transitions::instant_for(track, &project.materials, segment, time)
+            if let Some(instant) =
+                transitions::instant_for(track, &project.materials, segment, time)
             {
                 let from = self.quad(
                     canvas,
@@ -1350,10 +1348,9 @@ impl Compositor {
 
     fn read_back_inner(&self, target: &PooledTexture) -> Result<Vec<u8>> {
         let (width, height) = (target.width(), target.height());
-        let bytes_per_pixel = target
-            .format()
-            .block_copy_size(None)
-            .ok_or_else(|| RenderError::Readback(format!("{:?} is not copyable", target.format())))?;
+        let bytes_per_pixel = target.format().block_copy_size(None).ok_or_else(|| {
+            RenderError::Readback(format!("{:?} is not copyable", target.format()))
+        })?;
         let unpadded = width * bytes_per_pixel;
         let padded = unpadded.div_ceil(COPY_ALIGN) * COPY_ALIGN;
         let total = padded as u64 * height as u64;
@@ -1719,7 +1716,10 @@ mod tests {
         let f = frame(&c, &project, 0, &provider);
 
         let [r, _, _, a] = f.pixel(320, 240);
-        assert!((r as i32 - 128).abs() <= 2, "half of white over black, got {r}");
+        assert!(
+            (r as i32 - 128).abs() <= 2,
+            "half of white over black, got {r}"
+        );
         assert_eq!(a, 255);
     }
 
@@ -1738,7 +1738,10 @@ mod tests {
         let provider =
             SolidColorProvider::new().with("red", SolidSource::new([1.0, 0.0, 0.0, 1.0], 640, 480));
 
-        assert_eq!(frame(&c, &project, 0, &provider).pixel(320, 240), [0, 0, 0, 255]);
+        assert_eq!(
+            frame(&c, &project, 0, &provider).pixel(320, 240),
+            [0, 0, 0, 255]
+        );
         assert_eq!(
             frame(&c, &project, 2_500_000, &provider).pixel(320, 240),
             [255, 0, 0, 255]
@@ -1759,9 +1762,7 @@ mod tests {
         // 101 * 4 = 404 bytes per row, padded to 512 on the GPU.
         let project = project([1.0, 0.0, 0.0, 1.0]);
         let provider = SolidColorProvider::new();
-        let f = c
-            .render(&project, 0, (101, 37), &provider)
-            .expect("render");
+        let f = c.render(&project, 0, (101, 37), &provider).expect("render");
         assert_eq!(f.data.len(), 101 * 37 * 4);
         for y in 0..37 {
             for x in 0..101 {
@@ -1860,8 +1861,7 @@ mod tests {
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
                     format,
-                    usage: wgpu::TextureUsages::TEXTURE_BINDING
-                        | wgpu::TextureUsages::COPY_DST,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                     view_formats: &[],
                 });
                 let mut data = Vec::new();
@@ -2205,7 +2205,13 @@ mod tests {
                 ),
                 TestSource::SplitPlanar(left, right, w, h) => SourceFrame::from_planes(
                     Self::split_plane(ctx, w, h, wgpu::TextureFormat::R8Unorm, &[left], &[right]),
-                    Self::plane(ctx, w / 2, h / 2, wgpu::TextureFormat::Rg8Unorm, &[128, 128]),
+                    Self::plane(
+                        ctx,
+                        w / 2,
+                        h / 2,
+                        wgpu::TextureFormat::Rg8Unorm,
+                        &[128, 128],
+                    ),
                     YuvMatrix::Bt709,
                     YuvRange::Full,
                     0,
@@ -2220,11 +2226,7 @@ mod tests {
     /// The window is centred on 4 s and `Easing::Linear` is set explicitly, so
     /// progress at the cut is exactly 0.5 and every assertion below is about
     /// the blend rather than about the easing curve.
-    fn cut_project(
-        kind: TransitionKind,
-        duration: Micros,
-        size: (u32, u32),
-    ) -> Project {
+    fn cut_project(kind: TransitionKind, duration: Micros, size: (u32, u32)) -> Project {
         let mut project = project([0.0, 0.0, 0.0, 1.0]);
         for id in ["left", "right"] {
             project
@@ -2275,15 +2277,26 @@ mod tests {
         };
         // A one-second dissolve at a cut on 4 s: the window is [3.5 s, 4.5 s).
         let project = cut_project(TransitionKind::Dissolve, 1_000_000, (640, 480));
-        let provider = MixedProvider::default().with("left", RED).with("right", BLUE);
+        let provider = MixedProvider::default()
+            .with("left", RED)
+            .with("right", BLUE);
 
         // Before and after the window there is no transition at all, just the
         // clip that owns the instant.
-        assert_eq!(frame(&c, &project, 3_000_000, &provider).pixel(320, 240), [255, 0, 0, 255]);
-        assert_eq!(frame(&c, &project, 5_000_000, &provider).pixel(320, 240), [0, 0, 255, 255]);
+        assert_eq!(
+            frame(&c, &project, 3_000_000, &provider).pixel(320, 240),
+            [255, 0, 0, 255]
+        );
+        assert_eq!(
+            frame(&c, &project, 5_000_000, &provider).pixel(320, 240),
+            [0, 0, 255, 255]
+        );
 
         // At the very start of the window the outgoing clip is still whole.
-        assert_eq!(frame(&c, &project, 3_500_000, &provider).pixel(320, 240), [255, 0, 0, 255]);
+        assert_eq!(
+            frame(&c, &project, 3_500_000, &provider).pixel(320, 240),
+            [255, 0, 0, 255]
+        );
 
         // At the cut, half way: the two clips in equal measure. This is the
         // number the whole feature is about.
@@ -2334,12 +2347,20 @@ mod tests {
             ("software over hardware", white_sw, black_hw),
             ("hardware over hardware", white_hw, black_hw),
         ] {
-            let provider = MixedProvider::default().with("left", left).with("right", right);
+            let provider = MixedProvider::default()
+                .with("left", left)
+                .with("right", right);
 
             let start = frame(&c, &project, 3_500_000, &provider).pixel(320, 240);
-            assert!(start[0] > 250, "{name}: the window opens on white, got {start:?}");
+            assert!(
+                start[0] > 250,
+                "{name}: the window opens on white, got {start:?}"
+            );
             let end = frame(&c, &project, 4_499_999, &provider).pixel(320, 240);
-            assert!(end[0] < 5, "{name}: the window closes on black, got {end:?}");
+            assert!(
+                end[0] < 5,
+                "{name}: the window closes on black, got {end:?}"
+            );
 
             // Half white and half black *in linear light* is 0.5, which an sRGB
             // target stores as 188 — not 128. Asserting the linear number is
@@ -2406,7 +2427,9 @@ mod tests {
         };
         let mut project = cut_project(TransitionKind::Dissolve, 1_000_000, (640, 480));
         project.tracks[0].segments[0].transform.opacity = 0.5;
-        let provider = MixedProvider::default().with("left", RED).with("right", BLUE);
+        let provider = MixedProvider::default()
+            .with("left", RED)
+            .with("right", BLUE);
 
         // Outside the window: half of red over black, through the ordinary
         // quad path.
@@ -2431,7 +2454,9 @@ mod tests {
         };
         let mut project = cut_project(TransitionKind::DipToColor, 1_000_000, (640, 480));
         transition_mut(&mut project).color = [0.0, 1.0, 0.0, 1.0];
-        let provider = MixedProvider::default().with("left", RED).with("right", BLUE);
+        let provider = MixedProvider::default()
+            .with("left", RED)
+            .with("right", BLUE);
 
         assert_eq!(
             frame(&c, &project, 4_000_000, &provider).pixel(320, 240),
@@ -2461,11 +2486,21 @@ mod tests {
             transition.direction = TransitionDirection::Right;
             transition.softness = 0.0;
         }
-        let provider = MixedProvider::default().with("left", RED).with("right", BLUE);
+        let provider = MixedProvider::default()
+            .with("left", RED)
+            .with("right", BLUE);
 
         let f = frame(&c, &project, 4_000_000, &provider);
-        assert_eq!(f.pixel(4, 240), [0, 0, 255, 255], "the left half has arrived");
-        assert_eq!(f.pixel(635, 240), [255, 0, 0, 255], "the right half has not");
+        assert_eq!(
+            f.pixel(4, 240),
+            [0, 0, 255, 255],
+            "the left half has arrived"
+        );
+        assert_eq!(
+            f.pixel(635, 240),
+            [255, 0, 0, 255],
+            "the right half has not"
+        );
     }
 
     /// A transition costs two source lookups and no more.
@@ -2480,12 +2515,16 @@ mod tests {
             return;
         };
         let project = cut_project(TransitionKind::Dissolve, 1_000_000, (640, 480));
-        let provider = MixedProvider::default().with("left", RED).with("right", BLUE);
+        let provider = MixedProvider::default()
+            .with("left", RED)
+            .with("right", BLUE);
 
         frame(&c, &project, 4_000_000, &provider);
         assert_eq!(provider.calls(), 2, "inside the window, both sides");
 
-        let outside = MixedProvider::default().with("left", RED).with("right", BLUE);
+        let outside = MixedProvider::default()
+            .with("left", RED)
+            .with("right", BLUE);
         frame(&c, &project, 3_000_000, &outside);
         assert_eq!(outside.calls(), 1, "outside it, only the live clip");
     }
@@ -2506,12 +2545,23 @@ mod tests {
         let mut project = cut_project(TransitionKind::Dissolve, 1_000_000, (640, 480));
         // Trim the outgoing clip so the two no longer meet.
         project.tracks[0].segments[0].target_range.duration = 3_000_000;
-        let provider = MixedProvider::default().with("left", RED).with("right", BLUE);
+        let provider = MixedProvider::default()
+            .with("left", RED)
+            .with("right", BLUE);
 
         // The gap shows the background, and the clip on each side is whole.
-        assert_eq!(frame(&c, &project, 2_500_000, &provider).pixel(320, 240), [255, 0, 0, 255]);
-        assert_eq!(frame(&c, &project, 3_500_000, &provider).pixel(320, 240), [0, 0, 0, 255]);
-        assert_eq!(frame(&c, &project, 4_100_000, &provider).pixel(320, 240), [0, 0, 255, 255]);
+        assert_eq!(
+            frame(&c, &project, 2_500_000, &provider).pixel(320, 240),
+            [255, 0, 0, 255]
+        );
+        assert_eq!(
+            frame(&c, &project, 3_500_000, &provider).pixel(320, 240),
+            [0, 0, 0, 255]
+        );
+        assert_eq!(
+            frame(&c, &project, 4_100_000, &provider).pixel(320, 240),
+            [0, 0, 255, 255]
+        );
     }
 
     /// A missing source on one side fades to nothing rather than losing the
@@ -2600,7 +2650,11 @@ mod tests {
             // And the two are genuinely mid-transition rather than agreeing on
             // a frame where nothing is happening.
             let [r, _, b, _] = preview.pixel(320, 240);
-            assert!(r > 10 && b > 10, "expected both clips at {at} µs, got {:?}", preview.pixel(320, 240));
+            assert!(
+                r > 10 && b > 10,
+                "expected both clips at {at} µs, got {:?}",
+                preview.pixel(320, 240)
+            );
         }
     }
 
@@ -2683,14 +2737,12 @@ mod tests {
         };
         for (name, source, classify) in split_cases() {
             let mut project = split_project("split");
-            project.tracks[0].segments[0].crop = Some(
-                crate::modules::project::document::Crop {
-                    left: 0.0,
-                    top: 0.0,
-                    right: 0.5,
-                    bottom: 1.0,
-                },
-            );
+            project.tracks[0].segments[0].crop = Some(crate::modules::project::document::Crop {
+                left: 0.0,
+                top: 0.0,
+                right: 0.5,
+                bottom: 1.0,
+            });
             let provider = MixedProvider::default().with("split", source);
             let f = frame(&c, &project, 0, &provider);
 
@@ -2898,11 +2950,10 @@ mod tests {
         intensity: f32,
     ) {
         grade(project, adjust);
-        project.materials.color_adjusts[0].lut =
-            Some(crate::modules::project::document::LutRef {
-                path: path.to_string_lossy().into_owned(),
-                intensity,
-            });
+        project.materials.color_adjusts[0].lut = Some(crate::modules::project::document::LutRef {
+            path: path.to_string_lossy().into_owned(),
+            intensity,
+        });
     }
 
     /// A .cube file on real disk, because the cache is keyed by path + mtime
@@ -2988,21 +3039,43 @@ mod tests {
         // White at brightness -0.4 sits at 0.6 encoded = 153; warm white
         // drops only blue, 1 - 0.6*0.2 = 0.88 = 224; black at +0.4 is 102.
         for (name, source, adjust, expected) in [
-            ("sw darkened", white_sw, [-0.4, 1.0, 1.0, 0.0], [153, 153, 153]),
-            ("hw darkened", white_hw, [-0.4, 1.0, 1.0, 0.0], [153, 153, 153]),
+            (
+                "sw darkened",
+                white_sw,
+                [-0.4, 1.0, 1.0, 0.0],
+                [153, 153, 153],
+            ),
+            (
+                "hw darkened",
+                white_hw,
+                [-0.4, 1.0, 1.0, 0.0],
+                [153, 153, 153],
+            ),
             ("sw warmed", white_sw, [0.0, 1.0, 1.0, 0.6], [255, 255, 224]),
             ("hw warmed", white_hw, [0.0, 1.0, 1.0, 0.6], [255, 255, 224]),
-            ("sw lifted black", black_sw, [0.4, 1.0, 1.0, 0.0], [102, 102, 102]),
-            ("hw lifted black", black_hw, [0.4, 1.0, 1.0, 0.0], [102, 102, 102]),
+            (
+                "sw lifted black",
+                black_sw,
+                [0.4, 1.0, 1.0, 0.0],
+                [102, 102, 102],
+            ),
+            (
+                "hw lifted black",
+                black_hw,
+                [0.4, 1.0, 1.0, 0.0],
+                [102, 102, 102],
+            ),
         ] {
             let mut project = split_project("clip");
             grade(&mut project, adjust);
             let provider = MixedProvider::default().with("clip", source);
             let f = frame(&c, &project, 0, &provider);
             let [r, g, b, a] = f.pixel(320, 240);
-            for (channel, actual, wanted) in
-                [("r", r, expected[0]), ("g", g, expected[1]), ("b", b, expected[2])]
-            {
+            for (channel, actual, wanted) in [
+                ("r", r, expected[0]),
+                ("g", g, expected[1]),
+                ("b", b, expected[2]),
+            ] {
                 assert!(
                     (actual as i32 - wanted).abs() <= 2,
                     "{name}: {channel} is {actual}, expected {wanted}"
@@ -3011,7 +3084,10 @@ mod tests {
             assert_eq!(a, 255, "{name}: a grade never touches coverage");
 
             // The reference agrees with the hand-computed numbers above.
-            let encoded_in = if matches!(source, TestSource::Rgba([0, ..], ..) | TestSource::Planar(0, ..)) {
+            let encoded_in = if matches!(
+                source,
+                TestSource::Rgba([0, ..], ..) | TestSource::Planar(0, ..)
+            ) {
                 [0.0, 0.0, 0.0]
             } else {
                 [1.0, 1.0, 1.0]
@@ -3045,8 +3121,8 @@ mod tests {
         ] {
             let mut project = split_project("clip");
             grade(&mut project, adjust);
-            let provider = MixedProvider::default()
-                .with("clip", TestSource::Planar(200, 128, 128, 640, 480));
+            let provider =
+                MixedProvider::default().with("clip", TestSource::Planar(200, 128, 128, 640, 480));
             let f = frame(&c, &project, 0, &provider);
             let expected = adjust_encoded([200.0 / 255.0; 3], adjust);
             let got = f.pixel(320, 240);
@@ -3162,10 +3238,16 @@ mod tests {
             "identity17",
             &crate::modules::render::lut::fixtures::identity_cube(17),
         );
-        project.materials.color_adjusts[0].lut.as_mut().unwrap().path =
-            path.to_string_lossy().into_owned();
+        project.materials.color_adjusts[0]
+            .lut
+            .as_mut()
+            .unwrap()
+            .path = path.to_string_lossy().into_owned();
         let with_larger = frame(&c, &project, 0, &provider);
-        assert_eq!(before.data, with_larger.data, "a 17-point identity LUT changed pixels");
+        assert_eq!(
+            before.data, with_larger.data,
+            "a 17-point identity LUT changed pixels"
+        );
     }
 
     /// The analytic fixtures, on both decode paths. Inversion and halving on
@@ -3279,7 +3361,10 @@ mod tests {
         grade_with_lut(&mut project, [0.0, 1.0, 1.0, 0.0], &invert, 0.0);
         let off = frame(&c, &project, 0, &provider);
         let plain = frame(&c, &split_project("clip"), 0, &provider);
-        assert_eq!(off.data, plain.data, "intensity 0 must be byte-identical to no LUT");
+        assert_eq!(
+            off.data, plain.data,
+            "intensity 0 must be byte-identical to no LUT"
+        );
     }
 
     /// Grade first, look second. Brightness +0.2 then invert on code 100:
@@ -3333,7 +3418,10 @@ mod tests {
             // rather than re-reading the file.
             let first = frame(&c, &project, 0, &provider);
             let second = frame(&c, &project, 0, &provider);
-            assert_eq!(plain.data, first.data, "{path:?}: identity scalars, no look");
+            assert_eq!(
+                plain.data, first.data,
+                "{path:?}: identity scalars, no look"
+            );
             assert_eq!(first.data, second.data);
         }
 
@@ -3366,7 +3454,10 @@ mod tests {
         grade_with_lut(&mut project, [0.0, 1.0, 1.0, 0.0], &path, 1.0);
 
         let before = frame(&c, &project, 0, &provider).pixel(320, 240);
-        assert!((before[0] as i32 - 200).abs() <= 1, "identity first: {before:?}");
+        assert!(
+            (before[0] as i32 - 200).abs() <= 1,
+            "identity first: {before:?}"
+        );
 
         // A pause so the rewrite cannot land on the same mtime even on a
         // coarse-timestamp filesystem.

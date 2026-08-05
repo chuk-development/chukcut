@@ -259,7 +259,10 @@ mod tests {
     fn long_positions_do_not_overflow() {
         // Three hours of 48 kHz overflows an i64 multiply that is not widened.
         let frames = 3 * 60 * 60 * 48_000u64;
-        assert_eq!(frames_to_micros(frames, RATE), 3 * 60 * 60 * MICROS_PER_SECOND);
+        assert_eq!(
+            frames_to_micros(frames, RATE),
+            3 * 60 * 60 * MICROS_PER_SECOND
+        );
     }
 
     #[test]
@@ -348,7 +351,10 @@ mod tests {
         device.detach();
         let after = source.now();
         assert!(after >= before, "{after} < {before}");
-        assert!(after - before < MICROS_PER_SECOND, "and it did not leap forward either");
+        assert!(
+            after - before < MICROS_PER_SECOND,
+            "and it did not leap forward either"
+        );
     }
 
     #[test]

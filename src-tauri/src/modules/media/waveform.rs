@@ -246,12 +246,13 @@ fn analyze(path: &Path) -> Result<Waveform> {
     let parameters = stream.parameters();
     let codec_name = parameters.id().name().to_string();
 
-    let context = ffmpeg::codec::context::Context::from_parameters(parameters).map_err(|source| {
-        MediaError::Decode {
-            path: path.to_path_buf(),
-            source,
-        }
-    })?;
+    let context =
+        ffmpeg::codec::context::Context::from_parameters(parameters).map_err(|source| {
+            MediaError::Decode {
+                path: path.to_path_buf(),
+                source,
+            }
+        })?;
     let mut decoder = context
         .decoder()
         .audio()
@@ -320,7 +321,13 @@ fn analyze(path: &Path) -> Result<Waveform> {
                 path: path.to_path_buf(),
                 source,
             })?;
-        drain(path, &mut decoder, &mut resampler, layout_mask, &mut envelope)?;
+        drain(
+            path,
+            &mut decoder,
+            &mut resampler,
+            layout_mask,
+            &mut envelope,
+        )?;
     }
 
     // Codecs with a decode delay hold the tail of the file until told the
@@ -329,7 +336,13 @@ fn analyze(path: &Path) -> Result<Waveform> {
         path: path.to_path_buf(),
         source,
     })?;
-    drain(path, &mut decoder, &mut resampler, layout_mask, &mut envelope)?;
+    drain(
+        path,
+        &mut decoder,
+        &mut resampler,
+        layout_mask,
+        &mut envelope,
+    )?;
 
     Ok(envelope.finish(duration, rate, channels))
 }
@@ -502,8 +515,14 @@ impl Envelope {
         let (min, max, rms) = if peak > 0.0 && peak.is_finite() {
             let scale = 1.0 / peak;
             (
-                self.min.iter().map(|v| (v * scale).clamp(-1.0, 1.0)).collect(),
-                self.max.iter().map(|v| (v * scale).clamp(-1.0, 1.0)).collect(),
+                self.min
+                    .iter()
+                    .map(|v| (v * scale).clamp(-1.0, 1.0))
+                    .collect(),
+                self.max
+                    .iter()
+                    .map(|v| (v * scale).clamp(-1.0, 1.0))
+                    .collect(),
                 rms.iter().map(|v| (v * scale).clamp(0.0, 1.0)).collect(),
             )
         } else {
@@ -948,13 +967,21 @@ mod tests {
 
         let truncated = dir.join("truncated.env");
         std::fs::write(&truncated, &bytes[..bytes.len() - 4]).unwrap();
-        assert_eq!(read_cache(&truncated), None, "a short file is not a waveform");
+        assert_eq!(
+            read_cache(&truncated),
+            None,
+            "a short file is not a waveform"
+        );
 
         let foreign = dir.join("foreign.env");
         let mut wrong = bytes.clone();
         wrong[0] = b'X';
         std::fs::write(&foreign, &wrong).unwrap();
-        assert_eq!(read_cache(&foreign), None, "another format is not a waveform");
+        assert_eq!(
+            read_cache(&foreign),
+            None,
+            "another format is not a waveform"
+        );
 
         let older = dir.join("older.env");
         let mut stale = bytes.clone();

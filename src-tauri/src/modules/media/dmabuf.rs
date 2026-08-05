@@ -247,7 +247,9 @@ impl DmabufFrame {
     /// How many distinct DRM buffers back this frame. One, on every driver
     /// seen so far; the format allows up to four.
     pub fn objects(&self) -> usize {
-        self.descriptor().map(|d| d.nb_objects as usize).unwrap_or(0)
+        self.descriptor()
+            .map(|d| d.nb_objects as usize)
+            .unwrap_or(0)
     }
 
     /// Every plane, in the order a software frame would have them.
@@ -332,7 +334,16 @@ impl std::fmt::Debug for DmabufFrame {
                 "layers",
                 &planes
                     .iter()
-                    .map(|p| format!("{} {}x{} @{}+{}", p.fourcc_name(), p.width, p.height, p.offset, p.pitch))
+                    .map(|p| {
+                        format!(
+                            "{} {}x{} @{}+{}",
+                            p.fourcc_name(),
+                            p.width,
+                            p.height,
+                            p.offset,
+                            p.pitch
+                        )
+                    })
                     .collect::<Vec<_>>(),
             )
             .field(
@@ -391,9 +402,15 @@ mod tests {
     fn a_chroma_plane_is_half_the_picture_in_both_axes() {
         // Getting this wrong is how a UV texture samples off the end of its
         // plane, which on a tiled buffer is not a crash — it is garbage colour.
-        assert_eq!(plane_size(fourcc_code(b"R8  "), 0, 1920, 1080), (1920, 1080));
+        assert_eq!(
+            plane_size(fourcc_code(b"R8  "), 0, 1920, 1080),
+            (1920, 1080)
+        );
         assert_eq!(plane_size(fourcc_code(b"GR88"), 0, 1920, 1080), (960, 540));
-        assert_eq!(plane_size(fourcc_code(b"NV12"), 0, 1920, 1080), (1920, 1080));
+        assert_eq!(
+            plane_size(fourcc_code(b"NV12"), 0, 1920, 1080),
+            (1920, 1080)
+        );
         assert_eq!(plane_size(fourcc_code(b"NV12"), 1, 1920, 1080), (960, 540));
         // Odd sizes round up, so the chroma plane covers every luma sample.
         assert_eq!(plane_size(fourcc_code(b"GR88"), 0, 1921, 1081), (961, 541));

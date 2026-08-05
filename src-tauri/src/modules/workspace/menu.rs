@@ -248,7 +248,12 @@ pub struct MenuSection {
     pub entries: &'static [Entry],
 }
 
-const fn item(id: &'static str, label: &'static str, accel: Option<&'static str>, gate: Gate) -> Entry {
+const fn item(
+    id: &'static str,
+    label: &'static str,
+    accel: Option<&'static str>,
+    gate: Gate,
+) -> Entry {
     Entry::Item(Item {
         id,
         label,
@@ -264,23 +269,53 @@ pub const ITEMS: &[MenuSection] = &[
         title: "File",
         entries: &[
             item(ids::FILE_NEW, "New Project", Some("Ctrl+N"), Gate::Always),
-            item(ids::FILE_OPEN, "Open Project…", Some("Ctrl+O"), Gate::Always),
+            item(
+                ids::FILE_OPEN,
+                "Open Project…",
+                Some("Ctrl+O"),
+                Gate::Always,
+            ),
             // The rows — one per remembered project — are injected by
             // `describe` from the list on disk; only Clear List is static.
             Entry::Submenu(Submenu {
                 id: ids::FILE_RECENT,
                 label: "Recent Projects",
                 gate: Gate::Always,
-                entries: &[item(ids::FILE_RECENT_CLEAR, "Clear List", None, Gate::Always)],
+                entries: &[item(
+                    ids::FILE_RECENT_CLEAR,
+                    "Clear List",
+                    None,
+                    Gate::Always,
+                )],
             }),
             Entry::Separator,
             // Greyed when there is nothing to write. A Save that is a no-op
             // still teaches the user that Save sometimes does nothing.
-            item(ids::FILE_SAVE, "Save", Some("Ctrl+S"), Gate::State(|s| s.has_project && s.dirty)),
-            item(ids::FILE_SAVE_AS, "Save As…", Some("Ctrl+Shift+S"), Gate::State(|s| s.has_project)),
+            item(
+                ids::FILE_SAVE,
+                "Save",
+                Some("Ctrl+S"),
+                Gate::State(|s| s.has_project && s.dirty),
+            ),
+            item(
+                ids::FILE_SAVE_AS,
+                "Save As…",
+                Some("Ctrl+Shift+S"),
+                Gate::State(|s| s.has_project),
+            ),
             Entry::Separator,
-            item(ids::FILE_IMPORT, "Import Media…", Some("Ctrl+I"), Gate::State(|s| s.has_project)),
-            item(ids::FILE_EXPORT, "Export…", Some("Ctrl+E"), Gate::State(|s| s.has_project)),
+            item(
+                ids::FILE_IMPORT,
+                "Import Media…",
+                Some("Ctrl+I"),
+                Gate::State(|s| s.has_project),
+            ),
+            item(
+                ids::FILE_EXPORT,
+                "Export…",
+                Some("Ctrl+E"),
+                Gate::State(|s| s.has_project),
+            ),
             Entry::Separator,
             // The document's own settings — name, canvas, fps, background —
             // as opposed to Ctrl+, which is the application's.
@@ -297,18 +332,53 @@ pub const ITEMS: &[MenuSection] = &[
     MenuSection {
         title: "Edit",
         entries: &[
-            item(ids::EDIT_UNDO, "Undo", Some("Ctrl+Z"), Gate::State(|s| s.can_undo)),
-            item(ids::EDIT_REDO, "Redo", Some("Ctrl+Shift+Z"), Gate::State(|s| s.can_redo)),
+            item(
+                ids::EDIT_UNDO,
+                "Undo",
+                Some("Ctrl+Z"),
+                Gate::State(|s| s.can_undo),
+            ),
+            item(
+                ids::EDIT_REDO,
+                "Redo",
+                Some("Ctrl+Shift+Z"),
+                Gate::State(|s| s.can_redo),
+            ),
             Entry::Separator,
             // The clipboard holds detached clips and lives in the webview, so
             // Cut and Copy need something selected and Paste needs something
             // copied.
-            item(ids::EDIT_CUT, "Cut", Some("Ctrl+X"), Gate::State(|s| s.has_selection)),
-            item(ids::EDIT_COPY, "Copy", Some("Ctrl+C"), Gate::State(|s| s.has_selection)),
-            item(ids::EDIT_PASTE, "Paste", Some("Ctrl+V"), Gate::State(|s| s.has_project && s.has_clipboard)),
-            item(ids::EDIT_DUPLICATE, "Duplicate", Some("Ctrl+D"), Gate::State(|s| s.has_selection)),
+            item(
+                ids::EDIT_CUT,
+                "Cut",
+                Some("Ctrl+X"),
+                Gate::State(|s| s.has_selection),
+            ),
+            item(
+                ids::EDIT_COPY,
+                "Copy",
+                Some("Ctrl+C"),
+                Gate::State(|s| s.has_selection),
+            ),
+            item(
+                ids::EDIT_PASTE,
+                "Paste",
+                Some("Ctrl+V"),
+                Gate::State(|s| s.has_project && s.has_clipboard),
+            ),
+            item(
+                ids::EDIT_DUPLICATE,
+                "Duplicate",
+                Some("Ctrl+D"),
+                Gate::State(|s| s.has_selection),
+            ),
             Entry::Separator,
-            item(ids::EDIT_DELETE, "Delete Clip", Some("Del"), Gate::State(|s| s.has_selection)),
+            item(
+                ids::EDIT_DELETE,
+                "Delete Clip",
+                Some("Del"),
+                Gate::State(|s| s.has_selection),
+            ),
             item(
                 ids::EDIT_SELECT_ALL,
                 "Select All",
@@ -317,15 +387,35 @@ pub const ITEMS: &[MenuSection] = &[
                 // timeline lights up Delete and Copy for a selection of nothing.
                 Gate::State(|s| s.has_project && s.has_clips),
             ),
-            item(ids::EDIT_SPLIT, "Split Clip", Some("C"), Gate::State(|s| s.can_split)),
+            item(
+                ids::EDIT_SPLIT,
+                "Split Clip",
+                Some("C"),
+                Gate::State(|s| s.can_split),
+            ),
         ],
     },
     MenuSection {
         title: "View",
         entries: &[
-            item(ids::VIEW_ZOOM_IN, "Zoom In", Some("Ctrl+="), Gate::State(|s| s.has_project)),
-            item(ids::VIEW_ZOOM_OUT, "Zoom Out", Some("Ctrl+-"), Gate::State(|s| s.has_project)),
-            item(ids::VIEW_ZOOM_FIT, "Fit Timeline", Some("Ctrl+0"), Gate::State(|s| s.can_fit)),
+            item(
+                ids::VIEW_ZOOM_IN,
+                "Zoom In",
+                Some("Ctrl+="),
+                Gate::State(|s| s.has_project),
+            ),
+            item(
+                ids::VIEW_ZOOM_OUT,
+                "Zoom Out",
+                Some("Ctrl+-"),
+                Gate::State(|s| s.has_project),
+            ),
+            item(
+                ids::VIEW_ZOOM_FIT,
+                "Fit Timeline",
+                Some("Ctrl+0"),
+                Gate::State(|s| s.can_fit),
+            ),
             // Fixed steps, labelled in timeline-pixels per second of media
             // because that is the unit the ruler makes visible. The values are
             // in `workspace/lib/menu.ts::ZOOM_PRESETS`, clamped by the
@@ -335,10 +425,30 @@ pub const ITEMS: &[MenuSection] = &[
                 label: "Zoom Preset",
                 gate: Gate::State(|s| s.has_project),
                 entries: &[
-                    item(ids::VIEW_ZOOM_DETAIL, "Detail — 400 px/s", None, Gate::State(|s| s.has_project)),
-                    item(ids::VIEW_ZOOM_STANDARD, "Standard — 100 px/s", None, Gate::State(|s| s.has_project)),
-                    item(ids::VIEW_ZOOM_OVERVIEW, "Overview — 10 px/s", None, Gate::State(|s| s.has_project)),
-                    item(ids::VIEW_ZOOM_HOUR, "Whole hour — 2 px/s", None, Gate::State(|s| s.has_project)),
+                    item(
+                        ids::VIEW_ZOOM_DETAIL,
+                        "Detail — 400 px/s",
+                        None,
+                        Gate::State(|s| s.has_project),
+                    ),
+                    item(
+                        ids::VIEW_ZOOM_STANDARD,
+                        "Standard — 100 px/s",
+                        None,
+                        Gate::State(|s| s.has_project),
+                    ),
+                    item(
+                        ids::VIEW_ZOOM_OVERVIEW,
+                        "Overview — 10 px/s",
+                        None,
+                        Gate::State(|s| s.has_project),
+                    ),
+                    item(
+                        ids::VIEW_ZOOM_HOUR,
+                        "Whole hour — 2 px/s",
+                        None,
+                        Gate::State(|s| s.has_project),
+                    ),
                 ],
             }),
             item(
@@ -348,19 +458,39 @@ pub const ITEMS: &[MenuSection] = &[
                 Gate::State(|s| s.has_project),
             ),
             Entry::Separator,
-            item(ids::VIEW_FULLSCREEN, "Toggle Fullscreen", Some("F"), Gate::Always),
-            item(ids::VIEW_LOGS, "Show Log Directory", None, Gate::Capability(|c| c.logs)),
+            item(
+                ids::VIEW_FULLSCREEN,
+                "Toggle Fullscreen",
+                Some("F"),
+                Gate::Always,
+            ),
+            item(
+                ids::VIEW_LOGS,
+                "Show Log Directory",
+                None,
+                Gate::Capability(|c| c.logs),
+            ),
         ],
     },
     MenuSection {
         title: "Help",
         entries: &[
             item(ids::HELP_ABOUT, "About chukcut", None, Gate::Always),
-            item(ids::HELP_SHORTCUTS, "Keyboard Shortcuts", Some("?"), Gate::Always),
+            item(
+                ids::HELP_SHORTCUTS,
+                "Keyboard Shortcuts",
+                Some("?"),
+                Gate::Always,
+            ),
             // The docs are markdown in the repository. There is no published
             // copy and nothing is bundled into the app, so this can only be
             // offered from a source checkout.
-            item(ids::HELP_DOCS, "Documentation", None, Gate::Capability(|c| c.docs)),
+            item(
+                ids::HELP_DOCS,
+                "Documentation",
+                None,
+                Gate::Capability(|c| c.docs),
+            ),
         ],
     },
 ];
@@ -625,7 +755,10 @@ pub fn run<R: Runtime>(app: &AppHandle<R>, id: &str) {
         // The webview decides what it can run and asks for the rest, so this is
         // the two halves disagreeing about which of them owns an id — a bug in
         // `workspace/lib/menu.ts`, and silence would hide it.
-        _ => tracing::warn!(id, "the webview asked Rust to run a menu item Rust does not own"),
+        _ => tracing::warn!(
+            id,
+            "the webview asked Rust to run a menu item Rust does not own"
+        ),
     }
 }
 
@@ -829,7 +962,12 @@ mod tests {
         let empty = MenuState::default();
         // New and Open are how you get a document, so they cannot depend on
         // having one; Quit and About are about the app, not the work.
-        for id in [ids::FILE_NEW, ids::FILE_OPEN, ids::FILE_QUIT, ids::HELP_ABOUT] {
+        for id in [
+            ids::FILE_NEW,
+            ids::FILE_OPEN,
+            ids::FILE_QUIT,
+            ids::HELP_ABOUT,
+        ] {
             assert!(is_enabled(&empty, id), "{id} must work with nothing open");
         }
         for id in [
@@ -851,7 +989,10 @@ mod tests {
             ids::VIEW_ZOOM_HOUR,
             ids::VIEW_CENTER_PLAYHEAD,
         ] {
-            assert!(!is_enabled(&empty, id), "{id} must be grey with nothing open");
+            assert!(
+                !is_enabled(&empty, id),
+                "{id} must be grey with nothing open"
+            );
         }
     }
 
@@ -916,7 +1057,10 @@ mod tests {
             .filter(|item| unavailable_reason(item.id).is_some())
             .map(|item| item.id)
             .collect();
-        assert!(stubs.is_empty(), "these items are wired to nothing: {stubs:?}");
+        assert!(
+            stubs.is_empty(),
+            "these items are wired to nothing: {stubs:?}"
+        );
     }
 
     #[test]
@@ -1099,7 +1243,8 @@ mod tests {
                             0
                         };
                         assert_eq!(view.entries.len(), submenu.entries.len() + dynamic);
-                        for (inner, origin) in view.entries.iter().skip(dynamic).zip(submenu.entries)
+                        for (inner, origin) in
+                            view.entries.iter().skip(dynamic).zip(submenu.entries)
                         {
                             match (inner, origin) {
                                 (EntryView::Separator, Entry::Separator) => {}
@@ -1237,7 +1382,12 @@ mod tests {
         // Everything else needs the document, a dialog or a file picker, all of
         // which are in the webview. The two halves splitting the list
         // differently is exactly the bug `run`'s fallback warns about.
-        for id in [ids::FILE_QUIT, ids::VIEW_LOGS, ids::HELP_DOCS, ids::HELP_ABOUT] {
+        for id in [
+            ids::FILE_QUIT,
+            ids::VIEW_LOGS,
+            ids::HELP_DOCS,
+            ids::HELP_ABOUT,
+        ] {
             assert!(is_ours(id), "{id} is Rust's to run");
         }
         for id in [

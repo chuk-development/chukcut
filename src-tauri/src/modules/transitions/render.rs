@@ -429,8 +429,7 @@ mod tests {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        let pixels: Vec<u8> = std::iter::repeat(color)
-            .take((SIZE * SIZE) as usize)
+        let pixels: Vec<u8> = std::iter::repeat_n(color, (SIZE * SIZE) as usize)
             .flatten()
             .collect();
         ctx.queue().write_texture(
@@ -485,9 +484,7 @@ mod tests {
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
-        let mut encoder = ctx
-            .device()
-            .create_command_encoder(&Default::default());
+        let mut encoder = ctx.device().create_command_encoder(&Default::default());
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
                 texture,
@@ -642,7 +639,11 @@ mod tests {
         left.direction = TransitionDirection::Left;
 
         let half = blend(&ctx, &pipeline, left);
-        assert_eq!(half[0], [255, 0, 0, 255], "left edge should still be outgoing");
+        assert_eq!(
+            half[0],
+            [255, 0, 0, 255],
+            "left edge should still be outgoing"
+        );
         assert_eq!(half[(SIZE - 1) as usize], [0, 0, 255, 255]);
     }
 
@@ -710,8 +711,20 @@ mod tests {
                 })],
                 ..Default::default()
             });
-            pipeline.draw(&ctx, &mut pass, 0, &params(TransitionKind::Dissolve, 0.0), &layers);
-            pipeline.draw(&ctx, &mut pass, 1, &params(TransitionKind::Dissolve, 1.0), &layers);
+            pipeline.draw(
+                &ctx,
+                &mut pass,
+                0,
+                &params(TransitionKind::Dissolve, 0.0),
+                &layers,
+            );
+            pipeline.draw(
+                &ctx,
+                &mut pass,
+                1,
+                &params(TransitionKind::Dissolve, 1.0),
+                &layers,
+            );
         }
         ctx.queue().submit(Some(encoder.finish()));
 

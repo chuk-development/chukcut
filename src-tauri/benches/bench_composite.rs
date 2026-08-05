@@ -210,7 +210,7 @@ fn timeline(layers: usize, canvas: (u32, u32), fancy: bool) -> Project {
             // A 2% margin: enough that the UV rectangle is not the identity and
             // `crop_uv` has real work, small enough that the quad still fills
             // the canvas.
-            crop: fancy.then(|| Crop {
+            crop: fancy.then_some(Crop {
                 left: 0.02,
                 top: 0.02,
                 right: 0.98,
@@ -257,10 +257,7 @@ fn keyframes(property: AnimatableProperty, span: Micros, from: f32, to: f32) -> 
 /// nothing about the table is degenerate (an identity LUT tempts a future
 /// cache into special-casing it and benchmarking the special case).
 fn warm_lut_file() -> std::path::PathBuf {
-    let path = std::env::temp_dir().join(format!(
-        "chukcut-bench-warm-{}.cube",
-        std::process::id()
-    ));
+    let path = std::env::temp_dir().join(format!("chukcut-bench-warm-{}.cube", std::process::id()));
     let n = 33u32;
     let last = (n - 1) as f32;
     let mut text = format!("LUT_3D_SIZE {n}\n");
@@ -328,7 +325,14 @@ pub fn run(ctx: &Arc<RenderContext>, budget: &Budget) -> Vec<Measurement> {
             // A whole frame, readback included: what the preview and the export
             // both pay per frame for the composite stage.
             let samples = rounds::<String>(budget.rounds, |_| {
-                Ok(sweep(&compositor, &project, &provider, canvas, budget.frames, true))
+                Ok(sweep(
+                    &compositor,
+                    &project,
+                    &provider,
+                    canvas,
+                    budget.frames,
+                    true,
+                ))
             })
             .expect("compositing does not fail once the first frame has");
             compositor.reset_stats();
@@ -338,19 +342,25 @@ pub fn run(ctx: &Arc<RenderContext>, budget: &Budget) -> Vec<Measurement> {
             // between the two rows is the map-and-copy `docs/STATUS.md` puts at
             // ~5 ms for a 1080p frame.
             let samples = rounds::<String>(budget.rounds, |_| {
-                Ok(sweep(&compositor, &project, &provider, canvas, budget.frames, false))
+                Ok(sweep(
+                    &compositor,
+                    &project,
+                    &provider,
+                    canvas,
+                    budget.frames,
+                    false,
+                ))
             })
             .expect("compositing does not fail once the first frame has");
             let stats = compositor.stats();
             compositor.reset_stats();
 
-            let without = Measurement::ms(GROUP, format!("{name}, GPU only"), samples).with_note(
-                format!(
+            let without =
+                Measurement::ms(GROUP, format!("{name}, GPU only"), samples).with_note(format!(
                     "sources {:.2} ms, composite {:.2} ms",
                     stats.per_frame(stats.sources_ns) / 1e6,
                     stats.per_frame(stats.composite_ns) / 1e6
-                ),
-            );
+                ));
             out.push(with_readback);
             out.push(without);
         }
@@ -369,26 +379,39 @@ pub fn run(ctx: &Arc<RenderContext>, budget: &Budget) -> Vec<Measurement> {
         let name = format!("{layers} layer(s), grade+lut");
 
         let samples = rounds::<String>(budget.rounds, |_| {
-            Ok(sweep(&compositor, &project, &provider, canvas, budget.frames, true))
+            Ok(sweep(
+                &compositor,
+                &project,
+                &provider,
+                canvas,
+                budget.frames,
+                true,
+            ))
         })
         .expect("compositing does not fail once the first frame has");
         compositor.reset_stats();
         let with_readback = Measurement::ms(GROUP, name.clone(), samples);
 
         let samples = rounds::<String>(budget.rounds, |_| {
-            Ok(sweep(&compositor, &project, &provider, canvas, budget.frames, false))
+            Ok(sweep(
+                &compositor,
+                &project,
+                &provider,
+                canvas,
+                budget.frames,
+                false,
+            ))
         })
         .expect("compositing does not fail once the first frame has");
         let stats = compositor.stats();
         compositor.reset_stats();
 
-        let without = Measurement::ms(GROUP, format!("{name}, GPU only"), samples).with_note(
-            format!(
+        let without =
+            Measurement::ms(GROUP, format!("{name}, GPU only"), samples).with_note(format!(
                 "sources {:.2} ms, composite {:.2} ms",
                 stats.per_frame(stats.sources_ns) / 1e6,
                 stats.per_frame(stats.composite_ns) / 1e6
-            ),
-        );
+            ));
         out.push(with_readback);
         out.push(without);
     }

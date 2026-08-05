@@ -50,12 +50,7 @@ struct Wav {
 impl Wav {
     /// Write `frames` sample frames of `channels` channels, each sample taken
     /// from `sample(frame, channel)` in `-1.0..=1.0`.
-    fn new(
-        name: &str,
-        channels: u16,
-        frames: usize,
-        sample: impl Fn(usize, u16) -> f32,
-    ) -> Self {
+    fn new(name: &str, channels: u16, frames: usize, sample: impl Fn(usize, u16) -> f32) -> Self {
         let channels = channels.max(1);
         let data_len = frames * channels as usize * 2;
 
@@ -186,7 +181,10 @@ fn rms_separates_a_sine_from_its_own_peak() {
         "rms {} should be about 0.707 of the peak",
         drawn.rms[0]
     );
-    assert!(drawn.rms[0] < drawn.max[0], "the body sits inside the outline");
+    assert!(
+        drawn.rms[0] < drawn.max[0],
+        "the body sits inside the outline"
+    );
 }
 
 #[test]
@@ -247,7 +245,10 @@ fn a_file_with_no_audio_at_all_says_so_with_the_path_in_it() {
         .expect_err("the counter clip has no audio stream")
         .to_string();
     assert!(error.contains("no audio stream"), "{error}");
-    assert!(error.contains("counter"), "the message names the file: {error}");
+    assert!(
+        error.contains("counter"),
+        "the message names the file: {error}"
+    );
 }
 
 #[test]
@@ -257,7 +258,10 @@ fn a_compressed_file_decodes_through_the_same_path() {
     let media = require_media!();
     let drawn = envelope(&media.audio_only, 128);
     assert_eq!(drawn.buckets, 128);
-    assert!(drawn.max.iter().any(|v| *v > 0.5), "a sine reaches full scale");
+    assert!(
+        drawn.max.iter().any(|v| *v > 0.5),
+        "a sine reaches full scale"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -408,10 +412,8 @@ struct ColdClip {
 
 impl ColdClip {
     fn of(source: &Path, name: &str) -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "chukcut-thumbs-{name}-{}.mp4",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("chukcut-thumbs-{name}-{}.mp4", std::process::id()));
         std::fs::copy(source, &path).expect("copy the fixture");
         Self { path }
     }
@@ -468,7 +470,9 @@ fn tiles_arrive_before_the_strip_is_finished() {
             "thumbnails must live under the workspace cache root: {path:?}"
         );
         assert!(
-            std::fs::metadata(path).map(|m| m.len() > 0).unwrap_or(false),
+            std::fs::metadata(path)
+                .map(|m| m.len() > 0)
+                .unwrap_or(false),
             "{path:?} is empty"
         );
     }
@@ -554,7 +558,9 @@ fn cancelling_mid_flight_stops_the_job_and_keeps_what_it_had() {
     // Every tile that *was* produced is a real file, cancelled or not: a
     // half-written JPEG would be cached forever.
     for path in &files {
-        assert!(std::fs::metadata(path).map(|m| m.len() > 0).unwrap_or(false));
+        assert!(std::fs::metadata(path)
+            .map(|m| m.len() > 0)
+            .unwrap_or(false));
     }
 }
 

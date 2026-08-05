@@ -146,8 +146,24 @@ const RESERVED_IN_450: &[&str] = &[
 ];
 
 const ES1_TYPES: &[&str] = &[
-    "void", "bool", "int", "float", "vec2", "vec3", "vec4", "bvec2", "bvec3", "bvec4", "ivec2",
-    "ivec3", "ivec4", "mat2", "mat3", "mat4", "sampler2D", "samplerCube",
+    "void",
+    "bool",
+    "int",
+    "float",
+    "vec2",
+    "vec3",
+    "vec4",
+    "bvec2",
+    "bvec3",
+    "bvec4",
+    "ivec2",
+    "ivec3",
+    "ivec4",
+    "mat2",
+    "mat3",
+    "mat4",
+    "sampler2D",
+    "samplerCube",
 ];
 
 /// Blank out comments, keeping line structure, so no replacement below ever
@@ -400,14 +416,19 @@ pub fn rewrite(source: &str, stage: Stage) -> Rewritten {
         // `gl_FragData[N]` — 72 of the sampled shaders write it. Only the
         // indices actually written get an output, because declaring unused
         // ones would demand colour attachments the pass does not have.
-        let highest = (0..8).filter(|n| body.contains(&format!("gl_FragData[{n}]"))).max();
+        let highest = (0..8)
+            .filter(|n| body.contains(&format!("gl_FragData[{n}]")))
+            .max();
         if let Some(hi) = highest {
             for n in 0..=hi {
                 decls.push_str(&format!(
                     "layout(location = {}) out vec4 chukcut_FragData{n};\n",
                     n + outputs
                 ));
-                body = body.replace(&format!("gl_FragData[{n}]"), &format!("chukcut_FragData{n}"));
+                body = body.replace(
+                    &format!("gl_FragData[{n}]"),
+                    &format!("chukcut_FragData{n}"),
+                );
             }
             outputs += hi + 1;
         }
@@ -456,7 +477,9 @@ void main() {
         assert!(!contains_ident(&out.source, "varying"));
         assert!(!contains_ident(&out.source, "texture2D"));
         assert!(out.source.contains("in vec2 v_uv;"));
-        assert!(out.source.contains("layout(location = 0) out vec4 chukcut_FragColor;"));
+        assert!(out
+            .source
+            .contains("layout(location = 0) out vec4 chukcut_FragColor;"));
     }
 
     #[test]
@@ -464,7 +487,9 @@ void main() {
         // Vulkan GLSL rejects a loose non-opaque uniform, and a sampler cannot
         // go in a block. Getting this backwards fails at glslang, loudly.
         let out = rewrite(ES1, Stage::Fragment);
-        assert!(out.source.contains("layout(std140) uniform ChukcutUniforms {"));
+        assert!(out
+            .source
+            .contains("layout(std140) uniform ChukcutUniforms {"));
         assert!(out.source.contains("    float u_intensity;"));
         assert!(out.source.contains("    vec2 u_center;"));
         assert!(out.source.contains("uniform sampler2D u_inputTexture;"));
@@ -489,7 +514,8 @@ void main() {
     #[test]
     fn a_variable_named_sample_is_renamed_because_450_reads_it_as_a_qualifier() {
         // Found by running the corpus: a Sobel filter declares `vec3 sample;`.
-        let source = "precision highp float;\nvoid main() {\n  vec3 sample;\n  sample = vec3(1.0);\n}\n";
+        let source =
+            "precision highp float;\nvoid main() {\n  vec3 sample;\n  sample = vec3(1.0);\n}\n";
         let out = rewrite(source, Stage::Fragment);
         assert!(!contains_ident(&out.source, "sample"));
         assert!(out.source.contains("vec3 sample_;"));
@@ -532,8 +558,12 @@ void main() {
         );
         let out = rewrite(source, Stage::Fragment);
         assert_eq!(out.outputs, 2);
-        assert!(out.source.contains("layout(location = 0) out vec4 chukcut_FragData0;"));
-        assert!(out.source.contains("layout(location = 1) out vec4 chukcut_FragData1;"));
+        assert!(out
+            .source
+            .contains("layout(location = 0) out vec4 chukcut_FragData0;"));
+        assert!(out
+            .source
+            .contains("layout(location = 1) out vec4 chukcut_FragData1;"));
         assert!(!out.source.contains("gl_FragData"));
     }
 

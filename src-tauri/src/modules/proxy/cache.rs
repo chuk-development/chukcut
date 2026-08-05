@@ -237,7 +237,11 @@ impl ProxyCache {
 
     /// Where a proxy for `key` would be written.
     pub fn path_for(&self, key: &SourceKey) -> PathBuf {
-        self.root.join(format!("{}.{}", key.digest(), super::generate::PROXY_EXTENSION))
+        self.root.join(format!(
+            "{}.{}",
+            key.digest(),
+            super::generate::PROXY_EXTENSION
+        ))
     }
 
     /// The proxy for `source`, if one exists and is still valid.
@@ -285,7 +289,9 @@ impl ProxyCache {
     /// a log line and a test.
     pub fn insert(&self, key: SourceKey, width: u32, height: u32) -> Result<usize> {
         let file = self.path_for(&key);
-        let bytes = std::fs::metadata(&file).map_err(ProxyError::io(&file))?.len();
+        let bytes = std::fs::metadata(&file)
+            .map_err(ProxyError::io(&file))?
+            .len();
         let name = file
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -396,7 +402,7 @@ impl ProxyCache {
         let path = self.root.join(INDEX_FILE);
         let temporary = path.with_extension("json.tmp");
         let write = serde_json::to_vec_pretty(index)
-            .map_err(|e| std::io::Error::other(e))
+            .map_err(std::io::Error::other)
             .and_then(|bytes| std::fs::write(&temporary, bytes))
             .and_then(|()| std::fs::rename(&temporary, &path));
         if let Err(error) = write {
@@ -454,7 +460,9 @@ fn head_and_tail(file: &mut std::fs::File, length: u64) -> u64 {
     }
     if length > FINGERPRINT_SAMPLE as u64 {
         let mut tail = vec![0u8; FINGERPRINT_SAMPLE];
-        if file.seek(SeekFrom::End(-(FINGERPRINT_SAMPLE as i64))).is_ok()
+        if file
+            .seek(SeekFrom::End(-(FINGERPRINT_SAMPLE as i64)))
+            .is_ok()
             && file.read_exact(&mut tail).is_ok()
         {
             hash = fnv1a(hash, &tail);
@@ -679,7 +687,10 @@ mod tests {
 
         assert_eq!(cache.stats().entries, 2);
         assert!(cache.path_for(&key).exists(), "the new one stays");
-        assert!(cache.path_for(&keys[1].1).exists(), "b was used most recently");
+        assert!(
+            cache.path_for(&keys[1].1).exists(),
+            "b was used most recently"
+        );
         assert!(!cache.path_for(&keys[2].1).exists(), "c was the stalest");
     }
 
@@ -749,7 +760,10 @@ mod tests {
             ..a.clone()
         };
 
-        let same_everything_but_content = SourceKey { content: 8, ..a.clone() };
+        let same_everything_but_content = SourceKey {
+            content: 8,
+            ..a.clone()
+        };
 
         assert_ne!(a.digest(), same_path_new_content.digest());
         assert_ne!(a.digest(), other_file.digest());

@@ -386,14 +386,19 @@ fn probe(ctx: &Arc<RenderContext>) -> std::result::Result<(), String> {
     // Dropped before the ring, which is what lets the ring free its memory.
     drop(surface);
 
-    let (rgb, got_w, got_h) =
-        super::encoder::decode_jpeg_rgb(&jpeg).map_err(|e| format!("the result is not a JPEG: {e}"))?;
+    let (rgb, got_w, got_h) = super::encoder::decode_jpeg_rgb(&jpeg)
+        .map_err(|e| format!("the result is not a JPEG: {e}"))?;
     if (got_w, got_h) != (WIDTH, HEIGHT) {
-        return Err(format!("it came back {got_w}x{got_h} rather than {WIDTH}x{HEIGHT}"));
+        return Err(format!(
+            "it came back {got_w}x{got_h} rather than {WIDTH}x{HEIGHT}"
+        ));
     }
 
     for row in 0..h {
-        let mean: u32 = (0..w).map(|col| rgb[(row * w + col) * 3] as u32).sum::<u32>() / w as u32;
+        let mean: u32 = (0..w)
+            .map(|col| rgb[(row * w + col) * 3] as u32)
+            .sum::<u32>()
+            / w as u32;
         // Six counts covers JPEG quantisation on a flat row at quality 95 and
         // the round trip through full-range NV12. The failure it is looking for
         // is off by 15 at row 0 and by more further in.
@@ -592,12 +597,7 @@ mod tests {
         let claim = ring.claim().expect("slot");
         let layout = Nv12Layout::for_size(width, height);
         Nv12Converter::new(&ctx)
-            .convert_into_range(
-                &ctx,
-                &target,
-                ring.buffer(claim.index()),
-                YuvRange::Full,
-            )
+            .convert_into_range(&ctx, &target, ring.buffer(claim.index()), YuvRange::Full)
             .expect("convert into the exported buffer");
 
         // Back out through wgpu, which touches nothing libva owns.
@@ -640,7 +640,10 @@ mod tests {
 
         for row in 0..h {
             for col in 0..w {
-                let (a, b) = (got[row * layout.y_stride + col], y[row * layout.y_stride + col]);
+                let (a, b) = (
+                    got[row * layout.y_stride + col],
+                    y[row * layout.y_stride + col],
+                );
                 assert!(
                     a.abs_diff(b) <= 1,
                     "luma at {col},{row}: exported {a}, CPU {b}"
@@ -692,7 +695,10 @@ mod tests {
         let (width, height) = (256u32, 128u32);
         let Some(ring) = PreviewRing::new(&ctx, (width, height)).map(Arc::new) else {
             eprintln!("skipping: this device cannot export DMA-BUF memory");
-            assert!(!verdict, "the probe cannot say yes on a device with no export");
+            assert!(
+                !verdict,
+                "the probe cannot say yes on a device with no export"
+            );
             return;
         };
 
@@ -742,7 +748,10 @@ mod tests {
             crate::modules::preview::encoder::encode_preview_jpeg_dmabuf(&described, 95)
         };
         let Some((jpeg, surface)) = encoded else {
-            assert!(!verdict, "the probe said yes but the encode refused the surface");
+            assert!(
+                !verdict,
+                "the probe said yes but the encode refused the surface"
+            );
             claim.release(None);
             return;
         };
@@ -753,8 +762,10 @@ mod tests {
         let (w, h) = (width as usize, height as usize);
         let worst = (0..h)
             .map(|row| {
-                let mean: u32 =
-                    (0..w).map(|col| rgb[(row * w + col) * 3] as u32).sum::<u32>() / w as u32;
+                let mean: u32 = (0..w)
+                    .map(|col| rgb[(row * w + col) * 3] as u32)
+                    .sum::<u32>()
+                    / w as u32;
                 mean.abs_diff(row as u32)
             })
             .max()

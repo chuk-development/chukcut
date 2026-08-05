@@ -256,7 +256,11 @@ fn full_document() -> Project {
 fn a_document_using_every_field_survives_a_save_and_load_unchanged() {
     let original = full_document();
     assert_eq!(
-        original.tracks.iter().map(|t| t.segments.len()).sum::<usize>(),
+        original
+            .tracks
+            .iter()
+            .map(|t| t.segments.len())
+            .sum::<usize>(),
         52,
         "the fixture is supposed to be fifty segments plus one linked pair"
     );
@@ -300,7 +304,10 @@ fn a_reloaded_document_is_the_same_document() {
         serde_json::json!([1, 2, 3]),
         "an opaque extras blob is stored verbatim, not flattened"
     );
-    assert_eq!(reloaded.materials.kind_of("text-0"), Some(MaterialKind::Text));
+    assert_eq!(
+        reloaded.materials.kind_of("text-0"),
+        Some(MaterialKind::Text)
+    );
     assert_eq!(
         reloaded.materials.video("video-1").map(|m| m.rotation),
         Some(90)
@@ -410,7 +417,10 @@ fn a_document_with_no_optional_fields_loads_with_the_documented_defaults() {
 
     let track = &project.tracks[0];
     assert!(!track.muted && !track.locked && !track.hidden);
-    assert_eq!(track.volume, 1.0, "a missing track volume is unity, not zero");
+    assert_eq!(
+        track.volume, 1.0,
+        "a missing track volume is unity, not zero"
+    );
 
     let segment = &track.segments[0];
     assert_eq!(segment.speed, 1.0, "a missing speed is 1x, not zero");
@@ -467,7 +477,10 @@ fn a_saved_document_is_structurally_valid_when_it_is_read_back() {
         .filter(|i| i.severity == Severity::Error)
         .map(|i| i.message)
         .collect();
-    assert!(errors.is_empty(), "validation errors after a round trip: {errors:?}");
+    assert!(
+        errors.is_empty(),
+        "validation errors after a round trip: {errors:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -35,7 +35,10 @@ pub fn issues(project: &Project) -> Vec<ValidationIssue> {
 
             if attached.len() > 1 {
                 issues.push(error(
-                    format!("clip carries {} transitions; it may have one", attached.len()),
+                    format!(
+                        "clip carries {} transitions; it may have one",
+                        attached.len()
+                    ),
                     &segment.id,
                 ));
             }
@@ -167,11 +170,7 @@ mod tests {
     fn a_transition_whose_neighbours_stopped_touching_is_an_error() {
         let (mut project, _, left_id, right_id) = cut_project();
         attach(&mut project, &right_id, 1_000_000);
-        project
-            .segment_mut(&left_id)
-            .unwrap()
-            .target_range
-            .duration = 3_000_000;
+        project.segment_mut(&left_id).unwrap().target_range.duration = 3_000_000;
 
         let errors = errors(&project);
         assert_eq!(errors.len(), 1, "{errors:?}");

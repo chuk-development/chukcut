@@ -105,8 +105,7 @@ pub struct VideoStreamSpec {
 impl VideoStreamSpec {
     /// The rate-control configurations to try at `avcodec_open2`, best first.
     fn rate_controls(&self) -> Vec<RateControl> {
-        let fallback =
-            hwaccel::fallback_bitrate(self.width, self.height, self.fps, self.quality);
+        let fallback = hwaccel::fallback_bitrate(self.width, self.height, self.fps, self.quality);
         self.accel.rate_control_ladder(self.quality, fallback)
     }
 
@@ -452,7 +451,8 @@ impl MediaWriter {
         }
 
         let prepared = Instant::now();
-        let mut source = frame::Video::new(format::Pixel::NV12, self.video.width, self.video.height);
+        let mut source =
+            frame::Video::new(format::Pixel::NV12, self.video.width, self.video.height);
         copy_plane(&mut source, 0, y, y_stride, width, height);
         copy_plane(&mut source, 1, uv, uv_stride, width, uv_rows);
         source.set_pts(Some(index as i64));
@@ -745,7 +745,10 @@ fn open_video_encoder(
                         rate_control.label
                     );
                 }
-                return Ok(OpenVideoEncoder { encoder: opened, hw: pool });
+                return Ok(OpenVideoEncoder {
+                    encoder: opened,
+                    hw: pool,
+                });
             }
             Err(source) => {
                 tracing::debug!(
@@ -795,8 +798,10 @@ fn add_video(
         ost.set_avg_frame_rate(frame_rate);
     }
 
-    let OpenVideoEncoder { encoder: opened, hw } =
-        open_video_encoder(spec, codec, global_header)?;
+    let OpenVideoEncoder {
+        encoder: opened,
+        hw,
+    } = open_video_encoder(spec, codec, global_header)?;
 
     // The stream's parameters have to describe the *opened* encoder: before
     // `open` there is no extradata, and a header written without it produces a
@@ -1066,7 +1071,7 @@ fn encode_audio_chunk(
     );
     source.set_rate(audio.rate);
     {
-        let bytes = interleaved.len() * std::mem::size_of::<f32>();
+        let bytes = std::mem::size_of_val(interleaved);
         let plane = source.data_mut(0);
         // Packed f32 is one plane of native-endian floats, so this is a
         // reinterpretation and not a conversion.

@@ -420,7 +420,11 @@ impl EffectPackage {
 
         let config: Config = read_json(&source, "config.json")?;
 
-        let links = config.effect.as_ref().map(|e| e.link.clone()).unwrap_or_default();
+        let links = config
+            .effect
+            .as_ref()
+            .map(|e| e.link.clone())
+            .unwrap_or_default();
         let mut contents = Vec::with_capacity(links.len());
         for link in &links {
             let path = join_link(&link.path, "content.json");
@@ -463,7 +467,11 @@ impl EffectPackage {
             .as_ref()
             .map(|e| e.link.iter().collect())
             .unwrap_or_default();
-        links.sort_by(|a, b| a.zorder.partial_cmp(&b.zorder).unwrap_or(std::cmp::Ordering::Equal));
+        links.sort_by(|a, b| {
+            a.zorder
+                .partial_cmp(&b.zorder)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         links
     }
 
@@ -519,10 +527,11 @@ impl EffectPackage {
                 // observed and there is no reason to think that list is closed.
                 if let Some(map) = setting.as_object() {
                     for (_, entry) in map {
-                        let Some(array) = entry.as_array() else { continue };
+                        let Some(array) = entry.as_array() else {
+                            continue;
+                        };
                         for item in array {
-                            let Ok(param) =
-                                serde_json::from_value::<AdjustParam>(item.clone())
+                            let Ok(param) = serde_json::from_value::<AdjustParam>(item.clone())
                             else {
                                 continue;
                             };
@@ -723,10 +732,7 @@ mod tests {
         assert_eq!(intensity.kind, ParameterKind::Float);
         assert_eq!(intensity.widget, Widget::Slider);
         assert_eq!(intensity.origin, ParameterOrigin::ScriptProperty);
-        assert_eq!(
-            intensity.range,
-            Some(ParameterRange { min: 0.0, max: 1.0 })
-        );
+        assert_eq!(intensity.range, Some(ParameterRange { min: 0.0, max: 1.0 }));
         // `[UI(Display="Strength")]` is the human label; the key stays the
         // variable name because that is what gets written to the instance.
         assert_eq!(intensity.label, "Strength");
@@ -777,8 +783,12 @@ mod tests {
             "the same package read two ways declares the same parameters"
         );
         assert_eq!(
-            directory.read_to_string("AmazingFeature/xshader/tint.frag").unwrap(),
-            archive.read_to_string("AmazingFeature/xshader/tint.frag").unwrap()
+            directory
+                .read_to_string("AmazingFeature/xshader/tint.frag")
+                .unwrap(),
+            archive
+                .read_to_string("AmazingFeature/xshader/tint.frag")
+                .unwrap()
         );
     }
 

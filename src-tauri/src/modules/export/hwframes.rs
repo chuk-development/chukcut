@@ -140,10 +140,7 @@ impl HwDeviceContext {
     /// VAAPI comes from the process's shared display; anything else — QSV is
     /// the only other kind with a frame pool — is opened here, because there is
     /// exactly one caller and nothing else in the process has one to share.
-    pub(crate) fn for_kind(
-        kind: ffmpeg::ffi::AVHWDeviceType,
-        node: Option<&str>,
-    ) -> Result<Self> {
+    pub(crate) fn for_kind(kind: ffmpeg::ffi::AVHWDeviceType, node: Option<&str>) -> Result<Self> {
         if kind == ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI {
             Self::shared_vaapi()
         } else {
@@ -373,7 +370,10 @@ impl HwFramesContext {
         // releases. The frames context is only read.
         let code = unsafe { ffmpeg::ffi::av_hwframe_get_buffer(self.ptr, hw.as_mut_ptr(), 0) };
         if code < 0 {
-            return Err(av_error("cannot take a surface from the hardware pool", code));
+            return Err(av_error(
+                "cannot take a surface from the hardware pool",
+                code,
+            ));
         }
         Ok(hw)
     }
@@ -400,11 +400,7 @@ impl HwFramesContext {
         // nothing on either that we would have to free. The zero is the
         // documented "no flags".
         let code = unsafe {
-            ffmpeg::ffi::av_hwframe_transfer_data(
-                hardware.as_mut_ptr(),
-                software.as_ptr(),
-                0,
-            )
+            ffmpeg::ffi::av_hwframe_transfer_data(hardware.as_mut_ptr(), software.as_ptr(), 0)
         };
         if code < 0 {
             return Err(av_error("cannot upload a frame to the GPU", code));
@@ -603,8 +599,7 @@ impl HwFramesContext {
             ffmpeg::ffi::av_hwframe_map(
                 f,
                 source.as_ptr(),
-                ffmpeg::ffi::AV_HWFRAME_MAP_DIRECT as i32
-                    | ffmpeg::ffi::AV_HWFRAME_MAP_READ as i32,
+                ffmpeg::ffi::AV_HWFRAME_MAP_DIRECT as i32 | ffmpeg::ffi::AV_HWFRAME_MAP_READ as i32,
             )
         };
         if mapped_ok < 0 {
@@ -785,7 +780,8 @@ mod tests {
             }
         }
         for row in 0..layout.uv_rows {
-            let line = &mut picture[layout.uv_offset() + row * layout.uv_stride..][..width as usize];
+            let line =
+                &mut picture[layout.uv_offset() + row * layout.uv_stride..][..width as usize];
             for (col, byte) in line.iter_mut().enumerate() {
                 *byte = (row.wrapping_mul(11).wrapping_add(col.wrapping_mul(5)) % 241) as u8;
             }
@@ -978,7 +974,8 @@ mod tests {
         let layout = Nv12Layout::for_size(width, height);
         assert_eq!(reference.data.len(), layout.total_bytes());
 
-        let Some(exported) = ExportableBuffer::new(&ctx, layout.total_bytes() as u64, "shader test")
+        let Some(exported) =
+            ExportableBuffer::new(&ctx, layout.total_bytes() as u64, "shader test")
         else {
             eprintln!("skipping: this device cannot export DMA-BUF memory");
             return;

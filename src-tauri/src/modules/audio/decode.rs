@@ -140,10 +140,13 @@ impl AudioClipReader {
                     source,
                 }
             })?;
-        let mut decoder = context.decoder().audio().map_err(|source| AudioError::Decode {
-            path: path.to_path_buf(),
-            source,
-        })?;
+        let mut decoder = context
+            .decoder()
+            .audio()
+            .map_err(|source| AudioError::Decode {
+                path: path.to_path_buf(),
+                source,
+            })?;
 
         // Some containers leave the layout unset even though the channel count
         // is known, and swresample refuses to initialise without one.
@@ -276,10 +279,12 @@ impl AudioClipReader {
                 // Codecs with a decode delay hold the tail of the file until
                 // told the stream ended; without this the last block of every
                 // clip is silence.
-                self.decoder.send_eof().map_err(|source| AudioError::Decode {
-                    path: self.path.clone(),
-                    source,
-                })?;
+                self.decoder
+                    .send_eof()
+                    .map_err(|source| AudioError::Decode {
+                        path: self.path.clone(),
+                        source,
+                    })?;
                 self.draining = true;
             }
         }
@@ -362,9 +367,8 @@ impl AudioClipReader {
         // Room for the rate change plus a margin: swresample buffers whatever
         // does not fit and hands it over on the next call, which would show up
         // as a slowly growing delay rather than an error.
-        let capacity = (in_samples as u64 * self.rate as u64 / decoded.rate().max(1) as u64)
-            as usize
-            + 64;
+        let capacity =
+            (in_samples as u64 * self.rate as u64 / decoded.rate().max(1) as u64) as usize + 64;
         let mut converted = frame::Audio::new(
             ffmpeg::format::Sample::F32(ffmpeg::format::sample::Type::Packed),
             capacity,
@@ -395,7 +399,8 @@ impl AudioClipReader {
             // Packed f32 is native-endian, so this is a reinterpretation
             // rather than a byte-order conversion.
             let sample = f32::from_ne_bytes([value[0], value[1], value[2], value[3]]);
-            self.buffer.push_back(if sample.is_finite() { sample } else { 0.0 });
+            self.buffer
+                .push_back(if sample.is_finite() { sample } else { 0.0 });
         }
     }
 

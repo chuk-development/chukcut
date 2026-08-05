@@ -68,7 +68,10 @@ impl Measurement {
         direction: Direction,
         mut samples: Vec<f64>,
     ) -> Self {
-        assert!(!samples.is_empty(), "a measurement needs at least one sample");
+        assert!(
+            !samples.is_empty(),
+            "a measurement needs at least one sample"
+        );
         samples.sort_by(|a, b| a.partial_cmp(b).expect("no NaN timings"));
         let best = samples[0];
         let worst = samples[samples.len() - 1];
@@ -175,7 +178,10 @@ pub fn time_ms<T>(body: impl FnOnce() -> T) -> (T, f64) {
 /// Errors are not swallowed into a slow sample. A round that failed measured
 /// nothing, and averaging a failure in is how a benchmark reports that a broken
 /// path is fast.
-pub fn rounds<E>(count: usize, mut body: impl FnMut(usize) -> Result<f64, E>) -> Result<Vec<f64>, E> {
+pub fn rounds<E>(
+    count: usize,
+    mut body: impl FnMut(usize) -> Result<f64, E>,
+) -> Result<Vec<f64>, E> {
     let mut samples = Vec::with_capacity(count);
     for round in 0..count.max(1) {
         samples.push(body(round)?);
@@ -202,7 +208,7 @@ pub fn interleave(count: usize, candidates: &mut [&mut dyn FnMut()]) -> Vec<Vec<
     let mut samples: Vec<Vec<f64>> = vec![Vec::with_capacity(count); candidates.len()];
     for _ in 0..count.max(1) {
         for (index, body) in candidates.iter_mut().enumerate() {
-            let (_, ms) = time_ms(|| body());
+            let (_, ms) = time_ms(body);
             samples[index].push(ms);
         }
     }
@@ -237,8 +243,11 @@ pub fn print_table(results: &[Measurement]) {
             println!("## {current}");
             println!();
             println!(
-                "{:<width$} {:>14} {:>10} {:>8}  {}",
-                "", "median", "best", "spread", "",
+                "{:<width$} {:>14} {:>10} {:>8}  ",
+                "",
+                "median",
+                "best",
+                "spread",
                 width = NAME_WIDTH
             );
         }
@@ -315,8 +324,11 @@ pub fn print_comparison(before: &Report, after: &Report) {
     );
     println!();
     println!(
-        "{:<width$} {:>12} {:>12} {:>10}  {}",
-        "", "before", "after", "change", "verdict",
+        "{:<width$} {:>12} {:>12} {:>10}  verdict",
+        "",
+        "before",
+        "after",
+        "change",
         width = NAME_WIDTH
     );
 

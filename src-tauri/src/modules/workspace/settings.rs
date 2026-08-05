@@ -178,8 +178,7 @@ impl RecentProjects {
     /// Drop entries whose file no longer exists. Called before showing the
     /// list, so the start screen never offers a project that cannot open.
     pub fn prune_missing(&mut self) {
-        self.entries
-            .retain(|e| PathBuf::from(&e.path).exists());
+        self.entries.retain(|e| PathBuf::from(&e.path).exists());
     }
 }
 
@@ -195,7 +194,10 @@ mod tests {
         let stored: Settings = serde_json::from_str(r#"{"preview_max_edge": 960}"#).unwrap();
         assert_eq!(stored.settings_version, 0, "absent version must read as 0");
         let migrated = stored.migrated();
-        assert_eq!(migrated.preview_max_edge, 0, "the never-chosen 960 becomes auto");
+        assert_eq!(
+            migrated.preview_max_edge, 0,
+            "the never-chosen 960 becomes auto"
+        );
         assert_eq!(migrated.settings_version, SETTINGS_VERSION);
     }
 

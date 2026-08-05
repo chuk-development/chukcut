@@ -158,12 +158,7 @@ impl EffectChain {
             .config()
             .effect
             .as_ref()
-            .map(|e| {
-                e.link
-                    .iter()
-                    .position(|l| l.path == link.path)
-                    .unwrap_or(0)
-            })
+            .map(|e| e.link.iter().position(|l| l.path == link.path).unwrap_or(0))
             .unwrap_or(0);
 
         let base = link.path.clone();
@@ -177,16 +172,16 @@ impl EffectChain {
         })?;
         let scene = SceneEntry::parse(&scene_path, &pkg.read(&scene_path)?)?;
 
-        let material_path = scene.materials.first().cloned().ok_or_else(|| {
-            EffectError::Unsupported(format!("{scene_path} draws no material"))
-        })?;
+        let material_path =
+            scene.materials.first().cloned().ok_or_else(|| {
+                EffectError::Unsupported(format!("{scene_path} draws no material"))
+            })?;
         let material_path = package::join_link(&base, &material_path);
         let material = Material::parse(&material_path, &pkg.read(&material_path)?)?;
 
         let xshader_ref = material.xshader.as_ref().and_then(|r| r.path.clone());
-        let xshader_path = xshader_ref.ok_or_else(|| {
-            EffectError::Unsupported(format!("{material_path} names no xshader"))
-        })?;
+        let xshader_path = xshader_ref
+            .ok_or_else(|| EffectError::Unsupported(format!("{material_path} names no xshader")))?;
         let xshader_path = package::join_link(&base, &xshader_path);
         let xshader = XShader::parse(&xshader_path, &pkg.read(&xshader_path)?)?;
 
@@ -300,7 +295,11 @@ impl EffectChain {
             stills,
             placeholder,
             sampler,
-            vertices: create_buffer(device, bytemuck::cast_slice(&QUAD), wgpu::BufferUsages::VERTEX),
+            vertices: create_buffer(
+                device,
+                bytemuck::cast_slice(&QUAD),
+                wgpu::BufferUsages::VERTEX,
+            ),
             indices: create_buffer(
                 device,
                 bytemuck::cast_slice(&QUAD_INDICES),
@@ -325,15 +324,12 @@ impl EffectChain {
             return Ok(());
         };
         let event = self.runtime.make_event(vec![
-            mlua::Value::String(
-                self.runtime
-                    .lua()
-                    .create_string(key)
-                    .map_err(|e| super::lua::ScriptError::Lua {
-                        script: "<event>".into(),
-                        message: e.to_string(),
-                    })?,
-            ),
+            mlua::Value::String(self.runtime.lua().create_string(key).map_err(|e| {
+                super::lua::ScriptError::Lua {
+                    script: "<event>".into(),
+                    message: e.to_string(),
+                }
+            })?),
             mlua::Value::Number(value),
         ])?;
         script.on_event(component, &event)?;
@@ -384,11 +380,17 @@ impl EffectChain {
             let (width, height) = desc.size_for(size);
             intermediates.insert(
                 path.clone(),
-                pool.acquire(device, TextureKey::new(width, height, OUTPUT_FORMAT, TARGET_USAGE)),
+                pool.acquire(
+                    device,
+                    TextureKey::new(width, height, OUTPUT_FORMAT, TARGET_USAGE),
+                ),
             );
         }
 
-        let output = pool.acquire(device, TextureKey::new(size.0, size.1, OUTPUT_FORMAT, TARGET_USAGE));
+        let output = pool.acquire(
+            device,
+            TextureKey::new(size.0, size.1, OUTPUT_FORMAT, TARGET_USAGE),
+        );
         let placeholder_view = self.placeholder.create_view(&Default::default());
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -490,10 +492,13 @@ impl EffectChain {
         }
         Ok(output)
     }
-
 }
 
-fn create_buffer(device: &wgpu::Device, contents: &[u8], usage: wgpu::BufferUsages) -> wgpu::Buffer {
+fn create_buffer(
+    device: &wgpu::Device,
+    contents: &[u8],
+    usage: wgpu::BufferUsages,
+) -> wgpu::Buffer {
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("chukcut effect geometry"),
         size: contents.len() as u64,
@@ -586,10 +591,9 @@ fn build_pass(
     material: &Material,
     is_last: bool,
 ) -> Result<GpuPass> {
-    let vertex_source = pass
-        .vertex
-        .as_ref()
-        .ok_or_else(|| EffectError::Unsupported(format!("pass {} has no vertex shader", pass.name)))?;
+    let vertex_source = pass.vertex.as_ref().ok_or_else(|| {
+        EffectError::Unsupported(format!("pass {} has no vertex shader", pass.name))
+    })?;
     let fragment_source = pass.fragment.as_ref().ok_or_else(|| {
         EffectError::Unsupported(format!("pass {} has no fragment shader", pass.name))
     })?;
@@ -867,9 +871,7 @@ fn to_lua(runtime: &LuaRuntime, value: &serde_yaml_ng::Value) -> mlua::Result<ml
             Some(i) => mlua::Value::Integer(i),
             None => mlua::Value::Number(v.as_f64().unwrap_or(0.0)),
         },
-        serde_yaml_ng::Value::String(v) => {
-            mlua::Value::String(runtime.lua().create_string(v)?)
-        }
+        serde_yaml_ng::Value::String(v) => mlua::Value::String(runtime.lua().create_string(v)?),
         _ => mlua::Value::Nil,
     })
 }
@@ -971,8 +973,7 @@ mod tests {
     // ---------------------------------------------------------------------
 
     fn fixture() -> std::path::PathBuf {
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("src/modules/effects/fixtures/tint")
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/modules/effects/fixtures/tint")
     }
 
     /// Everything [`EffectChain::load`] does up to the point it needs a GPU:
@@ -995,7 +996,10 @@ mod tests {
 
         let path = "AmazingFeature/material/tint.material";
         let material = Material::parse(path, &pkg.read(path).unwrap()).unwrap();
-        assert_eq!(material.textures["inputImageTexture"], TextureSource::HostInput);
+        assert_eq!(
+            material.textures["inputImageTexture"],
+            TextureSource::HostInput
+        );
         assert_eq!(
             material.textures["desaturatedTexture"],
             TextureSource::Package("rt/desaturateRT.rt".into()),
@@ -1005,7 +1009,12 @@ mod tests {
         let xshader = XShader::parse(path, &pkg.read(path).unwrap()).unwrap();
         assert_eq!(xshader.passes.len(), 2);
         assert_eq!(
-            xshader.passes[0].render_texture.as_ref().unwrap().path.as_deref(),
+            xshader.passes[0]
+                .render_texture
+                .as_ref()
+                .unwrap()
+                .path
+                .as_deref(),
             Some("rt/desaturateRT.rt"),
         );
         assert_eq!(
@@ -1104,7 +1113,9 @@ mod tests {
         slice.map_async(wgpu::MapMode::Read, move |r| {
             let _ = tx.send(r);
         });
-        ctx.device().poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        ctx.device()
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
         rx.recv().unwrap().unwrap();
         let pixel = {
             let view = slice.get_mapped_range().unwrap();
@@ -1178,7 +1189,9 @@ mod tests {
         let strong = read_pixel(&ctx, &chain.render(&view, size, delta, delta).unwrap());
 
         // Turn the effect off through the host's own mechanism.
-        chain.set_parameter("effects_adjust_intensity", 0.0).unwrap();
+        chain
+            .set_parameter("effects_adjust_intensity", 0.0)
+            .unwrap();
         let off = read_pixel(&ctx, &chain.render(&view, size, delta, 0.0).unwrap());
 
         assert!(

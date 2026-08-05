@@ -52,11 +52,11 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use chukcut_lib::modules::media::MediaSourceProvider;
+use chukcut_lib::modules::preview::encoder::encode_preview_jpeg_va_surface;
 use chukcut_lib::modules::preview::encoder::{
     decode_jpeg_rgb, encode_jpeg, encode_preview_jpeg, encode_preview_jpeg_dmabuf,
     hardware_available, psnr_rgb, Backend,
 };
-use chukcut_lib::modules::preview::encoder::encode_preview_jpeg_va_surface;
 use chukcut_lib::modules::preview::vaapi::VaapiJpegEncoder;
 use chukcut_lib::modules::preview::vasurface::{self, SurfaceRing};
 use chukcut_lib::modules::preview::zerocopy::{self, PreviewRing};
@@ -65,8 +65,8 @@ use chukcut_lib::modules::project::{
     new_id, CanvasConfig, Micros, Project, Segment, TimeRange, Track, TrackKind, Transform,
     VideoMaterial,
 };
-use chukcut_lib::modules::render::source::YuvRange;
 use chukcut_lib::modules::render::nv12::{Nv12PlaneWriter, READ_FORMAT};
+use chukcut_lib::modules::render::source::YuvRange;
 use chukcut_lib::modules::render::texture_pool::{TextureKey, TexturePool};
 use chukcut_lib::modules::render::{Compositor, Nv12Layout, RenderContext};
 
@@ -134,11 +134,19 @@ fn main() {
     let linear_ok = zerocopy::encoder_can_read_linear(&ctx);
     println!(
         "  verdict  a VA surface the compositor drew into: the JPEG encoder {}",
-        if drawn_ok { "READS IT" } else { "cannot read it" },
+        if drawn_ok {
+            "READS IT"
+        } else {
+            "cannot read it"
+        },
     );
     println!(
         "           a linear buffer the driver imports:   the JPEG encoder {}",
-        if linear_ok { "READS IT" } else { "cannot read it" },
+        if linear_ok {
+            "READS IT"
+        } else {
+            "cannot read it"
+        },
     );
     println!(
         "           so the preview {}",
@@ -169,8 +177,8 @@ fn main() {
 fn row_ramp(ctx: &Arc<RenderContext>) {
     use chukcut_lib::modules::export::hwframes::{HwDeviceContext, HwFramesContext, Nv12Dmabuf};
     use chukcut_lib::modules::render::dmabuf::{ExportableBuffer, DRM_FORMAT_MOD_LINEAR};
-    use ffmpeg_next as ffmpeg;
     use ffmpeg::format::Pixel;
+    use ffmpeg_next as ffmpeg;
 
     heading("1. one linear buffer, three consumers: which row came back where");
 
@@ -254,7 +262,11 @@ fn row_ramp(ctx: &Arc<RenderContext>) {
     match uploaded {
         Ok(bytes) => {
             let (rgb, ..) = decode_jpeg_rgb(&bytes).expect("decode");
-            println!("  {:<34}{}", "mjpeg_vaapi, uploaded", row_means(&rgb, w, &ROWS));
+            println!(
+                "  {:<34}{}",
+                "mjpeg_vaapi, uploaded",
+                row_means(&rgb, w, &ROWS)
+            );
         }
         Err(e) => println!("  mjpeg_vaapi upload failed: {e}"),
     }
@@ -329,7 +341,8 @@ fn row_ramp(ctx: &Arc<RenderContext>) {
         let device = HwDeviceContext::shared_vaapi().map_err(|e| e.to_string())?;
         let pool = HwFramesContext::create(device, Pixel::VAAPI, Pixel::NV12, width, height, 8)
             .map_err(|e| e.to_string())?;
-        pool.attach_to_encoder(&mut encoder).map_err(|e| e.to_string())?;
+        pool.attach_to_encoder(&mut encoder)
+            .map_err(|e| e.to_string())?;
         let mut encoder = encoder
             .open_as_with(codec, ffmpeg::Dictionary::new())
             .map_err(|e| e.to_string())?;
@@ -341,7 +354,9 @@ fn row_ramp(ctx: &Arc<RenderContext>) {
         encoder.send_frame(&surface).map_err(|e| e.to_string())?;
         encoder.send_eof().map_err(|e| e.to_string())?;
         let mut packet = ffmpeg::Packet::empty();
-        encoder.receive_packet(&mut packet).map_err(|e| e.to_string())?;
+        encoder
+            .receive_packet(&mut packet)
+            .map_err(|e| e.to_string())?;
 
         let decoder_codec =
             ffmpeg::decoder::find(ffmpeg::codec::Id::H264).ok_or("no h264 decoder")?;
@@ -547,9 +562,13 @@ fn verify(ctx: &Arc<RenderContext>, clip: &Path) {
             println!("  {:>11}  libjpeg-turbo refused it", label(size));
             continue;
         };
-        let Ok((copying, backend)) = encode_preview_jpeg(&rgba, size.0, size.1, DEFAULT_JPEG_QUALITY)
+        let Ok((copying, backend)) =
+            encode_preview_jpeg(&rgba, size.0, size.1, DEFAULT_JPEG_QUALITY)
         else {
-            println!("  {:>11}  the copying hardware path refused it", label(size));
+            println!(
+                "  {:>11}  the copying hardware path refused it",
+                label(size)
+            );
             continue;
         };
 
@@ -853,7 +872,10 @@ fn time(frames: usize, mut body: impl FnMut(usize) -> Option<()>) -> f64 {
 // ---------------------------------------------------------------------------
 
 fn heading(text: &str) {
-    println!("── {text} {}", "─".repeat(72usize.saturating_sub(text.len())));
+    println!(
+        "── {text} {}",
+        "─".repeat(72usize.saturating_sub(text.len()))
+    );
 }
 
 fn label(size: (u32, u32)) -> String {

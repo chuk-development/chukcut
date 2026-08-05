@@ -170,10 +170,7 @@ pub fn cancel_all_thumbnails() {
 /// decode happens once and is cached on disk at a fixed resolution, so changing
 /// zoom re-reduces an array rather than re-reading the file.
 #[tauri::command]
-pub async fn media_waveform(
-    path: String,
-    buckets: usize,
-) -> std::result::Result<Waveform, String> {
+pub async fn media_waveform(path: String, buckets: usize) -> std::result::Result<Waveform, String> {
     off_thread(move || super::waveform(&path, buckets)).await
 }
 

@@ -533,8 +533,16 @@ pub fn missing_media(project: &Project) -> Vec<String> {
                     let path = materials
                         .video(&segment.material_id)
                         .map(|m| m.path.as_str())
-                        .or_else(|| materials.audio(&segment.material_id).map(|m| m.path.as_str()))
-                        .or_else(|| materials.image(&segment.material_id).map(|m| m.path.as_str()));
+                        .or_else(|| {
+                            materials
+                                .audio(&segment.material_id)
+                                .map(|m| m.path.as_str())
+                        })
+                        .or_else(|| {
+                            materials
+                                .image(&segment.material_id)
+                                .map(|m| m.path.as_str())
+                        });
                     if let Some(path) = path {
                         if !Path::new(path).exists() {
                             lines.push(format!(
@@ -1147,7 +1155,8 @@ fn on_frame_written(
     if mixed.is_empty() {
         return Ok(());
     }
-    let until = audio::frames_for(fps.frame_time(index + 1), audio_rate).min(mixed.len() / channels);
+    let until =
+        audio::frames_for(fps.frame_time(index + 1), audio_rate).min(mixed.len() / channels);
     if until > *audio_cursor {
         writer.write_audio(&mixed[*audio_cursor * channels..until * channels])?;
         *audio_cursor = until;
@@ -1632,7 +1641,9 @@ mod tests {
         assert!(block.contains("zero-copy DMA-BUF (tier 1 of 3)"), "{block}");
         // The strides are the reason this exists.
         assert!(
-            block.contains("y_stride 1920 B · uv_stride 1920 B · uv_offset 2073600 B · total 3110400 B"),
+            block.contains(
+                "y_stride 1920 B · uv_stride 1920 B · uv_offset 2073600 B · total 3110400 B"
+            ),
             "{block}"
         );
         // Nothing to explain on the top tier.
@@ -1704,8 +1715,14 @@ mod tests {
             Some((1088, 1088, 2088960, 3133440)),
             &["zero-copy gave up at frame 12 (the encoder is still holding …)".to_string()],
         );
-        assert!(demoted.contains("GPU NV12 readback (tier 2 of 3) at the end"), "{demoted}");
-        assert!(demoted.contains("zero-copy gave up at frame 12"), "{demoted}");
+        assert!(
+            demoted.contains("GPU NV12 readback (tier 2 of 3) at the end"),
+            "{demoted}"
+        );
+        assert!(
+            demoted.contains("zero-copy gave up at frame 12"),
+            "{demoted}"
+        );
         // What the compositor really produced, not what the layout predicted.
         assert!(
             demoted.contains("as rendered: y_stride 1088 B · uv_stride 1088 B · uv_offset 2088960 B · total 3133440 B"),
@@ -1726,7 +1743,9 @@ mod tests {
 
         let failed = describe_outcome(
             &settings,
-            Some(&ExportError::Settings("the muxer refused the packet".into())),
+            Some(&ExportError::Settings(
+                "the muxer refused the packet".into(),
+            )),
             7,
             Duration::from_secs(1),
             final_path_label(false, false),

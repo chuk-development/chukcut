@@ -174,7 +174,10 @@ fn main() {
     // working correctly. Fatal keeps a genuine failure visible and drops those.
     // `RUST_LOG` containing `ffmpeg` puts them back, for when a skip reason is
     // not enough to explain why a path was refused.
-    if !std::env::var("RUST_LOG").unwrap_or_default().contains("ffmpeg") {
+    if !std::env::var("RUST_LOG")
+        .unwrap_or_default()
+        .contains("ffmpeg")
+    {
         ffmpeg_next::util::log::set_level(ffmpeg_next::util::log::Level::Fatal);
     }
 
@@ -223,13 +226,17 @@ fn main() {
     // Fixtures first: generating them is the slow part of a first run, and it
     // should not happen after twenty seconds of unrelated benchmarking.
     let media_dir = fixtures::media_dir(options.media_dir.as_deref());
-    let needs_media =
-        wanted(bench_decode::GROUP) || wanted(bench_preview::FRAME_GROUP) || wanted(bench_export::GROUP);
+    let needs_media = wanted(bench_decode::GROUP)
+        || wanted(bench_preview::FRAME_GROUP)
+        || wanted(bench_export::GROUP);
     let media = if needs_media {
         match fixtures::ensure(&media_dir, if options.full { 6.0 } else { 4.0 }, 30) {
             Ok(media) => media,
             Err(error) => {
-                eprintln!("could not prepare fixtures in {}: {error}", media_dir.display());
+                eprintln!(
+                    "could not prepare fixtures in {}: {error}",
+                    media_dir.display()
+                );
                 fixtures::Fixtures {
                     clips: Vec::new(),
                     missing: vec![("all".into(), error.to_string())],
@@ -351,7 +358,8 @@ fn main() {
         let group_matched = GROUPS.iter().any(|g| g.to_lowercase().contains(filter));
         if !group_matched {
             results.retain(|row| {
-                row.name.to_lowercase().contains(filter) || row.group.to_lowercase().contains(filter)
+                row.name.to_lowercase().contains(filter)
+                    || row.group.to_lowercase().contains(filter)
             });
         }
     }
@@ -393,9 +401,10 @@ fn main() {
     }
 
     if let Some(path) = &options.compare {
-        match std::fs::read_to_string(path).map_err(|e| e.to_string()).and_then(|text| {
-            serde_json::from_str::<Report>(&text).map_err(|e| e.to_string())
-        }) {
+        match std::fs::read_to_string(path)
+            .map_err(|e| e.to_string())
+            .and_then(|text| serde_json::from_str::<Report>(&text).map_err(|e| e.to_string()))
+        {
             Ok(before) if before.schema != report.schema => eprintln!(
                 "\n{} was written by schema {} and this is schema {}; not comparing.",
                 path.display(),
@@ -447,13 +456,20 @@ fn print_header(report: &Report, elapsed: f64) {
     println!("Command: `{}`", report.command);
     println!(
         "Machine: {} ({}), {} CPU threads, {}",
-        report.machine.gpu, report.machine.gpu_backend, report.machine.cpu_threads, report.machine.ffmpeg
+        report.machine.gpu,
+        report.machine.gpu_backend,
+        report.machine.cpu_threads,
+        report.machine.ffmpeg
     );
     println!(
         "Hardware decode: {}. Hardware encode: {}. Hardware JPEG: {}.",
         list(&report.machine.hardware_decode),
         list(&report.machine.hardware_encode),
-        if report.machine.hardware_jpeg { "yes" } else { "no" }
+        if report.machine.hardware_jpeg {
+            "yes"
+        } else {
+            "no"
+        }
     );
     println!(
         "Load average {:.2} before, {:.2} after; {elapsed:.0} s of measuring.",
@@ -467,7 +483,11 @@ fn print_header(report: &Report, elapsed: f64) {
 }
 
 fn print_footer(report: &Report) {
-    let skipped = report.results.iter().filter(|r| r.skipped.is_some()).count();
+    let skipped = report
+        .results
+        .iter()
+        .filter(|r| r.skipped.is_some())
+        .count();
     let shaky = report
         .results
         .iter()

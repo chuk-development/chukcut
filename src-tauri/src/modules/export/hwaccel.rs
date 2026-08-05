@@ -114,7 +114,9 @@ impl HwAccel {
 
     /// The libav hardware device and surface format this API needs, when it
     /// needs a frame pool at all.
-    pub fn frame_pool(self) -> Option<(ffmpeg_next::ffi::AVHWDeviceType, ffmpeg_next::format::Pixel)> {
+    pub fn frame_pool(
+        self,
+    ) -> Option<(ffmpeg_next::ffi::AVHWDeviceType, ffmpeg_next::format::Pixel)> {
         use ffmpeg_next::ffi::AVHWDeviceType;
         use ffmpeg_next::format::Pixel;
         match self {
@@ -604,7 +606,10 @@ mod tests {
     fn software_has_no_fallback_because_crf_always_works() {
         let ladder = HwAccel::Software.rate_control_ladder(Quality::Crf(20), 9_000_000);
         assert_eq!(ladder.len(), 1);
-        assert_eq!(ladder[0].options, vec![("crf".to_string(), "20".to_string())]);
+        assert_eq!(
+            ladder[0].options,
+            vec![("crf".to_string(), "20".to_string())]
+        );
         assert_eq!(ladder[0].bit_rate, 0);
     }
 

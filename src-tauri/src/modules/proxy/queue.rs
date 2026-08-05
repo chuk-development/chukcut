@@ -323,7 +323,10 @@ impl ProxyQueue {
             });
         }
 
-        let job_id = format!("proxy-{}", self.inner.next_id.fetch_add(1, Ordering::Relaxed));
+        let job_id = format!(
+            "proxy-{}",
+            self.inner.next_id.fetch_add(1, Ordering::Relaxed)
+        );
         let total_frames = spec.total_frames();
         let job = Job {
             id: job_id.clone(),
@@ -559,7 +562,7 @@ fn run_one(inner: &Inner, job: Job) {
             // thousand IPC messages for a thousand frames is a stutter in the
             // webview, and no progress bar needs that resolution.
             let step = progress_step(total);
-            if frame % step != 0 && frame != total {
+            if !frame.is_multiple_of(step) && frame != total {
                 return;
             }
             emit_to(
@@ -578,10 +581,9 @@ fn run_one(inner: &Inner, job: Job) {
         }
     };
 
-    let outcome =
-        inner
-            .transcoder
-            .transcode(&job.source, &dest, &job.spec, &job.cancel, &progress);
+    let outcome = inner
+        .transcoder
+        .transcode(&job.source, &dest, &job.spec, &job.cancel, &progress);
 
     let event = match outcome {
         Ok(generated) => {
@@ -661,9 +663,16 @@ fn progress_step(total: u64) -> u64 {
 #[serde(rename_all = "camelCase", tag = "state")]
 pub enum ProxyState {
     /// A valid proxy exists.
-    Ready { proxy_path: String },
-    Building { job_id: String, fraction: f32 },
-    Queued { job_id: String },
+    Ready {
+        proxy_path: String,
+    },
+    Building {
+        job_id: String,
+        fraction: f32,
+    },
+    Queued {
+        job_id: String,
+    },
     /// No proxy, and none is being built.
     None,
 }
@@ -707,10 +716,10 @@ impl ProxyQueue {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::ProxyError;
-    use crate::modules::export::Quality;
+    use super::*;
     use crate::modules::export::presets::Fps;
+    use crate::modules::export::Quality;
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
@@ -839,7 +848,12 @@ mod tests {
         // Pushed directly rather than through `enqueue`, which would need a
         // real media file to probe. What is under test is the queue.
         let source = scratch.path().join("clip.mp4");
-        queue.inner.state.lock().pending.push_back(job("j1", &source));
+        queue
+            .inner
+            .state
+            .lock()
+            .pending
+            .push_back(job("j1", &source));
         queue.inner.wake.notify_all();
 
         started_rx
@@ -940,11 +954,15 @@ mod tests {
             }
         }
         queue.inner.wake.notify_all();
-        started_rx.recv_timeout(Duration::from_secs(5)).expect("start");
+        started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("start");
 
         queue.cancel_all();
         assert!(queue.status().pending.is_empty());
-        wait_for(&events, |e| e.stage == ProxyStage::Cancelled && e.job_id == "j1");
+        wait_for(&events, |e| {
+            e.stage == ProxyStage::Cancelled && e.job_id == "j1"
+        });
         queue.shutdown();
     }
 
@@ -975,7 +993,11 @@ mod tests {
             if let Some(running) = status.running {
                 assert_eq!(running.job_id, "j1", "the first import is proxied first");
                 assert_eq!(
-                    status.pending.iter().map(|j| j.job_id.as_str()).collect::<Vec<_>>(),
+                    status
+                        .pending
+                        .iter()
+                        .map(|j| j.job_id.as_str())
+                        .collect::<Vec<_>>(),
                     vec!["j2", "j3"]
                 );
                 break;
@@ -1003,9 +1025,16 @@ mod tests {
         );
 
         let source = scratch.path().join("clip.mp4");
-        queue.inner.state.lock().pending.push_back(job("j1", &source));
+        queue
+            .inner
+            .state
+            .lock()
+            .pending
+            .push_back(job("j1", &source));
         queue.inner.wake.notify_all();
-        started_rx.recv_timeout(Duration::from_secs(5)).expect("start");
+        started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("start");
 
         let began = Instant::now();
         for _ in 0..100 {

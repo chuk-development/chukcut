@@ -31,7 +31,9 @@
 use std::sync::Arc;
 
 use chukcut_lib::modules::media::MediaSourceProvider;
-use chukcut_lib::modules::preview::encoder::{encode_jpeg, encode_preview_jpeg, hardware_available};
+use chukcut_lib::modules::preview::encoder::{
+    encode_jpeg, encode_preview_jpeg, hardware_available,
+};
 use chukcut_lib::modules::preview::vaapi::VaapiJpegEncoder;
 use chukcut_lib::modules::preview::DEFAULT_JPEG_QUALITY;
 use chukcut_lib::modules::project::{
@@ -258,11 +260,7 @@ fn single_clip(fixture: &crate::fixtures::Fixture) -> Project {
     project
 }
 
-pub fn run_frame(
-    ctx: &Arc<RenderContext>,
-    media: &Fixtures,
-    budget: &Budget,
-) -> Vec<Measurement> {
+pub fn run_frame(ctx: &Arc<RenderContext>, media: &Fixtures, budget: &Budget) -> Vec<Measurement> {
     let mut out = Vec::new();
     let compositor = Compositor::new(Arc::clone(ctx));
 
@@ -327,13 +325,13 @@ pub fn run_frame(
                 out.push(
                     Measurement::ms(FRAME_GROUP, format!("{label} whole frame"), samples)
                         .with_note(format!(
-                            "sources {:.2} + composite {:.2} + readback {:.2} ms, JPEG on {} ({} KB)",
-                            stats.per_frame(stats.sources_ns) / 1e6,
-                            stats.per_frame(stats.composite_ns) / 1e6,
-                            stats.per_frame(stats.readback_ns) / 1e6,
-                            backend.map(|b| b.label()).unwrap_or("nothing"),
-                            jpeg_bytes / 1024,
-                        )),
+                        "sources {:.2} + composite {:.2} + readback {:.2} ms, JPEG on {} ({} KB)",
+                        stats.per_frame(stats.sources_ns) / 1e6,
+                        stats.per_frame(stats.composite_ns) / 1e6,
+                        stats.per_frame(stats.readback_ns) / 1e6,
+                        backend.map(|b| b.label()).unwrap_or("nothing"),
+                        jpeg_bytes / 1024,
+                    )),
                 );
                 out.push(budget_row(&label, median));
                 compositor.reset_stats();
@@ -350,7 +348,14 @@ pub fn run_frame(
         // upload — 60% of the row above — do not happen at all. Immediately
         // after the copying arm and in the same process on purpose: a "before"
         // taken from a build that no longer exists is not a measurement.
-        out.extend(drawn_frame(ctx, &compositor, &project, render_size, &label, budget));
+        out.extend(drawn_frame(
+            ctx,
+            &compositor,
+            &project,
+            render_size,
+            &label,
+            budget,
+        ));
     }
 
     out

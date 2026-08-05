@@ -87,9 +87,8 @@ fn decode_counter(decoder: &mut VideoDecoder, at: i64) -> u64 {
         (frame.width * frame.height * 4) as usize,
         "the decoder must hand back a tight RGBA buffer"
     );
-    read_counter_rgba(&frame.data, frame.width, frame.height).unwrap_or_else(|| {
-        panic!("the frame decoded at {at} µs does not carry a readable counter")
-    })
+    read_counter_rgba(&frame.data, frame.width, frame.height)
+        .unwrap_or_else(|| panic!("the frame decoded at {at} µs does not carry a readable counter"))
 }
 
 /// Halfway into frame `n`, which is where a playhead normally sits.
@@ -317,7 +316,10 @@ fn every_frame_is_reachable_by_seeking_straight_to_it() {
     on_every_path(|path| {
         // Both fixtures run at a constant 30 fps; the variable-rate one has its
         // own test because a frame index there is not a time.
-        for (label, file) in [("mp4", &media.counter), ("mpeg-ts", &media.counter_late_start)] {
+        for (label, file) in [
+            ("mp4", &media.counter),
+            ("mpeg-ts", &media.counter_late_start),
+        ] {
             // A fresh decoder per frame, so nothing is answered out of the
             // state left by the previous request — this is the cold-seek path a
             // scrub after an edit and the exporter's first frame both take. The
@@ -389,7 +391,9 @@ fn a_variable_frame_rate_file_returns_the_frame_its_own_timestamps_name() {
         }
 
         assert!(
-            sweep.windows(2).all(|w| w[1].0 >= w[0].0 && w[1].1 >= w[0].1),
+            sweep
+                .windows(2)
+                .all(|w| w[1].0 >= w[0].0 && w[1].1 >= w[0].1),
             "{path:?}: sweeping the playhead forwards must never go back a frame"
         );
         for pair in sweep.windows(2) {
@@ -413,7 +417,11 @@ fn a_variable_frame_rate_file_returns_the_frame_its_own_timestamps_name() {
         // or this fixture is not testing anything.
         let mut frames: Vec<(i64, u64)> = sweep.clone();
         frames.dedup_by_key(|(_, counter)| *counter);
-        assert!(frames.len() > 30, "{path:?}: only saw {} frames", frames.len());
+        assert!(
+            frames.len() > 30,
+            "{path:?}: only saw {} frames",
+            frames.len()
+        );
         let early = frames[5].0 - frames[4].0;
         let late = frames[frames.len() - 2].0 - frames[frames.len() - 3].0;
         assert!(
@@ -577,8 +585,8 @@ fn a_portrait_file_keeps_its_shape_through_probe_and_decode() {
 fn scaled_decoding_constrains_the_display_height_and_still_reads_back() {
     let media = require_media!();
     on_every_path(|path| {
-        let mut decoder = VideoDecoder::open_scaled_with(&media.counter, 120, path)
-            .expect("open scaled");
+        let mut decoder =
+            VideoDecoder::open_scaled_with(&media.counter, 120, path).expect("open scaled");
         assert_eq!(decoder.output_size(), (160, 120), "{path:?}");
         let frame = decoder.seek_and_decode(mid_frame(42)).expect("decode");
         assert_eq!((frame.width, frame.height), (160, 120), "{path:?}");
@@ -600,8 +608,8 @@ fn a_rotated_file_scales_to_the_display_height_it_was_asked_for() {
         // Coded 320x240, displayed 240x320. Asking for 160 display pixels tall
         // has to constrain the coded *width*, or the caller gets a frame twice
         // the size it asked for.
-        let decoder = VideoDecoder::open_scaled_with(&media.quadrants_rot90, 160, path)
-            .expect("open scaled");
+        let decoder =
+            VideoDecoder::open_scaled_with(&media.quadrants_rot90, 160, path).expect("open scaled");
         let (width, height) = decoder.output_size();
         assert_eq!(height, 160, "{path:?}: the target is a display height");
         assert_eq!(width, 120, "{path:?}: and the aspect ratio is preserved");
@@ -640,7 +648,11 @@ fn an_audio_only_file_probes_as_audio_and_refuses_to_open_as_video() {
     // Both paths have to fail the same way. A hardware decoder that produced a
     // different error here would leak the acceleration choice into a message
     // the user reads.
-    for path in [Acceleration::Software, Acceleration::Auto, Acceleration::Vaapi] {
+    for path in [
+        Acceleration::Software,
+        Acceleration::Auto,
+        Acceleration::Vaapi,
+    ] {
         let error = VideoDecoder::open_with(&media.audio_only, path)
             .err()
             .expect("a decoder cannot be opened on a file with no video");
@@ -668,8 +680,14 @@ fn a_video_without_audio_says_so_and_one_with_it_says_so_too() {
 #[test]
 fn opening_a_file_that_is_not_there_names_the_file() {
     let missing = std::path::Path::new("/nonexistent/definitely-not-a-video.mp4");
-    for path in [Acceleration::Software, Acceleration::Auto, Acceleration::Vaapi] {
-        let error = VideoDecoder::open_with(missing, path).err().expect("no such file");
+    for path in [
+        Acceleration::Software,
+        Acceleration::Auto,
+        Acceleration::Vaapi,
+    ] {
+        let error = VideoDecoder::open_with(missing, path)
+            .err()
+            .expect("no such file");
         let message = error.to_string();
         assert!(
             message.contains("definitely-not-a-video.mp4"),
@@ -892,7 +910,11 @@ fn the_decoder_reports_which_path_it_actually_took() {
         // Before the first frame there is nothing to report but the request:
         // `get_format` has not run, so whether the accelerator initialised is
         // genuinely unknown.
-        assert_eq!(decoder.acceleration(), path, "{path:?}: before the first frame");
+        assert_eq!(
+            decoder.acceleration(),
+            path,
+            "{path:?}: before the first frame"
+        );
 
         decode_counter(&mut decoder, mid_frame(3));
         match path {
@@ -902,7 +924,10 @@ fn the_decoder_reports_which_path_it_actually_took() {
                 assert!(decoder.device_node().is_none());
             }
             _ => {
-                assert!(decoder.is_hardware(), "{path:?}: H.264 probed as usable here");
+                assert!(
+                    decoder.is_hardware(),
+                    "{path:?}: H.264 probed as usable here"
+                );
                 assert_eq!(decoder.acceleration(), Acceleration::Vaapi);
                 assert!(decoder.device_node().is_some());
             }
@@ -914,7 +939,10 @@ fn the_decoder_reports_which_path_it_actually_took() {
 fn hardware_and_software_decode_the_same_picture() {
     let media = require_media!();
     if !hwdecode::supports(HwCodec::H264) {
-        eprintln!("skipping {}: no hardware H.264 decode", support::test_name());
+        eprintln!(
+            "skipping {}: no hardware H.264 decode",
+            support::test_name()
+        );
         return;
     }
 
@@ -961,7 +989,10 @@ fn hardware_and_software_decode_the_same_picture() {
 fn a_hardware_frame_exports_as_dma_buf_handles_a_gpu_can_import() {
     let media = require_media!();
     if !hwdecode::supports(HwCodec::H264) {
-        eprintln!("skipping {}: no hardware H.264 decode", support::test_name());
+        eprintln!(
+            "skipping {}: no hardware H.264 decode",
+            support::test_name()
+        );
         return;
     }
 
@@ -975,7 +1006,10 @@ fn a_hardware_frame_exports_as_dma_buf_handles_a_gpu_can_import() {
     assert_eq!(mapped.display_size(), (COUNTER_WIDTH, COUNTER_HEIGHT));
 
     let planes = mapped.dmabuf.planes();
-    assert!(!planes.is_empty(), "an exported surface has at least one plane");
+    assert!(
+        !planes.is_empty(),
+        "an exported surface has at least one plane"
+    );
     assert!(
         mapped.dmabuf.is_importable(),
         "every plane needs a real modifier and pitch to be importable: {:?}",
@@ -1001,8 +1035,7 @@ fn mapping_a_software_decoder_is_refused_rather_than_quietly_copying() {
     let mut decoder = open(&media.counter, Acceleration::Software);
     let error = decoder
         .seek_and_map(mid_frame(5))
-        .err()
-        .expect("there is no GPU surface behind a software decode");
+        .expect_err("there is no GPU surface behind a software decode");
     assert!(error.to_string().contains("software"), "got: {error}");
 }
 
@@ -1010,7 +1043,10 @@ fn mapping_a_software_decoder_is_refused_rather_than_quietly_copying() {
 fn mapping_every_frame_of_a_file_does_not_exhaust_the_surface_pool() {
     let media = require_media!();
     if !hwdecode::supports(HwCodec::H264) {
-        eprintln!("skipping {}: no hardware H.264 decode", support::test_name());
+        eprintln!(
+            "skipping {}: no hardware H.264 decode",
+            support::test_name()
+        );
         return;
     }
 
@@ -1040,7 +1076,10 @@ fn mapping_every_frame_of_a_file_does_not_exhaust_the_surface_pool() {
 fn a_mapped_frame_is_the_same_frame_the_rgba_path_returns() {
     let media = require_media!();
     if !hwdecode::supports(HwCodec::H264) {
-        eprintln!("skipping {}: no hardware H.264 decode", support::test_name());
+        eprintln!(
+            "skipping {}: no hardware H.264 decode",
+            support::test_name()
+        );
         return;
     }
 

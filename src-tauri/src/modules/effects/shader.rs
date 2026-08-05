@@ -137,19 +137,19 @@ pub fn compile(source: &str, stage: Stage, name: &str) -> Result<CompiledShader>
     let spirv = to_spirv(&rewritten.source, stage, name)?;
 
     let mut corrections: Option<spirv_webgpu_transform::CorrectionMap> = None;
-    let split = spirv_webgpu_transform::combimgsampsplitter(&spirv, &mut corrections)
-        .map_err(|_| ShaderError::Split {
-            name: name.to_string(),
+    let split =
+        spirv_webgpu_transform::combimgsampsplitter(&spirv, &mut corrections).map_err(|_| {
+            ShaderError::Split {
+                name: name.to_string(),
+            }
         })?;
 
-    let module = naga::front::spv::parse_u8_slice(
-        as_bytes(&split),
-        &naga::front::spv::Options::default(),
-    )
-    .map_err(|e| ShaderError::SpirV {
-        name: name.to_string(),
-        message: format!("{e:?}"),
-    })?;
+    let module =
+        naga::front::spv::parse_u8_slice(as_bytes(&split), &naga::front::spv::Options::default())
+            .map_err(|e| ShaderError::SpirV {
+            name: name.to_string(),
+            message: format!("{e:?}"),
+        })?;
 
     let info = naga::valid::Validator::new(
         naga::valid::ValidationFlags::all(),
@@ -161,15 +161,12 @@ pub fn compile(source: &str, stage: Stage, name: &str) -> Result<CompiledShader>
         message: format!("{e:?}"),
     })?;
 
-    let wgsl = naga::back::wgsl::write_string(
-        &module,
-        &info,
-        naga::back::wgsl::WriterFlags::empty(),
-    )
-    .map_err(|e| ShaderError::Wgsl {
-        name: name.to_string(),
-        message: format!("{e:?}"),
-    })?;
+    let wgsl =
+        naga::back::wgsl::write_string(&module, &info, naga::back::wgsl::WriterFlags::empty())
+            .map_err(|e| ShaderError::Wgsl {
+                name: name.to_string(),
+                message: format!("{e:?}"),
+            })?;
 
     let layout = layout_from(&module, &rewritten);
     let vertex_inputs = match stage {
@@ -413,7 +410,11 @@ void main() {
     #[test]
     fn scalar_uniforms_come_back_as_a_block_with_offsets() {
         let out = compile(CORPUS_SHAPED, Stage::Fragment, "corpus_shaped.frag").unwrap();
-        let block = out.layout.uniform_block.as_ref().expect("two loose uniforms");
+        let block = out
+            .layout
+            .uniform_block
+            .as_ref()
+            .expect("two loose uniforms");
         assert_eq!(block.members.len(), 2);
 
         let intensity = out.layout.member("intensity").unwrap();

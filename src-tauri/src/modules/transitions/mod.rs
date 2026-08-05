@@ -64,7 +64,7 @@ pub mod resolve;
 pub mod validate;
 
 pub use catalog::{catalog, TransitionDescriptor};
-pub use render::{TransitionPipeline, TransitionParams};
+pub use render::{TransitionParams, TransitionPipeline};
 pub use resolve::{
     extended_source_time, instant_for, instants_at, linear_progress_at, max_duration, span_at,
     spans, window_for, TransitionInstant, TransitionLayer, TransitionSpan,

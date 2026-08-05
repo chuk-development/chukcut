@@ -239,7 +239,10 @@ pub struct PreviewSession {
 impl PreviewSession {
     pub fn new(project: Arc<Project>, options: PreviewOptions) -> Self {
         let size = options.size_for((project.canvas.width, project.canvas.height));
-        let quality = options.quality.unwrap_or(DEFAULT_JPEG_QUALITY).clamp(1, 100);
+        let quality = options
+            .quality
+            .unwrap_or(DEFAULT_JPEG_QUALITY)
+            .clamp(1, 100);
         Self {
             id: next_session_id(),
             size,
@@ -328,9 +331,21 @@ mod tests {
         // source file does in a player, because that is how the user finds out.
         assert_eq!(proxy_size((640, 480), None), (640, 480), "native");
         assert_eq!(proxy_size((1080, 1080), None), (1080, 1080), "native");
-        assert_eq!(proxy_size((1920, 1080), None), (1920, 1080), "1080p landscape is native");
-        assert_eq!(proxy_size((3840, 2160), None), (1920, 1080), "4K previews at 1080p");
-        assert_eq!(proxy_size((7680, 4320), None), (1920, 1080), "8K previews at 1080p");
+        assert_eq!(
+            proxy_size((1920, 1080), None),
+            (1920, 1080),
+            "1080p landscape is native"
+        );
+        assert_eq!(
+            proxy_size((3840, 2160), None),
+            (1920, 1080),
+            "4K previews at 1080p"
+        );
+        assert_eq!(
+            proxy_size((7680, 4320), None),
+            (1920, 1080),
+            "8K previews at 1080p"
+        );
     }
 
     #[test]
@@ -385,7 +400,10 @@ mod tests {
         // can show — 7.5× the work, on every stage of the frame.
         let panel = Viewport::new(700, 394);
         let size = preview_size((1920, 1080), Some(panel), None, false);
-        assert!(size.0 <= 700 && size.1 <= 394, "{size:?} does not fit the panel");
+        assert!(
+            size.0 <= 700 && size.1 <= 394,
+            "{size:?} does not fit the panel"
+        );
         assert_eq!(size, (700, 394));
 
         let full = 1920u64 * 1080;
@@ -431,7 +449,10 @@ mod tests {
                 let size = preview_size(canvas, Some(Viewport::new(panel.0, panel.1)), None, false);
                 assert_eq!(size.0 % 2, 0, "{canvas:?} in {panel:?} -> {size:?} is odd");
                 assert_eq!(size.1 % 2, 0, "{canvas:?} in {panel:?} -> {size:?} is odd");
-                assert!(size.0 <= panel.0 && size.1 <= panel.1, "{size:?} overflows {panel:?}");
+                assert!(
+                    size.0 <= panel.0 && size.1 <= panel.1,
+                    "{size:?} overflows {panel:?}"
+                );
                 let want = canvas.0 as f64 / canvas.1 as f64;
                 let got = size.0 as f64 / size.1 as f64;
                 assert!(
@@ -446,13 +467,22 @@ mod tests {
     fn the_settings_are_overrides_and_full_quality_wins() {
         let panel = Some(Viewport::new(700, 394));
         // `preview_max_edge` caps below the panel.
-        assert_eq!(preview_size((1920, 1080), panel, Some(480), false), (480, 270));
+        assert_eq!(
+            preview_size((1920, 1080), panel, Some(480), false),
+            (480, 270)
+        );
         // …and does not raise the preview above the panel, because the panel
         // still cannot show more than it has.
-        assert_eq!(preview_size((1920, 1080), panel, Some(1920), false), (700, 394));
+        assert_eq!(
+            preview_size((1920, 1080), panel, Some(1920), false),
+            (700, 394)
+        );
         // "Full quality preview" is the escape hatch: the canvas, whatever the
         // panel is and whatever the cap says.
-        assert_eq!(preview_size((1920, 1080), panel, Some(480), true), (1920, 1080));
+        assert_eq!(
+            preview_size((1920, 1080), panel, Some(480), true),
+            (1920, 1080)
+        );
         assert_eq!(preview_size((3840, 2160), panel, None, true), (3840, 2160));
     }
 
@@ -460,7 +490,10 @@ mod tests {
     fn no_viewport_leaves_the_old_table_in_charge() {
         // Before the first layout, and for any caller that does not measure a
         // panel at all, nothing changes.
-        assert_eq!(preview_size((1920, 1080), None, None, false), proxy_size((1920, 1080), None));
+        assert_eq!(
+            preview_size((1920, 1080), None, None, false),
+            proxy_size((1920, 1080), None)
+        );
         assert_eq!(preview_size((3840, 2160), None, None, false), (1920, 1080));
         // A panel that has not been laid out yet is not a request for a
         // one-pixel preview.
@@ -483,14 +516,19 @@ mod tests {
 
         // A one-pixel drag that rounds to the same even size is not a reason to
         // throw the ring away.
-        assert!(session.with_viewport(Some(Viewport::new(361, 641))).is_none());
+        assert!(session
+            .with_viewport(Some(Viewport::new(361, 641)))
+            .is_none());
         let bigger = session
             .with_viewport(Some(Viewport::new(540, 960)))
             .expect("a real resize");
         assert_eq!(bigger.size, (540, 960));
         assert!(bigger.id > session.id, "a new size is a new session");
         assert_eq!(bigger.quality, session.quality);
-        assert!(Arc::ptr_eq(&bigger.project, &session.project), "snapshot is shared");
+        assert!(
+            Arc::ptr_eq(&bigger.project, &session.project),
+            "snapshot is shared"
+        );
     }
 
     #[test]

@@ -138,7 +138,7 @@ struct Writer {
 static WRITER: OnceLock<&'static Writer> = OnceLock::new();
 
 fn writer() -> &'static Writer {
-    *WRITER.get_or_init(|| {
+    WRITER.get_or_init(|| {
         let writer: &'static Writer = Box::leak(Box::new(Writer {
             pending: Mutex::new(Pending {
                 job: None,
@@ -247,7 +247,12 @@ mod tests {
         let file = scratch("no_origin");
         discard_at(&file);
 
-        write_to(&file, &sample("untitled"), Some(Path::new("/old/place.chukcut"))).unwrap();
+        write_to(
+            &file,
+            &sample("untitled"),
+            Some(Path::new("/old/place.chukcut")),
+        )
+        .unwrap();
         // Saving under a new name, then not having one at all, must not leave
         // the old one behind to be saved over.
         write_to(&file, &sample("untitled"), None).unwrap();
@@ -261,7 +266,9 @@ mod tests {
     fn there_is_nothing_to_restore_when_nothing_was_written() {
         let file = scratch("absent");
         discard_at(&file);
-        assert!(read_from(&file).expect("a missing file is not an error").is_none());
+        assert!(read_from(&file)
+            .expect("a missing file is not an error")
+            .is_none());
     }
 
     #[test]

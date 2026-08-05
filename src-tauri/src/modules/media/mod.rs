@@ -50,9 +50,9 @@ pub mod waveform;
 pub use decoder::{Acceleration, DecodedFrame, VideoDecoder};
 pub use dmabuf::DmabufFrame;
 pub use hwdecode::{HwCodec, HwDecodeSupport};
-pub use provider::{MediaSourceProvider, MISSING_MEDIA_RGBA};
 pub use probe::{probe, AudioStreamInfo, MediaInfo, VideoStreamInfo};
-pub use thumbnails::{thumbnail_strip, thumbnail_stream, BatchSink, Thumbnail, ThumbnailBatch};
+pub use provider::{MediaSourceProvider, MISSING_MEDIA_RGBA};
+pub use thumbnails::{thumbnail_stream, thumbnail_strip, BatchSink, Thumbnail, ThumbnailBatch};
 pub use waveform::{waveform, Waveform};
 
 /// Everything that can go wrong reaching for a media file.
@@ -104,10 +104,7 @@ pub enum MediaError {
 
     /// A libav call on the hardware path failed.
     #[error("{what}: {source}")]
-    Hardware {
-        what: String,
-        source: ffmpeg::Error,
-    },
+    Hardware { what: String, source: ffmpeg::Error },
 
     #[error("{0}")]
     Invalid(String),

@@ -253,11 +253,13 @@ impl Project {
         let Some(group) = self.materials.link_of(segment) else {
             return false;
         };
-        self.link_members(group).into_iter().any(|(lane, _, other)| {
-            lane.kind == TrackKind::Audio
-                && other.id != segment.id
-                && other.material_id == segment.material_id
-        })
+        self.link_members(group)
+            .into_iter()
+            .any(|(lane, _, other)| {
+                lane.kind == TrackKind::Audio
+                    && other.id != segment.id
+                    && other.material_id == segment.material_id
+            })
     }
 
     /// Every segment live at `time`, ordered back-to-front for compositing.
@@ -1198,9 +1200,7 @@ impl Default for Crop {
 /// differently for it — it is what lets a segment keep its `KeyframeTrack`s in
 /// a canonical order, so that removing the last keyframe of a property and
 /// undoing it puts the track back exactly where it was rather than at the end.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AnimatableProperty {
     PositionX,
@@ -1432,10 +1432,7 @@ impl Project {
                 if self.materials.kind_of(&seg.material_id).is_none() {
                     outside.push(ValidationIssue {
                         severity: Severity::Warning,
-                        message: format!(
-                            "segment references unknown material {}",
-                            seg.material_id
-                        ),
+                        message: format!("segment references unknown material {}", seg.material_id),
                         subject_id: Some(seg.id.clone()),
                     });
                 }
@@ -1485,7 +1482,10 @@ impl Project {
                     }
                     if keys.keyframes.is_empty() {
                         error(
-                            format!("{:?} is marked as animated with no keyframes", keys.property),
+                            format!(
+                                "{:?} is marked as animated with no keyframes",
+                                keys.property
+                            ),
                             Some(seg.id.clone()),
                         );
                     }
@@ -1847,7 +1847,9 @@ mod tests {
 
         let issues = project.validate();
         assert!(issues.iter().any(|i| i.message.contains("two markers")));
-        assert!(issues.iter().any(|i| i.message.contains("before the timeline")));
+        assert!(issues
+            .iter()
+            .any(|i| i.message.contains("before the timeline")));
     }
 
     #[test]

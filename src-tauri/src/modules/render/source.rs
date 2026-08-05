@@ -486,14 +486,8 @@ mod tests {
         assert_eq!(upright.size(), (1920, 1080));
         assert!(upright.is_planar());
 
-        let sideways = SourceFrame::from_planes(
-            luma,
-            chroma,
-            YuvMatrix::Bt709,
-            YuvRange::Limited,
-            1,
-            None,
-        );
+        let sideways =
+            SourceFrame::from_planes(luma, chroma, YuvMatrix::Bt709, YuvRange::Limited, 1, None);
         assert_eq!(sideways.size(), (1080, 1920));
         assert_eq!(sideways.texture.width(), 1920, "the pixels were not moved");
     }

@@ -502,7 +502,10 @@ impl Inner {
             p99_ms: self.frames.percentile(0.99) as f64 / 1000.0,
             max_ms: self.frames.max() as f64 / 1000.0,
             budget_ms: self.budget_micros as f64 / 1000.0,
-            window_ms: now.saturating_duration_since(self.window_started).as_secs_f64() * 1000.0,
+            window_ms: now
+                .saturating_duration_since(self.window_started)
+                .as_secs_f64()
+                * 1000.0,
             decode: self.decode,
             encode: self.encode,
             width: self.facts.width,
@@ -511,8 +514,16 @@ impl Inner {
             rung: self.rung,
             // Before the first playback frame of a window there is no rung to
             // report, and the session's own size is the truthful answer.
-            render_width: if self.render.0 > 0 { self.render.0 } else { self.facts.width },
-            render_height: if self.render.1 > 0 { self.render.1 } else { self.facts.height },
+            render_width: if self.render.0 > 0 {
+                self.render.0
+            } else {
+                self.facts.width
+            },
+            render_height: if self.render.1 > 0 {
+                self.render.1
+            } else {
+                self.facts.height
+            },
             render_quality: self.render_quality,
         }
     }
@@ -971,7 +982,11 @@ mod tests {
         }
         hist.record(400_000);
 
-        assert!(hist.mean() < 12_000.0, "the mean looks healthy: {}", hist.mean());
+        assert!(
+            hist.mean() < 12_000.0,
+            "the mean looks healthy: {}",
+            hist.mean()
+        );
         assert_eq!(hist.max(), 400_000, "the outlier is reported exactly");
         // The outlier is past the last bucket, so the rank falls in the
         // overflow and the exact maximum is the answer.
@@ -1027,7 +1042,9 @@ mod tests {
         let stats = PlaybackStats::new();
         stats.begin_session(facts(), 30.0, start);
         stats.record_shown();
-        assert!(stats.record_frame(false, 10_000, Backend::Vaapi, None).is_none());
+        assert!(stats
+            .record_frame(false, 10_000, Backend::Vaapi, None)
+            .is_none());
 
         assert!(stats.tick(start).is_none(), "nothing at the very start");
         assert!(
@@ -1129,7 +1146,11 @@ mod tests {
             summary.budget_ms
         );
         // (8×10 + 40 + 90) / 10 = 21 ms.
-        assert!((summary.mean_ms - 21.0).abs() < 0.001, "mean {}", summary.mean_ms);
+        assert!(
+            (summary.mean_ms - 21.0).abs() < 0.001,
+            "mean {}",
+            summary.mean_ms
+        );
         assert!(
             (summary.max_ms - 90.0).abs() < 0.001,
             "the worst frame is reported exactly: {}",
@@ -1177,7 +1198,10 @@ mod tests {
         stats.record_shown();
         let idle = stats.finish(Instant::now()).expect("a summary");
         assert_eq!(idle.rung, 0);
-        assert_eq!((idle.render_width, idle.render_height), (idle.width, idle.height));
+        assert_eq!(
+            (idle.render_width, idle.render_height),
+            (idle.width, idle.height)
+        );
 
         stats.begin_session(facts(), 30.0, Instant::now());
         let _ = stats.record_frame(
@@ -1222,7 +1246,10 @@ mod tests {
         assert_eq!(summary.dropped, 4);
         assert_eq!(summary.discarded, 1);
         assert_eq!(summary.rendered, 0, "neither of them was ever encoded");
-        assert!(!summary.is_empty(), "a window of nothing but discards still says so");
+        assert!(
+            !summary.is_empty(),
+            "a window of nothing but discards still says so"
+        );
     }
 
     /// The decode path outlives a session, because it is a property of the
@@ -1245,7 +1272,11 @@ mod tests {
 
         let summary = stats.finish(start).expect("a summary");
         assert_eq!(summary.shown, 1, "a new session starts the counters again");
-        assert_eq!(summary.decode, Some(DecodePath::Vaapi), "but not the decode path");
+        assert_eq!(
+            summary.decode,
+            Some(DecodePath::Vaapi),
+            "but not the decode path"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1278,7 +1309,9 @@ mod tests {
         // exactly the state the summary exists to make visible.
         stats.record_shown();
 
-        let summary = stats.finish(start + Duration::from_secs(1)).expect("a summary");
+        let summary = stats
+            .finish(start + Duration::from_secs(1))
+            .expect("a summary");
         assert_eq!(summary.rendered, 0);
         assert_eq!(summary.shown, 1);
         for (name, value) in [
@@ -1291,7 +1324,10 @@ mod tests {
             assert!(value.is_finite(), "{name}_ms is {value}");
         }
         assert_eq!(summary.mean_ms, 0.0);
-        assert_eq!(summary.encode, None, "nothing encoded, so no encoder to name");
+        assert_eq!(
+            summary.encode, None,
+            "nothing encoded, so no encoder to name"
+        );
     }
 
     #[test]
@@ -1301,7 +1337,10 @@ mod tests {
         let _ = stats.record_frame(false, 1_000, Backend::Software, None);
         let summary = stats.finish(Instant::now()).expect("a summary");
         assert!(summary.budget_ms.is_finite());
-        assert!((summary.budget_ms - 33.333).abs() < 0.01, "falls back to 30 fps");
+        assert!(
+            (summary.budget_ms - 33.333).abs() < 0.01,
+            "falls back to 30 fps"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1347,7 +1386,9 @@ mod tests {
         stats.begin_session(facts(), 30.0, Instant::now());
         let _ = stats.record_frame(false, 6_000, Backend::Vaapi, None);
         assert!(
-            stats.record_frame(false, 31_000, Backend::Software, None).is_some(),
+            stats
+                .record_frame(false, 31_000, Backend::Software, None)
+                .is_some(),
             "a fresh session has not reported anything yet"
         );
     }
@@ -1400,7 +1441,10 @@ mod tests {
 
         let written = through_the_file_filter(|| emit(&summary, Reason::Tick));
 
-        assert!(written.contains("preview playback"), "the message: {written:?}");
+        assert!(
+            written.contains("preview playback"),
+            "the message: {written:?}"
+        );
         assert!(written.contains("INFO"), "at INFO, not DEBUG: {written:?}");
         for field in [
             "shown=30",
@@ -1418,7 +1462,10 @@ mod tests {
         }
         // The tail is the number the mean was hiding, and it has to be on the
         // line: 29 frames at 9 ms and one at 120 ms is a mean of 12.7 ms.
-        assert!(written.contains("max_ms=120"), "the worst frame: {written:?}");
+        assert!(
+            written.contains("max_ms=120"),
+            "the worst frame: {written:?}"
+        );
         assert!(written.contains("mean_ms=12.7"), "the mean: {written:?}");
         assert!(written.contains("p99_ms=120"), "the tail: {written:?}");
     }
@@ -1466,7 +1513,9 @@ mod tests {
 
         watch.arm(7, 30, 2_000_000, 1_000_000, SeekKind::Seek, start);
         assert!(
-            watch.complete(7, 30, start + Duration::from_millis(20)).is_none(),
+            watch
+                .complete(7, 30, start + Duration::from_millis(20))
+                .is_none(),
             "a 20 ms seek is not worth a line"
         );
 
@@ -1509,9 +1558,18 @@ mod tests {
         let start = Instant::now();
         let watch = SeekWatch::new();
         watch.arm(7, 30, 0, 1_000_000, SeekKind::Seek, start);
-        watch.arm(8, 60, 1_000_000, 2_000_000, SeekKind::Seek, start + Duration::from_millis(10));
+        watch.arm(
+            8,
+            60,
+            1_000_000,
+            2_000_000,
+            SeekKind::Seek,
+            start + Duration::from_millis(10),
+        );
 
-        assert!(watch.complete(7, 30, start + Duration::from_secs(1)).is_none());
+        assert!(watch
+            .complete(7, 30, start + Duration::from_secs(1))
+            .is_none());
         let slow = watch
             .complete(8, 60, start + Duration::from_millis(110))
             .expect("the live seek is still timed");

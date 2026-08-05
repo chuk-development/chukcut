@@ -114,10 +114,8 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use crate::modules::export::{
-    hwaccel, HwAccel, MediaWriter, Quality, VideoCodec, VideoStreamSpec,
-};
 use crate::modules::export::presets::Fps;
+use crate::modules::export::{hwaccel, HwAccel, MediaWriter, Quality, VideoCodec, VideoStreamSpec};
 use crate::modules::media::{probe, VideoDecoder};
 
 use super::decision::SourceProfile;
@@ -470,7 +468,9 @@ mod tests {
         let options = ProxySpec::options("h264_vaapi");
         assert!(options.contains(&("g".to_string(), "1".to_string())));
         assert!(options.contains(&("coder".to_string(), "cavlc".to_string())));
-        assert!(!options.iter().any(|(key, _)| key == "preset" || key == "tune"));
+        assert!(!options
+            .iter()
+            .any(|(key, _)| key == "preset" || key == "tune"));
     }
 
     #[test]

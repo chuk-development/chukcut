@@ -153,7 +153,10 @@ fn audio_info(stream: &ffmpeg::Stream) -> AudioStreamInfo {
     // populated; the replacement `ch_layout` is not exposed by ffmpeg-next 6.1.
     let (sample_rate, channels) = unsafe {
         let raw = parameters.as_ptr();
-        ((*raw).sample_rate.max(0) as u32, (*raw).channels.max(0) as u16)
+        (
+            (*raw).sample_rate.max(0) as u32,
+            (*raw).channels.max(0) as u16,
+        )
     };
 
     AudioStreamInfo {

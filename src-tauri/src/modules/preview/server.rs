@@ -832,7 +832,8 @@ impl PreviewServer {
         // at 30 requests a second a renderer that falls momentarily behind
         // produces exactly that stream. A neighbouring frame is a few
         // milliseconds stale and looks identical to a late one.
-        if let Some((neighbour, bytes)) = self.shared.cache.nearest(session, frame, NEAREST_TOLERANCE)
+        if let Some((neighbour, bytes)) =
+            self.shared.cache.nearest(session, frame, NEAREST_TOLERANCE)
         {
             if neighbour != frame {
                 tracing::debug!(
@@ -1381,7 +1382,11 @@ impl Destinations {
     ///
     /// `None` on a device that cannot do this at all, which is a reason to use
     /// another path and not a reason to fail.
-    fn surfaces(&mut self, ctx: &Arc<RenderContext>, size: (u32, u32)) -> Option<&Arc<SurfaceRing>> {
+    fn surfaces(
+        &mut self,
+        ctx: &Arc<RenderContext>,
+        size: (u32, u32),
+    ) -> Option<&Arc<SurfaceRing>> {
         if let Some(at) = self.drawn.iter().position(|ring| ring.holds(size)) {
             // Move to the back so the least recently used is always at the
             // front and is what gets evicted below.
@@ -1585,7 +1590,10 @@ fn claim_exported(
     }
 
     let want = ctx.clamp_size(session.size);
-    if !ring.as_ref().is_some_and(|r| r.holds(size) && r.holds(want)) {
+    if !ring
+        .as_ref()
+        .is_some_and(|r| r.holds(size) && r.holds(want))
+    {
         // Cheap here — once per session size, never per frame — and it is what
         // keeps a ring from being allocated on a machine with no encoder for it.
         if !super::encoder::hardware_available() {
@@ -1926,13 +1934,7 @@ fn render_one(
                 done_rendering(&shared, frame_no);
             }
             if stored && scrub {
-                shared.emit_position(
-                    session_id,
-                    frame_no,
-                    time,
-                    shared.clock.is_playing(),
-                    false,
-                );
+                shared.emit_position(session_id, frame_no, time, shared.clock.is_playing(), false);
             }
         }
     };
@@ -2196,7 +2198,9 @@ pub fn frame_protocol_async<R: tauri::Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::modules::project::document::{CanvasConfig, Segment, TimeRange, Track, TrackKind, Transform};
+    use crate::modules::project::document::{
+        CanvasConfig, Segment, TimeRange, Track, TrackKind, Transform,
+    };
     use crate::modules::render::{SolidColorProvider, SolidSource};
 
     fn project() -> Arc<Project> {
@@ -2246,7 +2250,10 @@ mod tests {
 
     #[test]
     fn frame_urls_parse_in_every_shape_a_webview_produces() {
-        assert_eq!(parse_frame_uri("chukcut-frame://preview/7/42"), Some((7, 42)));
+        assert_eq!(
+            parse_frame_uri("chukcut-frame://preview/7/42"),
+            Some((7, 42))
+        );
         assert_eq!(
             parse_frame_uri("chukcut-frame://localhost/preview/7/42"),
             Some((7, 42))
@@ -2302,7 +2309,10 @@ mod tests {
         let response = server.serve_uri("chukcut-frame://preview/5/2");
         assert_eq!(response.status(), tauri::http::StatusCode::OK);
         assert_eq!(
-            response.headers().get(tauri::http::header::CONTENT_TYPE).unwrap(),
+            response
+                .headers()
+                .get(tauri::http::header::CONTENT_TYPE)
+                .unwrap(),
             "image/jpeg"
         );
         assert_eq!(response.body(), &vec![0xFF, 0xD8, 0x00]);
@@ -2484,7 +2494,10 @@ mod tests {
             (700, 394),
             "the panel, not the canvas"
         );
-        assert!(resized.session > info.session, "a new size is a new session");
+        assert!(
+            resized.session > info.session,
+            "a new size is a new session"
+        );
         assert_eq!(
             server.cache().session(),
             resized.session,
@@ -2517,7 +2530,11 @@ mod tests {
             .expect("a session is open");
         assert_eq!(server.clock().position(), before, "a resize is not a seek");
         assert_eq!(resized.frame, 30);
-        assert_eq!(server.shared.work.lock().scrub, Some(30), "and it re-renders");
+        assert_eq!(
+            server.shared.work.lock().scrub,
+            Some(30),
+            "and it re-renders"
+        );
     }
 
     /// The fullscreen bug, at the wiring level. Entering fullscreen during
@@ -2554,7 +2571,11 @@ mod tests {
         assert!(resized.playing, "the resize must not pause playback");
 
         let mut ladder = server.shared.ladder.lock();
-        assert_eq!(ladder.rung(), 0, "old-size evidence does not survive a resize");
+        assert_eq!(
+            ladder.rung(),
+            0,
+            "old-size evidence does not survive a resize"
+        );
         assert_eq!(
             ladder.dropped(5),
             None,
@@ -2680,7 +2701,11 @@ mod tests {
         // What the render thread does when it picks the job up.
         {
             let mut work = server.shared.work.lock();
-            assert_eq!(work.scrub.take(), Some(0), "the session queued its first frame");
+            assert_eq!(
+                work.scrub.take(),
+                Some(0),
+                "the session queued its first frame"
+            );
             work.rendering = Some(0);
         }
 
@@ -2717,7 +2742,8 @@ mod tests {
         }
         let (server, _time, _exclusive) = shared_server();
         server.set_source_provider(Arc::new(
-            SolidColorProvider::new().with("clip", SolidSource::new([1.0, 0.0, 0.0, 1.0], 1920, 1080)),
+            SolidColorProvider::new()
+                .with("clip", SolidSource::new([1.0, 0.0, 0.0, 1.0], 1920, 1080)),
         ));
 
         // No Tauri app in a unit test, so the session is installed directly;
@@ -2775,8 +2801,10 @@ mod tests {
         Arc<crate::modules::preview::clock::ManualSource>,
         std::sync::MutexGuard<'static, ()>,
     ) {
-        static SERVER: std::sync::OnceLock<(Arc<PreviewServer>, Arc<crate::modules::preview::clock::ManualSource>)> =
-            std::sync::OnceLock::new();
+        static SERVER: std::sync::OnceLock<(
+            Arc<PreviewServer>,
+            Arc<crate::modules::preview::clock::ManualSource>,
+        )> = std::sync::OnceLock::new();
 
         let guard = ONE_SERVER.lock().unwrap_or_else(|e| e.into_inner());
         let (server, time) = SERVER.get_or_init(|| {
@@ -2972,7 +3000,10 @@ mod tests {
             summary.decode.is_some(),
             "the render thread reports the decode path before its first frame"
         );
-        assert!(summary.encode.is_some(), "and the encode thread reports its backend");
+        assert!(
+            summary.encode.is_some(),
+            "and the encode thread reports its backend"
+        );
         assert!(
             summary.mean_ms > 0.0 && summary.mean_ms.is_finite(),
             "mean {}",
@@ -3003,7 +3034,11 @@ mod tests {
         // Draining is not idempotent by accident: `finish` resets, so a stop
         // straight after a final summary must not print a second empty one.
         assert!(
-            server.shared.stats.finish(std::time::Instant::now()).is_none(),
+            server
+                .shared
+                .stats
+                .finish(std::time::Instant::now())
+                .is_none(),
             "the window was drained"
         );
 

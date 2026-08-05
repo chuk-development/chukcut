@@ -54,7 +54,7 @@ impl ProjectConfig {
         if self.width < 2 || self.height < 2 {
             return Err("the canvas must be at least 2\u{d7}2 pixels".to_string());
         }
-        if self.width % 2 != 0 || self.height % 2 != 0 {
+        if !self.width.is_multiple_of(2) || !self.height.is_multiple_of(2) {
             return Err(format!(
                 "the canvas must have even dimensions; {}x{} has an odd edge",
                 self.width, self.height
@@ -174,22 +174,52 @@ mod tests {
         let base = config(&p);
 
         // An odd canvas is an export error waiting half an hour downstream.
-        let odd = ConfigureCommand::new(&p, ProjectConfig { width: 1235, ..base.clone() });
+        let odd = ConfigureCommand::new(
+            &p,
+            ProjectConfig {
+                width: 1235,
+                ..base.clone()
+            },
+        );
         assert!(odd.apply(&mut project()).unwrap_err().contains("even"));
 
-        let zero = ConfigureCommand::new(&p, ProjectConfig { width: 0, ..base.clone() });
+        let zero = ConfigureCommand::new(
+            &p,
+            ProjectConfig {
+                width: 0,
+                ..base.clone()
+            },
+        );
         assert!(zero.apply(&mut project()).is_err());
 
-        let nan_fps = ConfigureCommand::new(&p, ProjectConfig { fps: f64::NAN, ..base.clone() });
+        let nan_fps = ConfigureCommand::new(
+            &p,
+            ProjectConfig {
+                fps: f64::NAN,
+                ..base.clone()
+            },
+        );
         assert!(nan_fps.apply(&mut project()).is_err());
 
-        let unnamed = ConfigureCommand::new(&p, ProjectConfig { name: "  ".into(), ..base });
+        let unnamed = ConfigureCommand::new(
+            &p,
+            ProjectConfig {
+                name: "  ".into(),
+                ..base
+            },
+        );
         assert!(unnamed.apply(&mut project()).is_err());
 
         // And a refused command left the document untouched.
         let mut untouched = project();
         let before = config(&untouched);
-        let bad = ConfigureCommand::new(&untouched, ProjectConfig { fps: 0.0, ..before.clone() });
+        let bad = ConfigureCommand::new(
+            &untouched,
+            ProjectConfig {
+                fps: 0.0,
+                ..before.clone()
+            },
+        );
         assert!(bad.apply(&mut untouched).is_err());
         assert_eq!(config(&untouched), before);
     }
@@ -205,8 +235,14 @@ mod tests {
         let segment = Segment {
             id: "clip-1".into(),
             material_id: "mat-1".into(),
-            target_range: TimeRange { start: 1_000_000, duration: 2_000_000 },
-            source_range: TimeRange { start: 0, duration: 2_000_000 },
+            target_range: TimeRange {
+                start: 1_000_000,
+                duration: 2_000_000,
+            },
+            source_range: TimeRange {
+                start: 0,
+                duration: 2_000_000,
+            },
             render_index: 0,
             speed: 1.0,
             volume: 1.0,
@@ -218,7 +254,13 @@ mod tests {
         track.segments.push(segment.clone());
         p.tracks.push(track);
 
-        let command = ConfigureCommand::new(&p, ProjectConfig { fps: 24.0, ..config(&p) });
+        let command = ConfigureCommand::new(
+            &p,
+            ProjectConfig {
+                fps: 24.0,
+                ..config(&p)
+            },
+        );
         command.apply(&mut p).unwrap();
 
         assert_eq!(p.tracks[0].segments[0].target_range, segment.target_range);
@@ -229,7 +271,13 @@ mod tests {
     fn a_noop_knows_it_is_one() {
         let p = project();
         assert!(ConfigureCommand::new(&p, config(&p)).is_noop());
-        let renamed = ConfigureCommand::new(&p, ProjectConfig { name: "x".into(), ..config(&p) });
+        let renamed = ConfigureCommand::new(
+            &p,
+            ProjectConfig {
+                name: "x".into(),
+                ..config(&p)
+            },
+        );
         assert!(!renamed.is_noop());
     }
 }

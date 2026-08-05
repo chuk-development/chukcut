@@ -50,7 +50,9 @@ enum MaterialSource {
         /// see [`fitted_height`].
         display: (u32, u32),
     },
-    Image { path: PathBuf },
+    Image {
+        path: PathBuf,
+    },
     /// Text is rasterised rather than decoded, at the size of the frame being
     /// rendered, so the compositor's fit is the identity and the segment's own
     /// transform is what places the title. The material travels with it because
@@ -333,7 +335,12 @@ impl MediaSourceProvider {
     /// A cached upload for this material, if it is both the right frame and
     /// large enough. The size check is what stops an export reusing the
     /// preview's proxy texture and silently producing a soft picture.
-    fn cached(&self, material_id: &str, source_time: Micros, want_height: u32) -> Option<SourceFrame> {
+    fn cached(
+        &self,
+        material_id: &str,
+        source_time: Micros,
+        want_height: u32,
+    ) -> Option<SourceFrame> {
         let textures = self.textures.lock();
         let cached = textures.get(material_id)?;
         let close_enough = (cached.source_time - source_time).abs() <= FRAME_EPSILON;

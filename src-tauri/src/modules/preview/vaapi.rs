@@ -113,7 +113,7 @@ fn ffmpeg_error(what: &str, error: ffmpeg::Error) -> PreviewError {
 /// it is checked here rather than discovered as an `EINVAL` from
 /// `av_hwframe_ctx_init`.
 pub fn size_is_encodable(width: u32, height: u32) -> bool {
-    width >= 2 && height >= 2 && width % 2 == 0 && height % 2 == 0
+    width >= 2 && height >= 2 && width.is_multiple_of(2) && height.is_multiple_of(2)
 }
 
 /// One opened `mjpeg_vaapi` encoder and the surface pool it draws from.
@@ -235,9 +235,15 @@ impl VaapiJpegEncoder {
         // may be encoding on the same chip while it runs.
         let device =
             HwDeviceContext::shared_vaapi().map_err(|e| PreviewError::Encode(e.to_string()))?;
-        let frames =
-            HwFramesContext::create(device, Pixel::VAAPI, Pixel::NV12, width, height, POOL_SURFACES)
-                .map_err(|e| PreviewError::Encode(e.to_string()))?;
+        let frames = HwFramesContext::create(
+            device,
+            Pixel::VAAPI,
+            Pixel::NV12,
+            width,
+            height,
+            POOL_SURFACES,
+        )
+        .map_err(|e| PreviewError::Encode(e.to_string()))?;
         frames
             .attach_to_encoder(&mut encoder)
             .map_err(|e| PreviewError::Encode(e.to_string()))?;
@@ -635,7 +641,7 @@ pub fn rgba_to_nv12(
 
     let src_stride = width * BYTES_PER_PIXEL;
     debug_assert!(rgba.len() >= src_stride * height);
-    debug_assert!(width % 2 == 0 && height % 2 == 0);
+    debug_assert!(width.is_multiple_of(2) && height.is_multiple_of(2));
 
     // One row pair: the unit of work either way. A row *pair* rather than a row
     // because one line of chroma covers two lines of luma, so splitting
@@ -811,10 +817,10 @@ mod tests {
         // every average-based test still passes.
         let (w, h) = (4usize, 4usize);
         let mut rgba = solid(w, h, [0, 0, 0]);
-        let at = (1 * w + 1) * 4;
+        let at = (w + 1) * 4;
         rgba[at..at + 3].copy_from_slice(&[255, 255, 255]);
         let (y, _) = convert(&rgba, w, h);
-        assert_eq!(y[1 * w + 1], 255);
+        assert_eq!(y[w + 1], 255);
         assert_eq!(y.iter().filter(|&&v| v != 0).count(), 1);
     }
 
@@ -827,7 +833,15 @@ mod tests {
         let (stride, uv_stride) = (16usize, 16usize);
         let mut y = vec![7u8; stride * h];
         let mut uv = vec![7u8; uv_stride * h / 2];
-        rgba_to_nv12(&solid(w, h, [255, 255, 255]), w, h, &mut y, stride, &mut uv, uv_stride);
+        rgba_to_nv12(
+            &solid(w, h, [255, 255, 255]),
+            w,
+            h,
+            &mut y,
+            stride,
+            &mut uv,
+            uv_stride,
+        );
 
         for row in 0..h {
             assert!(
@@ -835,7 +849,9 @@ mod tests {
                 "row {row} was not written"
             );
             assert!(
-                y[row * stride + w..(row + 1) * stride].iter().all(|&v| v == 7),
+                y[row * stride + w..(row + 1) * stride]
+                    .iter()
+                    .all(|&v| v == 7),
                 "row {row} wrote past the picture into the padding"
             );
         }
