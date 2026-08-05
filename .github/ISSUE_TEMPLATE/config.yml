@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/chukfinley/chukcut/security/advisories/new
+    about: Report privately. Do not open a public issue.
+  - name: Where things stand
+    url: https://github.com/chukfinley/chukcut/blob/master/docs/STATUS.md
+    about: What works, what is rough, and which traps have already cost hours.

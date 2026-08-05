@@ -1,15 +1,50 @@
 # Build output
 node_modules/
 dist/
+dist-ssr/
 src-tauri/target/
 src-tauri/gen/
+*.tsbuildinfo
 
-# Editor / OS
+# Test and benchmark artefacts. The suites generate their own fixtures and
+# write results next to themselves; only the checked-in baselines belong in git.
+src-tauri/bench-results/
+src-tauri/tests/fixtures/generated/
+/coverage/
+*.profraw
+
+# Media that wandered in. Anything the editor produced or consumed while
+# someone was testing has no business in the history.
+/*.mp4
+/*.mkv
+/*.mov
+/*.webm
+/*.wav
+/*.chukcut
+
+# Scratch space — local investigation, downloads, throwaway scripts
+_scratch/
+
+# Dropped in the working directory by local tooling, not part of the project
+session.txt
+
+# Editor and OS
 .DS_Store
+Thumbs.db
 *.swp
+*~
 .idea/
 .vscode/
+!.vscode/extensions.json
 
-# Local env
+# Local environment and anything that looks like a credential
 .env
-.env.local
+.env.*
+!.env.example
+*.pem
+*.key
+secrets.json
+
+# Tauri signing keys — these must never reach the repository
+*.tauri-key
+tauri-private.key*

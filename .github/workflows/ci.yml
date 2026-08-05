@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Lint and format check
+        run: pnpm lint
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Tests
+        run: pnpm test:run
+
+  rust:
+    name: Rust
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      # Tauri's shell, FFmpeg's headers, VAAPI, and libshaderc. Without the
+      # last one shaderc-sys builds glslang from source with CMake, which works
+      # but adds several minutes to a cold build.
+      - name: System dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            libwebkit2gtk-4.1-dev libsoup-3.0-dev librsvg2-dev \
+            libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev \
+            libavdevice-dev libswscale-dev libswresample-dev \
+            libva-dev libshaderc-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Formatting
+        run: cargo fmt --check
+        working-directory: src-tauri
+
+      # Reported, not fatal. There is a backlog of about 28 style lints — no
+      # correctness among them — and failing the build on it would only teach
+      # people to ignore a red tick. Clear the backlog, then add `-D warnings`.
+      - name: Clippy
+        run: cargo clippy --all-targets
+        working-directory: src-tauri
+
+      # Tests that need a GPU adapter or FFmpeg binaries skip with a printed
+      # reason rather than fail, so a runner without either still reports
+      # truthfully — it just runs fewer tests. See src-tauri/tests/support.
+      - name: Tests
+        run: cargo test -j 4
+        working-directory: src-tauri

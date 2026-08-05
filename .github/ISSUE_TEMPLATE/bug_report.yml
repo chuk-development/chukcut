@@ -1,0 +1,64 @@
+name: Bug report
+description: Something behaves wrongly, crashes, or produces a bad file
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For playback or export problems, the log line naming the chosen encoder
+        and frame path is usually the whole diagnosis — please include it.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: And what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Import …
+        2. Drag …
+        3. Press …
+    validations:
+      required: true
+
+  - type: dropdown
+    id: build
+    attributes:
+      label: Build
+      options:
+        - Release build (pnpm tauri build)
+        - Dev build (pnpm tauri dev)
+    validations:
+      required: true
+
+  - type: textarea
+    id: machine
+    attributes:
+      label: Machine
+      description: >
+        Distribution, GPU and driver, and the output of `ffmpeg -version`.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: media
+    attributes:
+      label: The media involved
+      description: >
+        `ffprobe` output for the clip, if the problem involves a specific file.
+        Codec, resolution, frame rate and whether it is variable frame rate all
+        matter.
+      render: text
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Log output
+      render: text

@@ -1,0 +1,23 @@
+# Normalise line endings so a Windows checkout does not rewrite the tree.
+* text=auto eol=lf
+
+*.rs      text diff=rust
+*.ts      text
+*.tsx     text
+*.wgsl    text
+*.glsl    text
+*.md      text diff=markdown
+*.toml    text diff=toml
+
+# Generated or vendored — keep them out of diffs and language statistics.
+pnpm-lock.yaml      linguist-generated=true -diff
+src-tauri/Cargo.lock linguist-generated=true -diff
+
+# Binary, so git never tries to merge them.
+*.png     binary
+*.jpg     binary
+*.ico     binary
+*.icns    binary
+*.woff2   binary
+*.mp4     binary
+*.wav     binary
