@@ -95,7 +95,8 @@ pub fn vaapi_device() -> Option<VaapiDevice> {
                 tracing::info!(%error, "no VAAPI device; decoding and encoding in software");
                 None
             }
-        }).clone()
+        })
+        .clone()
 }
 
 #[cfg(test)]
