@@ -1847,6 +1847,17 @@ nothing else in the system would say so.
 
 ## Traps that have already cost time
 
+- **The frontend suite's flakiness was vitest's 5 s default, not the
+  components.** Eight tests across six files failed at 5.1–6.9 s, and the set
+  changed between runs — App, the export dialog, the preview, the media
+  library, settings. Every one of them passes with `--testTimeout=25000`.
+  Mounting these trees in jsdom costs seconds by itself: whole files take
+  17–103 s, and the suite spends more time in `environment` than in the tests.
+  Anything that waits after a mount was racing the timeout. `testTimeout` and
+  `hookTimeout` are now 20 s in `vitest.config.ts`, which is still far above
+  what any of them need, so a genuine hang still fails. If you see a
+  "flaky component" here, measure before believing it.
+
 - **FFmpeg will demux a plain text file as video.** The `tty` demuxer matches
   on the extension alone — `.txt`, `.nfo`, `.asc` and friends — and reports an
   `ansi` "video" stream with a size and a frame rate, so a stray text file
