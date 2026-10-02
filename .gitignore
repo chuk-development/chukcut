@@ -1,5 +1,5 @@
 # Build output
-/target/
+target/
 
 # Test and benchmark artefacts. The suites generate their own fixtures and
 # write results next to themselves; only the checked-in baselines belong in git.
