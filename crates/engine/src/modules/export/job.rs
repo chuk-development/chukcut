@@ -765,7 +765,9 @@ fn encode_all(
         // compositor wants the timeline's clock. The offset here and the
         // index-based PTS everywhere below are together what rebases a range
         // export to start at zero.
-        let time = settings.range_start + time;
+        // Sampled just inside the frame rather than on its first microsecond;
+        // see `SAMPLE_SLACK` for the duplicated frame at a cut that prevents.
+        let time = settings.range_start + time + crate::modules::project::SAMPLE_SLACK;
         if let Some(state) = zero_copy.as_mut() {
             match state.frame(job, writer, size, index, time) {
                 Ok(()) => {

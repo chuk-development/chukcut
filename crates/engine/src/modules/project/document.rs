@@ -1004,6 +1004,17 @@ pub struct Segment {
     pub keyframes: Vec<KeyframeTrack>,
 }
 
+/// How far inside a frame to sample it, when rendering frame by frame.
+///
+/// Times are whole microseconds and frame periods are not (33 333.3 µs at
+/// 30 fps), so every frame time, cut point and source offset is rounded, and
+/// the roundings add up. Sampled exactly at a frame's start, a clip whose
+/// source begins at a rounded frame time lands 1 µs short of the source frame
+/// it should show and shows the one before — a duplicated frame at the cut.
+/// Ten microseconds is above any sum of those roundings and far below the
+/// shortest frame period anyone exports (4 166 µs at 240 fps).
+pub const SAMPLE_SLACK: Micros = 10;
+
 /// The widest a segment's stored source duration may sit from the one its
 /// speed implies, in microseconds.
 ///

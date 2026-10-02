@@ -231,7 +231,12 @@ impl Editor {
             return;
         }
         self.last_request = Some(key);
-        self.player.request(Arc::clone(&self.project), time, size);
+        // Just inside the frame, like the export: see `SAMPLE_SLACK`.
+        self.player.request(
+            Arc::clone(&self.project),
+            time + chukcut_engine::modules::project::SAMPLE_SLACK,
+            size,
+        );
     }
 
     fn play(&mut self) {
