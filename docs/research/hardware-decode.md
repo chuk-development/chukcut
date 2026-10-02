@@ -283,7 +283,7 @@ that hands over an owned duplicate, because Vulkan closes what it is given while
 libavutil closes its own.
 
 ```rust
-use chukcut_lib::modules::media::dmabuf::Plane;   // or `crate::modules::media::...`
+use chukcut_engine::modules::media::dmabuf::Plane;   // or `crate::modules::media::...`
 
 /// Import one plane of a decoded video surface as a texture.
 ///

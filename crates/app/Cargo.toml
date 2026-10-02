@@ -1,0 +1,29 @@
+[package]
+name = "chukcut"
+version = "0.1.0"
+description = "A fast, modern video editor for Linux. Native GPU UI on the chukcut engine."
+license = "GPL-3.0-or-later"
+repository = "https://github.com/chuk-development/chukcut"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "chukcut"
+path = "src/main.rs"
+
+[dependencies]
+chukcut-engine = { path = "../engine" }
+
+# The UI toolkit Zed is built on: retained entities, immediate-style element
+# trees, and a wgpu renderer on Linux. Git-only, so pinned to one commit — the
+# one `docs/research/GPUI_SPIKE.md` verified. Bump deliberately, never by
+# accident: its API moves between commits.
+gpui = { git = "https://github.com/zed-industries/zed", rev = "b1a7ef0cf66dfbf9d7661170c96d97c7df916c68" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "b1a7ef0cf66dfbf9d7661170c96d97c7df916c68", features = ["wayland", "x11"] }
+
+# `RenderImage` is built from `image::Frame`, so this must be the same major
+# version gpui links.
+image = "0.25"
+anyhow = "1"
+parking_lot = "0.12"
+tracing = "0.1"

@@ -1,118 +1,104 @@
 # Architecture overview
 
-chukcut is a video editor: a Rust core that owns media, the GPU and the file
-system, and a webview frontend that owns everything the user looks at.
+chukcut is a video editor: a Rust engine that owns media, the GPU and the file
+system, and a native GPUI shell that owns the window. One process, no webview.
+Why: `../decisions/0011-native-ui-on-gpui.md`.
 
-## Why this split
-
-The previous attempt at this project put the UI in native Rust (egui). It
-produced a timeline that could not export, because every button, panel and drag
-interaction had to be drawn by hand and each iteration cost a compile. The
-work went into re-implementing widgets instead of into editing video.
-
-That is the real reason, and it is sufficient on its own. The UI is the part of
-an editor that has to be rebuilt fifty times before it feels right, so it
-belongs in the toolchain with the fastest iteration loop.
-
-An earlier draft of this document also claimed CapCut Desktop does the same
-thing. It does not, and the claim has been removed rather than softened. A
-full inventory of the Windows build (`docs/research/ui-inventory.md`) found
-**2,007 QML files inside `VECreator.dll`** — the editor is entirely native Qt
-Quick. Chromium and Lynx are present, but they render the commerce and account
-surfaces around the editor, never the timeline. Every CEF `.pak` in the install
-is stock Chromium, unpatched.
-
-What does hold:
-
-- **CapCut Web** is a TypeScript UI driving the same engine compiled to WASM
-  (`vesdk-lvapi.wasm` plus `libffmpeg.wasm`). So the engine/UI split across a
-  language boundary is proven at their scale, even if the desktop client draws
-  its own widgets.
-- ByteDance can afford to hand-build two thousand QML files. We cannot. That
-  asymmetry is the argument, not an appeal to their example.
-
-## The two processes
+## The crates
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│  Webview  (React 19 + TypeScript)                       │
+│  crates/app  (chukcut — GPUI)                           │
+│                                                         │
+│  editor.rs   media panel, preview, timeline, actions    │
+│  player.rs   preview render thread (latest-wins)        │
+│  edits.rs    gestures → EditCommand                     │
+│                                                         │
+│  Owns: layout, interaction, view state                  │
+└───────────────────────┬─────────────────────────────────┘
+                        │  plain function calls into
+                        │  modules/*/commands.rs
+┌───────────────────────▼─────────────────────────────────┐
+│  crates/engine  (chukcut-engine)                        │
 │                                                         │
 │  src/modules/<domain>/                                  │
-│    components/   what the user sees                     │
-│    lib/          typed wrappers around invoke()         │
-│    store.ts      Zustand slice                          │
-│                                                         │
-│  Owns: layout, interaction, local UI state              │
-│  Owns nothing else. No fs, no process, no decoder.      │
-└───────────────────────┬─────────────────────────────────┘
-                        │  invoke() commands
-                        │  Channel<T> event streams
-                        │  chukcut-frame:// custom protocol
-┌───────────────────────▼─────────────────────────────────┐
-│  Rust  (src-tauri)                                      │
-│                                                         │
-│  src-tauri/src/modules/<domain>/                        │
 │    mod.rs        the capability                         │
-│    commands.rs   the #[tauri::command] surface          │
+│    commands.rs   the shell-facing API                   │
+│  src/shell.rs    spawn_blocking + Channel               │
+│  src/state.rs    AppState: document, path, history      │
 │                                                         │
 │  Owns: document, media, GPU, encoding, disk             │
+│  Depends on no UI crate.                                │
 └─────────────────────────────────────────────────────────┘
 ```
 
-Module names match on both sides. `timeline` exists twice: once as edit
-operations over the document, once as the lane UI that issues them.
+The command layer is the contract. The app calls it today; a CLI and an MCP
+server will call the same functions, so a capability that exists only in the
+UI is a bug in where it was written.
 
 ## Modules
 
-| Module | Rust responsibility | Frontend responsibility |
-|---|---|---|
-| `project` | Document model, load/save, validation | Project store, open/save dialogs |
-| `timeline` | Edit commands, undo/redo | Lanes, clips, drag/trim/split, ruler |
-| `media` | FFmpeg probe/decode, thumbnails, waveforms | Media library, import |
-| `gpu` | The process's one wgpu device and one VAAPI display | — |
-| `render` | wgpu compositor: project + time → frame | — |
-| `preview` | Frame server, playback clock | Canvas player, transport controls |
-| `export` | Full-res render + encode, progress | Export dialog, presets, progress |
-| `effects` | Lua + shader effect runtime | Effect browser, parameter panel |
-| `workspace` | Paths, caches, settings, recents | Settings UI, start screen |
+| Module | Responsibility |
+|---|---|
+| `project` | Document model, load/save, import, validation, autosave |
+| `timeline` | Edit commands, undo/redo, split, link |
+| `media` | FFmpeg probe/decode, hardware decode, thumbnails, waveforms |
+| `gpu` | The process's one wgpu device and one VAAPI display |
+| `render` | wgpu compositor: project + time → frame |
+| `preview` | Playback clock; the old JPEG frame server (webview era, unused by the app) |
+| `audio` | Mixer and output device; the device's played samples are the clock |
+| `export` | Full-resolution render + encode, progress |
+| `effects` | Lua + shader effect runtime |
+| `text`, `transitions`, `inspector`, `proxy` | As named |
+| `workspace` | Paths, caches, settings, recents, logging, hardware report |
 
 ## The data flow
 
-There is one source of truth: the `Project` struct in
-`modules/project/document.rs`. Everything else is derived from it.
+There is one source of truth: the `Project` in `AppState`
+(`modules/project/document.rs`). Everything else is derived from it.
 
 ```
-    user gesture
+    user gesture (crates/app)
          │
          ▼
-  EditCommand ──────► History.apply() ──────► Project mutated
-                                                    │
-                        ┌───────────────────────────┼──────────────────┐
-                        ▼                           ▼                  ▼
-                  frontend store             render graph         export walk
-                  (full document              (project + t          (project +
-                   returned by IPC)            → one frame)          every t)
+  EditCommand ──► commands::timeline_apply ──► History.apply() ──► Project
+                                                                      │
+                     ┌────────────────────────────┬───────────────────┤
+                     ▼                            ▼                   ▼
+            app snapshot (Arc<Project>)     render thread        export walk
+            redrawn after every edit        project + t → frame  every t
 ```
 
-The frontend never mutates the document locally and then syncs. It sends a
-command, Rust applies it, Rust returns the new document, the store replaces
-itself. Blunt, but it makes desync bugs structurally impossible.
+The app never mutates the document itself. It builds a command, the engine
+applies it, and the app takes a fresh snapshot. The snapshot is an
+`Arc<Project>` handed to the render thread and the audio engine as is.
+
+## The preview, today
+
+`player.rs` renders on its own thread with the engine's `Compositor` and a
+`MediaSourceProvider`, reads the RGBA frame back, and hands it to GPUI as a
+`RenderImage`. The audio device's played-sample count drives the
+`PlaybackClock`; the view polls clock and render thread every 8 ms. No JPEG, no
+IPC. The end state shares one GPU device with GPUI so frames never leave the
+GPU (`../research/GPUI_SPIKE.md`, path (a)).
 
 ## What is deliberately not here
 
-- **No CapCut project import.** We use their format as a design reference for
-  our own schema because it is mature, not because we read their files.
-- **No bundled effect assets.** The effect runtime loads packages from a URL
-  the user provides at runtime. Nothing ByteDance-made ships with the app.
-- **No plugin system yet.** Extension points get designed once the core edit
-  loop is solid, not before.
+- **No platform other than Linux.** NVIDIA and Intel first, AMD best effort.
+- **No CapCut project import.** Their format is a design reference for our
+  schema, nothing more.
+- **No bundled effect assets.** The effect runtime loads packages the user
+  points it at.
+- **No plugin system yet.**
 
 ## Reading order for a new agent
 
-1. `docs/architecture/project-format.md` — the data model everything derives from
-2. `docs/architecture/ipc-contract.md` — how the two halves talk
-3. `docs/architecture/timeline-editing.md` — how mutations work
-4. `docs/architecture/preview-pipeline.md` — the one genuinely hard problem
-5. `docs/architecture/transitions.md` — the effect between two clips, and the
-   compositor change it is still waiting on
-6. `docs/ROADMAP.md` — what is built, what is next
+1. `project-format.md` — the data model everything derives from
+2. `timeline-editing.md` — how mutations work
+3. `../decisions/0011-native-ui-on-gpui.md` — why the UI is native, what is next
+4. `transitions.md` — the effect between two clips
+5. `../ROADMAP.md` — what is built, what is next
+
+`ipc-contract.md` and `preview-pipeline.md` describe the webview era. They are
+kept for the reasoning (frame pacing, staleness, read-ahead), not as a
+description of the current app.

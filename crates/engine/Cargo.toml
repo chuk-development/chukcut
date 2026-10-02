@@ -1,0 +1,124 @@
+[package]
+name = "chukcut-engine"
+version = "0.1.0"
+description = "The chukcut engine: media, timeline, GPU compositor, audio and export. No UI."
+authors = ["chukfinley <chuk@chuk.dev>"]
+license = "GPL-3.0-or-later"
+repository = "https://github.com/chuk-development/chukcut"
+homepage = "https://github.com/chuk-development/chukcut"
+readme = "../../README.md"
+keywords = ["video", "editor", "ffmpeg", "wgpu"]
+categories = ["multimedia::video"]
+# Not a library anyone should depend on, and the binary is distributed as an
+# app rather than through crates.io.
+publish = false
+edition = "2021"
+# `benches/main.rs` is a [[bin]], declared below. Without this cargo also picks
+# it up as a bench target and warns about one file backing two.
+autobenches = false
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "chukcut_engine"
+
+# The performance suite. It lives under `benches/` because that is what it is,
+# but it is a `[[bin]]` rather than a `[[bench]]`: `cargo bench` insists on the
+# unstable `#[bench]` harness or on criterion, and neither can express "refuse
+# to report when the machine is busy", which is the rule this suite exists to
+# enforce. `cargo run --release --bin chukcut-bench -- --all`.
+#
+# `autobenches = false` in `[package]` above stops cargo *also* auto-discovering
+# `benches/main.rs` as a `[[bench]]` target, which it otherwise does and then
+# warns that one file backs two targets.
+[[bin]]
+name = "chukcut-bench"
+path = "benches/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Status codes and responses for the preview frame server's request API.
+http = "1"
+anyhow = "1.0.104"
+thiserror = "2.0.19"
+uuid = { version = "1.24.0", features = ["v4", "serde"] }
+parking_lot = "0.12.5"
+rayon = "1.12.0"
+glam = "0.33.2"
+image = "0.25.10"
+# `media/thumbnails.rs` still uses this; the preview does not. It was replaced
+# there because it needed ~63 ms for a 1080x1920 frame against a 33 ms budget.
+jpeg-encoder = "0.7.0"
+# libjpeg-turbo, for the preview's software JPEG path — 3-4x faster than
+# `jpeg-encoder` on the same frame because it is SIMD rather than portable
+# Rust. Built from source by `turbojpeg-sys` (cmake + nasm) since Ubuntu ships
+# the runtime without a pkg-config file; that costs about a minute, once.
+turbojpeg = "1"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+ffmpeg-next = "6.1"
+# Output device only. cpal is the one crate that is a thin, unopinionated
+# wrapper over the platform APIs (ALSA here) without dragging in a mixer,
+# a decoder or an event loop of its own — we have all three already. 0.18
+# rather than the older 0.15 because its `Stream` is `Send + Sync`, which is
+# what lets the device live in Tauri-managed state next to the preview server.
+cpal = "0.18"
+wgpu = "30.0.0"
+bytemuck = "1.25.2"
+futures = "0.3.33"
+pollster = "1.0.1"
+parley = { version = "0.11.0", features = ["complex-scripts"] }
+
+# --- the effect runtime (modules/effects) ------------------------------------
+#
+# The Lua VM effect scripts run in. `lua54` rather than LuaJIT because the
+# corpus uses no JIT-only syntax and a vendored PUC-Rio build is the same on
+# every target we ship to; `vendored` so there is no system Lua to find.
+#
+# `send` is load-bearing rather than a nicety: the compositor's frame-pass seam
+# is `Send + Sync`, and without this feature `Lua` and every handle it hands out
+# are `!Send`, so an effect chain cannot be installed on the compositor at all.
+# Wrapping it in a `Mutex` does not help — `Mutex<T>` is only `Send` if `T` is.
+mlua = { version = "0.12", features = ["lua54", "vendored", "send"] }
+# Step [2] of the shader pipeline. Chosen over the `glslang` crate because
+# Ubuntu ships `libshaderc` and this crate links it rather than building
+# glslang from source with CMake. On a machine without it, `shaderc-sys` falls
+# back to a source build, which is slow but works — that is the fallback the
+# Windows and macOS builds will take, and it is the main unverified risk in
+# this dependency.
+shaderc = "0.10"
+# Step [3]. Splits combined image samplers in SPIR-V bytecode, through function
+# parameters and nesting — which is why the split happens here rather than in
+# the GLSL. Written for Godot's WebGPU driver; bus factor one, but it has *no*
+# runtime dependencies at all, so vendoring or forking it later is contained.
+# See docs/research/rust-crate-survey.md §6b.
+spirv-webgpu-transform = "0.1.6"
+# Step [4]. Pinned to exactly what wgpu 30 links: a second naga in the graph
+# would compile and would then hand `wgpu::ShaderSource::Wgsl` a module built
+# by a different IR. Check `cargo tree -d` after any wgpu bump.
+naga = { version = "30.0.0", features = ["spv-in", "wgsl-out"] }
+# Effect packages arrive as a directory or a zip and are read in place; a
+# package can hold several hundred files and a handful are ever opened.
+zip = "8.6"
+# The readable twin of `%SerializedFormat%@`. `serde_yaml` itself is
+# deprecated; this is the maintained fork with the same API.
+serde_yaml_ng = "0.10"
+kurbo = "0.13.1"
+zeno = "0.3.3"
+skrifa = "0.45.1"
+
+# The escape hatch under wgpu, for the one thing WebGPU has no concept of:
+# allocating a buffer whose memory can be exported as a DMA-BUF file descriptor,
+# so the VAAPI encoder can read what the compositor wrote instead of being handed
+# a copy. See `docs/research/zero-copy-encode.md` and `modules/render/dmabuf.rs`.
+#
+# Both are pinned to exactly what wgpu 30 links, and `cargo tree` should be
+# checked after any wgpu bump: a *second* `ash` in the graph would compile and
+# would hand us entry points for a different `VkDevice`, which is a class of bug
+# that shows up as a driver crash rather than a type error. Linux only — DMA-BUF
+# is a DRM concept and nothing here is reachable on another platform.
+[target.'cfg(target_os = "linux")'.dependencies]
+wgpu-hal = { version = "30.0.0", features = ["vulkan"] }
+ash = "0.38"
+libc = "0.2"

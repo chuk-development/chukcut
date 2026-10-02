@@ -1,5 +1,9 @@
 # 0004 — The app shell asks before it decides
 
+> **Webview era.** Written for the Tauri + React shell, which was removed on
+> 2026-10-02 (decision 0011). Kept for its reasoning; the code paths it names
+> under `src/` and `src-tauri/` no longer exist.
+
 Status: decided 2026-07-26. Covers the start screen, project lifecycle,
 settings, the hardware panel and the crash-recovery seam in `src/app/` and
 `src/modules/workspace/`.

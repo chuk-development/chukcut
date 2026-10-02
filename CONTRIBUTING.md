@@ -20,13 +20,13 @@ the wrong module is expensive to move afterwards.
 
 ```bash
 sudo apt install \
-  libwebkit2gtk-4.1-dev libsoup-3.0-dev librsvg2-dev \
   libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev \
   libavdevice-dev libswscale-dev libswresample-dev \
-  libva-dev libasound2-dev libshaderc-dev nasm cmake
+  libva-dev libasound2-dev libshaderc-dev nasm cmake \
+  libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+  libx11-xcb-dev libxcb1-dev libfontconfig-dev libfreetype-dev
 
-pnpm install
-pnpm tauri dev
+cargo run -p chukcut
 ```
 
 **You do not need a GPU to contribute.** Tests that require a Vulkan adapter or
@@ -36,35 +36,30 @@ still runs a green suite — it just runs fewer tests.
 ## Before you open a pull request
 
 ```bash
-pnpm biome check --write .        # format and lint the frontend
-pnpm build                        # typecheck
-pnpm test -- --run                # vitest
-
-cd src-tauri
 cargo fmt                         # formatting is enforced in CI
-cargo clippy --all-targets
-cargo test
+cargo clippy --workspace --all-targets
+cargo test -p chukcut-engine -j 4
+cargo build -p chukcut
 ```
 
-`cargo check` with default parallelism gets OOM-killed on 32 GB while compiling
-wgpu and the Tauri macro crates. Use `-j 4`.
+`cargo check` with default parallelism can get OOM-killed on 32 GB while
+compiling wgpu and GPUI. Use `-j 4`.
 
 If you touched anything on the preview or export path, run the benchmark suite
 and say what happened in the pull request:
 
 ```bash
-cd src-tauri
-cargo run --release --bin chukcut-bench -- --all
+cargo run --release -p chukcut-engine --bin chukcut-bench -- --all
 ```
 
 It generates its own fixtures and refuses to report on a busy machine. Compare
-against a baseline with `--compare src-tauri/benches/baseline-<commit>.json`.
+against a baseline with `--compare crates/engine/benches/baseline-<commit>.json`.
 
 ## The rules that matter
 
-- **Rust owns the machine, the webview owns the pixels.** No file access, no
-  process spawning, no decoding, no GPU work in TypeScript. Capabilities cross
-  the boundary as registered Tauri commands.
+- **The engine never depends on a UI crate.** Every capability is a function in
+  `crates/engine/src/modules/<name>/commands.rs`; the app, and later the CLI
+  and MCP server, call it. No feature lives only in the UI.
 - **Document mutations go through `EditCommand`.** Every edit must be
   invertible, because undo is built out of the inverses rather than snapshots.
 - **Times are `i64` microseconds.** Never floats, never frame numbers.
@@ -83,7 +78,7 @@ prefix.
 
 ## Reporting bugs
 
-Include the build (`pnpm tauri dev` or a release build), your GPU and driver,
+Include the build (debug or release), your GPU and driver,
 `ffmpeg -version`, and what the app logged. For anything about playback or
 export, the log line naming the chosen encoder and frame path is usually the
 whole diagnosis.

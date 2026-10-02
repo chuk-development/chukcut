@@ -1,5 +1,9 @@
 # Preview pipeline
 
+> **Webview era.** Written for the Tauri + React shell, which was removed on
+> 2026-10-02 (decision 0011). Kept for its reasoning; the code paths it names
+> under `src/` and `src-tauri/` no longer exist.
+
 This is the one genuinely hard problem in putting a video editor in a webview,
 and it is where naive Tauri video editors die.
 

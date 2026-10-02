@@ -1,8 +1,8 @@
 # chukcut
 
-**A fast, modern video editor for Linux.** Rust engine, GPU compositor, web UI.
+**A fast, modern video editor for Linux.** Rust engine, GPU compositor, native GPU UI.
 
-[![CI](https://github.com/chukfinley/chukcut/actions/workflows/ci.yml/badge.svg)](https://github.com/chukfinley/chukcut/actions/workflows/ci.yml)
+[![CI](https://github.com/chuk-development/chukcut/actions/workflows/ci.yml/badge.svg)](https://github.com/chuk-development/chukcut/actions/workflows/ci.yml)
 [![License: GPL v3](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org)
 
@@ -64,57 +64,50 @@ FFmpeg's own frame at the same timestamp to a max channel delta of 2.
 
 ## Build and run
 
-Needs Rust (stable), Node 20+, pnpm, and system libraries.
+Linux only. NVIDIA and Intel are the targets; AMD should work. Needs Rust
+(stable) and system libraries.
 
 ```bash
 # Debian / Ubuntu
 sudo apt install \
-  libwebkit2gtk-4.1-dev libsoup-3.0-dev librsvg2-dev \
   libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev \
   libavdevice-dev libswscale-dev libswresample-dev \
-  libva-dev libasound2-dev libshaderc-dev nasm cmake
+  libva-dev libasound2-dev libshaderc-dev nasm cmake \
+  libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+  libx11-xcb-dev libxcb1-dev libfontconfig-dev libfreetype-dev
 
-pnpm install
-pnpm tauri dev
+cargo build --release -p chukcut
+./target/release/chukcut                      # new project
+./target/release/chukcut clip1.mp4 clip2.mov  # new project with these clips
+./target/release/chukcut my.chukcut           # open a project
 ```
 
-For anything performance-related, build in release — `pnpm tauri dev` is not
-representative, and [`docs/STATUS.md`](docs/STATUS.md) explains why:
-
-```bash
-pnpm tauri build --no-bundle
-./src-tauri/target/release/chukcut
-```
-
-Hardware acceleration is automatic where the driver supports it.
-`CHUKCUT_DECODE=software|auto|vaapi` overrides decode if you need to compare.
+Hardware acceleration is automatic where the driver supports it — VAAPI on
+Intel today, NVDEC/NVENC next. `CHUKCUT_DECODE=software|auto|vaapi` overrides
+decode if you need to compare.
 
 ## Architecture
 
-**Rust owns the machine, the webview owns the pixels.** No file access, no
-process spawning, no decoding and no GPU work happens in TypeScript. Every
-capability crosses the boundary as a registered Tauri command.
+One process. **The engine owns the machine; the app owns the window.**
 
 ```
-src-tauri/src/modules/<name>/     src/modules/<name>/
-  mod.rs      what it owns          components/   React
-  commands.rs the IPC surface       lib/          typed invoke() wrappers
-  <impl>.rs   the work              store.ts      Zustand slice (UI state only)
+crates/engine/   chukcut-engine — media, timeline, compositor, audio, export.
+                 No UI dependency. modules/<name>/commands.rs is the API.
+crates/app/      chukcut — the native app on GPUI (Zed's UI toolkit, wgpu).
 ```
 
-Module names are mirrored on both sides: `timeline` in Rust and `timeline` in
-TypeScript are one feature seen from two directions. The project document lives
-in Rust and is replaced wholesale after each edit — the frontend never patches
-it locally.
+Every capability is a command in the engine. The app calls it; a CLI and an
+MCP server will call the same functions. The project document lives in the
+engine and changes only through invertible edit commands.
 
 | Layer | Choice |
 |---|---|
-| Shell | Tauri 2 |
-| UI | React 19, TypeScript, Vite, Tailwind v4, shadcn/ui, Zustand |
+| UI | GPUI (native, GPU-rendered) |
 | Engine | Rust |
-| GPU | wgpu (Vulkan / Metal / D3D12 / GL) |
-| Media | FFmpeg via `ffmpeg-next`, VAAPI for hardware paths |
-| Lint | Biome, rustfmt, clippy |
+| GPU | wgpu on Vulkan |
+| Media | FFmpeg via `ffmpeg-next`; VAAPI today, NVDEC/NVENC next |
+| Audio | cpal (ALSA) |
+| Lint | rustfmt, clippy |
 
 ## Documentation
 

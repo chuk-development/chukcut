@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = ["crates/engine", "crates/app"]
+default-members = ["crates/app"]
+
+# Development builds run the full pipeline — decode, JPEG encode, pixel work —
+# at video rates, and an unoptimized build of that is not merely slower, it is
+# unusable: `jpeg-encoder` needs ~130 ms per preview frame at opt-level 0 and
+# ~8 ms at 3, which is the difference between 5 fps and real-time playback.
+#
+# Dependencies are optimized fully because they are compiled once and rarely
+# change. Our own crate stays at opt-level 1, which keeps incremental rebuilds
+# quick while removing the worst of the debug overhead.
+[profile.dev]
+opt-level = 1
+# Line tables are enough for backtraces. Full debug info made a debug build of
+# the app 1 GB and the whole target directory 21 GB, which filled the disk.
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 3
+debug = false

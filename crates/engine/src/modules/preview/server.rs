@@ -1,0 +1,2965 @@
+//! The frame server.
+//!
+//! Owns the compositor, the live session, the ring buffer and the two threads
+//! that keep them moving:
+//!
+//! - the **render thread** produces frames — ahead of the playhead during
+//!   playback, exactly at it while scrubbing — encodes them and puts them in
+//!   the ring;
+//! - the **pacer thread** watches the clock and tells the frontend which frame
+//!   number to display, at the frame rate rather than at the render rate.
+//!
+//! Splitting the two is what makes read-ahead work. If the frontend were told
+//! about frames as they were rendered it would display them as fast as the GPU
+//! produced them, which is the same as having no ring at all. The renderer runs
+//! as far ahead as it likes; the pacer decides when each frame is due.
+//!
+//! ## The URL
+//!
+//! ```text
+//! chukcut-frame://preview/<session>/<frame>
+//! ```
+//!
+//! Three answers, and the difference between them matters:
+//!
+//! - **200** — the frame, as JPEG bytes.
+//! - **410 Gone** — the session has been superseded. Never a stale image: the
+//!   whole point of the session id is that a request from before a seek gets an
+//!   error the frontend can ignore rather than a picture of the wrong moment.
+//! - **404** — the right session, but the frame is not rendered yet. The
+//!   handler waits [`FRAME_WAIT`] for it first, because "the frame is 10 ms
+//!   away" should read as a slightly slow image and not as a blank viewer, but
+//!   it does give up. A protocol handler that blocks indefinitely blocks the
+//!   webview.
+
+use std::sync::Arc;
+use std::thread::JoinHandle;
+use std::time::Duration;
+
+use parking_lot::{Condvar, Mutex, RwLock};
+use serde::Serialize;
+
+use super::cache::{CachedFrame, FrameCache, Lookup, DEFAULT_CAPACITY};
+use super::clock::{
+    frame_at, frame_interval, frame_time, pace, MonotonicSource, Pacing, PlaybackClock, TimeSource,
+    DEFAULT_READ_AHEAD,
+};
+use super::encoder::{
+    encode_preview_jpeg, encode_preview_jpeg_dmabuf, encode_preview_jpeg_va_surface, Backend,
+};
+use super::error::{PreviewError, Result};
+use super::ladder::{self, Ladder};
+use super::probe::{self, PROBE};
+use super::session::{PreviewOptions, PreviewSession, Viewport};
+use super::stats::{self, PlaybackStats, Rendered, SeekKind, SeekWatch, SessionFacts};
+use super::vasurface::{self, SurfaceRing};
+use super::zerocopy::{self, PreviewRing};
+use crate::modules::audio::AudioEngine;
+use crate::modules::project::document::{Micros, Project};
+use crate::modules::render::{Compositor, EmptySourceProvider, RenderContext, SourceProvider};
+
+/// The registered URI scheme. Must match `register_uri_scheme_protocol` in
+/// `lib.rs` and the `frameUrl` the frontend builds.
+/// Where preview events go: the shell's callback, called from the server's
+/// own threads.
+pub type EventSink = Arc<dyn Fn(PreviewEvent) + Send + Sync>;
+
+pub const SCHEME: &str = "chukcut-frame";
+
+/// How long a frame request waits for a frame that is being rendered before it
+/// gives up with a 404.
+pub const FRAME_WAIT: Duration = Duration::from_millis(60);
+
+/// How far off the requested frame a substitute may be, in frames.
+///
+/// Two frames is 66 ms at 30 fps — close enough that a viewer reads it as a
+/// frame arriving slightly late, which is what it is. Beyond that the picture
+/// visibly jumps backwards, and leaving the previous frame up is better.
+const NEAREST_TOLERANCE: i64 = 2;
+
+/// How far behind the playhead a *composited* frame may be and still be worth
+/// a JPEG.
+///
+/// One frame, tied to [`NEAREST_TOLERANCE`]: a frame one interval late is still
+/// served — as the nearest neighbour of the frame the webview asked for — so
+/// encoding it is not waste. It also keeps the renderer out of a livelock. A
+/// renderer that is consistently one frame behind would, at zero tolerance,
+/// discard every frame it ever finished and the picture would stop entirely
+/// while the machine stayed busy.
+const LATE_ENCODE_TOLERANCE: i64 = 1;
+
+/// How long the render thread sleeps when the ring is full enough. Short, so
+/// that a seek or a pause is acted on promptly.
+const IDLE_TICK: Duration = Duration::from_millis(4);
+
+/// The two savings that can be turned off, so that both arms of them can be
+/// measured in one process.
+///
+/// A claim that a change made something faster is worth what its measurement
+/// is worth, and a measurement taken against a build that no longer exists is
+/// worth very little. `examples/preview_waste.rs` runs the same pipeline with
+/// each of these on and off and prints the difference; nothing else ever calls
+/// them, and both default to on.
+pub mod experiment {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static SKIP_LATE_ENCODES: AtomicBool = AtomicBool::new(true);
+    static DEDUPE_SCRUBS: AtomicBool = AtomicBool::new(true);
+
+    /// Throw away a composited frame the playhead has already passed instead of
+    /// spending a JPEG on it.
+    pub fn set_skip_late_encodes(on: bool) {
+        SKIP_LATE_ENCODES.store(on, Ordering::Relaxed);
+    }
+
+    pub fn skip_late_encodes() -> bool {
+        SKIP_LATE_ENCODES.load(Ordering::Relaxed)
+    }
+
+    /// Refuse a frame request for a frame that is already being rendered.
+    pub fn set_dedupe_scrubs(on: bool) {
+        DEDUPE_SCRUBS.store(on, Ordering::Relaxed);
+    }
+
+    pub fn dedupe_scrubs() -> bool {
+        DEDUPE_SCRUBS.load(Ordering::Relaxed)
+    }
+}
+
+/// Upper bound on the pacer's sleep, so shutdown is never more than this away.
+const PACER_TICK: Duration = Duration::from_millis(8);
+
+// ---------------------------------------------------------------------------
+// What the frontend hears
+// ---------------------------------------------------------------------------
+
+/// Playback position and lifecycle, pushed to the shell's [`EventSink`].
+///
+/// Position updates are pushed rather than polled: at 30 fps a polling frontend
+/// either asks too often and burns IPC on unchanged answers, or asks too rarely
+/// and shows a playhead that lags the picture.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase", tag = "type")]
+pub enum PreviewEvent {
+    /// The session is open and the renderer has a device.
+    Ready {
+        session: u64,
+        width: u32,
+        height: u32,
+        fps: f64,
+        duration: Micros,
+    },
+    /// Display this frame. The frontend turns it into a URL and sets an image
+    /// source; it does not need to know anything else.
+    Position {
+        session: u64,
+        frame: i64,
+        time: Micros,
+        playing: bool,
+    },
+    /// Playback reached the end of the project and stopped.
+    Ended { session: u64 },
+    /// Something the user should be told about — no GPU, or a frame that could
+    /// not be produced while they were waiting on it.
+    Error { message: String },
+}
+
+/// A snapshot of the preview for `preview_state`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewStatus {
+    /// `None` when no session is open.
+    pub session: Option<u64>,
+    pub width: u32,
+    pub height: u32,
+    pub quality: u8,
+    pub fps: f64,
+    pub duration: Micros,
+    pub position: Micros,
+    pub frame: i64,
+    pub playing: bool,
+    /// Frames currently in the ring, and how many it holds.
+    pub cached: usize,
+    pub capacity: usize,
+    /// Prefix the frontend appends `/<frame>` to. Built here because the shape
+    /// of a custom-protocol URL differs between platforms.
+    pub frame_url: Option<String>,
+}
+
+/// What every command hands back, so the frontend can update its store from one
+/// value regardless of which call it made.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewInfo {
+    pub session: u64,
+    pub width: u32,
+    pub height: u32,
+    pub quality: u8,
+    pub fps: f64,
+    pub duration: Micros,
+    pub position: Micros,
+    pub frame: i64,
+    pub playing: bool,
+    pub frame_url: String,
+}
+
+/// The base URL for a session's frames.
+///
+/// Custom protocols do not look the same everywhere: on Windows and Android
+/// they are folded into `http://<scheme>.localhost/`, elsewhere the scheme is
+/// used directly. Getting this wrong produces a viewer that works on one
+/// developer's machine and not another's.
+pub fn frame_url(session: u64) -> String {
+    #[cfg(any(windows, target_os = "android"))]
+    {
+        format!("http://{SCHEME}.localhost/preview/{session}")
+    }
+    #[cfg(not(any(windows, target_os = "android")))]
+    {
+        format!("{SCHEME}://preview/{session}")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The server
+// ---------------------------------------------------------------------------
+
+/// Everything the worker threads and the command surface share.
+struct Shared {
+    work: Mutex<Work>,
+    /// Signalled whenever `work` changes in a way a thread might care about.
+    wake: Condvar,
+    cache: Arc<FrameCache>,
+    clock: PlaybackClock,
+    /// Injected by `media`. Behind an `RwLock` because the decoder is built
+    /// after the preview server is managed by Tauri, and swapped when a project
+    /// is closed.
+    sources: RwLock<Arc<dyn SourceProvider>>,
+    /// The audio engine, when there is one. The preview owns the playhead
+    /// and audio owns the sound, so every transition of one has to be a
+    /// transition of the other. Injected, so the preview still works on a
+    /// machine with no output device.
+    audio: RwLock<Option<Arc<AudioEngine>>>,
+    events: RwLock<Option<EventSink>>,
+    /// `(session, frame)` of the last position announced to the frontend.
+    ///
+    /// Exists so that [`Shared::emit_position`] can decide and send under one
+    /// lock. See that function for why a decision taken outside it is not
+    /// enough.
+    announced: Mutex<Option<(u64, i64)>>,
+    /// What the log says about playback when nobody has `RUST_LOG` set. See
+    /// [`stats`].
+    stats: PlaybackStats,
+    /// How long the picture takes to catch up with a moved playhead.
+    seeks: SeekWatch,
+    /// What playback is currently giving up to keep up. See [`ladder`].
+    ///
+    /// Its own mutex rather than a field of `Work` because the encode thread
+    /// steps it, and that thread must not take the lock the render thread holds
+    /// while it waits for work. A leaf, like `stats`: nothing under it takes
+    /// another lock.
+    ladder: Mutex<Ladder>,
+}
+
+#[derive(Default)]
+struct Work {
+    shutdown: bool,
+    playing: bool,
+    session: Option<Arc<PreviewSession>>,
+    /// A single pending scrub. Newest wins: a superseded position is simply
+    /// overwritten before the renderer ever sees it, which is what cancelling
+    /// an in-flight render amounts to when a render is one frame long.
+    scrub: Option<i64>,
+    /// The scrub frame the render thread is working on right now, cleared when
+    /// its bytes reach the ring.
+    ///
+    /// Exists so a second request for a frame that is already being rendered
+    /// does not queue a second render of it. The webview asks again while it
+    /// waits — `serve_uri` answers a miss and the viewer retries — and without
+    /// this each retry composited the same frame again, which on a cold seek is
+    /// the most expensive frame there is.
+    rendering: Option<i64>,
+    /// Next frame playback intends to render.
+    cursor: i64,
+    read_ahead: usize,
+    /// One error per session is informative; one per frame is a stream of
+    /// modals.
+    reported_error: bool,
+}
+
+impl Shared {
+    fn audio(&self) -> Option<Arc<AudioEngine>> {
+        self.audio.read().clone()
+    }
+
+    fn emit(&self, event: PreviewEvent) {
+        if let Some(sink) = self.events.read().as_ref() {
+            let sent = std::time::Instant::now();
+            sink(event);
+            probe::add(&PROBE.emit_ns, sent);
+            probe::bump(&PROBE.emits);
+        }
+    }
+
+    /// Announce where the playhead is, without ever moving it backwards by
+    /// accident.
+    ///
+    /// Two threads announce positions and they do not agree about time. The
+    /// **pacer** says where playback is, at the frame rate. The **render
+    /// thread** announces a *scrub* frame the moment its JPEG exists, from the
+    /// encode thread, after the encode — because a parked frame is the one
+    /// somebody is waiting to look at and it should not have to wait for the
+    /// pacer's next tick.
+    ///
+    /// The parked frame of a new session is a scrub. Press play immediately and
+    /// the pacer can announce frames 1 and 2 before frame 0's announcement is
+    /// emitted, and the frontend's playhead jumps backwards for one frame.
+    /// That was latent for as long as opening a render device per server cost
+    /// enough to order the two; `gpu::render_context` made it free, and
+    /// `tests/preview.rs::position_updates_arrive_in_order_as_the_playhead_advances`
+    /// began failing almost every run.
+    ///
+    /// The first fix compared the frame against the clock and then emitted.
+    /// **That is a check the pacer can invalidate before the send happens**:
+    /// both threads reach the sink through an `RwLock` *read* guard, so
+    /// nothing serialises them and the window between deciding and sending is
+    /// exactly the window the pacer needs. Deciding and sending under one lock
+    /// is what closes it.
+    ///
+    /// `authoritative` marks an announcement that *defines* the playhead — the
+    /// pacer's, and a transport command's. Those always go out and reset the
+    /// mark, so a backwards seek or a replay from the end is still announced. A
+    /// scrub is subordinate: it is dropped if a later frame of the same session
+    /// has already been sent, because the pacer has already said everything it
+    /// could add. A different session id is never compared against, since a
+    /// seek supersedes the session and starts the ordering again.
+    fn emit_position(
+        &self,
+        session: u64,
+        frame: i64,
+        time: Micros,
+        playing: bool,
+        authoritative: bool,
+    ) {
+        let mut announced = self.announced.lock();
+        if !authoritative {
+            if let Some((last_session, last_frame)) = *announced {
+                if last_session == session && last_frame > frame {
+                    return;
+                }
+            }
+        }
+        *announced = Some((session, frame));
+        // Inside the lock on purpose: the order these reach the channel has to
+        // be the order they were decided in, or the guard above is decoration.
+        self.emit(PreviewEvent::Position {
+            session,
+            frame,
+            time,
+            playing,
+        });
+    }
+
+    fn emit_error_once(&self, message: String) {
+        {
+            let mut work = self.work.lock();
+            if work.reported_error {
+                tracing::warn!(message, "preview error (already reported)");
+                return;
+            }
+            work.reported_error = true;
+        }
+        tracing::warn!(message, "preview error");
+        self.emit(PreviewEvent::Error { message });
+    }
+}
+
+pub struct PreviewServer {
+    shared: Arc<Shared>,
+    threads: Mutex<Vec<JoinHandle<()>>>,
+}
+
+impl PreviewServer {
+    pub fn new() -> Arc<Self> {
+        Self::with_capacity(DEFAULT_CAPACITY)
+    }
+
+    pub fn with_capacity(capacity: usize) -> Arc<Self> {
+        Self::with_time_source(capacity, Arc::new(MonotonicSource::default()))
+    }
+
+    /// A server whose playback clock reads from `source`.
+    ///
+    /// Injected rather than fixed for the same reason [`PlaybackClock`] takes
+    /// one: the audio device becomes the clock master, and when it does this is
+    /// the only line that changes.
+    ///
+    /// It is also what makes read-ahead testable. Playback driven by wall time
+    /// can only be checked by sleeping and hoping, which produces a test that
+    /// passes on an idle machine and fails on a busy one — worse than no test,
+    /// because it teaches people to rerun until it goes green. With a source
+    /// that only moves when told to, how far the renderer runs ahead is an
+    /// exact function of where the clock was put.
+    pub fn with_time_source(capacity: usize, source: Arc<dyn TimeSource>) -> Arc<Self> {
+        Arc::new(Self {
+            shared: Arc::new(Shared {
+                work: Mutex::new(Work {
+                    read_ahead: DEFAULT_READ_AHEAD,
+                    ..Work::default()
+                }),
+                wake: Condvar::new(),
+                cache: Arc::new(FrameCache::new(capacity)),
+                clock: PlaybackClock::with_source(source, 30.0, 0),
+                sources: RwLock::new(Arc::new(EmptySourceProvider)),
+                audio: RwLock::new(None),
+                events: RwLock::new(None),
+                announced: Mutex::new(None),
+                stats: PlaybackStats::new(),
+                seeks: SeekWatch::new(),
+                ladder: Mutex::new(Ladder::new()),
+            }),
+            threads: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// Wire in the real decoder.
+    ///
+    /// Injected rather than constructed here so this module never depends on
+    /// `media`: the preview drives whatever can produce textures, which is also
+    /// what lets the tests drive it with solid colours.
+    pub fn set_source_provider(&self, sources: Arc<dyn SourceProvider>) {
+        *self.shared.sources.write() = sources;
+    }
+
+    pub fn set_audio(&self, audio: Arc<AudioEngine>) {
+        *self.shared.audio.write() = Some(audio);
+    }
+
+    pub fn cache(&self) -> &Arc<FrameCache> {
+        &self.shared.cache
+    }
+
+    pub fn clock(&self) -> &PlaybackClock {
+        &self.shared.clock
+    }
+
+    /// The playback counters behind the summary line.
+    ///
+    /// For a harness that wants the numbers rather than the log: the counts of
+    /// what was shown, dropped, discarded and rendered are the only way to say
+    /// whether a change to the pipeline did what it claims.
+    /// `examples/preview_waste.rs` reads them; the application only ever emits
+    /// them.
+    pub fn stats(&self) -> &PlaybackStats {
+        &self.shared.stats
+    }
+
+    pub fn session(&self) -> Option<Arc<PreviewSession>> {
+        self.shared.work.lock().session.clone()
+    }
+
+    /// Open a session on `project` and render the frame at `at`.
+    ///
+    /// Returns as soon as the session exists. Opening the GPU takes long enough
+    /// to be visible in a command round-trip, so it happens on the render
+    /// thread and its failure arrives as [`PreviewEvent::Error`].
+    ///
+    /// Calling this again replaces the session, which is also how the preview
+    /// picks up an edit: the document is snapshotted here and the render thread
+    /// never touches the live one.
+    pub fn start(
+        self: &Arc<Self>,
+        project: Arc<Project>,
+        options: PreviewOptions,
+        at: Micros,
+        events: EventSink,
+    ) -> PreviewInfo {
+        *self.shared.events.write() = Some(events);
+        self.spawn_threads();
+
+        if let Some(audio) = self.shared.audio() {
+            audio.set_project(Arc::clone(&project));
+        }
+
+        let session = Arc::new(PreviewSession::new(project, options));
+        self.adopt(session, at, false, SeekKind::SessionStart)
+    }
+
+    /// Move the playhead. Supersedes the session so no frame rendered for the
+    /// old position can be served against the new one.
+    pub fn seek(&self, to: Micros) -> Result<PreviewInfo> {
+        let (previous, playing) = {
+            let work = self.shared.work.lock();
+            let session = work.session.clone().ok_or(PreviewError::NoSession)?;
+            (session, work.playing)
+        };
+        Ok(self.adopt(Arc::new(previous.superseded()), to, playing, SeekKind::Seek))
+    }
+
+    pub fn play(&self) -> Result<PreviewInfo> {
+        let session = self
+            .shared
+            .work
+            .lock()
+            .session
+            .clone()
+            .ok_or(PreviewError::NoSession)?;
+
+        // Starting from the end would produce one frame and an immediate stop;
+        // treat it as a replay, which is what every player does.
+        if self.shared.clock.is_at_end() {
+            self.shared.clock.seek(0);
+        }
+        if let Some(audio) = self.shared.audio() {
+            audio.play(self.shared.clock.position());
+        }
+        self.shared.clock.play();
+
+        // Every run starts at the top of the ladder. Carrying a rung over from
+        // the last one would mean a machine that stuttered once previews softly
+        // for the rest of the session, and the user has no way to ask for it
+        // back.
+        //
+        // And every run starts with the adoption grace, because starting IS the
+        // third way into the empty-ring trap that resize and seek were already
+        // graced against: an edit restarts the session, the restart resumes
+        // play against a ring that is empty and a decoder that is cold — 1.5
+        // seconds cold with two open files, measured — and the first composites
+        // inevitably finish behind the clock. Counting those as "too late"
+        // stepped the ladder down after every edit and the resolution pumped
+        // between full and three-quarter, at over_budget=0, mean 7 ms: the
+        // owner's "es spielt ein bisschen rum". The grace is spent in
+        // *finished* frames, so a slow cold start cannot outlive it.
+        {
+            let mut ladder = self.shared.ladder.lock();
+            let _ = ladder.reset();
+            ladder.begin_grace(Self::LADDER_ADOPT_GRACE);
+        }
+
+        // The window starts here, not when the session opened: a session that
+        // sat parked for a minute would otherwise put that minute in the first
+        // summary's `window_ms`.
+        self.shared.stats.start_window(std::time::Instant::now());
+
+        let mut work = self.shared.work.lock();
+        work.playing = true;
+        work.cursor = self.shared.clock.frame();
+        drop(work);
+        self.shared.wake.notify_all();
+
+        Ok(self.info(&session))
+    }
+
+    pub fn pause(&self) -> Result<PreviewInfo> {
+        let session = self
+            .shared
+            .work
+            .lock()
+            .session
+            .clone()
+            .ok_or(PreviewError::NoSession)?;
+
+        if let Some(audio) = self.shared.audio() {
+            audio.pause();
+        }
+        self.shared.clock.pause();
+        {
+            let mut work = self.shared.work.lock();
+            work.playing = false;
+        }
+        self.shared.wake.notify_all();
+
+        // The last word on the run that just ended. Emitted with no lock held —
+        // `finish` folds and resets under its own and hands the numbers back.
+        if let Some(summary) = self.shared.stats.finish(std::time::Instant::now()) {
+            stats::emit(&summary, stats::Reason::Stopped);
+        }
+
+        // A paused frame is the one the user sits and looks at, so it is the
+        // one thing the quality ladder is never allowed to affect. If playback
+        // gave anything up, the ring is full of frames that are softer than the
+        // project and the frame under the playhead is one of them — so the
+        // session is superseded (which empties the ring) and that frame is
+        // rendered again at the session's own size and `scrub_quality`.
+        //
+        // Only when it actually degraded: a run that held the top rung
+        // throughout already has the right picture in the ring, and superseding
+        // for it would throw away the read-ahead a resume is about to need.
+        if self.shared.ladder.lock().reset() {
+            let refreshed = Arc::new(session.superseded());
+            tracing::debug!(
+                session = refreshed.id,
+                width = refreshed.width(),
+                height = refreshed.height(),
+                "re-rendering the paused frame at full quality"
+            );
+            let info = self.readopt(refreshed, false);
+            self.shared
+                .emit_position(info.session, info.frame, info.position, false, true);
+            return Ok(info);
+        }
+
+        let info = self.info(&session);
+        // Authoritative: pausing *is* where the playhead is now.
+        self.shared
+            .emit_position(session.id, info.frame, info.position, false, true);
+        Ok(info)
+    }
+
+    /// Tell the preview how big the panel showing it is, in device pixels.
+    ///
+    /// This is what stops the compositor and the JPEG encoder from working at
+    /// eight times the pixels the screen can display. `None` goes back to
+    /// sizing from the canvas alone.
+    ///
+    /// A no-op when the size does not change, which is most calls: the frontend
+    /// debounces a window drag, but a debounce still delivers several sizes and
+    /// only some of them cross a rounding boundary. Restarting the pipeline for
+    /// the rest would empty the ring for nothing.
+    pub fn set_viewport(&self, viewport: Option<Viewport>) -> Result<PreviewInfo> {
+        let (session, playing) = {
+            let work = self.shared.work.lock();
+            let session = work.session.clone().ok_or(PreviewError::NoSession)?;
+            (session, work.playing)
+        };
+        let Some(resized) = session.with_viewport(viewport) else {
+            return Ok(self.info(&session));
+        };
+        tracing::info!(
+            width = resized.width(),
+            height = resized.height(),
+            was_width = session.width(),
+            was_height = session.height(),
+            canvas_width = resized.project.canvas.width,
+            canvas_height = resized.project.canvas.height,
+            "preview resized to the panel"
+        );
+        Ok(self.readopt(Arc::new(resized), playing))
+    }
+
+    /// Close the session and stop the threads. The ring is dropped: its frames
+    /// describe a document state that is no longer on screen.
+    pub fn stop(&self) {
+        {
+            let mut work = self.shared.work.lock();
+            work.shutdown = true;
+            work.playing = false;
+            work.session = None;
+            work.scrub = None;
+        }
+        self.shared.wake.notify_all();
+
+        let threads: Vec<JoinHandle<()>> = std::mem::take(&mut *self.threads.lock());
+        for thread in threads {
+            let _ = thread.join();
+        }
+
+        if let Some(audio) = self.shared.audio() {
+            audio.stop();
+        }
+        self.shared.cache.reset(0);
+        self.shared.clock.pause();
+        *self.shared.events.write() = None;
+        self.shared.work.lock().shutdown = false;
+
+        // After the threads have joined, so nothing can still be counting into
+        // the window this summarises.
+        self.shared.seeks.clear();
+        if let Some(summary) = self.shared.stats.finish(std::time::Instant::now()) {
+            stats::emit(&summary, stats::Reason::Stopped);
+        }
+    }
+
+    pub fn status(&self) -> PreviewStatus {
+        let work = self.shared.work.lock();
+        let session = work.session.clone();
+        let playing = work.playing;
+        drop(work);
+
+        let position = self.shared.clock.position();
+        match session {
+            Some(session) => PreviewStatus {
+                session: Some(session.id),
+                width: session.width(),
+                height: session.height(),
+                quality: session.quality,
+                fps: session.fps,
+                duration: session.duration,
+                position,
+                frame: frame_at(position, session.fps),
+                playing,
+                cached: self.shared.cache.len(),
+                capacity: self.shared.cache.capacity(),
+                frame_url: Some(frame_url(session.id)),
+            },
+            None => PreviewStatus {
+                session: None,
+                width: 0,
+                height: 0,
+                quality: 0,
+                fps: 0.0,
+                duration: 0,
+                position: 0,
+                frame: 0,
+                playing: false,
+                cached: 0,
+                capacity: self.shared.cache.capacity(),
+                frame_url: None,
+            },
+        }
+    }
+
+    /// Ask for a frame that is not in the ring.
+    ///
+    /// The protocol handler calls this so a frame URL is self-sufficient: the
+    /// frontend can address any frame of the live session and get it, whether
+    /// or not anything asked for it first.
+    /// Ask for a frame the webview wanted and did not find in the ring.
+    ///
+    /// **Never during playback.** This is the fix for a feedback loop that made
+    /// playback unusable, and it is worth spelling out because the obvious
+    /// implementation is the broken one:
+    ///
+    /// The render thread serves scrub jobs before playback jobs, and a scrub
+    /// job seeks the decoder to that exact frame. During playback the webview
+    /// asks for frames slightly ahead of what has been rendered, so treating
+    /// those requests as scrubs made the decoder jump forward — and the next
+    /// playback frame, one frame after the cursor, was then *behind* the
+    /// decoder and needed a full backward seek. Every frame cost a seek instead
+    /// of a forward decode, the renderer fell further behind, which produced
+    /// more misses, which produced more seeks. Measured: single frames taking
+    /// 13.5 seconds, against a 33 ms budget.
+    ///
+    /// While playing, the renderer is already walking toward that frame in the
+    /// cheapest possible order. The request is dropped and the handler answers
+    /// with the nearest frame it has.
+    pub fn request_frame(&self, session: u64, frame: i64) {
+        let mut work = self.shared.work.lock();
+        let Some(live) = work.session.as_ref() else {
+            return;
+        };
+        if live.id != session {
+            return;
+        }
+        if work.playing {
+            return;
+        }
+        // Already being made. The webview asks again while it waits — the
+        // handler answers a miss after `FRAME_WAIT` and the viewer retries —
+        // and queueing a second render of a frame that is halfway through the
+        // first one is the most expensive possible way to answer, because a
+        // scrub job seeks the decoder and the frame it is seeking to is the one
+        // the decoder is already on.
+        if work.rendering == Some(frame) && experiment::dedupe_scrubs() {
+            return;
+        }
+        work.scrub = Some(frame);
+        drop(work);
+        self.shared.wake.notify_all();
+    }
+
+    /// Serve one frame URL.
+    ///
+    /// Takes the URL as a string rather than a parsed request so the whole
+    /// decision — parse, staleness, wait, status — is exercisable without a
+    /// Tauri app.
+    pub fn serve_uri(&self, uri: &str) -> http::Response<Vec<u8>> {
+        let Some((session, frame)) = parse_frame_uri(uri) else {
+            return text_response(
+                http::StatusCode::BAD_REQUEST,
+                format!("{uri} is not a preview frame url"),
+            );
+        };
+
+        let served = std::time::Instant::now();
+        probe::bump(&PROBE.serve_calls);
+        match self.shared.cache.get(session, frame) {
+            Lookup::Hit(bytes) => {
+                probe::bump(&PROBE.serve_hit);
+                probe::add(&PROBE.serve_ns, served);
+                return jpeg_response(&bytes);
+            }
+            Lookup::Stale => {
+                probe::bump(&PROBE.serve_stale);
+                probe::add(&PROBE.serve_ns, served);
+                return gone(session);
+            }
+            Lookup::Miss => {}
+        }
+
+        // Not rendered yet. What happens next depends on whether we are
+        // playing, because the two states have opposite economics:
+        //
+        // - Paused, this is a scrub: the nudge below queues exactly this frame
+        //   and waiting for it is how the pointer's position becomes the
+        //   picture. The wait is the feature.
+        // - Playing, the nudge is a no-op (`request_frame` returns early) and
+        //   the render thread is already producing frames in playback order —
+        //   nothing this handler does makes the missing frame arrive sooner.
+        //   Waiting `FRAME_WAIT` = 60 ms here just held the *displayed* picture
+        //   back by 60 ms whenever the renderer slipped a frame, which is
+        //   latency exactly when the preview is already struggling. Measured in
+        //   `docs/research/preview-performance.md`: median announce→bytes went
+        //   54–62 ms when behind, and every one of those waits was pure loss.
+        //   Skip straight to the nearest-frame fallback instead: a neighbour a
+        //   frame old is indistinguishable at speed, and the next request will
+        //   catch up on its own.
+        let playing = self.shared.work.lock().playing;
+        if !playing {
+            self.request_frame(session, frame);
+            let waited = std::time::Instant::now();
+            let found = self.shared.cache.wait(session, frame, FRAME_WAIT);
+            probe::add(&PROBE.serve_wait_ns, waited);
+            match found {
+                Lookup::Hit(bytes) => {
+                    probe::bump(&PROBE.serve_wait_hit);
+                    probe::add(&PROBE.serve_ns, served);
+                    return jpeg_response(&bytes);
+                }
+                Lookup::Stale => {
+                    probe::bump(&PROBE.serve_stale);
+                    probe::add(&PROBE.serve_ns, served);
+                    return gone(session);
+                }
+                Lookup::Miss => {}
+            }
+        }
+
+        // Still not there. Answer with the closest frame we do have rather than
+        // an error.
+        //
+        // This is not politeness, it is a crash fix: WebKitGTK reacts to a
+        // stream of failed resource loads by tearing down its web process, and
+        // at 30 requests a second a renderer that falls momentarily behind
+        // produces exactly that stream. A neighbouring frame is a few
+        // milliseconds stale and looks identical to a late one.
+        if let Some((neighbour, bytes)) =
+            self.shared.cache.nearest(session, frame, NEAREST_TOLERANCE)
+        {
+            if neighbour != frame {
+                tracing::debug!(
+                    requested = frame,
+                    served = neighbour,
+                    "served a neighbouring frame; the renderer is behind"
+                );
+            }
+            probe::bump(&PROBE.serve_nearest);
+            probe::add(&PROBE.serve_ns, served);
+            return jpeg_response(&bytes);
+        }
+        probe::bump(&PROBE.serve_empty);
+        probe::add(&PROBE.serve_ns, served);
+
+        // Nothing has been rendered for this session at all — the very first
+        // frame, on a cold decoder. 204 rather than 404: it is a *successful*
+        // response carrying no image, so the webview keeps what it is showing
+        // instead of recording a failure.
+        http::Response::builder()
+            .status(http::StatusCode::NO_CONTENT)
+            .header("Access-Control-Allow-Origin", "*")
+            .body(Vec::new())
+            .expect("static response parts are valid")
+    }
+
+    // -----------------------------------------------------------------------
+    // Internals
+    // -----------------------------------------------------------------------
+
+    /// Install a session, invalidate the ring, and queue the frame under the
+    /// playhead.
+    fn adopt(
+        &self,
+        session: Arc<PreviewSession>,
+        at: Micros,
+        keep_playing: bool,
+        kind: SeekKind,
+    ) -> PreviewInfo {
+        // Read before anything moves the clock: this is where the playhead was,
+        // and the *direction* is what makes a seek expensive — a backward one
+        // discards the ring and costs the decoder a real seek.
+        let from = self.shared.clock.position();
+
+        // The ring is reset before the session is installed so a render already
+        // in flight for the old session cannot land in the new one's ring.
+        self.shared.cache.reset(session.id);
+        if keep_playing {
+            // Same rule as `readopt`: the reset ring will drop frames while the
+            // read-ahead refills, and those drops are this seek's doing, not
+            // the machine's load. Without the grace, every seek during playback
+            // stepped the quality ladder down.
+            self.shared
+                .ladder
+                .lock()
+                .begin_grace(Self::LADDER_ADOPT_GRACE);
+        } else {
+            self.shared.clock.pause();
+        }
+        // Audio first, always. The engine flushes its ring and marks where
+        // the new sound will be heard; the playhead has to anchor against
+        // that mark rather than the reading from before the seek, or the
+        // picture leads the sound by the buffer depth after every seek.
+        if let Some(audio) = self.shared.audio() {
+            audio.seek(at);
+        }
+        self.shared.clock.retime(session.fps, session.duration);
+        self.shared.clock.seek(at);
+
+        let frame = self.shared.clock.frame();
+
+        // Armed before the render thread is woken, or a decoder that is already
+        // warm could deliver the frame before there is anything timing it.
+        self.shared.seeks.arm(
+            session.id,
+            frame,
+            from,
+            self.shared.clock.position(),
+            kind,
+            std::time::Instant::now(),
+        );
+        self.shared.stats.begin_session(
+            SessionFacts {
+                width: session.width(),
+                height: session.height(),
+                canvas: (session.project.canvas.width, session.project.canvas.height),
+            },
+            session.fps,
+            std::time::Instant::now(),
+        );
+
+        {
+            let mut work = self.shared.work.lock();
+            work.session = Some(Arc::clone(&session));
+            work.scrub = Some(frame);
+            work.rendering = None;
+            work.cursor = frame;
+            work.playing = keep_playing;
+            work.reported_error = false;
+        }
+        self.shared.wake.notify_all();
+
+        self.info(&session)
+    }
+
+    /// Replace the live session with one that differs only in how it is
+    /// rendered, leaving the playhead exactly where it is.
+    ///
+    /// [`Self::adopt`] is for a *move*: it seeks the clock and the audio engine
+    /// and arms the seek watch. A resize and the re-render after a pause move
+    /// nothing — the picture has to change, the time does not — and putting
+    /// them through `adopt` would seek the audio engine for a window drag.
+    ///
+    /// What it still has to do is supersede: the ring holds frames at the old
+    /// size or the old quality, and a frame URL is answered from the ring
+    /// without anything looking at how big the picture in it is.
+    /// Finished frames after a mid-playback adoption during which dropped
+    /// frames do not move the quality ladder.
+    ///
+    /// An adoption resets the ring, and the pacer then reports misses until the
+    /// read-ahead refills — drops the adoption itself caused. A window of about
+    /// a second covers the refill with margin; real overload keeps announcing
+    /// itself through over-budget frames, which the grace deliberately does not
+    /// cover.
+    const LADDER_ADOPT_GRACE: u32 = 30;
+
+    fn readopt(&self, session: Arc<PreviewSession>, keep_playing: bool) -> PreviewInfo {
+        self.shared.cache.reset(session.id);
+        if keep_playing {
+            // The old rung's evidence was collected at the old size and means
+            // nothing at the new one; start honest and let real measurements
+            // re-step. Without this — and without the grace — entering
+            // fullscreen mid-play dropped the ring, the drop stepped the
+            // ladder, and the picture stayed soft until a pause: the owner's
+            // "aendere ich die Groesse, aendert sich die Qualitaet".
+            let mut ladder = self.shared.ladder.lock();
+            let _ = ladder.reset();
+            ladder.begin_grace(Self::LADDER_ADOPT_GRACE);
+        }
+        self.shared.stats.begin_session(
+            SessionFacts {
+                width: session.width(),
+                height: session.height(),
+                canvas: (session.project.canvas.width, session.project.canvas.height),
+            },
+            session.fps,
+            std::time::Instant::now(),
+        );
+
+        let frame = self.shared.clock.frame();
+        {
+            let mut work = self.shared.work.lock();
+            work.session = Some(Arc::clone(&session));
+            work.scrub = Some(frame);
+            work.rendering = None;
+            work.cursor = frame;
+            work.playing = keep_playing;
+        }
+        self.shared.wake.notify_all();
+
+        self.info(&session)
+    }
+
+    fn info(&self, session: &PreviewSession) -> PreviewInfo {
+        let position = self.shared.clock.position();
+        PreviewInfo {
+            session: session.id,
+            width: session.width(),
+            height: session.height(),
+            quality: session.quality,
+            fps: session.fps,
+            duration: session.duration,
+            position,
+            frame: frame_at(position, session.fps),
+            playing: self.shared.clock.is_playing(),
+            frame_url: frame_url(session.id),
+        }
+    }
+
+    fn spawn_threads(self: &Arc<Self>) {
+        let mut threads = self.threads.lock();
+        if !threads.is_empty() {
+            return;
+        }
+        let render_shared = Arc::clone(&self.shared);
+        threads.push(
+            std::thread::Builder::new()
+                .name("chukcut-preview-render".into())
+                .spawn(move || render_loop(render_shared))
+                .expect("spawn preview render thread"),
+        );
+        let pacer_shared = Arc::clone(&self.shared);
+        threads.push(
+            std::thread::Builder::new()
+                .name("chukcut-preview-pacer".into())
+                .spawn(move || pace_loop(pacer_shared))
+                .expect("spawn preview pacer thread"),
+        );
+    }
+}
+
+impl Drop for PreviewServer {
+    fn drop(&mut self) {
+        {
+            let mut work = self.shared.work.lock();
+            work.shutdown = true;
+        }
+        self.shared.wake.notify_all();
+        for thread in std::mem::take(&mut *self.threads.lock()) {
+            let _ = thread.join();
+        }
+    }
+}
+
+impl std::fmt::Debug for PreviewServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let work = self.shared.work.lock();
+        f.debug_struct("PreviewServer")
+            .field("session", &work.session.as_ref().map(|s| s.id))
+            .field("playing", &work.playing)
+            .field("cache", &self.shared.cache)
+            .finish()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The render thread
+// ---------------------------------------------------------------------------
+
+struct Job {
+    session: Arc<PreviewSession>,
+    frame: i64,
+    /// Scrub frames are rendered at reduced quality and reported immediately;
+    /// playback frames go into the ring and wait for the pacer.
+    scrub: bool,
+}
+
+/// The device the render thread draws with: the process's, not its own.
+///
+/// This used to open one here, with a `cfg(test)` seam that shared instead,
+/// because two live Vulkan instances in one address space reach a state where a
+/// `write_buffer` on one of them segfaults — measured at four runs in forty,
+/// and not reproducible with a single instance. The seam has been removed
+/// because the *application* had the same shape the test binary did: an export
+/// builds its own compositor while this thread is running, so a preview and an
+/// export meant two devices. `gpu` owns the only one now and there is nothing
+/// left to keep in step.
+///
+/// Still lazy and still opened from this thread the first time a session needs
+/// a frame, which keeps the cost off the command that started the session.
+fn render_device() -> Option<Arc<RenderContext>> {
+    crate::modules::gpu::render_context()
+}
+
+fn render_loop(shared: Arc<Shared>) {
+    let Some(ctx) = render_device() else {
+        shared.emit_error_once(PreviewError::NoDevice.to_string());
+        return;
+    };
+    let compositor = Compositor::new(Arc::clone(&ctx));
+
+    // The decode path, once, from the only thread that has a device to ask.
+    //
+    // At INFO with its reason because "software" here is a 20× per-frame
+    // regression (`docs/research/hardware-decode.md`) and it is invisible from
+    // the outside: the preview looks identical, it is only slower. A log that
+    // does not say which decoder ran cannot answer "why was it slow".
+    let (path, why) = stats::decode_path(ctx.can_import_dmabuf());
+    shared.stats.set_decode_path(path);
+    tracing::info!(decode = path.label(), reason = why, "preview decode path");
+
+    // Whether the frame before this one was composited and then thrown away for
+    // being late. The render thread's own state, so no lock and no atomic: it
+    // is the only thread that reads or writes it. See [`render_one`] for what
+    // it guarantees.
+    let mut discarded_last = false;
+
+    // Where a finished frame can go other than system memory, allocated on the
+    // first frame that qualifies. This thread's own state — the encode thread
+    // reaches the memory through the `Arc` inside a claim, never through this.
+    let mut destinations = Destinations::default();
+
+    loop {
+        // Timed around `next_job` rather than inside it, so one counter covers
+        // every reason this thread is not rendering: no session, paused, or the
+        // read-ahead window already full. See `probe`: that last case is the
+        // one that says the renderer is not the bottleneck.
+        let waited = std::time::Instant::now();
+        let Some(job) = next_job(&shared) else {
+            return;
+        };
+        probe::add(&PROBE.render_wait_ns, waited);
+        if job.scrub {
+            probe::bump(&PROBE.scrub_jobs);
+        }
+        discarded_last = render_one(
+            &shared,
+            &ctx,
+            &compositor,
+            &mut destinations,
+            job,
+            discarded_last,
+        );
+    }
+}
+
+/// Block until there is something to render, or the server is shutting down.
+fn next_job(shared: &Shared) -> Option<Job> {
+    let mut work = shared.work.lock();
+    loop {
+        if work.shutdown {
+            return None;
+        }
+
+        let Some(session) = work.session.clone() else {
+            shared.wake.wait(&mut work);
+            continue;
+        };
+
+        if let Some(frame) = work.scrub.take() {
+            // Held until the bytes are in the ring, so a retry for the same
+            // frame while this one is in flight is answered by the ring rather
+            // than by a second render. See `Work::rendering`.
+            work.rendering = Some(frame);
+            return Some(Job {
+                session,
+                frame,
+                scrub: true,
+            });
+        }
+
+        if !work.playing {
+            shared.wake.wait(&mut work);
+            continue;
+        }
+
+        match pace(
+            work.cursor,
+            shared.clock.position(),
+            session.fps,
+            work.read_ahead,
+        ) {
+            Pacing::Render(frame) => {
+                // Never render past the end; the pacer stops playback there.
+                if session.duration > 0 && frame_time(frame, session.fps) >= session.duration {
+                    shared.wake.wait_for(&mut work, IDLE_TICK);
+                    continue;
+                }
+                work.cursor = frame + 1;
+                return Some(Job {
+                    session,
+                    frame,
+                    scrub: false,
+                });
+            }
+            Pacing::Skip { from, to } => {
+                tracing::debug!(
+                    dropped = to - from,
+                    from,
+                    to,
+                    "renderer fell behind; dropping late frames"
+                );
+                // Counted under the `work` guard, which is safe because the
+                // stats mutex is a leaf: nothing under it takes another lock,
+                // so there is no order to invert. It is a single add and it
+                // never logs — the count reaches the file in the next summary.
+                shared.stats.record_dropped(to - from);
+                // The ladder is a leaf for the same reason. A drop is the
+                // loudest evidence there is that the renderer cannot hold this
+                // size, so it steps down at once rather than after a streak.
+                // Silently: this runs under the `work` guard, and a `tracing`
+                // call here would be a `write` syscall with the render thread's
+                // own lock held. The rung reaches the file on the next summary
+                // line, and the step itself is logged from the encode thread.
+                let _ = shared.ladder.lock().dropped(to - from);
+                work.cursor = to;
+            }
+            Pacing::Idle => {
+                shared.wake.wait_for(&mut work, IDLE_TICK);
+            }
+        }
+    }
+}
+
+/// How many frames may be waiting to be JPEG-encoded at once.
+///
+/// Encoding runs off the render thread so that compositing the next frame and
+/// encoding the last one overlap, and the cap exists because an unbounded queue
+/// would let a slow encoder turn into unbounded memory: on the copying path each
+/// pending frame holds a full RGBA buffer, and on the drawn path each one holds
+/// a slot of a rotation only `vasurface::SLOTS` deep.
+///
+/// **The numbers this comment used to quote were inverted and are now both
+/// stale**, which is worth recording because the reasoning changed twice. It
+/// said "compositing around 17 ms and encoding around 10 ms". Measured on a
+/// running server at 1080p (`docs/research/preview-performance.md`), the encode
+/// was the *larger* of the two — composite 5.77 / encode 6.46 at load 10, and
+/// composite 28.16 / encode 57.16 at load 33, because `rgba_to_nv12` took all
+/// twelve rayon workers while the render thread wanted them. Since the preview
+/// composites straight into the encoder's own surface that pass is gone
+/// entirely, and the same measurement is composite 8.92 / encode **1.18** ms.
+/// So the encode is once again much the smaller half, for a different reason
+/// than this comment originally gave, and what saturates first is the render
+/// thread.
+const MAX_PENDING_ENCODES: usize = 3;
+
+static PENDING_ENCODES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// One encode, ready to run on the encode thread.
+type EncodeJob = Box<dyn FnOnce() + Send + 'static>;
+
+/// The thread that turns composited frames into JPEG, and the queue into it.
+///
+/// **This used to be `rayon::spawn`, and that is what made the preview hang.**
+/// The symptom pointed nowhere near the cause, so it is worth the space:
+///
+/// - `encoder.rs` holds one process-wide mutex around the one hardware JPEG
+///   encoder, and the RGBA→NV12 conversion used to run *inside* it — and that
+///   conversion is a **rayon parallel iterator**.
+/// - A rayon worker that blocks inside a parallel iterator does not idle. It
+///   joins the work-stealing loop and runs *any* other job in the pool —
+///   including another encode `rayon::spawn`ed here, which asks for the mutex
+///   the very same thread is holding. `parking_lot::Mutex` is not reentrant, so
+///   the thread parks forever and never releases the lock.
+///
+/// From the outside: five frames and then nothing for thirty seconds with
+/// `playing=true`, every thread in `futex_wait`, no GPU work in flight.
+/// `PENDING_ENCODES` never falls, so [`render_one`] switches to encoding inline
+/// and the render thread blocks on the same lock too.
+/// `CHUKCUT_PREVIEW_JPEG=hardware` on `tests/preview.rs` hung 7 runs out of 7.
+///
+/// The conversion has since moved out from under the lock, which is the fix
+/// that actually closes the class — see `encoder.rs`'s `HARDWARE`. **This
+/// change is still worth having on its own**, and the reason is the second
+/// deadlock that one revealed: a *non*-rayon thread that dispatches under the
+/// lock waits for a worker, and if the pool is meanwhile full of jobs waiting
+/// for that lock, nobody moves. Keeping encodes out of the pool means the pool
+/// cannot fill with them.
+///
+/// One thread, not several: the hardware encoder is one non-reentrant device
+/// whose mutex serialised these encodes anyway, and one encode is 6 ms hardware
+/// or 10 ms software against a 33 ms budget, so a second thread would only wait
+/// for the first.
+///
+/// The queue is bounded at [`MAX_PENDING_ENCODES`]; a full queue means the
+/// caller encodes inline, which is the same back-pressure as before.
+fn encode_queue() -> &'static std::sync::mpsc::SyncSender<EncodeJob> {
+    static QUEUE: std::sync::OnceLock<std::sync::mpsc::SyncSender<EncodeJob>> =
+        std::sync::OnceLock::new();
+    QUEUE.get_or_init(|| {
+        let (sender, receiver) = std::sync::mpsc::sync_channel::<EncodeJob>(MAX_PENDING_ENCODES);
+        std::thread::Builder::new()
+            .name("chukcut-preview-encode".into())
+            .spawn(move || {
+                // Ends when the sender is dropped, which only happens at
+                // process exit: the queue outlives any one session, exactly as
+                // rayon's pool did.
+                loop {
+                    let idle = std::time::Instant::now();
+                    let Ok(job) = receiver.recv() else { return };
+                    probe::add(&PROBE.encode_idle_ns, idle);
+                    job();
+                    PENDING_ENCODES.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            })
+            .expect("spawn the preview encode thread");
+        sender
+    })
+}
+
+/// Release the in-flight scrub mark, however the frame ended.
+///
+/// Every exit from [`render_one`] has to reach this for a scrub, or a frame
+/// that failed to render would be refused forever after: `request_frame` would
+/// keep seeing it as still in flight and never queue it again.
+fn done_rendering(shared: &Shared, frame: i64) {
+    let mut work = shared.work.lock();
+    if work.rendering == Some(frame) {
+        work.rendering = None;
+    }
+}
+
+/// One line when the quality ladder moves.
+///
+/// Worth INFO and not DEBUG for the same reason the encoder's backend change
+/// is: the picture got softer or sharper on its own, and without this the only
+/// evidence is a number in a summary line that a reader has to notice changed.
+/// Rare by construction — a step needs three bad frames or three good seconds.
+fn log_rung(rung: usize, why: &'static str) {
+    tracing::info!(
+        rung,
+        ladder = ladder::rung_label(rung),
+        reason = why,
+        "preview quality ladder moved"
+    );
+}
+
+/// Whether a frame that has just been composited is already past showing.
+///
+/// The tolerance is not zero, and that is deliberate. A frame one interval
+/// behind is still shown: `serve_uri` answers a request for the current frame
+/// with a neighbour within [`NEAREST_TOLERANCE`], so it has a reader. Two or
+/// more and the pacer has moved past anything it could substitute for.
+///
+/// `discarded_last` is the guarantee of progress: see [`render_one`].
+fn too_late_to_encode(frame: i64, position: Micros, fps: f64, discarded_last: bool) -> bool {
+    if discarded_last {
+        return false;
+    }
+    frame_at(position, fps) - frame > LATE_ENCODE_TOLERANCE
+}
+
+/// Somewhere other than system memory to put a finished frame.
+///
+/// Two rotations, because there are two ways round the same idea and a machine
+/// may have either, both or neither:
+///
+/// - **`drawn`** — the media driver allocates an NV12 surface, Vulkan imports
+///   its planes, and the compositor draws into them. The tiling is the
+///   encoder's own by construction. This is the one that works on Intel.
+/// - **`exported`** — Vulkan allocates a linear buffer, the media driver
+///   imports it. This is what the export does, and Intel's *JPEG* engine reads
+///   such a surface as though it were tiled while its *video* engine reads the
+///   same file descriptor correctly. Kept because it is a different set of
+///   driver assumptions and a machine that fails one may pass the other.
+///
+/// The render thread owns this. The encode thread reaches the memory only
+/// through the `Arc` inside a claim.
+#[derive(Default)]
+struct Destinations {
+    /// Keyed by *exact* size, most-recently-used last. A VA surface has a fixed
+    /// extent, so unlike an exported buffer a smaller frame cannot borrow a
+    /// bigger surface — and `render_one` alternates between two sizes whenever
+    /// the quality ladder is off rung 0, because a scrub always renders at the
+    /// session's own size. One ring would thrash between them; two do not, and
+    /// two at panel size is a few megabytes.
+    drawn: Vec<Arc<SurfaceRing>>,
+    exported: Option<Arc<PreviewRing>>,
+}
+
+/// How many `drawn` rings stay resident. See the field's own note.
+const RESIDENT_SURFACE_RINGS: usize = 2;
+
+impl Destinations {
+    /// The ring for `size`, allocating it if this is a size we do not hold.
+    ///
+    /// `None` on a device that cannot do this at all, which is a reason to use
+    /// another path and not a reason to fail.
+    fn surfaces(
+        &mut self,
+        ctx: &Arc<RenderContext>,
+        size: (u32, u32),
+    ) -> Option<&Arc<SurfaceRing>> {
+        if let Some(at) = self.drawn.iter().position(|ring| ring.holds(size)) {
+            // Move to the back so the least recently used is always at the
+            // front and is what gets evicted below.
+            let ring = self.drawn.remove(at);
+            self.drawn.push(ring);
+            return self.drawn.last();
+        }
+        let fresh = Arc::new(SurfaceRing::new(ctx, size)?);
+        tracing::info!(
+            width = size.0,
+            height = size.1,
+            slots = vasurface::SLOTS,
+            "the preview will composite straight into the JPEG encoder's own surfaces"
+        );
+        self.drawn.push(fresh);
+        if self.drawn.len() > RESIDENT_SURFACE_RINGS {
+            // Dropping a ring whose surfaces the encoder may still hold is
+            // safe: a surface is reference counted and the last reference is
+            // whoever is using it, not this vector.
+            self.drawn.remove(0);
+        }
+        self.drawn.last()
+    }
+}
+
+/// A composited frame, waiting to be turned into JPEG, and where its pixels are.
+///
+/// The three arms are the whole of the zero-copy work as the rest of this file
+/// sees it. Everything downstream — the ladder, the ring, the stats, the
+/// announcement — is identical whichever it is, which is deliberate: a second
+/// frame path that diverged after the encode would double the number of states
+/// this server can be in.
+enum Composited {
+    /// Read back to system memory. The encoder converts it to NV12 on twelve
+    /// rayon workers and uploads it into a VA surface — the 9.50 ms of a
+    /// 15.82 ms frame that `docs/research/preview-performance.md` measured.
+    Rgba(Vec<u8>),
+    /// Drawn straight into a VA surface the media driver allocated. Nothing
+    /// crosses the bus and nothing on either side declares a layout. The
+    /// [`vasurface::Claim`] carries the surface itself, so it travels with the
+    /// frame to the encode thread and the surface cannot be redrawn until it
+    /// comes back.
+    Drawn(vasurface::Claim),
+    /// Written into a linear buffer the encoder imports, with the colour
+    /// conversion done by the same compute pass that wrote it. The
+    /// [`zerocopy::Claim`] is what keeps the compute pass from overwriting the
+    /// memory while the encoder is still reading it.
+    Exported(zerocopy::Claim, crate::modules::render::Nv12Layout),
+}
+
+/// Composite one frame into whichever memory the encoder can read fastest.
+///
+/// Takes a zero-copy path when everything it needs lines up, and quietly
+/// composites the ordinary way when it does not. The decision is made **before**
+/// the frame is drawn rather than after, and that is not a stylistic choice:
+/// both zero-copy destinations are device-local, so once a frame has been
+/// composited into one there is no way for the CPU to read it back and no
+/// software fallback left. See `vasurface`'s header.
+fn composite(
+    ctx: &Arc<RenderContext>,
+    compositor: &Compositor,
+    destinations: &mut Destinations,
+    session: &PreviewSession,
+    time: Micros,
+    size: (u32, u32),
+    sources: &dyn SourceProvider,
+) -> crate::modules::render::Result<Composited> {
+    use crate::modules::render::source::YuvRange;
+    use crate::modules::render::Nv12Layout;
+
+    // **Full range, not limited**, on both zero-copy arms. A JPEG file has no
+    // range tag and every decoder reads it as 0..255, so limited-range samples
+    // come out as grey blacks — a valid picture that reads as the editor having
+    // washed the footage out, and about 27 dB against the software encoder
+    // instead of 37. The export's encoders want the other one. See
+    // `shaders/yuv.wgsl`.
+    if let Some(claim) = claim_drawn(ctx, destinations, size) {
+        let ring = Arc::clone(claim.ring());
+        match compositor.render_nv12_into_planes(
+            &session.project,
+            time,
+            size,
+            sources,
+            ring.luma(claim.index()),
+            ring.chroma(claim.index()),
+            YuvRange::Full,
+        ) {
+            // `render_nv12_into_planes` has waited for the GPU by the time it
+            // returns, which is the only synchronisation libva can be given —
+            // it cannot be handed a Vulkan semaphore. Skipping it would produce
+            // a frame torn between two compositions, intermittently.
+            Ok(()) => return Ok(Composited::Drawn(claim)),
+            Err(error) => {
+                // The render pass itself failed, which is a property of the
+                // device rather than of this frame. Write the path off and fall
+                // through, so the picture keeps moving.
+                vasurface::write_off(&error.to_string());
+                claim.release();
+            }
+        }
+    }
+
+    if let Some(claim) = claim_exported(ctx, &mut destinations.exported, session, size) {
+        let layout = Nv12Layout::for_size(size.0, size.1);
+        match compositor.render_nv12_into_range(
+            &session.project,
+            time,
+            size,
+            sources,
+            claim.ring().buffer(claim.index()),
+            YuvRange::Full,
+        ) {
+            Ok(()) => return Ok(Composited::Exported(claim, layout)),
+            Err(error) => {
+                zerocopy::write_off(&error.to_string());
+                drop(claim);
+            }
+        }
+    }
+
+    compositor
+        .render_frame(&session.project, time, size, sources)
+        .map(Composited::Rgba)
+}
+
+/// A driver-allocated surface to draw this frame into, if it can have one.
+///
+/// The gates are ordered cheapest-first and that ordering is load-bearing, not
+/// tidiness: this runs on the render thread once per frame. On a machine where
+/// the answer is no, nothing below the `OnceLock` inside
+/// [`vasurface::encoder_reads_its_own_surface`] is ever reached again after the
+/// first frame, and the per-frame cost is two atomic loads and an even-size
+/// test.
+fn claim_drawn(
+    ctx: &Arc<RenderContext>,
+    destinations: &mut Destinations,
+    size: (u32, u32),
+) -> Option<vasurface::Claim> {
+    if !vasurface::enabled() || vasurface::written_off() {
+        return None;
+    }
+    // NV12 has no odd edge, so neither has the encoder. `size_is_encodable` is
+    // the same gate the copying path uses to fall back to libjpeg-turbo.
+    if !super::vaapi::size_is_encodable(size.0, size.1) {
+        return None;
+    }
+    // Whether this machine's JPEG engine reads a surface the compositor drew
+    // into. Answered once by pushing a known row ramp through the real encoder
+    // and checking every row — never from a capability list, which said nothing
+    // useful about the linear path either. Cached in a `OnceLock`, so from the
+    // second frame on this is an atomic load.
+    //
+    // **Before** anything that opens a device or takes the encoder's mutex,
+    // which is why it is on this line and not below.
+    if !vasurface::encoder_reads_its_own_surface(ctx) {
+        return None;
+    }
+
+    let ring = match destinations.surfaces(ctx, size) {
+        Some(ring) => Arc::clone(ring),
+        None => {
+            // No VAAPI, no DMA-BUF import, or a driver that will not let Vulkan
+            // render into its own tiling. Not an error: the readback path still
+            // shows a picture.
+            vasurface::write_off("this device cannot draw into a VAAPI-allocated NV12 surface");
+            return None;
+        }
+    };
+
+    // `None` when every surface is still being read. Compositing another way is
+    // the right answer — waiting here would stall the render thread behind the
+    // encode thread, which is the pipelining this whole server is built on.
+    ring.claim()
+}
+
+/// An exported buffer to composite into, if this frame can use one.
+///
+/// The other direction, kept for machines whose JPEG engine reads a linear
+/// imported surface correctly — this chip's does not. Allocates the ring on the
+/// first frame that qualifies and reallocates it only when a session needs a
+/// bigger one; a ring is six buffers and 19 MB at 1080p, so rebuilding it per
+/// frame would cost more than it saves.
+///
+/// Same cheapest-first gate ordering as [`claim_drawn`], for the same reason:
+/// the last two touch the encoder's process-wide mutex, and on a machine that
+/// cannot use the path nothing below the `OnceLock` is ever reached again.
+fn claim_exported(
+    ctx: &Arc<RenderContext>,
+    ring: &mut Option<Arc<PreviewRing>>,
+    session: &PreviewSession,
+    size: (u32, u32),
+) -> Option<zerocopy::Claim> {
+    if !zerocopy::enabled() || zerocopy::written_off() {
+        return None;
+    }
+    if !super::vaapi::size_is_encodable(size.0, size.1) {
+        return None;
+    }
+    if !zerocopy::encoder_can_read_linear(ctx) {
+        return None;
+    }
+
+    let want = ctx.clamp_size(session.size);
+    if !ring
+        .as_ref()
+        .is_some_and(|r| r.holds(size) && r.holds(want))
+    {
+        // Cheap here — once per session size, never per frame — and it is what
+        // keeps a ring from being allocated on a machine with no encoder for it.
+        if !super::encoder::hardware_available() {
+            return None;
+        }
+        let Some(fresh) = PreviewRing::new(ctx, want) else {
+            // No Vulkan, or no `VK_KHR_external_memory_fd`. Not an error: it is
+            // what a machine on the GL fallback looks like, and the readback
+            // path still shows it a picture.
+            zerocopy::write_off("this device cannot export DMA-BUF memory");
+            return None;
+        };
+        tracing::info!(
+            width = want.0,
+            height = want.1,
+            slots = zerocopy::SLOTS,
+            "the preview will encode from the compositor's own memory"
+        );
+        // The old ring is dropped by this assignment, and its buffers may still
+        // be mapped by the encoder — `ExportableBuffer::drop` waits for the
+        // device to drain before freeing them, which is what makes that safe.
+        *ring = Some(Arc::new(fresh));
+    }
+
+    ring.as_ref()?.claim()
+}
+
+/// Turn a composited frame into JPEG bytes, whichever memory it is in.
+fn encode_composited(
+    composited: Composited,
+    size: (u32, u32),
+    quality: u8,
+) -> Result<(Vec<u8>, Backend)> {
+    match composited {
+        Composited::Rgba(rgba) => encode_preview_jpeg(&rgba, size.0, size.1, quality),
+        Composited::Drawn(mut claim) => {
+            let encoded = encode_preview_jpeg_va_surface(claim.surface_mut(), quality);
+            // The surface goes back to the ring either way: the encode has
+            // finished with it whether or not it produced bytes, and a claim
+            // that never came back would shrink the rotation by one for the
+            // rest of the session.
+            claim.release();
+            match encoded {
+                Some(bytes) => Ok((bytes, Backend::Vaapi)),
+                // No software fallback exists from here — the surface is
+                // device-local. One frame is lost and every later frame reads
+                // back, which is the honest version of a zero-copy path that
+                // cannot be taken.
+                None => {
+                    vasurface::write_off("the hardware JPEG encoder refused a drawn surface");
+                    Err(PreviewError::Encode(
+                        "the hardware JPEG encoder could not read the composited frame; \
+                         later frames will be read back to the CPU first"
+                            .into(),
+                    ))
+                }
+            }
+        }
+        Composited::Exported(claim, layout) => {
+            // The borrow of the ring ends with this block, so the claim can be
+            // consumed below. `Nv12Dmabuf` lends the file descriptor rather than
+            // taking it, because the buffer outlives every frame made from it.
+            let encoded = {
+                let described = claim.ring().describe(claim.index(), &layout);
+                encode_preview_jpeg_dmabuf(&described, quality)
+            };
+            match encoded {
+                // The surface is stored with the slot, not dropped: it is a wrap
+                // of that memory, and libavutil's reference count on it is the
+                // only authority on whether the driver has finished reading.
+                Some((bytes, surface)) => {
+                    claim.release(Some(surface));
+                    Ok((bytes, Backend::Vaapi))
+                }
+                None => {
+                    claim.release(None);
+                    zerocopy::write_off("the hardware JPEG encoder refused an imported surface");
+                    Err(PreviewError::Encode(
+                        "the hardware JPEG encoder could not read the composited frame; \
+                         later frames will be read back to the CPU first"
+                            .into(),
+                    ))
+                }
+            }
+        }
+    }
+}
+
+/// Composite one frame, and encode it unless nobody can still see it.
+///
+/// Returns whether the frame was thrown away for being late, which the caller
+/// hands back on the next call. That is the whole of the guarantee that this
+/// cannot stop the picture: **two composited frames are never discarded in a
+/// row**. A renderer that is consistently more than a frame behind would
+/// otherwise discard every frame it ever finished — each one is late by the
+/// same margin as the last — and the viewer would sit in front of a frozen
+/// picture while the machine stayed busy. Measured, in
+/// `examples/preview_waste.rs`: at eight times the frame budget the unguarded
+/// version encoded 1 frame in 14.
+fn render_one(
+    shared: &Arc<Shared>,
+    ctx: &Arc<RenderContext>,
+    compositor: &Compositor,
+    destinations: &mut Destinations,
+    job: Job,
+    discarded_last: bool,
+) -> bool {
+    let session = &job.session;
+    let time = frame_time(job.frame, session.fps);
+
+    // What this frame is made of, and the one asymmetry that matters.
+    //
+    // A **scrub** — a seek, a pause, the first frame of a session — is the
+    // frame somebody sits and looks at, so it is always the session's own size
+    // and `scrub_quality`. The ladder cannot touch it.
+    //
+    // A **playback** frame may be smaller and softer than that, because the
+    // alternative when the machine cannot hold the size is not a sharper
+    // picture, it is a picture that stops moving. See [`ladder`].
+    let (target, quality, rung) = if job.scrub {
+        (session.size, session.scrub_quality, 0)
+    } else {
+        let ladder = *shared.ladder.lock();
+        (
+            ladder.size(session.size),
+            ladder.quality(session.quality),
+            ladder.rung(),
+        )
+    };
+    let size = ctx.clamp_size(target);
+    let sources = Arc::clone(&*shared.sources.read());
+
+    let composite_started = std::time::Instant::now();
+    let composited = match composite(
+        ctx,
+        compositor,
+        destinations,
+        session,
+        time,
+        size,
+        sources.as_ref(),
+    ) {
+        Ok(composited) => composited,
+        Err(error) => {
+            let message = format!("cannot render the preview frame: {error}");
+            if job.scrub {
+                done_rendering(shared, job.frame);
+                shared.emit_error_once(message);
+            } else {
+                tracing::warn!(%error, frame = job.frame, "preview render failed");
+            }
+            return false;
+        }
+    };
+
+    let composite_micros = composite_started.elapsed().as_micros();
+    probe::add(&PROBE.composite_ns, composite_started);
+    probe::bump(&PROBE.composites);
+
+    // The frame is finished and already too late to show. Do not spend a JPEG
+    // on it.
+    //
+    // `pace` drops frames it has not started; this is the other end of the same
+    // rule, for a frame the clock passed *while* it was being composited. The
+    // two never count the same frame — this one was taken off the queue before
+    // `pace` looked at it — so it has its own counter, `discarded`.
+    //
+    if !job.scrub && shared.clock.is_playing() && experiment::skip_late_encodes() {
+        let position = shared.clock.position();
+        if too_late_to_encode(job.frame, position, session.fps, discarded_last) {
+            shared.stats.record_discarded(1);
+            tracing::debug!(
+                frame = job.frame,
+                behind = frame_at(position, session.fps) - job.frame,
+                composite_ms = composite_micros as f64 / 1000.0,
+                "the playhead passed this frame while it was being composited; \
+                 not encoding it"
+            );
+            if let Some(rung) = shared.ladder.lock().dropped(1) {
+                log_rung(rung, "a composited frame was already too late to show");
+            }
+            return true;
+        }
+    }
+
+    let dispatch_started = std::time::Instant::now();
+
+    // Encoding moves off this thread so the next frame can be composited while
+    // this one is turned into JPEG. Ordering does not matter: the ring is keyed
+    // by frame number, so a frame that finishes late simply lands in its own
+    // slot.
+    //
+    // When too many are already queued the encode is done inline instead. That
+    // is deliberately a stall: it is the back-pressure that stops a slow
+    // encoder from growing an unbounded queue of full-size RGBA buffers.
+    let pending = PENDING_ENCODES.load(std::sync::atomic::Ordering::Relaxed);
+    let inline = pending >= MAX_PENDING_ENCODES;
+
+    let finish = {
+        let shared = Arc::clone(shared);
+        let session_id = session.id;
+        let fps = session.fps;
+        let frame_no = job.frame;
+        let scrub = job.scrub;
+        move || {
+            let encode_started = std::time::Instant::now();
+            let (bytes, backend) = match encode_composited(composited, size, quality) {
+                Ok(encoded) => encoded,
+                Err(error) => {
+                    if scrub {
+                        done_rendering(&shared, frame_no);
+                    }
+                    shared.emit_error_once(error.to_string());
+                    return;
+                }
+            };
+            let encode_micros = encode_started.elapsed().as_micros();
+            probe::add(&PROBE.encode_ns, encode_started);
+            probe::bump(&PROBE.encodes);
+            PROBE
+                .encoded_bytes
+                .fetch_add(bytes.len() as u64, std::sync::atomic::Ordering::Relaxed);
+
+            // The two halves are reported separately because they now run in
+            // parallel: what fits in the budget is the larger of them, not the
+            // sum. `over_budget` is judged on that.
+            let slowest = composite_micros.max(encode_micros) as i64;
+            let slowest_ms = slowest as f64 / 1000.0;
+
+            // What playback gave up for this frame, so the summary line can say
+            // it. `None` for a scrub: a scrub never goes through the ladder.
+            let rendered = (!scrub).then_some(Rendered {
+                rung: rung as u8,
+                width: size.0,
+                height: size.1,
+                quality,
+            });
+
+            // Three integer adds and a bucket increment. Everything that costs
+            // anything — the divisions, the percentile, the formatting —
+            // happens once a second in the pacer, not here.
+            if let Some(fallback) = shared.stats.record_frame(scrub, slowest, backend, rendered) {
+                // The encoder changed backend under us. `encode_preview_jpeg`
+                // falls back silently by design, and on a 1080x1920 frame that
+                // is 31 ms of CPU against 6.2 ms of GPU — enough on its own to
+                // turn smooth playback into a stutter, and otherwise invisible.
+                tracing::info!(
+                    from = fallback.from.label(),
+                    to = fallback.to.label(),
+                    width = size.0,
+                    height = size.1,
+                    quality,
+                    reason = if super::vaapi::size_is_encodable(size.0, size.1) {
+                        "the hardware encoder refused the frame or has been written off"
+                    } else {
+                        "NV12 cannot represent this frame size"
+                    },
+                    "preview JPEG encoder changed backend"
+                );
+            }
+
+            let budget_ms = frame_interval(fps) as f64 / 1000.0;
+            let over_budget = slowest_ms > budget_ms;
+
+            tracing::debug!(
+                session = session_id,
+                frame = frame_no,
+                at_ms = time / 1000,
+                scrub,
+                width = size.0,
+                height = size.1,
+                quality,
+                rung,
+                composite_ms = composite_micros as f64 / 1000.0,
+                encode_ms = encode_micros as f64 / 1000.0,
+                slowest_ms,
+                budget_ms,
+                over_budget,
+                bytes = bytes.len(),
+                encoder = backend.label(),
+                "preview frame ready"
+            );
+
+            // The ladder is stepped from here rather than from the render
+            // thread because this is where a frame's real cost is known — the
+            // encode is half of it and it happens on this thread — and because
+            // nothing is locked here, so the one INFO line a step is worth can
+            // be written without a `write` syscall under somebody's mutex.
+            if !scrub {
+                if let Some(moved) = shared.ladder.lock().frame(over_budget) {
+                    log_rung(
+                        moved,
+                        if over_budget {
+                            "playback has been over budget for several frames"
+                        } else {
+                            "playback has had room to spare for three seconds"
+                        },
+                    );
+                }
+            }
+
+            let inserted = std::time::Instant::now();
+            let stored = shared.cache.insert(CachedFrame {
+                session: session_id,
+                frame: frame_no,
+                time,
+                bytes: Arc::from(bytes.into_boxed_slice()),
+            });
+            probe::add(&PROBE.insert_ns, inserted);
+
+            // The picture has caught up with wherever the playhead was moved
+            // to. This — and not how long `seek` took to return — is the wait
+            // the user experienced; the command itself returns in microseconds
+            // because the decoder seek happens here, on another thread.
+            if let Some(slow) =
+                shared
+                    .seeks
+                    .complete(session_id, frame_no, std::time::Instant::now())
+            {
+                stats::emit_slow_seek(&slow);
+            }
+
+            // A scrub frame is the one somebody is waiting to look at, so say so
+            // the moment it exists. Playback frames are announced by the pacer
+            // when they come due, not when they are made.
+            //
+            // Subordinate, not authoritative: this runs on the encode thread
+            // *after* the encode, so the pacer may already have announced a
+            // later frame — `Shared::emit_position` drops it if so, and that
+            // decision is taken under the same lock as the send. The whole
+            // account, and why the obvious version of the check is not enough,
+            // is on that function.
+            if scrub {
+                // Cleared only now, not when the composite finished: the point
+                // of the mark is that a request arriving *while* this frame is
+                // being made does not start a second one, and the ring is the
+                // first moment a request can be answered without one.
+                done_rendering(&shared, frame_no);
+            }
+            if stored && scrub {
+                shared.emit_position(session_id, frame_no, time, shared.clock.is_playing(), false);
+            }
+        }
+    };
+
+    if inline {
+        finish();
+        probe::add(&PROBE.inline_encode_ns, dispatch_started);
+        probe::bump(&PROBE.inline_encodes);
+        return false;
+    }
+
+    PENDING_ENCODES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if let Err(rejected) = encode_queue().try_send(Box::new(finish)) {
+        PENDING_ENCODES.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        // A full queue is the back-pressure `inline` above provides, arrived at
+        // one frame later; a disconnected one means the encode thread is gone,
+        // and dropping the frame silently would be worse than a stall.
+        let job = match rejected {
+            std::sync::mpsc::TrySendError::Full(job) => job,
+            std::sync::mpsc::TrySendError::Disconnected(job) => job,
+        };
+        job();
+        probe::add(&PROBE.inline_encode_ns, dispatch_started);
+        probe::bump(&PROBE.inline_encodes);
+        return false;
+    }
+    probe::add(&PROBE.dispatch_ns, dispatch_started);
+    false
+}
+
+// ---------------------------------------------------------------------------
+// The pacer thread
+// ---------------------------------------------------------------------------
+
+/// Turns clock position into "display frame N".
+///
+/// This is the presentation clock, and it is deliberately not the render loop:
+/// when the time source becomes the audio device, this is the only thing that
+/// has to notice.
+fn pace_loop(shared: Arc<Shared>) {
+    let mut last: Option<(u64, i64)> = None;
+
+    loop {
+        // Nothing to pace unless something is playing.
+        let session = {
+            let mut work = shared.work.lock();
+            loop {
+                if work.shutdown {
+                    return;
+                }
+                if work.playing {
+                    if let Some(session) = work.session.clone() {
+                        break session;
+                    }
+                }
+                last = None;
+                shared.wake.wait(&mut work);
+            }
+        };
+
+        let position = shared.clock.position();
+        let frame = frame_at(position, session.fps);
+        if last != Some((session.id, frame)) {
+            last = Some((session.id, frame));
+            // The pacer is the authority on where playback is, which also makes
+            // it the authority on how many frames the user actually saw.
+            shared.stats.record_shown();
+            shared.emit_position(session.id, frame, position, true, true);
+        }
+
+        // The summary is driven from here rather than from the render thread on
+        // purpose. This loop runs every few milliseconds for as long as playback
+        // is running, whatever the renderer is doing — so a renderer that has
+        // stalled completely still produces a line, and that line says
+        // `shown=30 rendered=0`, which is the clearest possible statement of
+        // what went wrong. Driven from the render thread, a stall would produce
+        // no line at all: silence exactly when there is something to say.
+        if let Some(summary) = shared.stats.tick(std::time::Instant::now()) {
+            stats::emit(&summary, stats::Reason::Tick);
+        }
+
+        if session.duration > 0 && position >= session.duration {
+            if let Some(audio) = shared.audio() {
+                audio.pause();
+            }
+            shared.clock.pause();
+            {
+                let mut work = shared.work.lock();
+                work.playing = false;
+            }
+            shared.wake.notify_all();
+            if let Some(summary) = shared.stats.finish(std::time::Instant::now()) {
+                stats::emit(&summary, stats::Reason::Stopped);
+            }
+            shared.emit(PreviewEvent::Ended {
+                session: session.id,
+            });
+            last = None;
+            continue;
+        }
+
+        // Half a frame, so no frame is ever displayed a whole interval late,
+        // capped so shutdown is never far away.
+        let nap = Duration::from_micros((frame_interval(session.fps) / 2).max(1) as u64);
+        std::thread::sleep(nap.min(PACER_TICK));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The protocol handler
+// ---------------------------------------------------------------------------
+
+/// Pull `(session, frame)` out of a frame URL.
+///
+/// Written against the string rather than a URL parser because the same logical
+/// URL arrives in three shapes: `chukcut-frame://preview/1/2` on Linux and
+/// macOS, `chukcut-frame://localhost/preview/1/2` when the webview normalizes
+/// the authority, and `http://chukcut-frame.localhost/preview/1/2` on Windows.
+/// Anchoring on the `preview` segment handles all three without caring which
+/// part the platform called the host.
+pub fn parse_frame_uri(uri: &str) -> Option<(u64, i64)> {
+    let rest = uri.split_once("://").map(|(_, rest)| rest).unwrap_or(uri);
+    let rest = rest.split(['?', '#']).next()?;
+    let segments: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
+    let at = segments.iter().position(|s| *s == "preview")?;
+    let session = segments.get(at + 1)?.parse::<u64>().ok()?;
+    let frame = segments.get(at + 2)?.parse::<i64>().ok()?;
+    Some((session, frame))
+}
+
+fn jpeg_response(bytes: &[u8]) -> http::Response<Vec<u8>> {
+    http::Response::builder()
+        .status(http::StatusCode::OK)
+        .header(http::header::CONTENT_TYPE, "image/jpeg")
+        // Frame numbers are reused across sessions and the bytes behind one
+        // change on every edit; a cached preview frame is always the wrong one.
+        .header(http::header::CACHE_CONTROL, "no-store")
+        .header(http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        .body(bytes.to_vec())
+        .expect("static response parts are valid")
+}
+
+fn gone(session: u64) -> http::Response<Vec<u8>> {
+    text_response(
+        http::StatusCode::GONE,
+        format!("preview session {session} has been superseded"),
+    )
+}
+
+fn text_response(status: http::StatusCode, message: String) -> http::Response<Vec<u8>> {
+    http::Response::builder()
+        .status(status)
+        .header(http::header::CONTENT_TYPE, "text/plain")
+        .header(http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+        .body(message.into_bytes())
+        .expect("static response parts are valid")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::modules::project::document::{
+        CanvasConfig, Segment, TimeRange, Track, TrackKind, Transform,
+    };
+    use crate::modules::render::{SolidColorProvider, SolidSource};
+
+    fn project() -> Arc<Project> {
+        let mut project = Project::new(
+            "preview test",
+            CanvasConfig {
+                width: 1920,
+                height: 1080,
+                background: [0.0, 0.0, 0.0, 1.0],
+            },
+            30.0,
+        );
+        project
+            .materials
+            .videos
+            .push(crate::modules::project::document::VideoMaterial {
+                id: "clip".into(),
+                path: "/nonexistent/clip.mp4".into(),
+                width: 1920,
+                height: 1080,
+                duration: 4_000_000,
+                fps: 30.0,
+                has_audio: false,
+                rotation: 0,
+            });
+        let mut track = Track::new(TrackKind::Video, "V1");
+        track.segments.push(Segment {
+            id: "seg".into(),
+            material_id: "clip".into(),
+            target_range: TimeRange::new(0, 2_000_000),
+            source_range: TimeRange::new(0, 2_000_000),
+            render_index: 0,
+            speed: 1.0,
+            volume: 1.0,
+            transform: Transform::default(),
+            crop: None,
+            extras: Vec::new(),
+            keyframes: Vec::new(),
+        });
+        project.tracks.push(track);
+        Arc::new(project)
+    }
+
+    // -----------------------------------------------------------------------
+    // URL parsing
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn frame_urls_parse_in_every_shape_a_webview_produces() {
+        assert_eq!(
+            parse_frame_uri("chukcut-frame://preview/7/42"),
+            Some((7, 42))
+        );
+        assert_eq!(
+            parse_frame_uri("chukcut-frame://localhost/preview/7/42"),
+            Some((7, 42))
+        );
+        assert_eq!(
+            parse_frame_uri("http://chukcut-frame.localhost/preview/7/42"),
+            Some((7, 42))
+        );
+        assert_eq!(
+            parse_frame_uri("chukcut-frame://preview/7/42?t=123"),
+            Some((7, 42)),
+            "a cache-busting query string is not part of the address"
+        );
+    }
+
+    #[test]
+    fn malformed_frame_urls_are_rejected_rather_than_guessed_at() {
+        assert_eq!(parse_frame_uri("chukcut-frame://preview/7"), None);
+        assert_eq!(parse_frame_uri("chukcut-frame://preview/seven/42"), None);
+        assert_eq!(parse_frame_uri("chukcut-frame://thumb/7/42"), None);
+        assert_eq!(parse_frame_uri("chukcut-frame://preview/7/4.2"), None);
+        assert_eq!(parse_frame_uri(""), None);
+    }
+
+    #[test]
+    fn the_frame_url_matches_what_the_parser_expects() {
+        let url = format!("{}/{}", frame_url(3), 12);
+        assert_eq!(parse_frame_uri(&url), Some((3, 12)));
+    }
+
+    // -----------------------------------------------------------------------
+    // Serving, without a GPU
+    // -----------------------------------------------------------------------
+
+    /// A server with a session installed but no threads running, so the cache
+    /// can be driven by hand.
+    fn served(session: u64) -> Arc<PreviewServer> {
+        let server = PreviewServer::with_capacity(8);
+        server.shared.cache.reset(session);
+        server
+    }
+
+    #[test]
+    fn a_cached_frame_is_served_as_jpeg() {
+        let server = served(5);
+        server.shared.cache.insert(CachedFrame {
+            session: 5,
+            frame: 2,
+            time: 66_667,
+            bytes: Arc::from(vec![0xFF, 0xD8, 0x00].into_boxed_slice()),
+        });
+
+        let response = server.serve_uri("chukcut-frame://preview/5/2");
+        assert_eq!(response.status(), http::StatusCode::OK);
+        assert_eq!(
+            response.headers().get(http::header::CONTENT_TYPE).unwrap(),
+            "image/jpeg"
+        );
+        assert_eq!(response.body(), &vec![0xFF, 0xD8, 0x00]);
+    }
+
+    #[test]
+    fn a_frame_from_a_superseded_session_is_gone_not_a_stale_image() {
+        let server = served(5);
+        server.shared.cache.insert(CachedFrame {
+            session: 5,
+            frame: 2,
+            time: 0,
+            bytes: Arc::from(vec![1, 2, 3].into_boxed_slice()),
+        });
+        // The user seeked: session 6 is live now.
+        server.shared.cache.reset(6);
+
+        let response = server.serve_uri("chukcut-frame://preview/5/2");
+        assert_eq!(response.status(), http::StatusCode::GONE);
+        assert_ne!(response.body(), &vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn a_frame_that_will_never_arrive_gives_up_rather_than_hanging() {
+        let server = served(5);
+        let started = std::time::Instant::now();
+        let response = server.serve_uri("chukcut-frame://preview/5/9");
+
+        // No content, not an error: nothing has been rendered for this session
+        // yet, and a failed resource load is what kills the WebKitGTK web
+        // process. What matters as much is that the answer arrives at all —
+        // a protocol handler that blocks indefinitely blocks the webview.
+        assert_eq!(response.status(), http::StatusCode::NO_CONTENT);
+        assert!(response.body().is_empty());
+        assert!(
+            started.elapsed() < FRAME_WAIT * 4,
+            "waited {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_frame_that_is_not_ready_is_answered_with_the_nearest_one_that_is() {
+        let server = served(5);
+        for frame in [10i64, 12] {
+            server.shared.cache.insert(CachedFrame {
+                session: 5,
+                frame,
+                time: frame * 33_333,
+                bytes: Arc::from(vec![0xFF, 0xD8, frame as u8].into_boxed_slice()),
+            });
+        }
+
+        // Frame 11 was never rendered. Serving its neighbour is a few
+        // milliseconds stale and indistinguishable from a late frame; serving
+        // an error is a step towards a dead web process.
+        let response = server.serve_uri("chukcut-frame://preview/5/11");
+        assert_eq!(response.status(), http::StatusCode::OK);
+        assert!(
+            response.body() == &vec![0xFF, 0xD8, 10] || response.body() == &vec![0xFF, 0xD8, 12],
+            "expected one of the two neighbours, got {:?}",
+            response.body()
+        );
+
+        // A superseded session still wins over the nearest frame: a stale
+        // picture from before a seek is the one thing that must never be shown.
+        server.shared.cache.reset(6);
+        assert_eq!(
+            server.serve_uri("chukcut-frame://preview/5/11").status(),
+            http::StatusCode::GONE
+        );
+    }
+
+    #[test]
+    fn a_frame_that_lands_while_the_request_waits_is_served() {
+        let server = served(5);
+        let writer = Arc::clone(&server);
+        let handle = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(5));
+            writer.shared.cache.insert(CachedFrame {
+                session: 5,
+                frame: 1,
+                time: 33_333,
+                bytes: Arc::from(vec![0xFF, 0xD8].into_boxed_slice()),
+            });
+        });
+
+        let response = server.serve_uri("chukcut-frame://preview/5/1");
+        assert_eq!(response.status(), http::StatusCode::OK);
+        handle.join().unwrap();
+    }
+
+    /// During playback a missing frame is answered *now* — with a neighbour or
+    /// a 204 — never by waiting `FRAME_WAIT` for a render that the wait cannot
+    /// summon (`request_frame` is a no-op while playing). The old behaviour
+    /// held every such request for the full 60 ms, which stalled the displayed
+    /// picture precisely when the renderer was already behind.
+    ///
+    /// The threshold is below `FRAME_WAIT` with slack for a loaded machine:
+    /// the old path could not answer this request in under 60 ms, the new one
+    /// does no timed work at all.
+    #[test]
+    fn playback_never_waits_on_a_missing_frame() {
+        let server = served(5);
+        server.shared.cache.insert(CachedFrame {
+            session: 5,
+            frame: 1,
+            time: 33_333,
+            bytes: Arc::from(vec![0xFF, 0xD8].into_boxed_slice()),
+        });
+        server.shared.work.lock().playing = true;
+
+        // Frame 2 is not in the ring; frame 1 is a serviceable neighbour.
+        let started = std::time::Instant::now();
+        let response = server.serve_uri("chukcut-frame://preview/5/2");
+        let elapsed = started.elapsed();
+        assert_eq!(response.status(), http::StatusCode::OK);
+        assert!(
+            elapsed < FRAME_WAIT - Duration::from_millis(15),
+            "a playback request for a missing frame blocked {elapsed:?}"
+        );
+
+        // And with nothing near it either: an immediate 204, not a timed miss.
+        let started = std::time::Instant::now();
+        let response = server.serve_uri("chukcut-frame://preview/5/40");
+        let elapsed = started.elapsed();
+        assert_eq!(response.status(), http::StatusCode::NO_CONTENT);
+        assert!(
+            elapsed < FRAME_WAIT - Duration::from_millis(15),
+            "a playback request with an empty ring blocked {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn a_malformed_url_is_a_bad_request() {
+        let server = served(5);
+        let response = server.serve_uri("chukcut-frame://preview/oops");
+        assert_eq!(response.status(), http::StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn a_request_before_any_session_exists_is_gone() {
+        let server = PreviewServer::with_capacity(8);
+        let response = server.serve_uri("chukcut-frame://preview/1/0");
+        assert_eq!(response.status(), http::StatusCode::GONE);
+    }
+
+    // -----------------------------------------------------------------------
+    // Rendering only what the screen can show
+    // -----------------------------------------------------------------------
+
+    /// A server with a session installed and no threads, so the decisions
+    /// around a session can be checked on a machine with no GPU.
+    fn parked() -> (Arc<PreviewServer>, PreviewInfo) {
+        let server = PreviewServer::with_capacity(8);
+        let info = server.adopt(
+            Arc::new(PreviewSession::new(project(), PreviewOptions::default())),
+            0,
+            false,
+            SeekKind::SessionStart,
+        );
+        (server, info)
+    }
+
+    #[test]
+    fn the_panel_decides_the_render_size_and_supersedes_when_it_changes() {
+        let (server, info) = parked();
+        assert_eq!(
+            (info.width, info.height),
+            (1920, 1080),
+            "no panel measured yet, so the canvas stands"
+        );
+
+        let resized = server
+            .set_viewport(Some(Viewport::new(700, 394)))
+            .expect("a session is open");
+        assert_eq!(
+            (resized.width, resized.height),
+            (700, 394),
+            "the panel, not the canvas"
+        );
+        assert!(
+            resized.session > info.session,
+            "a new size is a new session"
+        );
+        assert_eq!(
+            server.cache().session(),
+            resized.session,
+            "and the ring holding frames at the old size was emptied"
+        );
+
+        // A window drag is hundreds of layouts and only a few of them change
+        // the rounded size. The rest must cost nothing at all.
+        let again = server
+            .set_viewport(Some(Viewport::new(701, 395)))
+            .expect("a session is open");
+        assert_eq!(
+            again.session, resized.session,
+            "a resize that rounds to the same size did not restart the pipeline"
+        );
+
+        // Going back to no panel restores the canvas.
+        let full = server.set_viewport(None).expect("a session is open");
+        assert_eq!((full.width, full.height), (1920, 1080));
+        assert!(full.session > resized.session);
+    }
+
+    #[test]
+    fn the_playhead_survives_a_resize() {
+        let (server, _) = parked();
+        server.seek(1_000_000).expect("a session is open");
+        let before = server.clock().position();
+        let resized = server
+            .set_viewport(Some(Viewport::new(640, 360)))
+            .expect("a session is open");
+        assert_eq!(server.clock().position(), before, "a resize is not a seek");
+        assert_eq!(resized.frame, 30);
+        assert_eq!(
+            server.shared.work.lock().scrub,
+            Some(30),
+            "and it re-renders"
+        );
+    }
+
+    /// The fullscreen bug, at the wiring level. Entering fullscreen during
+    /// playback supersedes the session; the reset ring then drops frames, and
+    /// those drops used to step the quality ladder — the picture went soft on
+    /// a machine with `over_budget=0` and stayed soft until a pause. A resize
+    /// must reset the ladder (its evidence belongs to the old size) and grace
+    /// the refill's drops.
+    #[test]
+    fn a_resize_during_playback_neither_keeps_nor_earns_a_degraded_rung() {
+        let (server, _info) = parked();
+        // The panel measured first, as it does in the app; fullscreen below is
+        // then a real size change, not a no-op against the canvas default.
+        let _ = server
+            .set_viewport(Some(Viewport::new(700, 394)))
+            .expect("a session is open");
+        server.play().expect("a session is open");
+
+        // The state of a machine that had genuinely struggled at the old size —
+        // through the ungraced route, real over-budget measurements, because
+        // play() itself now grants the adoption grace against drops.
+        {
+            let mut ladder = server.shared.ladder.lock();
+            assert_eq!(ladder.frame(true), None);
+            assert_eq!(ladder.frame(true), None);
+            assert!(ladder.frame(true).is_some());
+        }
+        assert_ne!(server.shared.ladder.lock().rung(), 0);
+
+        // Fullscreen: the panel is suddenly much larger.
+        let resized = server
+            .set_viewport(Some(Viewport::new(1920, 1080)))
+            .expect("a session is open");
+        assert!(resized.playing, "the resize must not pause playback");
+
+        let mut ladder = server.shared.ladder.lock();
+        assert_eq!(
+            ladder.rung(),
+            0,
+            "old-size evidence does not survive a resize"
+        );
+        assert_eq!(
+            ladder.dropped(5),
+            None,
+            "the refill's drops right after the resize are the resize's own"
+        );
+    }
+
+    /// The third way into the empty-ring trap: play after a restart. An edit
+    /// restarts the session and resumes play against an empty ring and a cold
+    /// decoder; the first composites finish behind the clock and were counted
+    /// as "too late", stepping the ladder down after every edit — resolution
+    /// pumping between full and three-quarter at over_budget=0.
+    #[test]
+    fn starting_playback_does_not_charge_the_ladder_for_the_cold_start() {
+        let (server, _info) = parked();
+        server.play().expect("a session is open");
+
+        let mut ladder = server.shared.ladder.lock();
+        assert_eq!(
+            ladder.dropped(5),
+            None,
+            "the ramp-up's late frames are the start's own, not load"
+        );
+        assert_eq!(ladder.rung(), 0);
+    }
+
+    #[test]
+    fn pausing_after_a_degraded_run_re_renders_the_frame_at_full_quality() {
+        let (server, info) = parked();
+        server.play().expect("a session is open");
+
+        // What a machine that cannot hold the size does to the ladder. Every
+        // frame in the ring is now smaller and softer than the session's own
+        // size, and one of them is the frame the user is about to sit and look
+        // at. Degraded through over-budget frames — the route the play-time
+        // grace deliberately leaves open.
+        {
+            let mut ladder = server.shared.ladder.lock();
+            assert_eq!(ladder.frame(true), None);
+            assert_eq!(ladder.frame(true), None);
+            assert!(ladder.frame(true).is_some());
+        }
+
+        let paused = server.pause().expect("a session is open");
+        assert!(
+            paused.session > info.session,
+            "the degraded ring was not thrown away"
+        );
+        assert_eq!(
+            (paused.width, paused.height),
+            (info.width, info.height),
+            "the paused frame is the session's own size"
+        );
+        assert_eq!(server.shared.ladder.lock().rung(), 0, "and back at the top");
+        assert_eq!(
+            server.shared.work.lock().scrub,
+            Some(paused.frame),
+            "the frame under the playhead was queued for a fresh render"
+        );
+
+        // A run that never had to give anything up keeps its ring: superseding
+        // for it would throw away the read-ahead a resume needs.
+        server.play().expect("a session is open");
+        let again = server.pause().expect("a session is open");
+        assert_eq!(again.session, paused.session);
+    }
+
+    #[test]
+    fn a_paused_frame_is_never_encoded_worse_than_a_playing_one() {
+        // The owner's requirement, as an assertion: whatever the settings say
+        // about playback quality, the frame he stops on is at least as good.
+        for quality in [40u8, 88, 94, 100] {
+            let session = PreviewSession::new(
+                project(),
+                PreviewOptions {
+                    quality: Some(quality),
+                    ..PreviewOptions::default()
+                },
+            );
+            assert!(
+                session.scrub_quality >= session.quality,
+                "quality {quality}: scrub {} against playback {}",
+                session.scrub_quality,
+                session.quality
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Work that reaches nobody
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_frame_the_playhead_has_passed_is_not_worth_a_jpeg() {
+        let fps = 30.0;
+        let now = frame_time(40, fps);
+        // On time, and one frame late, are both still worth encoding: the
+        // handler serves a neighbour within `NEAREST_TOLERANCE`, so somebody
+        // sees it.
+        assert!(!too_late_to_encode(40, now, fps, false));
+        assert!(!too_late_to_encode(41, now, fps, false));
+        assert!(!too_late_to_encode(39, now, fps, false));
+        // Two or more behind and nothing will ask for it.
+        assert!(too_late_to_encode(38, now, fps, false));
+        assert!(too_late_to_encode(10, now, fps, false));
+    }
+
+    #[test]
+    fn two_frames_in_a_row_are_never_discarded() {
+        // Otherwise a renderer that is consistently three frames behind throws
+        // away every frame it finishes and the picture stops entirely — which
+        // is worse than the softness the ladder would have traded for it.
+        let fps = 30.0;
+        let now = frame_time(40, fps);
+        assert!(too_late_to_encode(30, now, fps, false));
+        assert!(!too_late_to_encode(30, now, fps, true));
+    }
+
+    #[test]
+    fn a_request_for_a_frame_already_being_rendered_does_not_queue_a_second_render() {
+        let (server, info) = parked();
+
+        // What the render thread does when it picks the job up.
+        {
+            let mut work = server.shared.work.lock();
+            assert_eq!(
+                work.scrub.take(),
+                Some(0),
+                "the session queued its first frame"
+            );
+            work.rendering = Some(0);
+        }
+
+        server.request_frame(info.session, 0);
+        assert_eq!(
+            server.shared.work.lock().scrub,
+            None,
+            "the webview asking again while it waits must not start a second render"
+        );
+
+        server.request_frame(info.session, 1);
+        assert_eq!(
+            server.shared.work.lock().scrub,
+            Some(1),
+            "a different frame is still a real request"
+        );
+
+        // Once the bytes are in the ring the mark is released, so a later
+        // request for the same frame is honoured again.
+        done_rendering(&server.shared, 0);
+        server.request_frame(info.session, 0);
+        assert_eq!(server.shared.work.lock().scrub, Some(0));
+    }
+
+    // -----------------------------------------------------------------------
+    // The whole pipeline, when the machine can render
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_session_renders_and_serves_the_frame_under_the_playhead() {
+        if crate::modules::render::test_context().is_none() {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        }
+        let (server, _time, _exclusive) = shared_server();
+        server.set_source_provider(Arc::new(
+            SolidColorProvider::new()
+                .with("clip", SolidSource::new([1.0, 0.0, 0.0, 1.0], 1920, 1080)),
+        ));
+
+        // No Tauri app in a unit test, so the session is installed directly;
+        // `start` differs only in that it also stores the event channel.
+        let info = server.adopt(
+            Arc::new(PreviewSession::new(project(), PreviewOptions::default())),
+            1_000_000,
+            false,
+            SeekKind::SessionStart,
+        );
+        // Native, because the proxy table stops reducing anything at or below
+        // a 1920 long edge. This assertion previously expected 960x540 and was
+        // left behind when the table changed.
+        assert_eq!(info.width, 1920, "a 1080p canvas previews natively");
+        assert_eq!(info.height, 1080);
+        assert_eq!(info.frame, 30);
+
+        // Opening the device happens on the render thread and can take longer
+        // than one request's patience, so retry rather than race it.
+        let url = format!("{}/{}", info.frame_url, info.frame);
+        let mut response = server.serve_uri(&url);
+        for _ in 0..40 {
+            if response.status() == http::StatusCode::OK {
+                break;
+            }
+            response = server.serve_uri(&url);
+        }
+        assert_eq!(response.status(), http::StatusCode::OK);
+        assert!(super::super::encoder::is_jpeg(response.body()));
+
+        server.stop();
+    }
+
+    /// One live server at a time, and only ever one of them.
+    ///
+    /// `render_loop` opens its own `RenderContext`, so a server per test means
+    /// a Vulkan instance created and torn down per test — and doing that
+    /// alongside the instance the compositor tests share segfaults inside the
+    /// driver often enough to make `cargo test` unreliable. Measured on this
+    /// machine: four failures in forty runs with a server per test, none in
+    /// forty without.
+    ///
+    /// The application runs exactly one preview server for its whole life, so
+    /// one here is also the more honest arrangement. Tests take it in turn and
+    /// install their own session with `adopt`, which supersedes whatever the
+    /// last test left — which is all a seek does anyway.
+    static ONE_SERVER: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// The shared server, its clock, and exclusive use of both.
+    ///
+    /// The lock is deliberately poison-tolerant: a test that failed while
+    /// holding it must not turn every later test into a secondary failure.
+    fn shared_server() -> (
+        Arc<PreviewServer>,
+        Arc<crate::modules::preview::clock::ManualSource>,
+        std::sync::MutexGuard<'static, ()>,
+    ) {
+        static SERVER: std::sync::OnceLock<(
+            Arc<PreviewServer>,
+            Arc<crate::modules::preview::clock::ManualSource>,
+        )> = std::sync::OnceLock::new();
+
+        let guard = ONE_SERVER.lock().unwrap_or_else(|e| e.into_inner());
+        let (server, time) = SERVER.get_or_init(|| {
+            let time = Arc::new(crate::modules::preview::clock::ManualSource::new());
+            let server = PreviewServer::with_time_source(DEFAULT_CAPACITY, Arc::clone(&time) as _);
+            (server, time)
+        });
+        // Threads are respawned per test because each test ends by stopping
+        // them. That is what keeps a render from being in flight when the
+        // process exits — an abrupt teardown in the middle of a `write_buffer`
+        // is a segfault, and it is the reason every one of these tests ends
+        // with `stop()`. The *device* survives it: `render_device` hands out a
+        // clone of the binary's shared context, so stopping drops the
+        // compositor and not the Vulkan instance.
+        server.spawn_threads();
+
+        // Rewind the injected clock.
+        //
+        // The source is shared through the `OnceLock` along with the server,
+        // so a test that moves the playhead leaves it moved for every test
+        // after it in this process. That made these tests order-dependent:
+        // one of them asserts the ring settles at exactly the read-ahead
+        // limit, which is only true when the playhead is where the test
+        // thinks it is, and inheriting a position from a previous test put
+        // the window further out and produced one frame too many. It failed
+        // at two different assertions on two runs, which is the signature of
+        // shared state rather than of a race.
+        //
+        // A test that asserts the injected source is in control cannot start
+        // by inheriting somebody else's position.
+        time.set(0);
+
+        (Arc::clone(server), Arc::clone(time), guard)
+    }
+
+    /// How long a test will wait for the renderer before calling it hung.
+    ///
+    /// Not a synchronisation device — every wait below blocks on the ring's
+    /// condvar and returns the instant the frame lands. This is only the bound
+    /// that turns "the render thread died" into a failure rather than a suite
+    /// that never finishes.
+    const RENDER_DEADLINE: Duration = Duration::from_secs(30);
+
+    /// Block until every frame in `frames` is in the ring.
+    ///
+    /// Every one of them, not just the last: encoding runs off the render
+    /// thread, so frames finish out of order and waiting on the highest number
+    /// says nothing about the ones below it.
+    #[track_caller]
+    fn await_frames(server: &PreviewServer, session: u64, frames: std::ops::Range<i64>) {
+        for frame in frames {
+            let found = server.cache().wait(session, frame, RENDER_DEADLINE);
+            // The message carries the whole decision state, because "frame N
+            // never arrived" on its own says nothing about *why*. The renderer
+            // stops for exactly two reasons — it reached its read-ahead limit,
+            // or playback is no longer running — and telling those apart from
+            // the outside is otherwise guesswork. `pace` idles when
+            // `cursor >= frame_at(position) + read_ahead`, so with the position
+            // and the frame count printed the arithmetic is checkable by hand.
+            let status = server.status();
+            assert!(
+                found.is_hit(),
+                "frame {frame} never arrived (ring holds {:?}; \
+                 playing={} position={}µs playhead=frame {} session fps={} \
+                 cached={}/{})",
+                server.cache().frames(),
+                status.playing,
+                status.position,
+                status.frame,
+                status.fps,
+                status.cached,
+                status.capacity,
+            );
+        }
+    }
+
+    #[test]
+    fn playback_fills_the_ring_ahead_of_the_playhead() {
+        if crate::modules::render::test_context().is_none() {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        }
+        // The clock reads from a source this test owns, so "the renderer runs
+        // twelve frames ahead of the playhead" is an exact statement rather
+        // than a guess about how long a contended GPU takes. The old version
+        // of this test slept in fifty-millisecond steps and compared the ring
+        // size against a wall-clock playhead, which made it a coin toss
+        // whenever the machine was busy.
+        let (server, time, _exclusive) = shared_server();
+        server.set_source_provider(Arc::new(EmptySourceProvider));
+        let info = server.adopt(
+            Arc::new(PreviewSession::new(project(), PreviewOptions::default())),
+            0,
+            false,
+            SeekKind::SessionStart,
+        );
+        server.play().expect("session is open");
+
+        // The playhead is at frame 0 and stays there. `pace` renders frames
+        // `cursor .. current + read_ahead` and idles beyond, so the ring must
+        // settle at exactly frames 0..12 — no more, however fast the GPU is,
+        // and no fewer, however slow.
+        let lead = DEFAULT_READ_AHEAD as i64;
+        await_frames(&server, info.session, 0..lead);
+        assert_eq!(
+            server.cache().frames(),
+            (0..lead).collect::<Vec<i64>>(),
+            "the renderer did not stop at its read-ahead limit"
+        );
+        assert_eq!(
+            server.clock().position(),
+            0,
+            "the clock moved on its own; the injected source is not in control"
+        );
+
+        // Move the playhead ten frames. The renderer must extend the ring by
+        // ten, not restart it and not run away.
+        time.set(frame_time(10, 30.0));
+        assert_eq!(server.clock().frame(), 10);
+        await_frames(&server, info.session, lead..10 + lead);
+        assert_eq!(
+            server.cache().frames(),
+            (0..10 + lead).collect::<Vec<i64>>(),
+            "the ring did not follow the playhead"
+        );
+
+        // Every frame the ring holds is at or ahead of the playhead, which is
+        // the property that makes playback smooth rather than merely possible.
+        assert!(
+            server
+                .cache()
+                .frames()
+                .iter()
+                .all(|frame| *frame >= server.clock().frame() - 10),
+            "the ring is behind the playhead"
+        );
+
+        server.pause().expect("session is open");
+        assert!(!server.clock().is_playing());
+
+        // Pausing stops the renderer where it is: time can pass without the
+        // ring growing, because a paused clock does not advance.
+        let frozen = server.cache().frames();
+        time.advance(5_000_000);
+        assert_eq!(server.clock().frame(), 10, "a paused clock does not move");
+        assert_eq!(server.cache().frames(), frozen);
+
+        server.stop();
+    }
+
+    /// The wiring, not the arithmetic: the arithmetic is covered in
+    /// `stats::tests`, but nothing there proves that the render thread, the
+    /// encode thread and the pacer are actually counting into it. Without this
+    /// the whole module could be correct and never called.
+    #[test]
+    fn playback_leaves_numbers_a_log_line_can_be_built_from() {
+        if crate::modules::render::test_context().is_none() {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        }
+        let (server, _time, _exclusive) = shared_server();
+        server.set_source_provider(Arc::new(EmptySourceProvider));
+        let info = server.adopt(
+            Arc::new(PreviewSession::new(project(), PreviewOptions::default())),
+            0,
+            false,
+            SeekKind::SessionStart,
+        );
+        server.play().expect("session is open");
+
+        // Synchronises on the ring, so every frame below has been through
+        // `record_frame` by the time this returns.
+        let lead = DEFAULT_READ_AHEAD as i64;
+        await_frames(&server, info.session, 0..lead);
+
+        let summary = server
+            .shared
+            .stats
+            .finish(std::time::Instant::now())
+            .expect("playback rendered frames, so there is something to say");
+
+        assert!(
+            summary.rendered >= lead as u64,
+            "the render thread counted {} frames against {lead} in the ring",
+            summary.rendered
+        );
+        assert_eq!(
+            summary.dropped, 0,
+            "the clock never moved, so nothing can have been late"
+        );
+        assert_eq!((summary.width, summary.height), (info.width, info.height));
+        assert!(
+            summary.decode.is_some(),
+            "the render thread reports the decode path before its first frame"
+        );
+        assert!(
+            summary.encode.is_some(),
+            "and the encode thread reports its backend"
+        );
+        assert!(
+            summary.mean_ms > 0.0 && summary.mean_ms.is_finite(),
+            "mean {}",
+            summary.mean_ms
+        );
+        assert!(
+            summary.p99_ms >= summary.mean_ms,
+            "p99 {} is below the mean {}",
+            summary.p99_ms,
+            summary.mean_ms
+        );
+        // One bucket of slack: the maximum is exact and the percentile is the
+        // upper edge of the bucket its sample fell in, so p99 may legitimately
+        // sit up to `BUCKET_MICROS` above the largest sample.
+        let bucket_ms = super::stats::BUCKET_MICROS as f64 / 1000.0;
+        assert!(
+            summary.max_ms + bucket_ms >= summary.p99_ms,
+            "max {} is more than one bucket below p99 {}",
+            summary.max_ms,
+            summary.p99_ms
+        );
+        assert!(
+            (summary.budget_ms - 33.333).abs() < 0.01,
+            "a 30 fps project has a 33.3 ms budget, not {}",
+            summary.budget_ms
+        );
+
+        // Draining is not idempotent by accident: `finish` resets, so a stop
+        // straight after a final summary must not print a second empty one.
+        assert!(
+            server
+                .shared
+                .stats
+                .finish(std::time::Instant::now())
+                .is_none(),
+            "the window was drained"
+        );
+
+        server.stop();
+    }
+
+    #[test]
+    fn seeking_supersedes_the_session_and_the_old_url_stops_working() {
+        if crate::modules::render::test_context().is_none() {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        }
+        let (server, _time, _exclusive) = shared_server();
+        let first = server.adopt(
+            Arc::new(PreviewSession::new(project(), PreviewOptions::default())),
+            0,
+            false,
+            SeekKind::SessionStart,
+        );
+        let second = server.seek(1_000_000).expect("session is open");
+        assert!(second.session > first.session);
+
+        let stale = server.serve_uri(&format!("{}/{}", first.frame_url, first.frame));
+        assert_eq!(stale.status(), http::StatusCode::GONE);
+
+        server.stop();
+    }
+}

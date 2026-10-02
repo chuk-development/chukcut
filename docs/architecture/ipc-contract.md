@@ -1,5 +1,9 @@
 # IPC contract
 
+> **Webview era.** Written for the Tauri + React shell, which was removed on
+> 2026-10-02 (decision 0011). Kept for its reasoning; the code paths it names
+> under `src/` and `src-tauri/` no longer exist.
+
 The webview has exactly three ways to reach Rust. Nothing else crosses the
 boundary.
 

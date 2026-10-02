@@ -1,5 +1,9 @@
 # 0006 — The menu bar is drawn in the webview, and decided in Rust
 
+> **Webview era.** Written for the Tauri + React shell, which was removed on
+> 2026-10-02 (decision 0011). Kept for its reasoning; the code paths it names
+> under `src/` and `src-tauri/` no longer exist.
+
 Status: decided 2026-07-27. Replaces the `tauri::menu::Menu` built in
 `src-tauri/src/modules/workspace/menu.rs` and covers window decorations,
 accelerators and the `--titlebar-*` tokens.

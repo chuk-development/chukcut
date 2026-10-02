@@ -5,7 +5,18 @@ Sessions are long and are not reopened, so nothing important is allowed to live
 only in a conversation. If you learn something that would change how the next
 person works, it belongs in this repository, not in a chat log.
 
-Last updated: 2026-08-05 (**the project is public, under GPL-3.0** — decision
+Last updated: 2026-10-02 (**the UI is native now** — decision 0011. The Tauri
+shell and the React frontend are gone; the engine is `crates/engine`
+(`chukcut-engine`, no UI dependency) and the app is a GPUI window in
+`crates/app`. What the native app does today: import (dialog or command line),
+a media list, click-to-append onto the timeline, preview with playback driven
+by the audio clock, scrubbing, clip select/move/delete, split, undo/redo,
+open/save, timeline zoom and scroll. Verified on an RTX 3060 under X11: Vulkan
+render device, software decode (no VAAPI driver on NVIDIA), playback advancing
+in step with the clock. Everything the React UI had beyond that — inspector,
+transitions, text, export dialog, settings, proxies — is not ported yet; the
+engine side of all of it is intact and compiles, tests included.)
+Previously 2026-08-05 (**the project is public, under GPL-3.0** — decision
 0010. Two things follow that are not paperwork: the licence question 0002 was
 built around is settled, so linking the distribution's ordinary `--enable-gpl`
 FFmpeg and using `libx264`/`libx265` in-process is now allowed and the
@@ -27,20 +38,42 @@ the `vkDeviceWaitIdle` crash it found.
 
 ## What this is
 
-`chukcut` — a CapCut-style video editor. Rust engine, Tauri 2 shell, React
-frontend. Everything lives in this repository at `~/git/chukcut`. There is no
-other source tree; earlier attempts (`~/git/chukcut-rust`, `~/git/x`) are
-reference material only and are described under "Prior work" below.
+`chukcut` — a CapCut-style video editor for Linux. Rust engine, native GPUI
+shell, one process. Everything lives in this repository at `~/git/chukcut`
+(GitHub: `chuk-development/chukcut`). Earlier attempts (`~/git/chukcut-rust`,
+`~/git/x`) are reference material only and are described under "Prior work"
+below. The webview UI that most of this file describes lives in history before
+decision 0011.
 
-Run the built app:
+Run the app:
 
 ```bash
 cd ~/git/chukcut
-pnpm tauri build --no-bundle          # ~1.5 min incremental
-./src-tauri/target/release/chukcut
+cargo build --release -p chukcut
+./target/release/chukcut [project.chukcut | media files…]
 ```
 
-Do **not** judge performance from `pnpm tauri dev`. See "Traps" below.
+Judge performance from a release build only.
+
+## Open work, in order
+
+1. **NVDEC/NVENC.** On NVIDIA there is no VAAPI, so decode and export run in
+   software. Add FFmpeg's `cuda` hwaccel and `h264_nvenc`/`hevc_nvenc` beside
+   the VAAPI paths; the payoff for decode is CUDA→Vulkan interop, not the
+   decode alone. Found on the RTX 3060 (2026-10-02, 760/764 lib tests green):
+   - The proxy encoder already picks `h264_nvenc` when FFmpeg has it, then
+     fails to open it ("cannot open the h264_nvenc encoder with bitrate",
+     EINVAL) and has **no fallback to software** — three `proxy::tests` fail.
+     An encoder in the build says nothing about whether it opens with our
+     options; fall back on open failure.
+   - `compositor::tests::empty_project_is_the_background_colour` gets
+     `[0, 64, 127, 255]` for an expected `128`: NVIDIA's Vulkan rounds the
+     clear colour differently from Intel's. Compare with a tolerance of one.
+2. **Shared GPU device with GPUI** so preview frames never leave the GPU
+   (`docs/research/GPUI_SPIKE.md`, path (a); needs the engine on GPUI's wgpu).
+3. **Port the UI the webview had:** inspector, export dialog, text,
+   transitions, trim handles, thumbnails and waveforms on clips, settings.
+4. **CLI and MCP server** over the command layer (`crates/cli`).
 
 ## What works, verified
 

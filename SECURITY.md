@@ -31,9 +31,10 @@ chukcut parses untrusted input by design, which is where the risk lives:
 - **Effect packages.** These are loaded from a URL the user supplies and contain
   shaders and metadata. Path traversal out of the package, shader translation
   that escapes its sandbox, or anything reaching the file system is in scope.
-- **The IPC boundary.** Every capability is a registered Tauri command. A
-  command that lets the webview read or write paths the user did not choose is
-  a bug, and an important one.
+- **The command layer.** Every capability is a function in
+  `crates/engine/src/modules/*/commands.rs`, and a CLI and an MCP server will
+  expose them to other processes. A command that reads or writes paths the
+  user did not choose is a bug, and an important one.
 
 ## What is not in scope
 

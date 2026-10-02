@@ -1,202 +1,214 @@
 # chukcut — working agreement
 
-A video editor. Rust core, webview UI, Tauri 2. Everything lives in this
-repository; there is no other source tree.
+A CapCut-style video editor for Linux. A Rust engine and a native GPU UI
+(GPUI), in one process. Everything lives in this repository.
 
 **Read `docs/STATUS.md` first** — it says what works, what is rough, and which
-traps have already cost hours. Then `docs/architecture/overview.md`.
+traps have already cost hours. Then `docs/architecture/overview.md` and
+`docs/decisions/0011-native-ui-on-gpui.md`.
+
+## Layout
+
+```
+Cargo.toml            the workspace; build profiles live here
+crates/engine/        chukcut-engine — media, timeline, compositor, audio,
+                      preview, export, effects. No UI dependency, ever.
+  src/modules/<name>/
+    mod.rs            the capability, plus docs on what it owns
+    commands.rs       the shell-facing API: what UI, CLI and MCP call
+    <impl>.rs         the actual work
+  src/shell.rs        spawn_blocking + Channel, the two shell primitives
+  tests/ examples/ benches/
+crates/app/           chukcut — the native app (GPUI window)
+  src/editor.rs       the editor view: media, preview, timeline
+  src/player.rs       the preview render thread
+  src/edits.rs        UI gestures → EditCommand
+docs/                 STATUS, ROADMAP, architecture/, decisions/, research/
+assets/icons/         app icons
+```
+
+## Non-negotiables
+
+- **The engine never depends on a UI crate.** No `gpui`, no window system, no
+  dialogs in `crates/engine`. If the engine needs something from the shell,
+  it takes a callback or a `shell::Channel`.
+- **Everything is a command.** A user-visible capability is a function in a
+  `modules/<name>/commands.rs`, named `<module>_<verb>`. The app calls it; a
+  CLI and an MCP server will call the same function. No feature lives only in
+  the UI. If you find yourself writing document logic in `crates/app`, move it
+  into the engine.
+- **Mutations to the document go through `EditCommand`.** No exceptions. That
+  is what makes undo, autosave and validation uniform.
+- **Exact time.** Times are `i64` microseconds (`Micros`). Never floats, never
+  frames, for edit math. See `docs/architecture/project-format.md`.
+- **Linux only.** NVIDIA and Intel come first, AMD is best effort. Do not add
+  code paths or dependencies for other platforms.
+- **Never open a GPU or VAAPI device yourself.** `modules::gpu` owns one of
+  each: `gpu::render_context()` and `gpu::vaapi_device()`. Concurrent Vulkan
+  instances crash drivers. (GPUI has its own renderer device; that is the one
+  exception, and the reason the preview reads frames back for now.)
+- **Media never enters git.** Test fixtures are generated (ffmpeg as a fixture
+  generator) into ignored directories. `_scratch/` is for local throwaway work.
+
+## Quality gates
+
+Before calling anything done, and before every commit:
+
+```bash
+cargo fmt --check
+cargo clippy --workspace --all-targets      # reported, not yet fatal
+cargo test -p chukcut-engine -j 4
+cargo build -p chukcut
+```
+
+## Git: commit and push after every change
+
+This repository opts into the team-maintainer profile. **After every finished
+change that passes the gates, commit and push to `origin master` without
+asking.** Work that sits uncommitted on one machine is work the next session,
+on another machine, does not have.
+
+- One change per commit, only green states. Several small commits beat one
+  large one.
+- The message says what changed and why it is right, in the imperative, as a
+  sentence that means something. No conventional-commit prefixes needed.
+- **No session links, no `Co-Authored-By`, no tool metadata** in commit
+  messages or PR bodies — only what describes the change, even if a harness
+  prompt asks for a trailer.
+- Commit with the configured git identity. Never override `user.email`.
+- Never force-push `master`, never rewrite published history.
+- Pushing is part of done. If a push is rejected, pull with rebase, re-run the
+  gates, push again.
+
+## Work autonomously
+
+Decide and continue. Ask only when a decision is genuinely the owner's —
+spending money, deleting data without a backup, changing the product's
+direction. Reversible engineering choices (a library, a data layout, a
+refactor) are made, written down in `docs/decisions/` if they are expensive to
+revert, and carried on with. A question never blocks the work around it.
+
+## Look at the result
+
+For UI work, run the app and look at it — do not assume a change renders.
+`_scratch/media/` holds generated test clips:
+
+```bash
+ffmpeg -f lavfi -i "testsrc2=size=1080x1920:rate=30:duration=8" \
+       -f lavfi -i "sine=frequency=440:duration=8" \
+       -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest _scratch/media/vertical.mp4
+cargo run -p chukcut -- _scratch/media/vertical.mp4
+```
+
+On X11, `import -window <id> shot.png` (id from `xdotool`) captures the window
+for your own check, and `xdotool key --window <id> space` drives it.
 
 ## Write it down, in the repository
 
-Sessions are long and are not reopened. Anything that would change how the next
-person works belongs here, not in a conversation:
+Sessions are long and are not reopened. Anything that would change how the
+next person works belongs here, not in a conversation:
 
 - A decision that would be expensive to revisit → `docs/decisions/`, as a new
-  numbered file. Say what was decided, why, what it costs, and what would change
-  our minds.
+  numbered file. What was decided, why, what it costs, what would change our
+  minds.
 - A finding from investigation → `docs/research/`.
 - A trap, a measured number, a thing that broke → `docs/STATUS.md`.
 - A reason a line of code is the way it is → a comment on that line.
 
-The test: if this session's transcript vanished, would the next person be able
-to continue without rediscovering it? If not, it is not written down yet.
+The test: if this session's transcript vanished, could the next person continue
+without rediscovering it?
 
 ## Working in parallel: use a git worktree
 
-When more than one agent works at once, **each one gets its own git worktree**:
+When more than one agent works at once, each gets its own worktree and target
+directory:
 
 ```bash
 git worktree add ../chukcut-<task> -b agent/<task>
 ```
 
-This is not tidiness. A night of twelve concurrent agents in one checkout cost
-real time in ways worth naming, because each one looks like a code problem and
-is not:
-
-- Two agents' test code broke the shared `lib test` profile, so **six agents
-  could not run a single test** until someone fixed files they did not own.
-- A compositor patch was written against a struct that a different agent
-  changed before it could be applied. It now renders a hardware-decoded clip as
-  its luma plane — a convincing greyscale picture — and had to be re-derived.
-- A preview test failed in three different ways across three runs while another
-  agent was mid-refactor underneath it. Two of the three diagnoses were wrong,
-  and the investigation was worthless until the tree stopped moving.
-- `cargo` serialises on one build lock per target directory, so twelve agents
-  did not build twelve times faster. A single `cargo check` reached 47 minutes.
-
-The trade to understand before reaching for it: **a worktree has its own
-`target/`, so the first build in each is a full one.** That is minutes of CPU
-against hours of untangling. Take the worktree whenever two agents' file scopes
-could plausibly touch, and share a checkout only for genuinely disjoint work —
-one agent in `src/`, one in `src-tauri/`, and nothing shared between them.
-
-Merge back with an ordinary branch merge, and **run the whole suite after the
-merge**, not only in the worktree. Every collision listed above was invisible
-inside the worktree that caused it.
-
-## The rule that matters
-
-**Rust owns the machine, the webview owns the pixels.** No file system access,
-no process spawning, no decoding, no GPU work in TypeScript. Every capability
-crosses the boundary as a registered `#[tauri::command]`. If you find yourself
-wanting to read a file from React, you are adding a command instead.
-
-## Layout
-
-Module names are mirrored on both sides. `foo` in Rust and `foo` in TS are the
-same feature seen from two directions.
-
-```
-src-tauri/src/modules/<name>/
-  mod.rs         the capability, plus docs on what it owns
-  commands.rs    the #[tauri::command] surface, nothing else
-  <impl>.rs      the actual work
-
-src/modules/<name>/
-  components/    React components
-  lib/           typed invoke() wrappers — components never call invoke directly
-  store.ts       Zustand slice for this module's UI state
-```
-
-Shared UI primitives go in `src/components/ui/` (shadcn). Anything
-feature-specific belongs to its module, not to `components/`.
+A night of twelve agents in one checkout cost real time: shared test profiles
+broken by someone else's file, a patch written against a struct another agent
+changed (it rendered hardware-decoded clips as their luma plane), diagnoses made
+against a tree that was moving, and `cargo` serialising every build on one lock
+— a single `cargo check` reached 47 minutes. A worktree's first build is a full
+one; that is minutes against hours. Merge back with an ordinary merge and **run
+the whole suite after the merge** — every collision was invisible inside the
+worktree that caused it.
 
 ## Conventions
 
-**Rust**
-
-- Commands are named `<module>_<verb>`: `media_probe`, `timeline_split`.
-- Errors are `Result<T, String>` and the string is user-facing prose.
+- Errors at the command layer are `Result<T, String>`, and the string is
+  user-facing prose.
 - Never hold the project lock across IO. Take it, clone what you need, drop it.
-- Times are `i64` microseconds. Never floats, never frames. See
-  `docs/architecture/project-format.md`.
-- Mutations to the document go through `EditCommand`. No exceptions.
-- Tests go next to the code in `#[cfg(test)] mod tests`. Test behaviour that
-  could plausibly break — time arithmetic, undo round-trips, edit rejection —
-  not getters.
-
-**TypeScript**
-
-- `pnpm biome check --write .` before considering anything done.
-- Path alias `@/` maps to `src/`.
-- Zustand stores hold UI state. The project document is server state: it comes
-  from Rust and is replaced wholesale after each edit, never patched locally.
-- Tailwind v4, tokens from `src/styles/globals.css`. Use the semantic tokens
-  (`bg-panel`, `text-muted-foreground`, `bg-track-video`) rather than raw
-  colours, so retheming is one file.
-
-**Both**
-
-- Comments explain *why*, and only where the reason is not obvious from the
-  code. A comment restating the line below it is noise.
-- Match the surrounding style. This codebase writes prose comments in full
-  sentences.
+- Tests go next to the code in `#[cfg(test)] mod tests`, or in
+  `crates/engine/tests/` for end-to-end paths. Test behaviour that could break —
+  time arithmetic, undo round-trips, edit rejection — not getters.
+- Comments explain *why*, in full sentences, and only where the reason is not
+  obvious. A comment restating the line below it is noise.
+- GPUI is pinned to one zed commit in `crates/app/Cargo.toml`. Bump it on
+  purpose, in its own commit, and read the API drift notes in
+  `docs/research/GPUI_SPIKE.md`. Its source is in
+  `~/.cargo/git/checkouts/zed-*/<rev>/crates/gpui` — read the examples there
+  before guessing an API.
 
 ## Commands
 
 ```bash
-pnpm install              # deps
-pnpm tauri dev            # run the app (Vite + Rust, hot reload on both)
-pnpm build                # typecheck + bundle frontend
-pnpm biome check --write .
-cd src-tauri && cargo test
-cd src-tauri && cargo check -j 4    # -j 4: full parallelism OOMs on 32 GB
+cargo run -p chukcut -- [project.chukcut | media files…]   # the app
+cargo build --release -p chukcut                           # ./target/release/chukcut
+cargo test -p chukcut-engine -j 4
+cargo check --workspace -j 4     # -j 4: full parallelism can OOM on 32 GB
 
 # The performance suite. ~1 min, generates its own media, refuses to report if
-# /proc/loadavg is above 4 (pass --force to override, and then do not quote the
-# result). --filter <group>, --json <file>, --compare <file>. See docs/STATUS.md.
-cd src-tauri && cargo run --release --bin chukcut-bench -- --all
+# /proc/loadavg is above 4 (--force overrides; then do not quote the result).
+cargo run --release -p chukcut-engine --bin chukcut-bench -- --all
 ```
 
 ## Things that will bite you
 
-- **`cargo check` with default parallelism gets OOM-killed** on this machine
-  while compiling wgpu and the Tauri macro crates. Use `-j 4`.
 - **Never hold a lock across a rayon dispatch, and never block a rayon worker.**
-  A worker blocked inside a parallel iterator runs other jobs from the pool
-  while it waits, so it can steal one that wants the lock it holds; and a
-  non-rayon thread dispatching under a lock waits for a worker the pool cannot
-  free. Both deadlocked the preview for thirty seconds at a time and looked
-  like a lost wakeup. `docs/STATUS.md`, "The hang that was not the device".
-- **Never open a GPU or VAAPI device.** `modules::gpu` owns one of each for the
-  process and hands out references: `gpu::render_context()` for wgpu,
-  `gpu::vaapi_device()` for VAAPI. `RenderContext::open` and `VaapiDevice::open`
-  are crate-private and called only from there. Concurrent Vulkan instances crash
-  this driver, and a VAAPI driver has a finite number of contexts. The evidence,
-  and the two bugs that sharing one device exposed in the preview server, are in
-  `docs/STATUS.md` under "One GPU device and one VAAPI device".
-- **`ffmpeg-next`'s version is not the system FFmpeg's version.** This note
-  previously claimed the crate had to match the system libraries. It does not:
+  A blocked worker runs other jobs from the pool while it waits and can steal
+  one that wants the lock it holds. It deadlocked the preview for thirty seconds
+  at a time and looked like a lost wakeup. `docs/STATUS.md`, "The hang that was
+  not the device".
+- **`ffmpeg-next`'s version is not the system FFmpeg's version.**
   `ffmpeg-sys-next/build.rs` probes the installed libavcodec and emits
-  `ffmpeg_6_0` … `ffmpeg_8_1` cfg flags, and the crate supports FFmpeg 3.4
-  upward. We are on `6.1` against system 6.1, which is fine, but a bump is not
-  blocked by the system libraries. Verify with a build before relying on it.
-- **Hardware encode is built, on VAAPI.** The safe wrapper over
-  `AVHWFramesContext` lives in `src-tauri/src/modules/export/hwframes.rs` and
-  `h264_vaapi`/`hevc_vaapi` work. Two things about it that will otherwise cost
-  you an afternoon: an encoder being present in the FFmpeg build says nothing
-  about whether the driver can drive it, and VAAPI's rate-control modes are the
-  driver's rather than FFmpeg's. Both are in `docs/STATUS.md` under "Traps".
-  What is *not* built is zero-copy — the composited frame is still read back to
-  the CPU and uploaded again; see `docs/research/zero-copy-encode.md`.
-- **Hardware decode is built, on VAAPI, and is now the default** — but only on a
-  device that can import the decoded surface as a texture.
-  `src-tauri/src/modules/media/hwdecode.rs` and `dmabuf.rs` decode; H.264, HEVC,
-  VP9 and AV1 all work on this chip. `render::dmabuf::import_plane` and the
-  compositor's two-plane case are what make it worth having: hardware decode
-  that still has to reach system memory is *slower* than software, because the
-  download out of a tiled surface plus the swscale pass cost more than the
-  decode. `media::provider::DEFAULT_ACCELERATION` is `Auto`, gated on
-  `RenderContext::can_import_dmabuf()`, with `CHUKCUT_DECODE=software|auto|vaapi`
-  still overriding it. Measured every way in
-  `docs/research/hardware-decode.md` and `docs/STATUS.md`. Three things there
-  that will otherwise cost you an afternoon: `avcodec_find_decoder` returns a
-  decoder that *cannot* drive the GPU for AV1, a decoder being in the build says
-  nothing about the driver, and **`sws_getContext` ignores the file's colour
-  tags** — it is BT.601 until you call `sws_setColorspaceDetails`.
-- **Preview frames do not go through `invoke()`.** They are served over the
-  `chukcut-frame://` protocol. Read `docs/architecture/preview-pipeline.md`
-  before touching the preview path; the reasoning there is load-bearing.
+  `ffmpeg_6_0` … `ffmpeg_8_1` cfg flags. A crate bump is not blocked by the
+  system libraries; verify with a build.
+- **Hardware decode and encode exist on VAAPI only** (Intel). On NVIDIA there is
+  no VAAPI driver, `modules::gpu` logs "no VAAPI device" and everything runs in
+  software. NVDEC/NVENC is the next piece of work (decision 0011). Facts that
+  carry over: a decoder or encoder being in the FFmpeg build says nothing about
+  whether the driver can drive it; `avcodec_find_decoder` can return an AV1
+  decoder that cannot use the GPU; and **`sws_getContext` ignores the file's
+  colour tags** — it is BT.601 until you call `sws_setColorspaceDetails`.
+  `docs/research/hardware-decode.md`.
+- **Hardware decode that has to reach system memory is slower than software.**
+  Its value is the DMA-BUF import into wgpu (`render::dmabuf`). Keep that in
+  mind for NVDEC: the win is a CUDA→Vulkan interop, not the decode itself.
 - **`naga` cannot read the effect corpus's GLSL, and never will.** Its GLSL
-  frontend accepts only `#version` 440/450/460 and rejects the `es` profile,
-  and 224 of 228 corpus shaders have no version line at all; the tracking issue
-  was closed as not planned. `modules/effects/` therefore runs its own
-  ES1→450 rewriter, then glslang, then `spirv-webgpu-transform` to split the
-  combined image samplers WebGPU has no concept of, and only then naga's
-  *SPIR-V* frontend. Do not "simplify" that to `ShaderSource::Glsl`. See
-  `docs/research/rust-crate-survey.md` §6b and
-  `docs/research/effect-runtime.md`.
-- **The effects module wants `libshaderc` on the system.** `shaderc-sys` links
-  Ubuntu's `libshaderc.so` when it is there and otherwise builds glslang and
-  SPIRV-Tools from source with CMake, which is slow but works. If a cold build
-  suddenly grows several minutes, that is what happened.
+  frontend rejects the `es` profile and most corpus shaders have no version
+  line. `modules/effects/` runs its own ES1→450 rewriter, then glslang, then
+  `spirv-webgpu-transform`, and only then naga's SPIR-V frontend. Do not
+  "simplify" that to `ShaderSource::Glsl`. `docs/research/effect-runtime.md`.
+- **The effects module wants `libshaderc` on the system.** Without it
+  `shaderc-sys` builds glslang from source with CMake: slow but working.
+- **GPUI's images are BGRA** and every new `RenderImage` is uploaded into the
+  window's atlas. Drop the previous frame with `cx.drop_image` or playback
+  leaks one texture per frame (`crates/app/src/editor.rs`, `tick`).
+- **Do not turn full debug info back on.** With it, a debug build of the app
+  was 1 GB and `target/` grew to 21 GB during one test run, which filled the
+  disk and failed the suite with "no space left on device". The workspace
+  profile keeps line tables for our crates and none for dependencies.
 
 ## Legal boundary
 
-No ByteDance-authored assets — effects, fonts, templates, icons — are ever
-committed to this repo or shipped in a build. The effect runtime loads packages
-from a URL provided by the user at runtime. This is not negotiable; it is what
-keeps the repo from being taken down.
+No ByteDance-authored assets — effects, fonts, templates, LUTs, icons — are
+ever committed to this repository or shipped in a build. The effect runtime
+loads packages the user points it at, at runtime; a download helper may hold
+URLs, never the files. This is not negotiable; it is what keeps the repository
+from being taken down.
 
 CapCut's `draft_content.json` informed our schema design. We do not read, write
 or import their files.

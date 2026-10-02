@@ -15,39 +15,14 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  frontend:
-    name: Frontend
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10
-
-      - uses: actions/setup-node@v5
-        with:
-          node-version: 20
-          cache: pnpm
-
-      - run: pnpm install --frozen-lockfile
-
-      - name: Lint and format check
-        run: pnpm lint
-
-      - name: Typecheck
-        run: pnpm typecheck
-
-      - name: Tests
-        run: pnpm test:run
-
   rust:
     name: Rust
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
 
-      # Tauri's shell, FFmpeg's headers, VAAPI, ALSA for cpal, and libshaderc —
+      # FFmpeg's headers, VAAPI, ALSA for cpal, the X11/Wayland/xkb/fontconfig
+      # headers gpui's Linux platform links, and libshaderc —
       # without the last one shaderc-sys builds glslang from source with CMake,
       # which works but adds several minutes to a cold build.
       #
@@ -58,7 +33,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y \
-            libwebkit2gtk-4.1-dev libsoup-3.0-dev librsvg2-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            libx11-xcb-dev libxcb1-dev libfontconfig-dev libfreetype-dev \
             libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev \
             libavdevice-dev libswscale-dev libswresample-dev \
             libva-dev libasound2-dev libshaderc-dev nasm cmake
@@ -68,23 +44,18 @@ jobs:
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri
 
       - name: Formatting
         run: cargo fmt --check
-        working-directory: src-tauri
 
       # Reported, not fatal. There is a backlog of about 28 style lints — no
       # correctness among them — and failing the build on it would only teach
       # people to ignore a red tick. Clear the backlog, then add `-D warnings`.
       - name: Clippy
         run: cargo clippy --all-targets
-        working-directory: src-tauri
 
       # Tests that need a GPU adapter or FFmpeg binaries skip with a printed
       # reason rather than fail, so a runner without either still reports
-      # truthfully — it just runs fewer tests. See src-tauri/tests/support.
+      # truthfully — it just runs fewer tests. See crates/engine/tests/support.
       - name: Tests
         run: cargo test -j 4
-        working-directory: src-tauri

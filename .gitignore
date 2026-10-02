@@ -1,15 +1,10 @@
 # Build output
-node_modules/
-dist/
-dist-ssr/
-src-tauri/target/
-src-tauri/gen/
-*.tsbuildinfo
+/target/
 
 # Test and benchmark artefacts. The suites generate their own fixtures and
 # write results next to themselves; only the checked-in baselines belong in git.
-src-tauri/bench-results/
-src-tauri/tests/fixtures/generated/
+crates/engine/bench-results/
+crates/engine/tests/fixtures/generated/
 /coverage/
 *.profraw
 

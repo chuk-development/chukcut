@@ -18,10 +18,9 @@ is a map, not a substitute for those texts.
 | libva and the platform media driver | MIT | Hardware decode and encode |
 | wgpu, naga | MIT / Apache-2.0 | GPU compositing and shader translation |
 | glslang, SPIRV-Tools, shaderc | Apache-2.0 | GLSL → SPIR-V for the effect runtime |
-| Tauri, WebKitGTK | MIT / Apache-2.0, LGPL | Application shell |
-| React, Zustand, Radix UI, Tailwind CSS, Lucide | MIT | User interface |
+| GPUI (Zed) | Apache-2.0 | User interface |
 
-`cargo tree` and `pnpm licenses list` enumerate the complete set.
+`cargo tree` enumerates the complete set.
 
 ## Codec patents
 

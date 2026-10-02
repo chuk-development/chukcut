@@ -32,8 +32,8 @@ body:
     attributes:
       label: Build
       options:
-        - Release build (pnpm tauri build)
-        - Dev build (pnpm tauri dev)
+        - Release build (cargo build --release)
+        - Debug build (cargo run)
     validations:
       required: true
 

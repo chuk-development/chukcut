@@ -15,8 +15,7 @@ benchmark comparison, a file you played in another player.
 
 ## Checklist
 
-- [ ] `pnpm biome check --write .`, `pnpm typecheck`, `pnpm test:run`
-- [ ] `cargo fmt`, `cargo clippy --all-targets`, `cargo test`
+- [ ] `cargo fmt`, `cargo clippy --workspace --all-targets`, `cargo test`
 - [ ] Preview or export path touched → benchmark run, numbers in the description
 - [ ] Anything the next person would otherwise rediscover is written down in
       `docs/` (decision, research note, or a line in `docs/STATUS.md`)
