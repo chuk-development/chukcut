@@ -163,7 +163,14 @@ impl ProxySpec {
     /// `export::encoder` because an *export* wants a normal GOP and only a
     /// proxy wants this.
     fn options(encoder_name: &str) -> Vec<(String, String)> {
-        let mut options = vec![("g".to_string(), "1".to_string())];
+        // `bf=0` belongs with `g=1`: an all-intra stream has no room for
+        // B-frames, and `export::encoder` asks for two. x264 quietly drops
+        // them; NVENC refuses to open at all ("Gop Length should be greater
+        // than number of B frames + 1"), which failed every proxy on NVIDIA.
+        let mut options = vec![
+            ("g".to_string(), "1".to_string()),
+            ("bf".to_string(), "0".to_string()),
+        ];
         if encoder_name.starts_with("libx26") {
             // Overrides the `preset=medium` `export::encoder` applies to
             // x264/x265: a proxy is judged on how fast it appears, and nobody
@@ -348,7 +355,26 @@ pub fn generate(
     stream.height = height;
 
     let total = spec.total_frames().max(1);
-    let mut writer = MediaWriter::create(&partial, &stream, None)?;
+    // A hardware encoder that passed its trial encode can still refuse the
+    // proxy's own options on some driver. A proxy is worth more late than
+    // never, so that is a reason to use the CPU, not to fail.
+    let mut writer = match MediaWriter::create(&partial, &stream, None) {
+        Ok(writer) => writer,
+        Err(error) if accel != HwAccel::Software => {
+            tracing::warn!(
+                encoder = %encoder_name,
+                %error,
+                "hardware proxy encoder would not open; encoding on the CPU instead"
+            );
+            let _ = std::fs::remove_file(&partial);
+            let software = VideoCodec::H264.software_encoder();
+            stream = spec.stream_spec(software, HwAccel::Software);
+            stream.width = width;
+            stream.height = height;
+            MediaWriter::create(&partial, &stream, None)?
+        }
+        Err(error) => return Err(error.into()),
+    };
 
     for index in 0..total {
         if cancel.load(Ordering::Relaxed) {

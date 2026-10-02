@@ -1595,7 +1595,14 @@ mod tests {
         let f = frame(&c, &project, 0, &provider);
 
         assert_eq!(f.data.len(), 640 * 480 * 4);
-        assert_eq!(f.pixel(320, 240), [0, 64, 128, 255]);
+        // 0.5 * 255 = 127.5 sits exactly on a rounding boundary: Intel's
+        // Vulkan driver writes 128, NVIDIA's 127. Either is the background.
+        let got = f.pixel(320, 240);
+        let want = [0u8, 64, 128, 255];
+        assert!(
+            got.iter().zip(want).all(|(g, w)| g.abs_diff(w) <= 1),
+            "background {got:?}, expected {want:?} within one step"
+        );
         assert_eq!(provider.call_count(), 0);
     }
 
