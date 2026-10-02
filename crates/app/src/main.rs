@@ -60,6 +60,7 @@ fn main() {
             KeyBinding::new("ctrl-i", Import, None),
             KeyBinding::new("ctrl-o", Open, None),
             KeyBinding::new("ctrl-s", Save, None),
+            KeyBinding::new("ctrl-e", Export, None),
             KeyBinding::new("left", StepBack, None),
             KeyBinding::new("right", StepForward, None),
             KeyBinding::new("home", GoToStart, None),

@@ -13,11 +13,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chukcut_engine::modules::audio::AudioEngine;
+use chukcut_engine::modules::export::commands as export_commands;
+use chukcut_engine::modules::export::presets::VideoCodec;
+use chukcut_engine::modules::export::{ExportProgress, ExportRequest, ExportStage};
 use chukcut_engine::modules::preview::clock::{frame_at, PlaybackClock};
 use chukcut_engine::modules::project::commands as project_commands;
 use chukcut_engine::modules::project::{Micros, Project, Track, TrackKind};
 use chukcut_engine::modules::timeline::commands as timeline_commands;
 use chukcut_engine::modules::timeline::ops::EditCommand;
+use chukcut_engine::shell::Channel;
 use chukcut_engine::state::AppState;
 use gpui::prelude::*;
 use gpui::{
@@ -40,6 +44,7 @@ actions!(
         Import,
         Open,
         Save,
+        Export,
         StepBack,
         StepForward,
         GoToStart,
@@ -122,6 +127,9 @@ pub struct Editor {
 
     viewer: Rc<Cell<Bounds<Pixels>>>,
     timeline: Rc<Cell<Bounds<Pixels>>>,
+    /// The newest progress message of a running export, written from the
+    /// export thread and read by [`Self::tick`].
+    export_progress: Arc<parking_lot::Mutex<Option<ExportProgress>>>,
     _ticker: Task<()>,
 }
 
@@ -172,8 +180,15 @@ impl Editor {
             status: None,
             viewer: Rc::new(Cell::new(Bounds::default())),
             timeline: Rc::new(Cell::new(Bounds::default())),
+            export_progress: Arc::new(parking_lot::Mutex::new(None)),
             _ticker: ticker,
         };
+        // Hardware encoder detection opens each device and encodes a test
+        // frame. Do it now, off the UI thread, so the Export button does not
+        // pay for it.
+        std::thread::spawn(|| {
+            let _ = chukcut_engine::modules::export::hwaccel::detect();
+        });
         if !startup.is_empty() {
             editor.import_paths(startup, cx);
         }
@@ -190,6 +205,10 @@ impl Editor {
         self.request_frame();
 
         let mut changed = playing;
+        if let Some(progress) = self.export_progress.lock().take() {
+            self.status = Some(export_status(&progress).into());
+            changed = true;
+        }
         if let Some(frame) = self.player.take() {
             if let Some(old) = self.frame.replace(frame.image) {
                 // A frame is uploaded into the window's atlas when drawn; drop
@@ -378,10 +397,14 @@ impl Editor {
             multiple: true,
             prompt: Some("Import".into()),
         });
-        cx.spawn(async move |this, cx| {
-            if let Ok(Ok(Some(paths))) = picked.await {
+        cx.spawn(async move |this, cx| match picked.await {
+            Ok(Ok(Some(paths))) => {
                 let _ = this.update(cx, |editor, cx| editor.import_paths(paths, cx));
             }
+            Ok(Err(error)) => {
+                let _ = this.update(cx, |editor, cx| editor.dialog_failed(error, cx));
+            }
+            _ => {}
         })
         .detach();
     }
@@ -448,6 +471,72 @@ impl Editor {
             });
         })
         .detach();
+    }
+
+    /// A file dialog that could not be opened — on Linux usually a missing
+    /// or broken xdg-desktop-portal — is said out loud, never swallowed.
+    fn dialog_failed(&mut self, error: anyhow::Error, cx: &mut Context<Self>) {
+        tracing::error!(%error, "the file dialog could not be opened");
+        self.status = Some(format!("File dialog failed: {error}").into());
+        cx.notify();
+    }
+
+    fn on_export(&mut self, _: &Export, _: &mut Window, cx: &mut Context<Self>) {
+        tracing::info!("export requested");
+        if self.project.duration() <= 0 {
+            self.status = Some("Nothing on the timeline to export".into());
+            cx.notify();
+            return;
+        }
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let videos = home.join("Videos");
+        let directory = if videos.is_dir() { videos } else { home };
+        let name = format!("{}.mp4", self.project.name);
+        let picked = cx.prompt_for_new_path(&directory, Some(&name));
+        cx.spawn(async move |this, cx| {
+            let path = match picked.await {
+                Ok(Ok(Some(path))) => path,
+                Ok(Ok(None)) => return,
+                Ok(Err(error)) => {
+                    let _ = this.update(cx, |editor, cx| editor.dialog_failed(error, cx));
+                    return;
+                }
+                Err(_) => return,
+            };
+            let _ = this.update(cx, |editor, cx| editor.start_export(path, cx));
+        })
+        .detach();
+    }
+
+    fn start_export(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        // The GPU encoder when this machine has one that passed its trial
+        // encode — NVENC, VAAPI or QSV — and libx264 otherwise.
+        let hardware = chukcut_engine::modules::export::hwaccel::detect()
+            .into_iter()
+            .find(|encoder| encoder.usable && encoder.codec == VideoCodec::H264)
+            .map(|encoder| encoder.id);
+        let request = ExportRequest {
+            output_path: path.to_string_lossy().into_owned(),
+            preset_id: None,
+            overrides: None,
+            hardware,
+            include_audio: true,
+            range: None,
+        };
+        let slot = Arc::clone(&self.export_progress);
+        let channel = Channel::new(move |progress: ExportProgress| {
+            *slot.lock() = Some(progress);
+            true
+        });
+        self.status = Some(
+            match export_commands::export_start(&self.state, request, channel) {
+                Ok(_) => "Exporting…".into(),
+                Err(error) => error.into(),
+            },
+        );
+        cx.notify();
     }
 
     fn step(&mut self, frames: i64) {
@@ -702,6 +791,11 @@ impl Editor {
                 "save",
                 "Save",
                 cx.listener(|this, _, w, cx| this.on_save(&Save, w, cx)),
+            ))
+            .child(button(
+                "export",
+                "Export",
+                cx.listener(|this, _, w, cx| this.on_export(&Export, w, cx)),
             ))
             .child(div().flex_1())
             .children(
@@ -1110,6 +1204,7 @@ impl Render for Editor {
             .on_action(cx.listener(Self::on_import))
             .on_action(cx.listener(Self::on_open))
             .on_action(cx.listener(Self::on_save))
+            .on_action(cx.listener(Self::on_export))
             .on_action(cx.listener(|this, _: &StepBack, _, cx| {
                 this.step(-1);
                 cx.notify();
@@ -1178,6 +1273,28 @@ fn button(
         .text_color(rgb(TEXT))
         .on_click(on_click)
         .child(label)
+}
+
+/// One line for the status bar from an export progress message.
+fn export_status(progress: &ExportProgress) -> String {
+    match progress.stage {
+        ExportStage::Done => format!(
+            "Exported {} frames in {:.1} s → {}",
+            progress.total_frames,
+            progress.elapsed_seconds,
+            progress.output_path.as_deref().unwrap_or("")
+        ),
+        ExportStage::Failed => format!(
+            "Export failed: {}",
+            progress.message.as_deref().unwrap_or("unknown error")
+        ),
+        ExportStage::Cancelled => "Export cancelled".into(),
+        _ => format!(
+            "Exporting {:.0} % · {:.0} fps",
+            progress.fraction * 100.0,
+            progress.fps
+        ),
+    }
 }
 
 fn file_name(path: &str) -> String {
