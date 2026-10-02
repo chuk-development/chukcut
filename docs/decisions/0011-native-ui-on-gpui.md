@@ -50,9 +50,7 @@ UI code fast enough that iteration speed in TypeScript no longer decides it.
 
 ## What comes next, in order
 
-1. **NVDEC/NVENC.** This machine is an RTX 3060 with no VAAPI driver, so decode
-   and encode run in software today. FFmpeg's `cuda` hwaccel for decode and
-   `h264_nvenc`/`hevc_nvenc` for encode, beside the existing VAAPI paths.
+1. ~~**NVDEC/NVENC.**~~ Done 2026-10-03 — see `docs/STATUS.md`, "Open work".
 2. **Shared GPU device (spike path (a)).** The engine renders into a texture
    GPUI composites directly. Blocked on version alignment: GPUI is on wgpu 29,
    the engine on wgpu 30.

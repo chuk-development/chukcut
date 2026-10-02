@@ -134,20 +134,29 @@ fn measure(file: &Path, frames: usize, rounds: usize) -> Result<String, String> 
     let video = info.video.ok_or_else(|| "no video stream".to_string())?;
     let step = (1_000_000.0 / video.fps.max(1.0)) as i64;
 
+    // VAAPI unless `CHUKCUT_BENCH_HW=cuda`, which measures NVDEC instead.
+    // NVDEC has no DMA-BUF export, so its "mapped" column stays empty.
+    let hw = match std::env::var("CHUKCUT_BENCH_HW").as_deref() {
+        Ok("cuda") | Ok("nvdec") => Acceleration::Cuda,
+        _ => Acceleration::Vaapi,
+    };
     let software = median(rounds, || {
         walk(file, Acceleration::Software, frames, step, Want::Rgba)
     })?;
-    let hardware = median(rounds, || {
-        walk(file, Acceleration::Vaapi, frames, step, Want::Rgba)
-    });
+    let hardware = median(rounds, || walk(file, hw, frames, step, Want::Rgba));
+    // The zero-copy column: DMA-BUF on VAAPI, NV12 planes on NVDEC.
     let mapped = median(rounds, || {
-        walk(file, Acceleration::Vaapi, frames, step, Want::Dmabuf)
+        let want = if hw == Acceleration::Cuda {
+            Want::Nv12
+        } else {
+            Want::Dmabuf
+        };
+        walk(file, hw, frames, step, want)
     });
 
     let (hardware_cell, note) = match &hardware {
         Ok(hardware) => (format!("{hardware:.2} ms"), {
-            let mut decoder =
-                VideoDecoder::open_with(file, Acceleration::Vaapi).map_err(|e| e.to_string())?;
+            let mut decoder = VideoDecoder::open_with(file, hw).map_err(|e| e.to_string())?;
             decoder.seek_and_decode(0).map_err(|e| e.to_string())?;
             if decoder.is_hardware() {
                 "yes".to_string()
@@ -182,6 +191,8 @@ enum Want {
     Rgba,
     /// DMA-BUF handles onto the surface, which is what it should be fed.
     Dmabuf,
+    /// NV12 planes downloaded from the GPU, the NVDEC path.
+    Nv12,
 }
 
 /// Milliseconds per frame over a sequential walk, first frame excluded.
@@ -200,6 +211,7 @@ fn walk(
             // surface to the pool — the same thing a consumer does once its
             // texture is built, so the pool pressure is representative.
             Want::Dmabuf => decoder.seek_and_map(at).map(drop),
+            Want::Nv12 => decoder.seek_and_download_nv12(at).map(drop),
         }
         .map_err(|e| e.to_string())
     };

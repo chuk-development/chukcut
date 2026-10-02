@@ -161,10 +161,11 @@ fn acceleration_override() -> Option<Acceleration> {
             Ok("software") => Some(Acceleration::Software),
             Ok("auto") => Some(Acceleration::Auto),
             Ok("vaapi") => Some(Acceleration::Vaapi),
+            Ok("cuda") | Ok("nvdec") => Some(Acceleration::Cuda),
             Ok(other) => {
                 tracing::warn!(
                     value = other,
-                    "CHUKCUT_DECODE must be software, auto or vaapi; using the default"
+                    "CHUKCUT_DECODE must be software, auto, vaapi or cuda; using the default"
                 );
                 None
             }
@@ -409,7 +410,12 @@ impl MediaSourceProvider {
         // exactly the "might be hardware" this needs; after it, it reports the
         // truth. `seek_and_map` refuses cheaply when the answer turns out to be
         // no, leaving the frame decoded and in hand for the fall-through.
-        if !matches!(open.decoder.acceleration(), Acceleration::Software) {
+        // NVDEC frames have no DMA-BUF export, so a CUDA decoder goes straight
+        // to the copying path below rather than failing a map per frame.
+        if matches!(
+            open.decoder.acceleration(),
+            Acceleration::Auto | Acceleration::Vaapi
+        ) {
             self.textures.lock().remove(material_id);
             let started = std::time::Instant::now();
             match open.decoder.seek_and_map(source_time) {
@@ -443,6 +449,44 @@ impl MediaSourceProvider {
                         file = %file_name(path),
                         %error,
                         "cannot export the decoded surface; copying it instead"
+                    );
+                }
+            }
+        }
+
+        // NVDEC: download the NV12 planes and upload them as they are. The
+        // shader converts them, as it does for an imported VA surface, so the
+        // swscale pass that made a downloaded frame slower than a software one
+        // never runs. Before the first frame `Auto` might still turn out to be
+        // NVDEC, so it is tried then too; a software frame refuses cheaply.
+        if matches!(
+            open.decoder.acceleration(),
+            Acceleration::Auto | Acceleration::Cuda
+        ) {
+            let started = std::time::Instant::now();
+            match open.decoder.seek_and_download_nv12(source_time) {
+                Ok(planes) => {
+                    let decode_micros = started.elapsed().as_micros();
+                    let upload_started = std::time::Instant::now();
+                    let frame = upload_nv12(ctx, &planes);
+                    tracing::debug!(
+                        file = %file_name(path),
+                        at_ms = source_time / 1000,
+                        decoded = format_args!("{}x{}", planes.width, planes.height),
+                        decode_ms = decode_micros as f64 / 1000.0,
+                        upload_ms = upload_started.elapsed().as_micros() as f64 / 1000.0,
+                        path = ?open.decoder.acceleration(),
+                        "downloaded NV12 source frame",
+                    );
+                    drop(decoders);
+                    self.store(material_id, source_time, &frame);
+                    return Ok(frame);
+                }
+                Err(error) => {
+                    tracing::trace!(
+                        file = %file_name(path),
+                        %error,
+                        "no NV12 download; converting to RGBA instead"
                     );
                 }
             }
@@ -726,6 +770,67 @@ fn yuv_range(range: ffmpeg::color::Range) -> render::YuvRange {
 /// tagging it as such is what makes the sampler linearize before the compositor
 /// blends. Blending sRGB values directly is the standard way to get muddy
 /// cross-fades.
+/// Upload NV12 planes as the two textures the compositor's YUV path samples:
+/// `R8Unorm` luma and `Rg8Unorm` interleaved chroma at half resolution — the
+/// same layout an imported VA surface has.
+fn upload_nv12(ctx: &RenderContext, planes: &crate::modules::media::Nv12Planes) -> SourceFrame {
+    let plane = |format, width: u32, height: u32, bytes_per_texel: u32, data: &[u8]| {
+        let texture = ctx.device().create_texture(&wgpu::TextureDescriptor {
+            label: Some("media source nv12 plane"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        ctx.queue().write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            data,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(bytes_per_texel * width),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        Arc::new(texture)
+    };
+
+    let (width, height) = (planes.width, planes.height);
+    let luma = plane(wgpu::TextureFormat::R8Unorm, width, height, 1, &planes.luma);
+    let chroma = plane(
+        wgpu::TextureFormat::Rg8Unorm,
+        width.div_ceil(2),
+        height.div_ceil(2),
+        2,
+        &planes.chroma,
+    );
+    let turns = planes.rotation.rem_euclid(360) / 90;
+    SourceFrame::from_planes(
+        luma,
+        chroma,
+        yuv_matrix(planes.color_space),
+        yuv_range(planes.color_range),
+        turns as u32,
+        None,
+    )
+}
+
 fn upload_rgba(ctx: &RenderContext, data: &[u8], width: u32, height: u32) -> SourceFrame {
     let texture = ctx.device().create_texture(&wgpu::TextureDescriptor {
         label: Some("media source"),

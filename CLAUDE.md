@@ -176,17 +176,22 @@ cargo run --release -p chukcut-engine --bin chukcut-bench -- --all
   `ffmpeg-sys-next/build.rs` probes the installed libavcodec and emits
   `ffmpeg_6_0` … `ffmpeg_8_1` cfg flags. A crate bump is not blocked by the
   system libraries; verify with a build.
-- **Hardware decode and encode exist on VAAPI only** (Intel). On NVIDIA there is
-  no VAAPI driver, `modules::gpu` logs "no VAAPI device" and everything runs in
-  software. NVDEC/NVENC is the next piece of work (decision 0011). Facts that
-  carry over: a decoder or encoder being in the FFmpeg build says nothing about
-  whether the driver can drive it; `avcodec_find_decoder` can return an AV1
-  decoder that cannot use the GPU; and **`sws_getContext` ignores the file's
-  colour tags** — it is BT.601 until you call `sws_setColorspaceDetails`.
-  `docs/research/hardware-decode.md`.
+- **Hardware decode: VAAPI (Intel, AMD) zero-copy via DMA-BUF; NVDEC
+  (NVIDIA) via an NV12 download uploaded as two textures.** Encode: VAAPI,
+  QSV, NVENC through `export::hwaccel`, each trial-encoded before it is
+  offered. `tests/every_card.rs` is the acceptance test on whatever GPU the
+  machine has — run it after touching decode, the compositor or export.
+  Facts that carry over: a codec in the FFmpeg build says nothing about
+  whether the driver can drive it; `avcodec_find_decoder` returns `libdav1d`
+  for AV1, which has no hardware path on any backend; and **`sws_getContext`
+  ignores the file's colour tags** — it is BT.601 until you call
+  `sws_setColorspaceDetails`. `docs/research/hardware-decode.md`.
+- **NVDEC seeks cost ~25 ms each**, because FFmpeg rebuilds the decoder after
+  a flush. Measure scrubbing changes on real footage, not on the fixtures.
 - **Hardware decode that has to reach system memory is slower than software.**
-  Its value is the DMA-BUF import into wgpu (`render::dmabuf`). Keep that in
-  mind for NVDEC: the win is a CUDA→Vulkan interop, not the decode itself.
+  Its value is the DMA-BUF import into wgpu (`render::dmabuf`). NVDEC wins
+  only because its frames skip the CPU conversion (NV12 straight to two
+  textures); a CUDA→Vulkan interop would remove the download as well.
 - **`naga` cannot read the effect corpus's GLSL, and never will.** Its GLSL
   frontend rejects the `es` profile and most corpus shaders have no version
   line. `modules/effects/` runs its own ES1→450 rewriter, then glslang, then

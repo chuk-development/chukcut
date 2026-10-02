@@ -1,4 +1,11 @@
-//! Hardware video decode, on VAAPI.
+//! Hardware video decode, on VAAPI (Intel, AMD) and CUDA/NVDEC (NVIDIA).
+//!
+//! VAAPI is the zero-copy path: its surfaces export as DMA-BUF and the
+//! compositor samples them directly. CUDA frames have no DMA-BUF export here
+//! yet, so they are downloaded (`av_hwframe_transfer_data`) and converted like
+//! a software frame; the decode itself still moves off the CPU, which is what
+//! matters for HEVC, AV1 and 4K. The VAAPI notes below apply to both: CUDA is
+//! the same ordinary decoder with a different accelerator underneath.
 //!
 //! This is the mirror of `export::hwframes`, which does the same job for the
 //! encoder. Read that file first: the ownership discipline here is copied from
@@ -280,6 +287,172 @@ impl std::fmt::Debug for VaapiDevice {
 }
 
 // ---------------------------------------------------------------------------
+// CUDA (NVDEC)
+// ---------------------------------------------------------------------------
+
+/// Which hardware decode API a device or a frame belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HwBackend {
+    /// Intel and AMD through libva. Frames export as DMA-BUF.
+    Vaapi,
+    /// NVIDIA through NVDEC. Frames are downloaded to system memory.
+    Cuda,
+}
+
+impl HwBackend {
+    pub fn label(self) -> &'static str {
+        match self {
+            HwBackend::Vaapi => "VAAPI",
+            HwBackend::Cuda => "NVDEC",
+        }
+    }
+
+    fn pix_fmt(self) -> ffmpeg::ffi::AVPixelFormat {
+        match self {
+            HwBackend::Vaapi => ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_VAAPI,
+            HwBackend::Cuda => ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_CUDA,
+        }
+    }
+
+    fn device_type(self) -> ffmpeg::ffi::AVHWDeviceType {
+        match self {
+            HwBackend::Vaapi => ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI,
+            HwBackend::Cuda => ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_CUDA,
+        }
+    }
+}
+
+/// An open CUDA device context, for NVDEC.
+///
+/// The same ownership discipline as [`VaapiDevice`]: one owned `AVBufferRef`,
+/// a fresh `av_buffer_ref` for every consumer, unref exactly once in `Drop`.
+/// The process has one, handed out by [`crate::modules::gpu::cuda_device`].
+pub struct CudaDevice {
+    /// Always non-null between construction and `Drop`.
+    ptr: *mut ffmpeg::ffi::AVBufferRef,
+}
+
+/// # Safety
+///
+/// As for [`VaapiDevice`]: libavutil reference-counts `AVBufferRef`s
+/// atomically, nothing here mutates through `&self`, and a CUDA context is
+/// safe to use from several threads — NVDEC decoders on it are serialised by
+/// the provider's mutex like the VAAPI ones.
+unsafe impl Send for CudaDevice {}
+unsafe impl Sync for CudaDevice {}
+
+impl CudaDevice {
+    /// Open the default CUDA device. Crate-private: [`crate::modules::gpu`]
+    /// opens the process's one context.
+    pub(crate) fn open() -> Result<Self> {
+        ensure_initialized();
+        let mut ptr: *mut ffmpeg::ffi::AVBufferRef = ptr::null_mut();
+        // SAFETY: as in `VaapiDevice::open` — the output pointer is assigned
+        // only on success, a null device string selects CUDA device 0, and the
+        // last two arguments are "no options, no flags".
+        let code = unsafe {
+            ffmpeg::ffi::av_hwdevice_ctx_create(
+                &mut ptr,
+                ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_CUDA,
+                ptr::null(),
+                ptr::null_mut(),
+                0,
+            )
+        };
+        if code < 0 || ptr.is_null() {
+            return Err(MediaError::NoHardware(format!(
+                "cannot open a CUDA device ({})",
+                ffmpeg::Error::from(if code < 0 { code } else { -1 })
+            )));
+        }
+        Ok(Self { ptr })
+    }
+
+    /// Point a not-yet-opened codec context at this device.
+    pub fn attach_to_decoder(&self, context: &mut ffmpeg::codec::context::Context) -> Result<()> {
+        // SAFETY: identical to `VaapiDevice::attach_to_decoder` — a new
+        // reference owned by the context, set before `avcodec_open2`, on a
+        // context nobody else is reading.
+        unsafe {
+            let extra = ffmpeg::ffi::av_buffer_ref(self.ptr);
+            if extra.is_null() {
+                return Err(MediaError::NoHardware(
+                    "out of memory attaching the CUDA device to a decoder".into(),
+                ));
+            }
+            let raw = context.as_mut_ptr();
+            debug_assert!((*raw).hw_device_ctx.is_null());
+            (*raw).hw_device_ctx = extra;
+            (*raw).get_format = Some(select_cuda);
+            (*raw).extra_hw_frames = EXTRA_HW_FRAMES;
+        }
+        Ok(())
+    }
+}
+
+impl Clone for CudaDevice {
+    fn clone(&self) -> Self {
+        // SAFETY: as `VaapiDevice::clone`.
+        let ptr = unsafe { ffmpeg::ffi::av_buffer_ref(self.ptr) };
+        assert!(!ptr.is_null(), "out of memory cloning a CUDA device");
+        Self { ptr }
+    }
+}
+
+impl Drop for CudaDevice {
+    fn drop(&mut self) {
+        // SAFETY: as `VaapiDevice::drop` — exactly one reference, owned here.
+        unsafe { ffmpeg::ffi::av_buffer_unref(&mut self.ptr) };
+    }
+}
+
+impl std::fmt::Debug for CudaDevice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CudaDevice").finish()
+    }
+}
+
+/// The device a decoder is attached to, of either kind.
+#[derive(Debug, Clone)]
+pub enum HwDevice {
+    Vaapi(VaapiDevice),
+    Cuda(CudaDevice),
+}
+
+impl HwDevice {
+    pub fn backend(&self) -> HwBackend {
+        match self {
+            HwDevice::Vaapi(_) => HwBackend::Vaapi,
+            HwDevice::Cuda(_) => HwBackend::Cuda,
+        }
+    }
+
+    /// The render node for VAAPI, `"cuda"` for NVDEC. For log lines.
+    pub fn node(&self) -> &str {
+        match self {
+            HwDevice::Vaapi(device) => device.node(),
+            HwDevice::Cuda(_) => "cuda",
+        }
+    }
+
+    pub fn attach_to_decoder(&self, context: &mut ffmpeg::codec::context::Context) -> Result<()> {
+        match self {
+            HwDevice::Vaapi(device) => device.attach_to_decoder(context),
+            HwDevice::Cuda(device) => device.attach_to_decoder(context),
+        }
+    }
+}
+
+/// The process's device for `backend`, if this machine has one.
+pub fn device_for(backend: HwBackend) -> Option<HwDevice> {
+    match backend {
+        HwBackend::Vaapi => crate::modules::gpu::vaapi_device().map(HwDevice::Vaapi),
+        HwBackend::Cuda => crate::modules::gpu::cuda_device().map(HwDevice::Cuda),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Format selection
 // ---------------------------------------------------------------------------
 
@@ -294,8 +467,32 @@ impl std::fmt::Debug for VaapiDevice {
 /// with `AV_PIX_FMT_VAAPI` removed when the accelerator fails to initialise,
 /// and a file that will not hardware-decode must still open.
 unsafe extern "C" fn select_vaapi(
+    context: *mut ffmpeg::ffi::AVCodecContext,
+    fmt: *const ffmpeg::ffi::AVPixelFormat,
+) -> ffmpeg::ffi::AVPixelFormat {
+    // SAFETY: forwarded unchanged under libavcodec's `get_format` contract.
+    unsafe { select_format(context, fmt, ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_VAAPI) }
+}
+
+/// [`select_vaapi`] for NVDEC: answers `AV_PIX_FMT_CUDA` when offered.
+unsafe extern "C" fn select_cuda(
+    context: *mut ffmpeg::ffi::AVCodecContext,
+    fmt: *const ffmpeg::ffi::AVPixelFormat,
+) -> ffmpeg::ffi::AVPixelFormat {
+    // SAFETY: forwarded unchanged under libavcodec's `get_format` contract.
+    unsafe { select_format(context, fmt, ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_CUDA) }
+}
+
+/// Pick `wanted` from libavcodec's offer, or the offer's head.
+///
+/// # Safety
+///
+/// `fmt` must satisfy libavcodec's `get_format` contract: an array of at
+/// least one entry terminated by `AV_PIX_FMT_NONE`, valid for the call.
+unsafe fn select_format(
     _context: *mut ffmpeg::ffi::AVCodecContext,
     fmt: *const ffmpeg::ffi::AVPixelFormat,
+    wanted: ffmpeg::ffi::AVPixelFormat,
 ) -> ffmpeg::ffi::AVPixelFormat {
     use ffmpeg::ffi::AVPixelFormat;
 
@@ -303,11 +500,9 @@ unsafe extern "C" fn select_vaapi(
         return AVPixelFormat::AV_PIX_FMT_NONE;
     }
 
-    // SAFETY: libavcodec's contract for `get_format` is that `fmt` points at an
-    // array of at least one entry terminated by `AV_PIX_FMT_NONE`, valid for
-    // the duration of the call. The walk stops at that terminator and at a
-    // hard bound, so a caller that broke the contract cannot run us off the end
-    // of the allocation.
+    // SAFETY: the walk stops at the terminator and at a hard bound, so a
+    // caller that broke the contract cannot run us off the end of the
+    // allocation.
     unsafe {
         let mut i = 0isize;
         let head = *fmt;
@@ -316,7 +511,7 @@ unsafe extern "C" fn select_vaapi(
             if candidate == AVPixelFormat::AV_PIX_FMT_NONE {
                 break;
             }
-            if candidate == AVPixelFormat::AV_PIX_FMT_VAAPI {
+            if candidate == wanted {
                 return candidate;
             }
             i += 1;
@@ -358,6 +553,11 @@ pub fn transfer_to_software(hardware: &frame::Video, software: &mut frame::Video
 
 /// Whether this frame is a hardware surface rather than pixels in memory.
 pub fn is_hardware_frame(frame: &frame::Video) -> bool {
+    matches!(frame.format(), Pixel::VAAPI | Pixel::CUDA)
+}
+
+/// Whether this frame is a VA surface, i.e. one [`super::dmabuf`] can export.
+pub fn is_vaapi_frame(frame: &frame::Video) -> bool {
     frame.format() == Pixel::VAAPI
 }
 
@@ -432,17 +632,21 @@ impl HwCodec {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HwDecodeSupport {
     pub codec: HwCodec,
+    /// Which API this row is about.
+    #[serde(default = "vaapi_backend")]
+    pub backend: HwBackend,
     /// What FFmpeg calls the decoder — `h264`, not `h264_vaapi`. VAAPI decode
     /// is the ordinary decoder with an accelerator underneath, and confusing
     /// the two sends people looking for a decoder that does not exist.
     pub decoder_name: String,
     /// A decoder for this codec is in the build at all.
     pub in_build: bool,
-    /// That decoder *claims* it can produce `AV_PIX_FMT_VAAPI` given a device.
-    /// A claim, from a static table — the thing that means nothing on its own.
+    /// That decoder *claims* it can produce the backend's surface format given
+    /// a device. A claim, from a static table — the thing that means nothing on
+    /// its own. (Named for VAAPI, which came first; it holds for either.)
     pub declares_vaapi: bool,
-    /// A real frame went in and a VA surface came out. This is the only field
-    /// worth believing.
+    /// A real frame went in and a hardware surface came out. This is the only
+    /// field worth believing.
     pub usable: bool,
     /// Why not, in prose, when `usable` is false.
     pub note: Option<String>,
@@ -456,33 +660,69 @@ pub struct HwDecodeSupport {
 /// code that aborts on a broken driver, and a panic here must not take the app
 /// down for a feature nobody asked for.
 pub fn capabilities() -> &'static [HwDecodeSupport] {
-    static DETECTED: OnceLock<Vec<HwDecodeSupport>> = OnceLock::new();
-    DETECTED.get_or_init(|| {
-        std::panic::catch_unwind(probe_all).unwrap_or_else(|_| {
-            tracing::warn!("hardware decode detection panicked; decoding in software");
+    capabilities_for(HwBackend::Vaapi)
+}
+
+/// [`capabilities`] for one backend. Each is probed once, on first ask, and
+/// only if the process has a device for it.
+pub fn capabilities_for(backend: HwBackend) -> &'static [HwDecodeSupport] {
+    static VAAPI: OnceLock<Vec<HwDecodeSupport>> = OnceLock::new();
+    static CUDA: OnceLock<Vec<HwDecodeSupport>> = OnceLock::new();
+    let cell = match backend {
+        HwBackend::Vaapi => &VAAPI,
+        HwBackend::Cuda => &CUDA,
+    };
+    cell.get_or_init(|| {
+        std::panic::catch_unwind(|| probe_all(backend)).unwrap_or_else(|_| {
+            tracing::warn!(
+                backend = backend.label(),
+                "hardware decode detection panicked; decoding in software"
+            );
             Vec::new()
         })
     })
 }
 
-/// Whether `codec` decodes on the GPU here. The question the decoder asks.
+/// Whether `codec` decodes on VAAPI here. The question the decoder asks first.
 pub fn supports(codec: HwCodec) -> bool {
-    capabilities()
+    supports_on(codec, HwBackend::Vaapi)
+}
+
+/// Whether `codec` decodes on `backend` here.
+pub fn supports_on(codec: HwCodec, backend: HwBackend) -> bool {
+    capabilities_for(backend)
         .iter()
         .any(|support| support.codec == codec && support.usable)
 }
 
-fn probe_all() -> Vec<HwDecodeSupport> {
-    ensure_initialized();
-    HwCodec::ALL.iter().map(|codec| probe(*codec)).collect()
+fn vaapi_backend() -> HwBackend {
+    HwBackend::Vaapi
 }
 
-fn probe(codec: HwCodec) -> HwDecodeSupport {
+fn probe_all(backend: HwBackend) -> Vec<HwDecodeSupport> {
+    ensure_initialized();
+    let supports: Vec<_> = HwCodec::ALL
+        .iter()
+        .map(|codec| probe(*codec, backend))
+        .collect();
+    let usable: Vec<_> = supports
+        .iter()
+        .filter(|s| s.usable)
+        .map(|s| s.codec.label())
+        .collect();
+    if !usable.is_empty() {
+        tracing::info!(backend = backend.label(), codecs = ?usable, "hardware decode available");
+    }
+    supports
+}
+
+fn probe(codec: HwCodec, backend: HwBackend) -> HwDecodeSupport {
     let default = ffmpeg::codec::decoder::find(codec.id());
-    let chosen = hardware_decoder(codec.id()).or(default);
+    let chosen = hardware_decoder_for(codec.id(), backend).or(default);
 
     let mut support = HwDecodeSupport {
         codec,
+        backend,
         decoder_name: chosen
             .map(|c| c.name().to_string())
             .unwrap_or_else(|| format!("{:?}", codec.id())),
@@ -497,10 +737,11 @@ fn probe(codec: HwCodec) -> HwDecodeSupport {
         return support;
     }
 
-    let Some(decoder) = hardware_decoder(codec.id()) else {
+    let Some(decoder) = hardware_decoder_for(codec.id(), backend) else {
         support.note = Some(format!(
-            "no {} decoder in this FFmpeg build has a VAAPI configuration",
-            codec.label()
+            "no {} decoder in this FFmpeg build has a {} configuration",
+            codec.label(),
+            backend.label()
         ));
         return support;
     };
@@ -508,7 +749,7 @@ fn probe(codec: HwCodec) -> HwDecodeSupport {
     let _ = decoder;
 
     let started = std::time::Instant::now();
-    match trial_decode(codec) {
+    match trial_decode(codec, backend) {
         Ok(()) => {
             support.usable = true;
             tracing::debug!(
@@ -546,6 +787,12 @@ fn probe(codec: HwCodec) -> HwDecodeSupport {
 /// which also means a future build that moves the hwaccel elsewhere keeps
 /// working without a table here to update.
 pub fn hardware_decoder(id: ffmpeg::codec::Id) -> Option<ffmpeg::Codec> {
+    hardware_decoder_for(id, HwBackend::Vaapi)
+}
+
+/// [`hardware_decoder`] for any backend. The AV1 trap applies to NVDEC too:
+/// `libdav1d` has no CUDA configuration, the native `av1` decoder does.
+pub fn hardware_decoder_for(id: ffmpeg::codec::Id, backend: HwBackend) -> Option<ffmpeg::Codec> {
     let mut opaque: *mut std::ffi::c_void = ptr::null_mut();
     loop {
         // SAFETY: `av_codec_iterate` walks libavcodec's own static registry,
@@ -563,7 +810,7 @@ pub fn hardware_decoder(id: ffmpeg::codec::Id) -> Option<ffmpeg::Codec> {
         // through `*const`; libavcodec's own API is `const`-correct here and
         // nothing below writes.
         let codec = unsafe { ffmpeg::Codec::wrap(raw as *mut _) };
-        if codec.is_decoder() && codec.id() == id && declares_vaapi(&codec) {
+        if codec.is_decoder() && codec.id() == id && declares(&codec, backend) {
             return Some(codec);
         }
     }
@@ -575,7 +822,7 @@ pub fn hardware_decoder(id: ffmpeg::codec::Id) -> Option<ffmpeg::Codec> {
 /// the *codec* supports, saying nothing about the driver. It exists to skip the
 /// expensive probe for codecs that cannot possibly work, not to answer the
 /// question.
-fn declares_vaapi(decoder: &ffmpeg::Codec) -> bool {
+fn declares(decoder: &ffmpeg::Codec, backend: HwBackend) -> bool {
     let mut index = 0;
     loop {
         // SAFETY: `avcodec_get_hw_config` returns a pointer into libavcodec's
@@ -591,22 +838,24 @@ fn declares_vaapi(decoder: &ffmpeg::Codec) -> bool {
         let (pix_fmt, methods, device_type) =
             unsafe { ((*config).pix_fmt, (*config).methods, (*config).device_type) };
         let by_device = methods & ffmpeg::ffi::AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX as i32 != 0;
-        if by_device
-            && pix_fmt == ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_VAAPI
-            && device_type == ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI
-        {
+        if by_device && pix_fmt == backend.pix_fmt() && device_type == backend.device_type() {
             return true;
         }
         index += 1;
     }
 }
 
-/// Decode one embedded frame and insist that a VA surface comes back.
-fn trial_decode(codec: HwCodec) -> Result<()> {
-    let device = crate::modules::gpu::vaapi_device()
-        .ok_or_else(|| MediaError::NoHardware("no VAAPI device on this machine".into()))?;
-    let found = hardware_decoder(codec.id()).ok_or_else(|| {
-        MediaError::NoHardware(format!("no {} decoder can drive VAAPI", codec.label()))
+/// Decode one embedded frame and insist that a hardware surface comes back.
+fn trial_decode(codec: HwCodec, backend: HwBackend) -> Result<()> {
+    let device = device_for(backend).ok_or_else(|| {
+        MediaError::NoHardware(format!("no {} device on this machine", backend.label()))
+    })?;
+    let found = hardware_decoder_for(codec.id(), backend).ok_or_else(|| {
+        MediaError::NoHardware(format!(
+            "no {} decoder can drive {}",
+            codec.label(),
+            backend.label()
+        ))
     })?;
 
     let mut context = ffmpeg::codec::context::Context::new();
@@ -643,12 +892,17 @@ fn trial_decode(codec: HwCodec) -> Result<()> {
             source,
         })?;
 
-    if !is_hardware_frame(&frame) {
+    let expected = match backend {
+        HwBackend::Vaapi => Pixel::VAAPI,
+        HwBackend::Cuda => Pixel::CUDA,
+    };
+    if frame.format() != expected {
         return Err(MediaError::NoHardware(format!(
-            "the {} test frame came back as {:?} rather than a VA surface, \
+            "the {} test frame came back as {:?} rather than a {} surface, \
              so this codec would decode in software anyway",
             codec.label(),
-            frame.format()
+            frame.format(),
+            backend.label()
         )));
     }
     Ok(())
@@ -690,7 +944,10 @@ mod tests {
         // The call itself is the test on a box with no GPU. Where there is one,
         // the invariant is the same one `export::hwaccel` holds: an entry is
         // either usable or carries prose explaining what went wrong.
-        for support in capabilities() {
+        for support in capabilities()
+            .iter()
+            .chain(capabilities_for(HwBackend::Cuda))
+        {
             assert_eq!(
                 support.note.is_some(),
                 !support.usable,

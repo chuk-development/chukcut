@@ -57,18 +57,30 @@ Judge performance from a release build only.
 
 ## Open work, in order
 
-1. **NVDEC/NVENC.** On NVIDIA there is no VAAPI, so decode and export run in
-   software. Add FFmpeg's `cuda` hwaccel and `h264_nvenc`/`hevc_nvenc` beside
-   the VAAPI paths; the payoff for decode is CUDA→Vulkan interop, not the
-   decode alone. Found on the RTX 3060 (2026-10-02, 760/764 lib tests green):
-   - The proxy encoder already picks `h264_nvenc` when FFmpeg has it, then
-     fails to open it ("cannot open the h264_nvenc encoder with bitrate",
-     EINVAL) and has **no fallback to software** — three `proxy::tests` fail.
-     An encoder in the build says nothing about whether it opens with our
-     options; fall back on open failure.
-   - `compositor::tests::empty_project_is_the_background_colour` gets
-     `[0, 64, 127, 255]` for an expected `128`: NVIDIA's Vulkan rounds the
-     clear colour differently from Intel's. Compare with a tolerance of one.
+1. **NVDEC and NVENC — done 2026-10-03, on an RTX 3060.**
+   - Decode: `media::hwdecode` has a second backend, CUDA (`HwBackend::Cuda`,
+     `gpu::cuda_device()`), probed per codec like VAAPI — H.264, HEVC, VP9 and
+     AV1 all decode. `Acceleration::Auto` tries VAAPI, then NVDEC, then
+     software; `CHUKCUT_DECODE=cuda` forces it. NVDEC frames have no DMA-BUF
+     export, so they are downloaded as NV12 and uploaded as the two textures
+     the compositor's YUV path already samples — no swscale.
+     `decode_bench` (`CHUKCUT_BENCH_HW=cuda`): 1080p H.264 **1.6 ms** against
+     12.9 ms in software, 4K HEVC **3.9 ms** against 19.2 ms. Downloaded and
+     converted to RGBA on the CPU instead, NVDEC was *slower* than software
+     (14.6 / 28.5 ms) — the same lesson the VAAPI path taught.
+   - **Trap: every seek on NVDEC costs ~25 ms, fixed.** FFmpeg 6.1 re-runs
+     `get_format` after `avcodec_flush_buffers` and rebuilds the NVDEC decoder.
+     On real footage that still beats decoding a GOP in software; on a tiny
+     fixture it does not, which is why the seek-timing test skips NVDEC.
+   - Encode: the export already knew NVENC. Proxies did not open on it
+     (all-intra with B-frames); fixed with `bf=0`, plus a software fallback.
+   - Acceptance: `tests/every_card.rs` plays, scrubs and exports a timeline
+     with jump cuts on every decode path and every usable encoder here, and
+     reads the frame index back out of every frame.
+   - Found on the way: export sampled frames on their first microsecond, so a
+     cut whose source offset was a rounded frame time showed the frame before —
+     a duplicated frame at the cut. `project::SAMPLE_SLACK` (10 µs) fixes the
+     export and the app's preview.
 2. **Shared GPU device with GPUI** so preview frames never leave the GPU
    (`docs/research/GPUI_SPIKE.md`, path (a); needs the engine on GPUI's wgpu).
 3. **Port the UI the webview had:** inspector, export dialog, text,

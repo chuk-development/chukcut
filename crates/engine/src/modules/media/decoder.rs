@@ -77,7 +77,7 @@ use ffmpeg::util::frame;
 use ffmpeg_next as ffmpeg;
 
 use super::dmabuf::DmabufFrame;
-use super::hwdecode::{self, HwCodec, VaapiDevice};
+use super::hwdecode::{self, HwBackend, HwCodec, HwDevice};
 use super::probe::normalize_rotation;
 use super::{ensure_initialized, micros_to_ts, ts_to_micros, MediaError, Result};
 use crate::modules::project::Micros;
@@ -95,11 +95,17 @@ pub enum Acceleration {
     Auto,
     /// VAAPI or nothing. For tests and for a caller that would rather know.
     Vaapi,
+    /// NVDEC through CUDA, or nothing. `Auto` reaches it when VAAPI cannot
+    /// decode the file — which on an NVIDIA card is every file.
+    Cuda,
 }
 
 impl Acceleration {
     fn wants_hardware(self) -> bool {
-        matches!(self, Acceleration::Auto | Acceleration::Vaapi)
+        matches!(
+            self,
+            Acceleration::Auto | Acceleration::Vaapi | Acceleration::Cuda
+        )
     }
 }
 
@@ -186,9 +192,9 @@ pub struct VideoDecoder {
     /// What the caller asked for. [`Self::acceleration`] reports what was
     /// actually obtained, which can be less.
     requested: Acceleration,
-    /// The VAAPI device this decoder's codec context is attached to, held so it
+    /// The device this decoder's codec context is attached to, held so it
     /// outlives the context. `None` on the software path.
-    hardware: Option<VaapiDevice>,
+    hardware: Option<HwDevice>,
     /// Whether frames are in fact coming back as GPU surfaces. Set from the
     /// first decoded frame rather than from the request, because libavcodec is
     /// entitled to fall back to software behind our back — see
@@ -341,7 +347,7 @@ impl VideoDecoder {
         // difference between hardware and a very convincing impression of it.
         let decoder = match hardware
             .as_ref()
-            .and_then(|_| hwdecode::hardware_decoder(codec_id))
+            .and_then(|device| hwdecode::hardware_decoder_for(codec_id, device.backend()))
         {
             Some(chosen) => context
                 .decoder()
@@ -417,7 +423,10 @@ impl VideoDecoder {
     pub fn acceleration(&self) -> Acceleration {
         match (self.position, self.hardware_frames) {
             (None, _) => self.requested,
-            (Some(_), true) => Acceleration::Vaapi,
+            (Some(_), true) => match self.hardware.as_ref().map(HwDevice::backend) {
+                Some(HwBackend::Cuda) => Acceleration::Cuda,
+                _ => Acceleration::Vaapi,
+            },
             (Some(_), false) => Acceleration::Software,
         }
     }
@@ -435,7 +444,7 @@ impl VideoDecoder {
     /// exists to outlive the codec context that references it, and a field
     /// nothing can observe is a field somebody eventually deletes.
     pub fn device_node(&self) -> Option<&str> {
-        self.hardware.as_ref().map(VaapiDevice::node)
+        self.hardware.as_ref().map(HwDevice::node)
     }
 
     /// The frame visible at `micros`, i.e. the last frame whose presentation
@@ -471,7 +480,7 @@ impl VideoDecoder {
     pub fn seek_and_map(&mut self, micros: Micros) -> Result<MappedFrame> {
         let pts = self.locate(micros)?;
         let (_, frame) = self.last.take().expect("locate leaves a frame in hand");
-        let mapped = if hwdecode::is_hardware_frame(&frame) {
+        let mapped = if hwdecode::is_vaapi_frame(&frame) {
             let (color_space, color_range) = self.frame_colour(&frame);
             DmabufFrame::map(&frame).map(|dmabuf| MappedFrame {
                 dmabuf,
@@ -480,6 +489,11 @@ impl VideoDecoder {
                 color_space,
                 color_range,
             })
+        } else if hwdecode::is_hardware_frame(&frame) {
+            Err(MediaError::NoHardware(format!(
+                "{} is decoding on NVDEC, whose frames do not export as DMA-BUF",
+                self.path.display()
+            )))
         } else {
             Err(MediaError::NoHardware(format!(
                 "{} is decoding in software, so there is no GPU surface to export",
@@ -488,6 +502,77 @@ impl VideoDecoder {
         };
         self.last = Some((pts, frame));
         mapped
+    }
+
+    /// The frame visible at `micros`, downloaded from the GPU as NV12 planes.
+    ///
+    /// The NVDEC path. Its frames cannot be exported as DMA-BUF, but they
+    /// arrive as NV12 after the download, and the compositor already samples
+    /// NV12 from two textures for the VAAPI path. Uploading the planes as they
+    /// are skips the swscale pass to RGBA, which was most of what made a
+    /// downloaded hardware frame slower than a software one.
+    ///
+    /// Errors, leaving the frame in hand for [`Self::seek_and_decode`], when
+    /// the frame is not a hardware frame or does not download as 8-bit NV12
+    /// (10-bit content comes back as P010).
+    pub fn seek_and_download_nv12(&mut self, micros: Micros) -> Result<Nv12Planes> {
+        let pts = self.locate(micros)?;
+        let (_, frame) = self.last.take().expect("locate leaves a frame in hand");
+        let result = self.download_nv12(&frame, pts);
+        self.last = Some((pts, frame));
+        result
+    }
+
+    fn download_nv12(&mut self, frame: &frame::Video, pts: Micros) -> Result<Nv12Planes> {
+        if !hwdecode::is_hardware_frame(frame) {
+            return Err(MediaError::NoHardware(format!(
+                "{} is decoding in software, so there is nothing to download",
+                self.path.display()
+            )));
+        }
+        let mut scratch = match self.download.take() {
+            Some(reused)
+                if reused.width() == frame.width() && reused.height() == frame.height() =>
+            {
+                reused
+            }
+            _ => frame::Video::empty(),
+        };
+        let downloaded = hwdecode::transfer_to_software(frame, &mut scratch);
+        let planes = downloaded.and_then(|()| {
+            if scratch.format() != ffmpeg::format::Pixel::NV12 {
+                return Err(MediaError::NoHardware(format!(
+                    "{} downloads as {:?}, not 8-bit NV12",
+                    self.path.display(),
+                    scratch.format()
+                )));
+            }
+            let (width, height) = (scratch.width(), scratch.height());
+            let chroma_height = height.div_ceil(2);
+            // Chroma rows hold interleaved U and V for every second luma
+            // column, so a row is the luma width rounded up to even.
+            let chroma_row = (width as usize).div_ceil(2) * 2;
+            let luma = tight_rows(scratch.data(0), scratch.stride(0), width as usize, height);
+            let chroma = tight_rows(
+                scratch.data(1),
+                scratch.stride(1),
+                chroma_row,
+                chroma_height,
+            );
+            let (color_space, color_range) = self.frame_colour(frame);
+            Ok(Nv12Planes {
+                width,
+                height,
+                luma,
+                chroma,
+                pts,
+                rotation: self.rotation,
+                color_space,
+                color_range,
+            })
+        });
+        self.download = Some(scratch);
+        planes
     }
 
     /// What matrix and range this frame's chroma is expressed in.
@@ -942,6 +1027,32 @@ impl VideoDecoder {
     }
 }
 
+/// A downloaded hardware frame as two NV12 planes, rows packed tight.
+pub struct Nv12Planes {
+    pub width: u32,
+    pub height: u32,
+    /// `width * height` bytes of luma.
+    pub luma: Vec<u8>,
+    /// `height.div_ceil(2)` rows of interleaved U and V, each row
+    /// `width.div_ceil(2) * 2` bytes.
+    pub chroma: Vec<u8>,
+    pub pts: Micros,
+    /// Display rotation in degrees clockwise, **not** applied.
+    pub rotation: i32,
+    pub color_space: ffmpeg::color::Space,
+    pub color_range: ffmpeg::color::Range,
+}
+
+/// Copy `rows` rows of `row_bytes` out of a plane with padding between rows.
+fn tight_rows(plane: &[u8], stride: usize, row_bytes: usize, rows: u32) -> Vec<u8> {
+    let mut tight = Vec::with_capacity(row_bytes * rows as usize);
+    for row in 0..rows as usize {
+        let start = row * stride;
+        tight.extend_from_slice(&plane[start..start + row_bytes]);
+    }
+    tight
+}
+
 /// A decoded frame that is still on the GPU.
 ///
 /// The counterpart of [`DecodedFrame`], for the path that does not copy. Note
@@ -1007,13 +1118,14 @@ fn attach_hardware(
     codec_id: ffmpeg::codec::Id,
     acceleration: Acceleration,
     path: &Path,
-) -> Result<Option<VaapiDevice>> {
+) -> Result<Option<HwDevice>> {
     if !acceleration.wants_hardware() {
         return Ok(None);
     }
 
-    let refuse = |reason: String| -> Result<Option<VaapiDevice>> {
-        if acceleration == Acceleration::Vaapi {
+    let forced = matches!(acceleration, Acceleration::Vaapi | Acceleration::Cuda);
+    let refuse = |reason: String| -> Result<Option<HwDevice>> {
+        if forced {
             Err(MediaError::NoHardware(reason))
         } else {
             tracing::debug!(file = %path.display(), reason, "decoding in software");
@@ -1027,23 +1139,37 @@ fn attach_hardware(
             codec_id.name()
         ));
     };
-    // The probe, not the FFmpeg build. `docs/STATUS.md` records why: a codec
-    // being present says nothing about whether the driver can drive it, in
-    // either direction.
-    if !hwdecode::supports(codec) {
-        return refuse(format!(
-            "this machine does not hardware-decode {}",
-            codec.label()
-        ));
-    }
-    let Some(device) = crate::modules::gpu::vaapi_device() else {
-        return refuse("no VAAPI device on this machine".into());
-    };
 
-    match device.attach_to_decoder(context) {
-        Ok(()) => Ok(Some(device)),
-        Err(error) => refuse(error.to_string()),
+    // VAAPI first: its surfaces go to the compositor without a copy. NVDEC
+    // second: the decode leaves the CPU, the download does not.
+    let order: &[HwBackend] = match acceleration {
+        Acceleration::Vaapi => &[HwBackend::Vaapi],
+        Acceleration::Cuda => &[HwBackend::Cuda],
+        _ => &[HwBackend::Vaapi, HwBackend::Cuda],
+    };
+    let mut reasons = Vec::new();
+    for &backend in order {
+        // The probe, not the FFmpeg build. `docs/STATUS.md` records why: a
+        // codec being present says nothing about whether the driver can drive
+        // it, in either direction.
+        if !hwdecode::supports_on(codec, backend) {
+            reasons.push(format!(
+                "{} does not decode {} here",
+                backend.label(),
+                codec.label()
+            ));
+            continue;
+        }
+        let Some(device) = hwdecode::device_for(backend) else {
+            reasons.push(format!("no {} device", backend.label()));
+            continue;
+        };
+        match device.attach_to_decoder(context) {
+            Ok(()) => return Ok(Some(device)),
+            Err(error) => reasons.push(error.to_string()),
+        }
     }
+    refuse(reasons.join("; "))
 }
 
 /// A stream whose first timestamp is unknown starts at zero.

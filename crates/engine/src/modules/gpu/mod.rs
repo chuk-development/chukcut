@@ -50,7 +50,7 @@
 
 use std::sync::{Arc, OnceLock};
 
-use crate::modules::media::hwdecode::VaapiDevice;
+use crate::modules::media::hwdecode::{CudaDevice, VaapiDevice};
 use crate::modules::render::RenderContext;
 
 /// The process's GPU, opened on the first call.
@@ -94,6 +94,32 @@ pub fn vaapi_device() -> Option<VaapiDevice> {
             Err(error) => {
                 tracing::info!(%error, "no VAAPI device; decoding and encoding in software");
                 None
+            }
+        })
+        .clone()
+}
+
+/// The process's CUDA context, for NVDEC, opened on the first call.
+///
+/// Only tried when the NVIDIA kernel driver is loaded: on any other machine
+/// libavutil would `dlopen` libcuda just to fail, and say so on stderr.
+/// `None` is the normal answer on Intel and AMD.
+pub fn cuda_device() -> Option<CudaDevice> {
+    static DEVICE: OnceLock<Option<CudaDevice>> = OnceLock::new();
+    DEVICE
+        .get_or_init(|| {
+            if !std::path::Path::new("/proc/driver/nvidia/version").exists() {
+                return None;
+            }
+            match CudaDevice::open() {
+                Ok(device) => {
+                    tracing::info!("CUDA device ready for NVDEC");
+                    Some(device)
+                }
+                Err(error) => {
+                    tracing::info!(%error, "NVIDIA driver loaded but no CUDA device");
+                    None
+                }
             }
         })
         .clone()

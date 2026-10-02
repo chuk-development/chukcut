@@ -47,7 +47,7 @@ pub mod thumbnails;
 
 pub mod waveform;
 
-pub use decoder::{Acceleration, DecodedFrame, VideoDecoder};
+pub use decoder::{Acceleration, DecodedFrame, Nv12Planes, VideoDecoder};
 pub use dmabuf::DmabufFrame;
 pub use hwdecode::{HwCodec, HwDecodeSupport};
 pub use probe::{probe, AudioStreamInfo, MediaInfo, VideoStreamInfo};

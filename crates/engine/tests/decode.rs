@@ -30,6 +30,7 @@ mod support;
 use std::time::Instant;
 
 use chukcut_engine::modules::media::decoder::Acceleration;
+use chukcut_engine::modules::media::hwdecode::HwBackend;
 use chukcut_engine::modules::media::{hwdecode, probe, HwCodec, VideoDecoder};
 use support::{
     assert_pixel_near, counter_frame_time, pixel, read_counter_rgba, COUNTER_FPS, COUNTER_FRAMES,
@@ -48,14 +49,26 @@ use support::{
 /// trains people to ignore failures.
 fn available_paths() -> Vec<Acceleration> {
     let mut paths = vec![Acceleration::Software];
-    if hwdecode::supports(HwCodec::H264) {
-        paths.push(Acceleration::Vaapi);
-    } else {
+    paths.extend(hardware_paths());
+    if paths.len() == 1 {
         eprintln!(
             "{}: the hardware path is not exercised — this machine does not \
              hardware-decode H.264",
             support::test_name()
         );
+    }
+    paths
+}
+
+/// The hardware decode paths this machine has for H.264: VAAPI on Intel and
+/// AMD, NVDEC on NVIDIA, possibly both on a hybrid laptop.
+fn hardware_paths() -> Vec<Acceleration> {
+    let mut paths = Vec::new();
+    if hwdecode::supports_on(HwCodec::H264, HwBackend::Vaapi) {
+        paths.push(Acceleration::Vaapi);
+    }
+    if hwdecode::supports_on(HwCodec::H264, HwBackend::Cuda) {
+        paths.push(Acceleration::Cuda);
     }
     paths
 }
@@ -652,6 +665,7 @@ fn an_audio_only_file_probes_as_audio_and_refuses_to_open_as_video() {
         Acceleration::Software,
         Acceleration::Auto,
         Acceleration::Vaapi,
+        Acceleration::Cuda,
     ] {
         let error = VideoDecoder::open_with(&media.audio_only, path)
             .err()
@@ -684,6 +698,7 @@ fn opening_a_file_that_is_not_there_names_the_file() {
         Acceleration::Software,
         Acceleration::Auto,
         Acceleration::Vaapi,
+        Acceleration::Cuda,
     ] {
         let error = VideoDecoder::open_with(missing, path)
             .err()
@@ -711,7 +726,8 @@ fn opening_a_file_that_is_not_there_names_the_file() {
 /// nothing to do with the seek policy. `seek_and_map` reaches the frame by the
 /// same `locate` and stops there.
 fn time_walk(decoder: &mut VideoDecoder, order: &[u64], path: Acceleration) -> std::time::Duration {
-    if path == Acceleration::Software {
+    // Only VA surfaces map; NVDEC frames are downloaded like software ones.
+    if path != Acceleration::Vaapi {
         let started = Instant::now();
         for n in order {
             let got = decode_counter(decoder, mid_frame(*n));
@@ -788,6 +804,17 @@ fn a_long_forward_jump_seeks_instead_of_decoding_through_everything_in_between()
     let media = require_media!();
 
     on_every_path(|path| {
+        // Not on NVDEC, where timing cannot tell the two apart. FFmpeg 6.1
+        // re-runs `get_format` after every flush and so rebuilds the NVDEC
+        // decoder on every seek — about 25 ms, fixed, at any resolution.
+        // Measured on this fixture: ten jumps 295 ms against ten 90-frame walks
+        // 272 ms, because a 320×240 frame decodes in 0.3 ms. On real footage
+        // the fixed cost is what wins (a 1080p GOP decoded in software costs
+        // several times more). The seek policy itself is the same code on
+        // every path and is held by the software and VAAPI runs.
+        if path == Acceleration::Cuda {
+            return;
+        }
         // The policy is "decode forward within the current GOP, seek beyond
         // it", expressed as a half-second window. The other test here covers the
         // first half — a decoder that always seeks cannot play back. This covers
@@ -928,7 +955,11 @@ fn the_decoder_reports_which_path_it_actually_took() {
                     decoder.is_hardware(),
                     "{path:?}: H.264 probed as usable here"
                 );
-                assert_eq!(decoder.acceleration(), Acceleration::Vaapi);
+                assert_eq!(
+                    decoder.acceleration(),
+                    path,
+                    "{path:?}: the backend asked for is the one reported"
+                );
                 assert!(decoder.device_node().is_some());
             }
         }
@@ -938,14 +969,20 @@ fn the_decoder_reports_which_path_it_actually_took() {
 #[test]
 fn hardware_and_software_decode_the_same_picture() {
     let media = require_media!();
-    if !hwdecode::supports(HwCodec::H264) {
+    let paths = hardware_paths();
+    if paths.is_empty() {
         eprintln!(
             "skipping {}: no hardware H.264 decode",
             support::test_name()
         );
         return;
     }
+    for path in paths {
+        same_picture_as_software(&media, path);
+    }
+}
 
+fn same_picture_as_software(media: &support::Media, path: Acceleration) {
     // Two decoders, two vendors' idea of what the bitstream means, one picture.
     // The tolerance is what a chroma upsample and an sRGB round trip cost, not
     // a licence for the hardware to be roughly right: a chroma swap, a
@@ -953,7 +990,7 @@ fn hardware_and_software_decode_the_same_picture() {
     // margin. The quadrant fixture is chosen because it has saturated colour in
     // known places, which is exactly what a wrong colour matrix ruins.
     let mut software = open(&media.quadrants, Acceleration::Software);
-    let mut hardware = open(&media.quadrants, Acceleration::Vaapi);
+    let mut hardware = open(&media.quadrants, path);
 
     let a = software.seek_and_decode(500_000).expect("software decode");
     let b = hardware.seek_and_decode(500_000).expect("hardware decode");
@@ -976,7 +1013,7 @@ fn hardware_and_software_decode_the_same_picture() {
         / a.data.len() as f64;
     assert!(
         mean < 2.0,
-        "the two decoders disagree by {mean:.2} on average (worst channel {worst}), \
+        "{path:?} and software disagree by {mean:.2} on average (worst channel {worst}), \
          which is more than chroma upsampling explains"
     );
 }
@@ -1098,4 +1135,30 @@ fn a_mapped_frame_is_the_same_frame_the_rgba_path_returns() {
             Some(n)
         );
     }
+}
+
+#[test]
+#[ignore = "diagnostic: prints jump versus walk timings per path"]
+fn diagnostic_jump_versus_walk() {
+    let media = require_media!();
+    on_every_path(|path| {
+        let mut jump = std::time::Duration::ZERO;
+        let mut walk = std::time::Duration::ZERO;
+        for round in 0..10u64 {
+            let mut decoder = open(&media.counter, path);
+            decode_counter(&mut decoder, mid_frame(round));
+            let started = Instant::now();
+            decode_counter(&mut decoder, mid_frame(round + 90));
+            jump += started.elapsed();
+
+            let mut decoder = open(&media.counter, path);
+            decode_counter(&mut decoder, mid_frame(round));
+            let started = Instant::now();
+            for n in round + 1..=round + 90 {
+                decode_counter(&mut decoder, mid_frame(n));
+            }
+            walk += started.elapsed();
+        }
+        eprintln!("{path:?}: 10 jumps {jump:?}, 10 walks of 90 frames {walk:?}");
+    });
 }
