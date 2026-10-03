@@ -1358,6 +1358,11 @@ impl Compositor {
                     crate::modules::tracking::follow::resolve(project, instant.from.segment, time);
                 let to_segment =
                     crate::modules::tracking::follow::resolve(project, instant.to.segment, time);
+                // A stabilised clip is drawn through its moving crop window.
+                let from_segment =
+                    crate::modules::analysis::stabilise::resolve(project, from_segment, time);
+                let to_segment =
+                    crate::modules::analysis::stabilise::resolve(project, to_segment, time);
                 let from = self.quad(
                     canvas,
                     &project.materials,
@@ -1436,6 +1441,9 @@ impl Compositor {
             // An overlay that follows a motion track is placed by the track;
             // see `modules::tracking::follow`. Borrowed when it does not.
             let resolved = crate::modules::tracking::follow::resolve(project, segment, time);
+            // A stabilised clip is drawn through its moving crop window; see
+            // `modules::analysis::stabilise`. Borrowed when it is not.
+            let resolved = crate::modules::analysis::stabilise::resolve(project, resolved, time);
 
             let quad = self.quad(
                 canvas,
