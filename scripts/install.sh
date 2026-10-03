@@ -124,7 +124,6 @@ build_tools=(
     "cmake       cmake            cmake"
     "nasm        nasm             nasm"
     "c++         build-essential  gcc-c++"
-    "clang       clang            clang"
 )
 # Needed to run, not to build: the Vulkan loader. The driver itself is the
 # GPU vendor's (Mesa for Intel and AMD, the proprietary driver for NVIDIA).
@@ -172,7 +171,9 @@ check_deps() {
         gone="$(ldd "$root/bin/chukcut" 2>/dev/null | awk '/not found/ {print $1}')"
         if [ -n "$gone" ]; then
             warn "The binary needs libraries this system lacks:"
-            echo "$gone" | sed 's/^/  /' >&2
+            # One library per line; the split is the point.
+            # shellcheck disable=SC2086
+            printf '  %s\n' $gone >&2
             warn "A prebuilt binary links the FFmpeg version of the system it was built on"
             warn "(see packaging/README.md). Install those libraries, or build from source."
             missing+=(runtime-libs)

@@ -43,6 +43,7 @@ cp LICENSE NOTICE.md README.md "$stage/"
 # from the tarball alone.
 {
     echo "chukcut $version, built $(date -u +%Y-%m-%d) from $(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+    # shellcheck source=/dev/null
     echo "on $(. /etc/os-release && echo "$PRETTY_NAME"), $(pkg-config --modversion libavcodec 2>/dev/null | sed 's/^/libavcodec /')"
     echo
     echo "Direct library dependencies (from the system, not bundled):"
