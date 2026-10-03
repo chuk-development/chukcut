@@ -78,17 +78,68 @@ pub(crate) const INFO: u32 = 0x5aa8ff;
 // --- the timeline --------------------------------------------------------------
 
 pub(crate) const PLAYHEAD: u32 = 0xffffff;
-pub(crate) const TRACK_HEADER: u32 = 0x1f2125;
 pub(crate) const CLIP_VIDEO: u32 = 0x0d4f54;
 pub(crate) const CLIP_VIDEO_TITLE: u32 = 0x11666c;
 pub(crate) const CLIP_IMAGE: u32 = 0x463b86;
+pub(crate) const CLIP_IMAGE_TITLE: u32 = 0x57499f;
 pub(crate) const CLIP_AUDIO: u32 = 0x14345c;
+pub(crate) const CLIP_AUDIO_TITLE: u32 = 0x1b4377;
 pub(crate) const CLIP_AUDIO_WAVE: u32 = 0x4f86c9;
 pub(crate) const CLIP_TEXT: u32 = 0x7d5419;
-/// Effect and sticker clips, once the timeline draws them.
-#[allow(dead_code)]
+pub(crate) const CLIP_TEXT_TITLE: u32 = 0x946620;
+/// Effect and sticker clips.
 pub(crate) const CLIP_EFFECT: u32 = 0x6b2b60;
+pub(crate) const CLIP_EFFECT_TITLE: u32 = 0x823576;
 pub(crate) const CLIP_OTHER: u32 = 0x4a4c55;
+pub(crate) const CLIP_OTHER_TITLE: u32 = 0x585a64;
+/// Lanes behind the clips, a step below the panel so clips stand out.
+pub(crate) const LANES: u32 = 0x16171a;
+/// One lane's band, a hair above the lanes' backdrop.
+pub(crate) const LANE: u32 = 0x1c1d21;
+/// The main (magnetic) lane's band.
+pub(crate) const LANE_MAIN: u32 = 0x202227;
+
+/// The title strip of a clip whose body is `body`.
+pub(crate) fn clip_title(body: u32) -> u32 {
+    match body {
+        CLIP_VIDEO => CLIP_VIDEO_TITLE,
+        CLIP_IMAGE => CLIP_IMAGE_TITLE,
+        CLIP_AUDIO => CLIP_AUDIO_TITLE,
+        CLIP_TEXT => CLIP_TEXT_TITLE,
+        CLIP_EFFECT => CLIP_EFFECT_TITLE,
+        _ => CLIP_OTHER_TITLE,
+    }
+}
+
+/// Where an in/out range or a drop will land: the accent, faint.
+pub(crate) fn range_fill() -> Hsla {
+    with_alpha(ACCENT, 0.10)
+}
+/// The snap guide: one warm line that never reads as a selection.
+pub(crate) const SNAP_LINE: u32 = 0xf2c94c;
+/// Markers on the ruler, by the colour the user picked.
+pub(crate) const MARKER_BLUE: u32 = 0x3d8bfd;
+pub(crate) const MARKER_GREEN: u32 = 0x3ccf6b;
+pub(crate) const MARKER_YELLOW: u32 = 0xf2c94c;
+pub(crate) const MARKER_ORANGE: u32 = 0xf2994a;
+pub(crate) const MARKER_RED: u32 = 0xeb5757;
+pub(crate) const MARKER_PURPLE: u32 = 0xa77bf3;
+
+// --- colour grading ------------------------------------------------------------
+//
+// Content colours: the strips under the grading sliders and the curve
+// channels show the colour they act on, so they are saturated on purpose.
+
+pub(crate) const STRIP_COOL: u32 = 0x3d6bff;
+pub(crate) const STRIP_WARM: u32 = 0xf2d33a;
+pub(crate) const STRIP_GREEN: u32 = 0x3fc24f;
+pub(crate) const STRIP_MAGENTA: u32 = 0xd84ad8;
+pub(crate) const STRIP_GREY: u32 = 0x8a8a8a;
+pub(crate) const STRIP_RED: u32 = 0xe23b3b;
+pub(crate) const CURVE_MASTER: u32 = 0xe6e6e6;
+pub(crate) const CURVE_RED: u32 = 0xe24c4c;
+pub(crate) const CURVE_GREEN: u32 = 0x4cc35a;
+pub(crate) const CURVE_BLUE: u32 = 0x4c7de2;
 
 // --- type ----------------------------------------------------------------------
 
@@ -131,6 +182,28 @@ pub(crate) const R_LG: f32 = 12.0;
 
 pub(crate) const MEDIA_W: f32 = 640.0;
 pub(crate) const INSPECTOR_W: f32 = 590.0;
+/// The narrowest the player gets before the side panels give way: wide
+/// enough for its timecode, transport and view buttons on one line.
+pub(crate) const PLAYER_MIN_W: f32 = 510.0;
+/// The narrowest the inspector gets: a label, two number fields and the
+/// action column on one row.
+const INSPECTOR_MIN_W: f32 = 432.0;
+const MEDIA_MIN_W: f32 = 360.0;
+
+/// The asset panel's and the inspector's widths in a window `window_w`
+/// wide: their full widths while the player keeps `PLAYER_MIN_W`; below
+/// that both shrink in proportion, the inspector no narrower than its rows
+/// need, so a 1366 px laptop screen still has a usable player.
+pub(crate) fn side_widths(window_w: f32) -> (f32, f32) {
+    let spare = window_w - 4.0 * GUTTER - PLAYER_MIN_W;
+    if spare >= MEDIA_W + INSPECTOR_W {
+        return (MEDIA_W, INSPECTOR_W);
+    }
+    let ratio = (spare / (MEDIA_W + INSPECTOR_W)).max(0.0);
+    let inspector = (INSPECTOR_W * ratio).clamp(INSPECTOR_MIN_W, INSPECTOR_W);
+    let media = (spare - inspector).clamp(MEDIA_MIN_W, MEDIA_W);
+    (media.floor(), inspector.floor())
+}
 
 // --- motion --------------------------------------------------------------------
 
@@ -193,7 +266,10 @@ fn apply_colors(theme: &mut Theme) {
     c.button_secondary_hover = hsla(OVERLAY);
     c.button_secondary_active = hsla(BORDER);
     c.button_secondary_foreground = hsla(TEXT);
-    c.accent = hsla(PANEL_RAISED);
+    // The hovered row of a menu, a dropdown or a list. Menus sit on
+    // `OVERLAY`, so the hover is the step above it; `PANEL_RAISED` would read
+    // as a hole in the menu.
+    c.accent = hsla(BORDER);
     c.accent_foreground = hsla(TEXT);
     c.secondary = hsla(PANEL_RAISED);
     c.secondary_hover = hsla(OVERLAY);
@@ -231,4 +307,22 @@ fn apply_colors(theme: &mut Theme) {
     c.warning = hsla(WARNING);
     c.danger = hsla(DANGER);
     c.info = hsla(INFO);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_full_hd_window_keeps_the_full_side_panels() {
+        assert_eq!(side_widths(1920.0), (MEDIA_W, INSPECTOR_W));
+    }
+
+    #[test]
+    fn a_laptop_window_keeps_a_usable_player_and_inspector() {
+        let (media, inspector) = side_widths(1366.0);
+        assert!(inspector >= INSPECTOR_MIN_W);
+        assert!(media >= MEDIA_MIN_W);
+        assert!(1366.0 - 4.0 * GUTTER - media - inspector >= PLAYER_MIN_W - 1.0);
+    }
 }

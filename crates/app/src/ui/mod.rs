@@ -48,7 +48,7 @@ pub(crate) use number::NumberField;
 #[allow(unused_imports)]
 pub(crate) use panel::{Panel, PanelHeader};
 #[allow(unused_imports)]
-pub(crate) use property::{KeyMark, KeyframeSlot, PropertyRow, LABEL_W};
+pub(crate) use property::{row_actions, KeyMark, KeyframeSlot, PropertyRow, LABEL_W};
 #[allow(unused_imports)]
 pub(crate) use section::{Section, SectionHeader};
 #[allow(unused_imports)]

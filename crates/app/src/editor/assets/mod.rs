@@ -8,6 +8,7 @@
 mod effects;
 mod library;
 mod media;
+pub(crate) use media::{drop_command, MediaDrag};
 
 use std::collections::HashMap;
 
@@ -218,7 +219,7 @@ impl Editor {
         };
 
         Panel::new("asset-panel")
-            .w(px(MEDIA_W))
+            .size_full()
             .flex_none()
             // The rail stands in for a header: CapCut's icon tabs, our glyphs.
             .header(

@@ -154,6 +154,39 @@ impl RenderOnce for KeyframeSlot {
     }
 }
 
+/// The action column of a row on its own: a reset (kept as space when there
+/// is none) and a keyframe slot (kept as space when the value cannot be
+/// animated), for rows that lay out their own label and controls.
+pub(crate) fn row_actions(
+    id: SharedString,
+    enabled: bool,
+    on_reset: Option<OnClick>,
+    keyframe: Option<KeyframeSlot>,
+) -> impl IntoElement {
+    let has_reset = on_reset.is_some();
+    div()
+        .flex_none()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(2.0))
+        .child(
+            div()
+                .when(!has_reset, |this| this.invisible())
+                .child(action(
+                    format!("{id}-reset").into(),
+                    icons::RESET,
+                    TEXT_DIM,
+                    enabled,
+                    on_reset,
+                )),
+        )
+        .child(match keyframe {
+            Some(slot) => slot.enabled(enabled).into_any_element(),
+            None => div().w(px(ACTION * 3.0)).into_any_element(),
+        })
+}
+
 /// One property: its label, its controls, a reset and a keyframe slot.
 #[derive(IntoElement)]
 pub(crate) struct PropertyRow {
@@ -230,30 +263,8 @@ impl RenderOnce for PropertyRow {
             .overflow_hidden()
             .text_ellipsis()
             .child(self.label);
-        let has_reset = self.on_reset.is_some();
-        let actions = (self.reserve_actions || has_reset || self.keyframe.is_some()).then(|| {
-            div()
-                .flex_none()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(2.0))
-                .child(
-                    div()
-                        .when(!has_reset, |this| this.invisible())
-                        .child(action(
-                            format!("{id}-reset").into(),
-                            icons::RESET,
-                            TEXT_DIM,
-                            enabled,
-                            self.on_reset,
-                        )),
-                )
-                .child(match self.keyframe {
-                    Some(slot) => slot.enabled(enabled).into_any_element(),
-                    None => div().w(px(ACTION * 3.0)).into_any_element(),
-                })
-        });
+        let actions = (self.reserve_actions || self.on_reset.is_some() || self.keyframe.is_some())
+            .then(|| row_actions(id.clone(), enabled, self.on_reset, self.keyframe));
         let controls = div()
             .flex_1()
             .min_w(px(0.0))

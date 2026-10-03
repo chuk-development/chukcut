@@ -1011,15 +1011,6 @@ impl Editor {
                 .into_any_element(),
             None => self.render_details(window, cx).into_any_element(),
         };
-        div()
-            .w(px(INSPECTOR_W))
-            .h_full()
-            .min_h(px(0.0))
-            .flex()
-            .flex_col()
-            .overflow_hidden()
-            .bg(rgb(PANEL))
-            .rounded(px(6.0))
-            .child(body)
+        crate::ui::Panel::new("inspector").size_full().child(body)
     }
 }

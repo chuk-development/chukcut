@@ -1,40 +1,45 @@
-//! The inspector's building blocks: tabs, sections, property rows, the number
-//! box with its stepper, and the reset and keyframe buttons. Drawn here rather
-//! than taken whole from GPUI Component so they keep CapCut's proportions; the
-//! slider, the text field and the switch are the component ones.
+//! The inspector's building blocks, on the design kit (`crate::ui`): the
+//! top tabs are a `PanelHeader`, the sub-tabs `SegmentedTabs`, a section is
+//! a kit `Section` with its `SectionHeader`, a number box a `NumberField`,
+//! and every property row a `PropertyRow` with its reset and `KeyframeSlot`.
+//! The helpers keep their old signatures so every tab builds its rows the
+//! same way; only the drawing moved to the kit.
 
-use gpui::component::input::Input;
+use gpui::component::button::{Button, ButtonVariants as _};
 use gpui::component::slider::Slider;
-use gpui::component::{Icon, Sizable};
+use gpui::component::{Disableable as _, Icon, Sizable};
 use gpui::{AnyElement, ClickEvent};
 
 use super::*;
+use crate::ui::{
+    self, EmptyState, Glyph, IconButton, KeyMark, KeyframeSlot, NumberField, PanelHeader,
+    PropertyRow, SectionHeader, SegmentedTabs,
+};
 
-/// Our own line icons, drawn as SVG and tinted by the text colour.
+/// The inspector's glyphs: the kit's, plus the alignment set, drawn on the
+/// kit's grid and stroke.
 pub(crate) mod icons {
     macro_rules! icon {
         ($name:ident, $body:literal) => {
             pub const $name: &[u8] = concat!(
-                r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">"#,
+                r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">"#,
                 $body,
                 "</svg>"
             )
             .as_bytes();
         };
     }
-    icon!(
-        RESET,
-        r#"<path d="M5 13a7 7 0 1 0 2-5.3"/><path d="M5 4v4.5h4.5"/>"#
-    );
-    icon!(DIAMOND, r#"<path d="M12 5l7 7-7 7-7-7z"/>"#);
-    icon!(
-        DIAMOND_FILLED,
-        r#"<path d="M12 5l7 7-7 7-7-7z" fill="black"/>"#
-    );
-    icon!(PREV, r#"<path d="M14 7l-5 5 5 5"/>"#);
-    icon!(NEXT, r#"<path d="M10 7l5 5-5 5"/>"#);
-    icon!(UP, r#"<path d="M7 14l5-5 5 5"/>"#);
-    icon!(DOWN, r#"<path d="M7 10l5 5 5-5"/>"#);
+    pub const RESET: &[u8] = crate::ui::icons::RESET.0;
+    // Kept for tabs that draw their own keyframe buttons (Effects).
+    #[allow(dead_code)]
+    pub const DIAMOND: &[u8] = crate::ui::icons::DIAMOND.0;
+    #[allow(dead_code)]
+    pub const DIAMOND_FILLED: &[u8] = crate::ui::icons::DIAMOND_FILLED.0;
+    #[allow(dead_code)]
+    pub const PREV: &[u8] = crate::ui::icons::CHEVRON_LEFT.0;
+    pub const NEXT: &[u8] = crate::ui::icons::CHEVRON_RIGHT.0;
+    pub const UP: &[u8] = crate::ui::icons::CHEVRON_UP.0;
+    pub const DOWN: &[u8] = crate::ui::icons::CHEVRON_DOWN.0;
     icon!(
         ALIGN_LEFT,
         r#"<path d="M4 4v16"/><path d="M8 8h11v3H8zM8 13h7v3H8z"/>"#
@@ -69,13 +74,9 @@ pub(crate) fn icon(data: &'static [u8], size: f32, color: u32) -> Icon {
 }
 
 /// Text colour of a control that does nothing yet.
-pub(crate) const DISABLED: u32 = 0x5c5c5c;
-/// The number box's well.
-const FIELD_BG: u32 = 0x1d1d1d;
-/// Height of a property row's controls.
-const ROW_H: f32 = 26.0;
+pub(crate) const DISABLED: u32 = TEXT_DISABLED;
 
-/// A small square icon button.
+/// A small square icon button: the kit's, with a resting tint.
 pub(crate) fn icon_button(
     id: impl Into<gpui::ElementId>,
     data: &'static [u8],
@@ -83,55 +84,34 @@ pub(crate) fn icon_button(
     enabled: bool,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
-    div()
-        .id(id.into())
-        .size(px(20.0))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(3.0))
-        .when(enabled, |this| {
-            this.cursor_pointer()
-                .hover(|style| style.bg(rgb(PANEL_RAISED)))
-                .on_click(on_click)
-        })
-        .child(icon(data, 14.0, if enabled { color } else { DISABLED }))
+    IconButton::new(id, Glyph(data))
+        .small()
+        .tint(color)
+        .disabled(!enabled)
+        .on_click(on_click)
 }
 
-/// CapCut's top tab row: plain labels, the active one in the accent colour.
+/// The top tab row: the kit's panel header with text tabs.
 pub(crate) fn top_tabs(
     tabs: &[&'static str],
     active: &'static str,
     cx: &mut Context<Editor>,
 ) -> impl IntoElement {
-    div()
-        .h(px(40.0))
-        .flex_none()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(22.0))
-        .px_3()
-        .border_b_1()
-        .border_color(rgb(BG))
-        .children(tabs.iter().map(|&tab| {
-            let selected = tab == active;
-            div()
-                .id(SharedString::from(format!("top-tab-{tab}")))
-                .h_full()
-                .flex()
-                .items_center()
-                .text_sm()
-                .when(selected, |this| this.font_weight(gpui::FontWeight::MEDIUM))
-                .text_color(rgb(if selected { ACCENT } else { TEXT }))
-                .cursor_pointer()
-                .hover(|style| style.text_color(rgb(if selected { ACCENT } else { 0xffffff })))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.inspector.tab = Some(tab);
-                    cx.notify();
-                }))
-                .child(tab)
-        }))
+    let entity = cx.entity().downgrade();
+    let all: Vec<&'static str> = tabs.to_vec();
+    let selected = tabs.iter().position(|&tab| tab == active).unwrap_or(0);
+    PanelHeader::new().tabs(
+        "top-tab",
+        tabs.iter().copied(),
+        selected,
+        move |index, _, cx| {
+            let tab = all[index];
+            let _ = entity.update(cx, |this, cx| {
+                this.inspector.tab = Some(tab);
+                cx.notify();
+            });
+        },
+    )
 }
 
 /// The segmented control under the top tabs.
@@ -141,39 +121,24 @@ pub(crate) fn sub_tabs(
     active: &'static str,
     cx: &mut Context<Editor>,
 ) -> impl IntoElement {
-    div().flex_none().px_3().pt_3().pb_2().child(
-        div()
-            .flex()
-            .flex_row()
-            .p(px(2.0))
-            .rounded(px(5.0))
-            .bg(rgb(0x1f1f1f))
-            .children(tabs.iter().map(|&tab| {
-                let selected = tab == active;
-                div()
-                    .id(SharedString::from(format!("sub-tab-{owner}-{tab}")))
-                    .flex_1()
-                    .h(px(24.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(4.0))
-                    .text_xs()
-                    .text_color(rgb(if selected { TEXT } else { TEXT_DIM }))
-                    .when(selected, |this| this.bg(rgb(PANEL_RAISED)))
-                    .cursor_pointer()
-                    .hover(|style| style.text_color(rgb(TEXT)))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.inspector.sub_tab.insert(owner, tab);
-                        cx.notify();
-                    }))
-                    .child(tab)
-            })),
+    let entity = cx.entity().downgrade();
+    let all: Vec<&'static str> = tabs.to_vec();
+    let selected = tabs.iter().position(|&tab| tab == active).unwrap_or(0);
+    div().flex_none().px(px(PAD)).pt(px(PAD)).pb(px(4.0)).child(
+        SegmentedTabs::new(format!("sub-tab-{owner}"), tabs.iter().copied(), selected).on_select(
+            move |index, _, cx| {
+                let tab = all[index];
+                let _ = entity.update(cx, |this, cx| {
+                    this.inspector.sub_tab.insert(owner, tab);
+                    cx.notify();
+                });
+            },
+        ),
     )
 }
 
 /// A section: header with a collapse caret, an optional enable checkbox and
-/// reset, then its rows.
+/// reset, then its rows — drawn by the kit's `Section`.
 pub(crate) struct Section {
     pub title: &'static str,
     pub checkbox: Option<bool>,
@@ -213,104 +178,76 @@ impl Section {
         cx: &mut Context<Editor>,
     ) -> AnyElement {
         let title = self.title;
-        let enabled = self.enabled;
-        let has_rows = !rows.is_empty();
-        let mut header = div().h(px(36.0)).flex().flex_row().items_center().gap_2();
-        if let Some(checked) = self.checkbox {
-            let on_check = self.on_check.map(std::rc::Rc::new);
-            header = header.child(check_box(
-                SharedString::from(format!("check-{title}")),
-                checked,
-                enabled && on_check.is_some(),
-                cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    if let Some(on_check) = &on_check {
-                        on_check(this, !checked, cx);
+        let entity = cx.entity().downgrade();
+        let mut header =
+            SectionHeader::new(format!("section-{title}"), title).disabled(!self.enabled);
+        if !rows.is_empty() {
+            let entity = entity.clone();
+            header = header.collapsible(collapsed, move |_, _, cx| {
+                let _ = entity.update(cx, |this, cx| {
+                    if !this.inspector.collapsed.remove(title) {
+                        this.inspector.collapsed.insert(title);
                     }
-                }),
-            ));
+                    cx.notify();
+                });
+            });
         }
-        header = header.child(
-            div()
-                .id(SharedString::from(format!("section-{title}")))
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_1()
-                .text_sm()
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(rgb(if enabled { TEXT } else { TEXT_DIM }))
-                .when(has_rows, |this| {
-                    this.cursor_pointer()
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if !this.inspector.collapsed.remove(title) {
-                                this.inspector.collapsed.insert(title);
-                            }
-                            cx.notify();
-                        }))
-                })
-                .child(title)
-                .when(has_rows, |this| {
-                    this.child(icon(
-                        if collapsed { icons::DOWN } else { icons::UP },
-                        12.0,
-                        TEXT_DIM,
-                    ))
-                }),
-        );
-        header = header.child(div().flex_1());
+        if let Some(checked) = self.checkbox {
+            header = match self.on_check {
+                Some(on_check) => {
+                    let entity = entity.clone();
+                    header.enable(checked, move |value, _, cx| {
+                        let _ = entity.update(cx, |this, cx| on_check(this, value, cx));
+                    })
+                }
+                None => header.checked(checked),
+            };
+        }
         if let Some(note) = self.note {
-            header = header.child(div().text_xs().text_color(rgb(DISABLED)).child(note));
+            header = header.note(note);
         }
         if let Some(on_reset) = self.on_reset {
-            let on_reset = std::rc::Rc::new(on_reset);
-            header = header.child(icon_button(
-                SharedString::from(format!("reset-{title}")),
-                icons::RESET,
-                TEXT_DIM,
-                enabled,
-                cx.listener(move |this, _, _, cx| on_reset(this, cx)),
-            ));
+            header = header.on_reset(move |_, _, cx| {
+                let _ = entity.update(cx, |this, cx| on_reset(this, cx));
+            });
         }
-
-        div()
-            .flex()
-            .flex_col()
-            .px_3()
-            .pb_2()
-            .border_b_1()
-            .border_color(rgb(0x2f2f2f))
-            .child(header)
-            .when(!collapsed, |this| {
-                this.child(div().flex().flex_col().gap(px(10.0)).pb_1().children(rows))
-            })
+        ui::Section::new(SharedString::from(format!("section-body-{title}")), header)
+            .mx(px(PAD))
+            .children(rows)
             .into_any_element()
     }
 }
 
+/// A checkbox in the kit's proportions, for rows that are not a section
+/// header.
 pub(crate) fn check_box(
     id: SharedString,
     checked: bool,
     enabled: bool,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
+    let fill = match (checked, enabled) {
+        (true, true) => Some(ACCENT),
+        (true, false) => Some(BORDER_STRONG),
+        (false, _) => None,
+    };
     div()
         .id(id)
         .size(px(14.0))
         .flex_none()
-        .rounded(px(3.0))
+        .rounded(px(R_XS))
         .border_1()
-        .border_color(rgb(if checked && enabled { ACCENT } else { 0x5a5a5a }))
-        .when(checked, |this| this.bg(rgb(if enabled { ACCENT } else { 0x4a4a4a })))
+        .border_color(rgb(match fill {
+            Some(color) => color,
+            None if enabled => BORDER_STRONG,
+            None => BORDER,
+        }))
+        .when_some(fill, |this, color| this.bg(rgb(color)))
         .flex()
         .items_center()
         .justify_center()
         .when(checked, |this| {
-            this.child(
-                Icon::default()
-                    .data(br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>"#)
-                    .size(px(11.0))
-                    .text_color(rgb(0x0b1214)),
-            )
+            this.child(ui::icons::glyph(ui::icons::CHECK, 12.0, rgb(ON_ACCENT)))
         })
         .when(enabled, |this| this.cursor_pointer().on_click(on_click))
 }
@@ -318,12 +255,13 @@ pub(crate) fn check_box(
 /// A sub-heading inside a section ("Colour", "Light", "Effects").
 pub(crate) fn group_label(label: &'static str) -> AnyElement {
     div()
-        .pt_1()
-        .pb_1()
+        .pt(px(6.0))
+        .pb(px(4.0))
         .border_b_1()
-        .border_color(rgb(0x2f2f2f))
-        .text_xs()
-        .text_color(rgb(TEXT_DIM))
+        .border_color(rgb(HAIRLINE))
+        .text_size(px(TEXT_CAPTION))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(rgb(TEXT_MUTED))
         .child(label)
         .into_any_element()
 }
@@ -331,28 +269,21 @@ pub(crate) fn group_label(label: &'static str) -> AnyElement {
 /// Shown in place of a tab the engine has nothing behind yet.
 pub(crate) fn not_yet(what: &str) -> AnyElement {
     div()
-        .p_6()
-        .flex()
-        .flex_col()
-        .items_center()
-        .gap_2()
+        .p(px(24.0))
         .child(
-            div()
-                .text_sm()
-                .text_color(rgb(TEXT_DIM))
-                .child(what.to_string()),
-        )
-        .child(
-            div()
-                .text_xs()
-                .text_color(rgb(DISABLED))
-                .child("Not in the engine yet."),
+            EmptyState::new(
+                SharedString::from(format!("not-yet-{what}")),
+                gpui::assets::IconName::Construction,
+                what.to_string(),
+            )
+            .hint("Not in the engine yet."),
         )
         .into_any_element()
 }
 
 impl Editor {
-    /// The boxed number field with CapCut's stacked stepper on its right.
+    /// The number box: the kit's field with its stacked stepper. `width` is
+    /// the value's own width; the stepper and a prefix add to it.
     pub(crate) fn number_box(
         &mut self,
         prop: Prop,
@@ -365,143 +296,64 @@ impl Editor {
         let spec = prop.spec();
         self.sync_field(prop, value, window, cx);
         let (input, _) = self.field(prop, window, cx);
-        let enabled = spec.supported;
-        let stepper = |up: bool, cx: &mut Context<Self>| {
-            div()
-                .id(SharedString::from(format!(
-                    "step-{prop:?}-{}",
-                    if up { "up" } else { "down" }
-                )))
-                .flex_1()
-                .w(px(14.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .when(enabled, |this| {
-                    this.cursor_pointer()
-                        .hover(|style| style.bg(rgb(BORDER)))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.step_prop(prop, if up { 1.0 } else { -1.0 }, cx)
-                        }))
-                })
-                .child(icon(
-                    if up { icons::UP } else { icons::DOWN },
-                    10.0,
-                    if enabled { TEXT_DIM } else { DISABLED },
-                ))
-        };
-        div()
-            .flex_none()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(4.0))
-            .when_some(prefix, |this, prefix| {
-                this.child(div().text_xs().text_color(rgb(TEXT_DIM)).child(prefix))
+        let entity = cx.entity().downgrade();
+        let extra = 18.0 + if prefix.is_some() { 14.0 } else { 0.0 };
+        NumberField::new(format!("number-{prop:?}"), &input)
+            .width(width + extra)
+            .disabled(!spec.supported)
+            .when_some(prefix, |field, prefix| field.prefix(prefix))
+            .when(!spec.suffix.is_empty(), |field| field.suffix(spec.suffix))
+            .on_step(move |direction, _, cx| {
+                let _ = entity.update(cx, |this, cx| this.step_prop(prop, direction, cx));
             })
-            .child(
-                div()
-                    .w(px(width))
-                    .h(px(ROW_H))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .rounded(px(4.0))
-                    .bg(rgb(FIELD_BG))
-                    .border_1()
-                    .border_color(rgb(0x333333))
-                    .child(
-                        div().flex_1().min_w(px(0.0)).child(
-                            Input::new(&input)
-                                .appearance(false)
-                                .xsmall()
-                                .disabled(!enabled)
-                                .text_xs()
-                                .text_color(rgb(if enabled { TEXT } else { DISABLED })),
-                        ),
-                    )
-                    .when(!spec.suffix.is_empty(), |this| {
-                        this.child(
-                            div()
-                                .pr_1()
-                                .text_xs()
-                                .text_color(rgb(if enabled { TEXT } else { DISABLED }))
-                                .child(spec.suffix),
-                        )
-                    }),
-            )
-            .child(
-                div()
-                    .h(px(ROW_H))
-                    .flex()
-                    .flex_col()
-                    .rounded(px(3.0))
-                    .bg(rgb(FIELD_BG))
-                    .child(stepper(true, cx))
-                    .child(stepper(false, cx)),
-            )
             .into_any_element()
     }
 
+    /// The keyframe slot of a property that can be animated.
+    fn keyframe_slot(
+        &self,
+        prop: Prop,
+        segment: &Segment,
+        cx: &mut Context<Self>,
+    ) -> Option<KeyframeSlot> {
+        if prop.animated().is_empty() {
+            return None;
+        }
+        let (animated, at) = self.keyframe_state(prop, segment);
+        let mark = match (animated, at) {
+            (_, true) => KeyMark::OnKey,
+            (true, false) => KeyMark::Animated,
+            (false, false) => KeyMark::None,
+        };
+        Some(
+            KeyframeSlot::new(format!("kf-{prop:?}"), mark)
+                .on_toggle(cx.listener(move |this, _, _, cx| this.toggle_keyframe(prop, cx)))
+                .on_prev(cx.listener(move |this, _, _, cx| this.jump_keyframe(prop, false, cx)))
+                .on_next(cx.listener(move |this, _, _, cx| this.jump_keyframe(prop, true, cx))),
+        )
+    }
+
     /// The reset and keyframe buttons at the right of a row. Rows without a
-    /// keyframeable property keep the space, so every column lines up.
+    /// keyframeable property keep the space, so every column lines up. For
+    /// rows that lay out their own label and controls.
+    #[allow(dead_code)]
     pub(crate) fn row_actions(
         &self,
         prop: Prop,
         segment: &Segment,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let spec = prop.spec();
-        let animatable = !prop.animated().is_empty();
-        let (animated, at) = self.keyframe_state(prop, segment);
-        let diamond_color = if at || animated { ACCENT } else { TEXT_DIM };
-        div()
-            .flex_none()
-            .flex()
-            .flex_row()
-            .items_center()
-            .child(icon_button(
-                SharedString::from(format!("reset-{prop:?}")),
-                icons::RESET,
-                TEXT_DIM,
-                spec.supported,
-                cx.listener(move |this, _, _, cx| this.reset_prop(prop, cx)),
-            ))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .when(!animatable, |this| this.invisible())
-                    .child(icon_button(
-                        SharedString::from(format!("kf-prev-{prop:?}")),
-                        icons::PREV,
-                        TEXT_DIM,
-                        animated,
-                        cx.listener(move |this, _, _, cx| this.jump_keyframe(prop, false, cx)),
-                    ))
-                    .child(icon_button(
-                        SharedString::from(format!("kf-{prop:?}")),
-                        if at {
-                            icons::DIAMOND_FILLED
-                        } else {
-                            icons::DIAMOND
-                        },
-                        diamond_color,
-                        animatable && spec.supported,
-                        cx.listener(move |this, _, _, cx| this.toggle_keyframe(prop, cx)),
-                    ))
-                    .child(icon_button(
-                        SharedString::from(format!("kf-next-{prop:?}")),
-                        icons::NEXT,
-                        TEXT_DIM,
-                        animated,
-                        cx.listener(move |this, _, _, cx| this.jump_keyframe(prop, true, cx)),
-                    )),
-            )
+        let reset: ui::OnClick =
+            std::rc::Rc::new(cx.listener(move |this, _, _, cx| this.reset_prop(prop, cx)));
+        ui::row_actions(
+            format!("row-{prop:?}").into(),
+            prop.spec().supported,
+            Some(reset),
+            self.keyframe_slot(prop, segment, cx),
+        )
     }
 
-    /// CapCut's slider row: the label above, then slider · number · actions.
+    /// A slider row: the label above, then slider · number · actions.
     pub(crate) fn slider_row(
         &mut self,
         prop: Prop,
@@ -513,29 +365,22 @@ impl Editor {
         let value = self.prop_value(prop, segment);
         let number = self.number_box(prop, value, 64.0, None, window, cx);
         let (_, slider) = self.field(prop, window, cx);
-        let actions = self.row_actions(prop, segment, cx);
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(4.0))
+        let keyframe = self.keyframe_slot(prop, segment, cx);
+        PropertyRow::new(format!("row-{prop:?}"), spec.label)
+            .stacked()
+            .disabled(!spec.supported)
+            .on_reset(cx.listener(move |this, _, _, cx| this.reset_prop(prop, cx)))
+            .when_some(keyframe, |row, slot| row.keyframe(slot))
             .child(
                 div()
-                    .text_xs()
-                    .text_color(rgb(if spec.supported { TEXT } else { TEXT_DIM }))
-                    .child(spec.label),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_3()
-                    .child(div().flex_1().px_1().when_some(slider, |this, slider| {
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .px(px(4.0))
+                    .when_some(slider, |this, slider| {
                         this.child(slider_with_track(prop, &slider))
-                    }))
-                    .child(number)
-                    .child(actions),
+                    }),
             )
+            .child(number)
             .into_any_element()
     }
 
@@ -552,23 +397,22 @@ impl Editor {
         let mut boxes = Vec::new();
         for &(prop, prefix) in props {
             let value = self.prop_value(prop, segment);
-            boxes.push(self.number_box(prop, value, 72.0, prefix, window, cx));
+            boxes.push(self.number_box(prop, value, 56.0, prefix, window, cx));
         }
-        let actions = self.row_actions(props[0].0, segment, cx);
-        div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_3()
+        let first = props[0].0;
+        let keyframe = self.keyframe_slot(first, segment, cx);
+        PropertyRow::new(format!("row-{label}"), label)
+            .disabled(!first.spec().supported)
+            .on_reset(cx.listener(move |this, _, _, cx| this.reset_prop(first, cx)))
+            .when_some(keyframe, |row, slot| row.keyframe(slot))
             .child(
                 div()
-                    .w(px(110.0))
-                    .text_xs()
-                    .text_color(rgb(TEXT))
-                    .child(label),
+                    .flex_1()
+                    .flex()
+                    .flex_row()
+                    .gap(px(12.0))
+                    .children(boxes),
             )
-            .child(div().flex_1().flex().flex_row().gap_4().children(boxes))
-            .child(actions)
             .into_any_element()
     }
 }
@@ -591,10 +435,10 @@ pub(crate) fn slider_with_track(prop: Prop, slider: &Entity<SliderState>) -> Any
         )
     };
     let track: gpui::Background = match prop {
-        _ if !spec.supported => rgb(0x3a3a3a).into(),
-        Prop::Temperature => strip(0x3d6bff, 0xf2d33a),
-        Prop::Tint => strip(0x3fc24f, 0xd84ad8),
-        Prop::Saturation => strip(0x8a8a8a, 0xe23b3b),
+        _ if !spec.supported => rgb(BORDER).into(),
+        Prop::Temperature => strip(STRIP_COOL, STRIP_WARM),
+        Prop::Tint => strip(STRIP_GREEN, STRIP_MAGENTA),
+        Prop::Saturation => strip(STRIP_GREY, STRIP_RED),
         // The HSL rows draw the band they act on: its neighbouring hues, its
         // colour from grey to full, and from dark to light.
         Prop::HslHue(band) | Prop::HslSaturation(band) | Prop::HslLuminance(band) => {
@@ -616,7 +460,7 @@ pub(crate) fn slider_with_track(prop: Prop, slider: &Entity<SliderState>) -> Any
                 gpui::linear_color_stop(to, 1.0),
             )
         }
-        _ => rgb(0x555555).into(),
+        _ => rgb(BORDER_STRONG).into(),
     };
     div()
         .relative()
@@ -636,26 +480,53 @@ pub(crate) fn slider_with_track(prop: Prop, slider: &Entity<SliderState>) -> Any
             Slider::new(slider)
                 .disabled(!spec.supported)
                 .bg(gpui::transparent_black())
-                .text_color(rgb(0xf0f0f0)),
+                .text_color(rgb(TEXT)),
         )
         .into_any_element()
 }
 
-/// A label on the left, anything on the right.
+/// A label on the left, anything on the right, at the row height.
 pub(crate) fn label_row(label: impl Into<SharedString>, right: impl IntoElement) -> AnyElement {
     div()
         .flex()
         .flex_row()
         .items_center()
         .justify_between()
-        .gap_3()
+        .gap(px(12.0))
         .min_h(px(ROW_H))
-        .child(div().text_xs().text_color(rgb(TEXT)).child(label.into()))
+        .child(
+            div()
+                .min_w(px(0.0))
+                .whitespace_nowrap()
+                .overflow_hidden()
+                .text_ellipsis()
+                .text_size(px(TEXT_LABEL))
+                .text_color(rgb(TEXT_DIM))
+                .child(label.into()),
+        )
         .child(right)
         .into_any_element()
 }
 
-/// A flat button in the panel's style. `primary` is the accent fill.
+/// The bar under a tab's body: its buttons, right-aligned, on a hairline.
+pub(crate) fn panel_footer(content: impl IntoElement) -> AnyElement {
+    div()
+        .flex_none()
+        .h(px(48.0))
+        .px(px(PAD))
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_end()
+        .gap(px(8.0))
+        .border_t_1()
+        .border_color(rgb(HAIRLINE))
+        .child(content)
+        .into_any_element()
+}
+
+/// A text button: GPUI Component's, at the size every inspector footer and
+/// row uses. `primary` is the accent fill.
 pub(crate) fn panel_button(
     id: impl Into<gpui::ElementId>,
     label: impl Into<SharedString>,
@@ -663,27 +534,10 @@ pub(crate) fn panel_button(
     enabled: bool,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
-    let (bg, fg, hover) = match (primary, enabled) {
-        (_, false) => (PANEL_RAISED, DISABLED, PANEL_RAISED),
-        (true, true) => (ACCENT, 0x0b1214, ACCENT_HOVER),
-        (false, true) => (0x3a3a3a, TEXT, 0x454545),
-    };
-    div()
-        .id(id.into())
-        .h(px(26.0))
-        .px_3()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(4.0))
-        .bg(rgb(bg))
-        .text_xs()
-        .font_weight(gpui::FontWeight::MEDIUM)
-        .text_color(rgb(fg))
-        .when(enabled, |this| {
-            this.cursor_pointer()
-                .hover(move |style| style.bg(rgb(hover)))
-                .on_click(on_click)
-        })
-        .child(label.into())
+    Button::new(id)
+        .small()
+        .label(label.into())
+        .when(primary, |button| button.primary())
+        .disabled(!enabled)
+        .on_click(on_click)
 }
