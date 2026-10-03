@@ -68,7 +68,7 @@ impl Editor {
             .any(|m| m.id == segment.material_id && m.has_audio)
     }
 
-    pub(super) fn render_clip(
+    pub(super) fn render_inspector_clip(
         &mut self,
         kind: ClipKind,
         window: &mut Window,

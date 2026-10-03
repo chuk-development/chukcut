@@ -945,7 +945,7 @@ impl Editor {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let body = match self.selected_segment().map(|(_, s)| self.clip_kind(s)) {
-            Some(kind) => self.render_clip(kind, window, cx).into_any_element(),
+            Some(kind) => self.render_inspector_clip(kind, window, cx).into_any_element(),
             None => self.render_details(window, cx).into_any_element(),
         };
         div()
