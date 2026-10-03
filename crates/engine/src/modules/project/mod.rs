@@ -22,8 +22,10 @@ pub mod effects;
 pub mod grade;
 pub mod migrate;
 pub mod recovery;
+pub mod speed;
 
 pub use animation::*;
 pub use configure::{ConfigureCommand, ProjectConfig};
 pub use document::*;
 pub use effects::{EffectMaterial, EffectValue};
+pub use speed::{SpeedCurveMaterial, SpeedPoint, SpeedPreset, TimeMap};

@@ -102,7 +102,10 @@ pub fn fx_set_param(
     at: Option<Micros>,
 ) -> Result<EditResponse, String> {
     commit(state, |p| {
-        let source = at.and_then(|t| p.segment(&segment_id).map(|(_, s)| edit::source_time(s, t)));
+        let source = at.and_then(|t| {
+            p.segment(&segment_id)
+                .map(|(_, s)| edit::source_time_in(&p.materials, s, t))
+        });
         minted(edit::set_param_command(
             p,
             &segment_id,
@@ -126,7 +129,7 @@ pub fn fx_toggle_keyframe(
         let (_, segment) = p
             .segment(&segment_id)
             .ok_or_else(|| format!("unknown segment {segment_id}"))?;
-        let source = edit::source_time(segment, at);
+        let source = edit::source_time_in(&p.materials, segment, at);
         // Half a frame, in source time: the keyframe "at" the playhead.
         let tolerance = (500_000.0 / p.fps.max(1.0) * segment.speed.max(0.01) as f64) as Micros;
         minted(edit::toggle_keyframe_command(

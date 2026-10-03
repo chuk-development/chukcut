@@ -65,6 +65,13 @@ pub fn silence_analyse(
     let (sound, path, source, timeline_start, speed) = state.with_project(|project| {
         let sound = audible_segment(project, &segment_id).ok_or("the clip has no sound")?;
         let (_, picked) = project.segment(&segment_id).ok_or("unknown clip")?;
+        if project.materials.speed_curve_of(picked).is_some() {
+            return Err(
+                "the clip plays on a speed curve, which mutes its sound; remove the curve to \
+                 cut its silences"
+                    .into(),
+            );
+        }
         let (_, heard) = project.segment(&sound).ok_or("unknown clip")?;
         let (original, _) = original_source(project, heard).ok_or("the clip has no sound")?;
         let path = effective_source(project, heard, &original).path;

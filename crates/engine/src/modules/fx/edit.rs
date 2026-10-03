@@ -448,6 +448,9 @@ pub fn clip_command(
 
 /// The instant of `segment`'s source clock at timeline `time`, clamped into
 /// the clip: the clock effect keyframes are stored in.
+///
+/// Constant speed only; [`source_time_in`] also follows a speed curve and is
+/// what every caller with the document at hand should use.
 pub fn source_time(segment: &Segment, time: Micros) -> Micros {
     let start = segment.target_range.start;
     let end = segment.target_range.end() - 1;
@@ -455,6 +458,15 @@ pub fn source_time(segment: &Segment, time: Micros) -> Micros {
     segment
         .source_time_at(t)
         .unwrap_or(segment.source_range.start)
+}
+
+/// [`source_time`] through the clip's speed curve, when it has one.
+pub fn source_time_in(
+    materials: &crate::modules::project::MaterialPool,
+    segment: &Segment,
+    time: Micros,
+) -> Micros {
+    materials.time_map(segment).clamped_source_time(time)
 }
 
 // ---------------------------------------------------------------------------

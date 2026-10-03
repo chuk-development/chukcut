@@ -87,15 +87,6 @@ pub fn target_segment<'a>(
     covering.or(named)
 }
 
-/// Source time of `segment` at `time`, held at its edges.
-fn clamped_source_time(segment: &Segment, time: Micros) -> Micros {
-    let start = segment.target_range.start;
-    let end = segment.target_range.end() - 1;
-    segment
-        .source_time_at(time.clamp(start, end.max(start)))
-        .unwrap_or(segment.source_range.start)
-}
-
 /// The quad matrix of `segment` at `time`, ignoring opacity: a clip faded to
 /// nothing still has a place on the canvas, and its followers keep theirs.
 fn segment_matrix(project: &Project, segment: &Segment, time: Micros) -> Option<Mat4> {
@@ -189,7 +180,7 @@ pub fn object_through(
     target: &Segment,
     time: Micros,
 ) -> Option<ObjectOnCanvas> {
-    let source_time = clamped_source_time(target, time);
+    let source_time = project.materials.time_map(target).clamped_source_time(time);
     let pose = track.pose_at(source_time)?;
     let m = segment_matrix(project, target, time)?;
     let (sin, cos) = pose.angle.to_radians().sin_cos();

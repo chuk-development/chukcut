@@ -65,7 +65,9 @@ pub fn freeze_source(
         .materials
         .video(&segment.material_id)
         .ok_or("only a video clip can be frozen")?;
-    let source_time = segment
+    let source_time = project
+        .materials
+        .time_map(segment)
         .source_time_at(at)
         .ok_or("the playhead is not over the clip")?;
     Ok(FreezeSource {

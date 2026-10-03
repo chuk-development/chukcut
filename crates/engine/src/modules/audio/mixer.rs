@@ -99,6 +99,11 @@ pub fn plan(project: &Project) -> Vec<PlannedSegment> {
             if project.sound_is_on_a_linked_lane(track, segment) {
                 continue;
             }
+            // A clip on a speed curve is muted: there is no pitch-preserving
+            // stretch to follow a ramp with. `modules::speed`, "Sound".
+            if project.materials.speed_curve_of(segment).is_some() {
+                continue;
+            }
             let Some(path) = audio_path(project, segment) else {
                 continue;
             };

@@ -72,6 +72,18 @@ pub fn extended_source_time(segment: &Segment, time: Micros) -> Micros {
     segment.source_range.start + (offset as f64 * segment.speed as f64) as Micros
 }
 
+/// [`extended_source_time`] through the clip's speed curve when it has one;
+/// past either end the curve's edge speed carries on.
+pub fn extended_source_time_in(
+    materials: &MaterialPool,
+    segment: &Segment,
+    time: Micros,
+) -> Micros {
+    materials
+        .time_map(segment)
+        .source_at(time - segment.target_range.start)
+}
+
 /// How long a material actually is, when that is knowable.
 ///
 /// `None` for images and text, which have no extent — asking for one at any
@@ -168,7 +180,7 @@ impl<'a> TransitionSpan<'a> {
 
     fn layer(&self, segment: &'a Segment, time: Micros) -> Option<TransitionLayer<'a>> {
         let kind = self.materials.kind_of(&segment.material_id)?;
-        let mut source_time = extended_source_time(segment, time).max(0);
+        let mut source_time = extended_source_time_in(self.materials, segment, time).max(0);
         if let Some(extent) = material_extent(self.materials, &segment.material_id) {
             // The last microsecond, not the first one past the end: a decoder
             // asked for a timestamp at or beyond the duration has nothing to
