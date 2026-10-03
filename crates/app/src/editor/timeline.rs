@@ -763,10 +763,12 @@ impl Editor {
             return Vec::new();
         };
         if self.timeline.selection.iter().any(|id| id == primary) {
+            // A clip whose lane was locked since it was selected drops out:
+            // a locked lane is not edited, not even as part of a selection.
             self.timeline
                 .selection
                 .iter()
-                .filter(|id| self.project.segment(id).is_some())
+                .filter(|id| self.project.segment(id).is_some_and(|(t, _)| !t.locked))
                 .cloned()
                 .collect()
         } else {
