@@ -54,7 +54,7 @@ column current.
 | 2 | captions | auto captions (OpenAI-compatible API with own base URL/key/model, or local Whisper), word/sentence mode, SRT/VTT, caption lane, styles (font, colour, stroke, box, position, karaoke highlight), emoji | merged c4418c1 — timeline S splits full text into both halves; emoji picker monochrome in GPUI; cloud path tested only against a mock |
 | 2 | research | ml-features, open-assets, integrations, resolve-plugins — all merged into docs/research/ |
 | 3 | tracking | merged — no re-find after occlusion/leaving frame; motion tracking T1 (Rust KLT, track material + follows link, box select on the player, re-track, smoothing, bake to keyframes) per docs/research/ml-features.md | |
-| 3 | design-2 | apply the kit to timeline + inspector; in/out marks on the ruler; drop ghost with lane (export MediaDrag) | running (agent/design2) |
+| 3 | design-2 | apply the kit to timeline + inspector; in/out marks on the ruler; drop ghost with lane (export MediaDrag) | merged — inspector/effects.rs still needs the token pass; menus stay 14 px |
 | 4 | perf | readback cost, shared device or DMA-BUF to GPUI, decode-ahead, GPU text animator, export fps | running (agent/perf) |
 | 4 | glue | caption split, filler adapter, ripple-all on silence cut, freeze frame, follow-link validation, proxy policy, inline text edit | running (agent/glue) |
 | 4 | QA | end-to-end tests over the command layer, a test pass over every panel, fixes | |
