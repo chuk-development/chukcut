@@ -1332,3 +1332,238 @@ fn measure_effect_cost_per_frame() {
         println!("  + {kind}: {:.1} ms/frame", time(&p) - base);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Faint alpha on an 8-bit target
+// ---------------------------------------------------------------------------
+//
+// An 8-bit blender may round its blend factors to the target's precision:
+// asked for `SrcAlpha, OneMinusSrcAlpha`, NVIDIA rounds the source alpha of an
+// `Rgba8UnormSrgb` target to 1/255 before the multiply. The over draw
+// therefore premultiplies in the shader. These tests hold it to the CPU
+// arithmetic at alphas that fall between the 1/255 steps.
+
+/// Alphas between the 1/255 steps, and some ordinary ones.
+const FAINT: [f32; 8] = [
+    0.0018,
+    1.4 / 255.0,
+    2.6 / 255.0,
+    4.45 / 255.0,
+    0.03,
+    0.1,
+    0.5,
+    1.0,
+];
+
+/// `v` as half-float bits, rounded to nearest. Normal values only, which is
+/// all these tests write.
+fn f16_bits(v: f32) -> u16 {
+    if v == 0.0 {
+        return 0;
+    }
+    let bits = v.to_bits();
+    let exponent = ((bits >> 23) & 0xff) as i32 - 127 + 15;
+    assert!((1..31).contains(&exponent), "{v} is not a normal half");
+    let mantissa = ((bits & 0x7f_ffff) + 0x1000) >> 13;
+    let (exponent, mantissa) = if mantissa == 0x400 {
+        (exponent + 1, 0)
+    } else {
+        (exponent, mantissa)
+    };
+    ((exponent as u16) << 10) | mantissa as u16
+}
+
+fn f16_value(h: u16) -> f32 {
+    if h == 0 {
+        return 0.0;
+    }
+    let exponent = ((h >> 10) & 0x1f) as i32 - 15;
+    let mantissa = (h & 0x3ff) as f32 / 1024.0;
+    2f32.powi(exponent) * (1.0 + mantissa)
+}
+
+/// The over draw of a finished layer, from an `Rgba16Float` layer (whose
+/// alpha is not held to 1/255 the way an 8-bit layer's is) onto the
+/// compositor's `Rgba8UnormSrgb` target cleared to black: each pixel must be
+/// the layer's light times its alpha, encoded.
+#[test]
+fn an_over_draw_of_a_faint_float_layer_matches_the_cpu_reference() {
+    let Some(ctx) = crate::modules::render::test_context() else {
+        eprintln!("skipping: no GPU adapter");
+        return;
+    };
+    use crate::modules::render::texture_pool::{TextureKey, TexturePool, DEFAULT_BUDGET_BYTES};
+    const SRGB: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+    let w = FAINT.len() as u32;
+    let colours: [[u8; 3]; 2] = [[255, 255, 255], [230, 180, 40]];
+    let h = colours.len() as u32;
+
+    // Straight alpha, linear light, as halves.
+    let mut want = Vec::new();
+    let mut bytes = Vec::new();
+    for colour in colours {
+        for alpha in FAINT {
+            let texel = [
+                f16_bits(decode(colour[0])),
+                f16_bits(decode(colour[1])),
+                f16_bits(decode(colour[2])),
+                f16_bits(alpha),
+            ];
+            let a = f16_value(texel[3]);
+            want.push([
+                encode(f16_value(texel[0]) * a),
+                encode(f16_value(texel[1]) * a),
+                encode(f16_value(texel[2]) * a),
+            ]);
+            for half in texel {
+                bytes.extend_from_slice(&half.to_le_bytes());
+            }
+        }
+    }
+    let size = wgpu::Extent3d {
+        width: w,
+        height: h,
+        depth_or_array_layers: 1,
+    };
+    let layer = ctx.device().create_texture(&wgpu::TextureDescriptor {
+        label: Some("fx faint layer"),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba16Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    ctx.queue().write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &layer,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &bytes,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(w * 8),
+            rows_per_image: Some(h),
+        },
+        size,
+    );
+    let layer_view = layer.create_view(&Default::default());
+
+    let fx = FxRenderer::new(&ctx);
+    let pool = TexturePool::new(DEFAULT_BUDGET_BYTES);
+    let target = pool.acquire(
+        ctx.device(),
+        TextureKey::new(
+            w,
+            h,
+            SRGB,
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        ),
+    );
+    let mut frame = fx.begin(&ctx, &pool);
+    let over = frame.prepare_over(&layer_view, SRGB, (w, h));
+    let mut encoder = ctx.device().create_command_encoder(&Default::default());
+    {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("fx faint over"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target.view(),
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            ..Default::default()
+        });
+        over.draw(&mut pass);
+    }
+    // Rows of 256 bytes: the copy alignment, and more than `w * 4`.
+    const PADDED: u32 = 256;
+    let buffer = ctx.device().create_buffer(&wgpu::BufferDescriptor {
+        label: Some("fx faint readback"),
+        size: (PADDED * h) as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture: target.texture(),
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(PADDED),
+                rows_per_image: Some(h),
+            },
+        },
+        size,
+    );
+    ctx.queue().submit(Some(encoder.finish()));
+    frame.finish();
+    let slice = buffer.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |r| {
+        let _ = tx.send(r);
+    });
+    ctx.device()
+        .poll(wgpu::PollType::wait_indefinitely())
+        .unwrap();
+    rx.recv().unwrap().unwrap();
+    let mapped = slice.get_mapped_range().unwrap();
+
+    let mut failures = Vec::new();
+    for y in 0..h {
+        for x in 0..w {
+            let at = (y * PADDED + x * 4) as usize;
+            let got = [mapped[at], mapped[at + 1], mapped[at + 2]];
+            let wanted = want[(y * w + x) as usize];
+            if (0..3).any(|i| (got[i] as i32 - wanted[i] as i32).abs() > 1) {
+                failures.push(format!(
+                    "{:?} at alpha {:.2}/255: got {got:?}, want {wanted:?}",
+                    colours[y as usize],
+                    FAINT[x as usize] * 255.0
+                ));
+            }
+        }
+    }
+    drop(mapped);
+    buffer.unmap();
+    pool.release(target);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The same through the compositor: an effected clip at a faint opacity over
+/// the black background. Its layer is the compositor's 8-bit format, so the
+/// opacity lands on the 1/255 grid there, on every adapter, before the over
+/// draw sees it; what the over draw adds must be exactly that.
+#[test]
+fn an_effected_clip_at_a_faint_opacity_matches_the_cpu_reference() {
+    let c = gpu!();
+    let colour = [230, 180, 40, 255];
+    let provider = Provider::default().with("clip", flat(32, 16, colour));
+    for opacity in FAINT {
+        let mut p = one_clip(32, 16);
+        p.segment_mut("s").unwrap().transform.opacity = opacity;
+        attach(&mut p, "s", effect(catalog::PIXELATE, &[("size", 60.0)], 3));
+        let frame = render(&c, &p, 500_000, &provider);
+        let a = (opacity * 255.0).round() / 255.0;
+        let want = [0, 1, 2].map(|i| encode(decode(colour[i]) * a));
+        let got = &frame.data[(8 * 32 + 16) * 4..][..3];
+        for i in 0..3 {
+            assert!(
+                (got[i] as i32 - want[i] as i32).abs() <= 1,
+                "opacity {:.2}/255: got {got:?}, want {want:?}",
+                opacity * 255.0
+            );
+        }
+    }
+}

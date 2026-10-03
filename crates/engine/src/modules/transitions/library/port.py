@@ -35,6 +35,10 @@ Two things the harness does on purpose:
   colour and the entry point unpremultiplies the result, so a `mix()` written
   for opaque images does not drag a visible pixel towards the colour of a
   transparent one.
+  (The pipeline blends premultiplied colour, so `mod.rs` draws each port
+  through a second entry, `chukcut_main`, that calls the translated `main_1`
+  and multiplies by alpha again. Keep the names `main_1`, `v_uv_1` and
+  `o_color` stable, or change `GL_OUTPUT_WGSL` with them.)
 - **GL texture coordinates.** gl-transitions puts the origin at the bottom
   left, chukcut at the top left. The harness flips `y` on the way in and on
   every sample, so "wipe up" still wipes up.

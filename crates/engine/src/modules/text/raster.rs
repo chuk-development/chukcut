@@ -16,9 +16,9 @@
 //! Four layers blend over each other, and source-over blending is only
 //! associative in premultiplied alpha — compositing straight-alpha values
 //! directly is how a dark shadow under white text turns the antialiased edges
-//! grey. The compositor, on the other hand, uses `BlendState::ALPHA_BLENDING`
-//! and `SourceFrame` documents its input as straight alpha, so the last step
-//! divides the colour back out.
+//! grey. The compositor, on the other hand, takes straight alpha (`SourceFrame`
+//! documents its input so, and the quad shader premultiplies on its own), so the
+//! last step divides the colour back out.
 //!
 //! Blending happens on sRGB-encoded bytes rather than in linear light. That is
 //! technically the wrong place to antialias, and it is what every text renderer

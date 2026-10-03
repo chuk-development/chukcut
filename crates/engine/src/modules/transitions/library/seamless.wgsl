@@ -25,7 +25,10 @@
 // background, which is what lets a zoom out or a whip pan stay full frame.
 //
 // All arithmetic is in premultiplied linear light, like every other
-// transition: straight-alpha layers in, straight alpha out.
+// transition: straight-alpha layers in, premultiplied out. The pipeline
+// blends with `One, OneMinusSrcAlpha`, so the multiply by alpha stays here in
+// 32-bit float rather than in a blender that may round alpha to the target's
+// 8 bits first (NVIDIA does; see `transition.wgsl`).
 
 struct GlBlock {
     state: vec4<f32>,
@@ -42,13 +45,6 @@ const PI: f32 = 3.14159265;
 
 fn premultiply(c: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(c.rgb * c.a, c.a);
-}
-
-fn unpremultiply(c: vec4<f32>) -> vec4<f32> {
-    if (c.a <= 0.00001) {
-        return vec4<f32>(0.0);
-    }
-    return vec4<f32>(c.rgb / c.a, c.a);
 }
 
 // A triangle wave: 0..1 maps to itself, beyond it reflects back.
@@ -156,7 +152,7 @@ fn fs_zoom_in(@location(0) v_uv: vec2<f32>) -> @location(0) vec4<f32> {
     for (var i = 0; i < TAPS; i = i + 1) {
         sum = sum + zoom_in_at(v_uv, shutter(U.state.x, i));
     }
-    return unpremultiply(sum / f32(TAPS));
+    return sum / f32(TAPS);
 }
 
 @fragment
@@ -165,7 +161,7 @@ fn fs_zoom_out(@location(0) v_uv: vec2<f32>) -> @location(0) vec4<f32> {
     for (var i = 0; i < TAPS; i = i + 1) {
         sum = sum + zoom_out_at(v_uv, shutter(U.state.x, i));
     }
-    return unpremultiply(sum / f32(TAPS));
+    return sum / f32(TAPS);
 }
 
 @fragment
@@ -174,7 +170,7 @@ fn fs_spin(@location(0) v_uv: vec2<f32>) -> @location(0) vec4<f32> {
     for (var i = 0; i < TAPS; i = i + 1) {
         sum = sum + spin_at(v_uv, shutter(U.state.x, i));
     }
-    return unpremultiply(sum / f32(TAPS));
+    return sum / f32(TAPS);
 }
 
 @fragment
@@ -183,7 +179,7 @@ fn fs_whip(@location(0) v_uv: vec2<f32>) -> @location(0) vec4<f32> {
     for (var i = 0; i < TAPS; i = i + 1) {
         sum = sum + whip_at(v_uv, shutter(U.state.x, i));
     }
-    return unpremultiply(sum / f32(TAPS));
+    return sum / f32(TAPS);
 }
 
 @fragment
@@ -192,5 +188,5 @@ fn fs_push(@location(0) v_uv: vec2<f32>) -> @location(0) vec4<f32> {
     for (var i = 0; i < TAPS; i = i + 1) {
         sum = sum + push_at(v_uv, shutter(U.state.x, i));
     }
-    return unpremultiply(sum / f32(TAPS));
+    return sum / f32(TAPS);
 }
