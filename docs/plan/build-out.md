@@ -46,7 +46,7 @@ column current.
 | 2 | timeline-2 | multi-select, clipboard, keyframes on clips, transitions on the timeline, text lane, detach/link audio, fade handles | merged 101f61f — no freeze frame (engine), drop ghost lacks lane (needs `MediaDrag` export), in/out marks not on ruler |
 | 2 | shell | start screen + recent projects, autosave restore, settings (proxies, cache, hardware), shortcuts sheet, playback/scrub robustness | merged 331c980 — in/out marks not drawn on the ruler yet (timeline owner); proxy policy + cache limit stored but unused |
 | 3 | text & titles | text tab (fonts, styles, presets), text inspector (font, size, colour, stroke, shadow, box) | |
-| 3 | motion | in/out/combo presets relative to the clip, easing library, text animator (letter/word/line), punch-in zoom + auto zoom on jump cuts | running (agent/motion) |
+| 3 | motion | in/out/combo presets relative to the clip, easing library, text animator (letter/word/line), punch-in zoom + auto zoom on jump cuts | merged — text animator composites on CPU (slow in export), combo restarts at a split |
 | 3 | integrations | provider registry (secrets.toml 0600) + ElevenLabs TTS/SFX, OpenAI-compatible TTS, Pexels/Pixabay/Freesound search, fal.ai jobs with cost estimate — after captions merge | |
 | 3 | silence | silence + filler-word cutting with a review list, voice cleanup, loudness target on export | running (agent/silence) |
 | 3 | effects | short-form pack (glow, shake, light sweep, RGB split, glitch, blur, vignette), film look (grain, halation, bloom), PiP/layouts with rounded corners, gl-transitions + seamless transitions — after colour merges (compositor) | running (agent/effects) |
