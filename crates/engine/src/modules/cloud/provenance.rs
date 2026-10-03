@@ -31,6 +31,10 @@ pub enum OriginKind {
     Generated,
     /// Downloaded from a stock library.
     Stock,
+    /// From chukcut's built-in asset library: a curated track, a sound-effect
+    /// pack, a sticker (`modules::library`). Credited like stock, but not a
+    /// stock provider the panel has to name.
+    Library,
 }
 
 /// May the result go into a monetised video?
@@ -222,7 +226,7 @@ impl Origin {
         }
         let provider = provider_name(&self.provider);
         match self.kind {
-            OriginKind::Stock => {
+            OriginKind::Stock | OriginKind::Library => {
                 let what = if self.title.is_empty() {
                     "Item".to_string()
                 } else {
@@ -268,6 +272,12 @@ pub fn provider_name(id: &str) -> &str {
         "deepl" => "DeepL",
         "openai_compatible" => "an OpenAI-compatible service",
         "openai" => "OpenAI",
+        "incompetech" => "Incompetech",
+        "kenney" => "Kenney",
+        "opengameart" => "OpenGameArt",
+        "fluent-emoji" => "Fluent Emoji",
+        "noto-emoji" => "Noto Emoji",
+        "iconify" => "Iconify",
         other => other,
     }
 }

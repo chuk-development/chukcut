@@ -14,6 +14,7 @@ pub mod export;
 pub mod fx;
 pub mod gpu;
 pub mod inspector;
+pub mod library;
 pub mod loudness;
 pub mod media;
 pub mod motion;

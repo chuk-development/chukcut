@@ -7,7 +7,11 @@
 
 mod effects;
 mod library;
+mod library_audio;
+mod library_panel;
+mod looks;
 mod media;
+mod stickers;
 pub(crate) use media::{drop_command, MediaDrag};
 
 use std::collections::HashMap;
@@ -29,15 +33,18 @@ pub(crate) enum AssetTab {
     Transitions,
     Filters,
     Effects,
+    /// Emoji and icons from the built-in library (`stickers.rs`).
+    Stickers,
     /// Pexels, Pixabay and Freesound with the user's keys (`editor/cloud`).
     Stock,
 }
 
 impl AssetTab {
-    const ALL: [AssetTab; 8] = [
+    const ALL: [AssetTab; 9] = [
         AssetTab::Media,
         AssetTab::Audio,
         AssetTab::Text,
+        AssetTab::Stickers,
         AssetTab::Captions,
         AssetTab::Effects,
         AssetTab::Transitions,
@@ -54,6 +61,7 @@ impl AssetTab {
             AssetTab::Transitions => "Transitions",
             AssetTab::Filters => "Filters",
             AssetTab::Effects => "Effects",
+            AssetTab::Stickers => "Stickers",
             AssetTab::Stock => "Stock",
         }
     }
@@ -67,6 +75,7 @@ impl AssetTab {
             AssetTab::Transitions => icons::TRANSITIONS,
             AssetTab::Filters => icons::FILTERS,
             AssetTab::Effects => icons::EFFECTS,
+            AssetTab::Stickers => stickers::STICKER_GLYPH,
             AssetTab::Stock => super::cloud::STOCK_GLYPH,
         }
     }
@@ -79,6 +88,8 @@ impl AssetTab {
             AssetTab::Audio => &[
                 "Import",
                 "Project audio",
+                library_audio::AUDIO_LIBRARY[0],
+                library_audio::AUDIO_LIBRARY[1],
                 super::cloud::AUDIO_CATEGORIES[0],
                 super::cloud::AUDIO_CATEGORIES[1],
                 super::cloud::AUDIO_CATEGORIES[2],
@@ -86,7 +97,8 @@ impl AssetTab {
             AssetTab::Text => &["Add text"],
             AssetTab::Captions => super::captions::CATEGORIES,
             AssetTab::Transitions => &library::TRANSITION_CATEGORIES,
-            AssetTab::Filters => &["Filters"],
+            AssetTab::Filters => &looks::FILTER_CATEGORIES,
+            AssetTab::Stickers => &stickers::CATEGORIES,
             AssetTab::Effects => &effects::CATEGORIES,
             AssetTab::Stock => super::cloud::STOCK_CATEGORIES,
         }
@@ -95,8 +107,10 @@ impl AssetTab {
     fn searchable(self, category: usize) -> bool {
         match self {
             AssetTab::Text | AssetTab::Captions | AssetTab::Stock => false,
-            // The cloud categories have fields of their own.
-            AssetTab::Media | AssetTab::Audio => category < 2,
+            // The cloud categories have fields of their own; the library's
+            // music and sounds use the shared one.
+            AssetTab::Media => category < 2,
+            AssetTab::Audio => category < 4,
             _ => true,
         }
     }
@@ -122,6 +136,8 @@ pub(crate) struct AssetPanel {
     picked: Option<String>,
     /// Text to speech, sound effects, music, stock, AI tools, translation.
     pub(crate) cloud: super::cloud::CloudPanel,
+    /// The built-in library: fonts, stickers, music, sounds, looks.
+    pub(crate) library: library_panel::LibraryPanel,
     _search_changed: Subscription,
 }
 
@@ -133,6 +149,7 @@ impl AssetPanel {
                 cx.notify();
             }
         });
+        let library = library_panel::LibraryPanel::new(&search, window, cx);
         Self {
             tab: AssetTab::Media,
             category: HashMap::new(),
@@ -140,6 +157,7 @@ impl AssetPanel {
             thumbs: HashMap::new(),
             picked: None,
             cloud: super::cloud::CloudPanel::new(window, cx),
+            library,
             _search_changed: subscription,
         }
     }
@@ -232,12 +250,15 @@ impl Editor {
         let content = match tab {
             AssetTab::Media if category >= 2 => self.render_ai_tools(cx),
             AssetTab::Media => self.render_media_tab(category, cx).into_any_element(),
-            AssetTab::Audio if category >= 2 => self.render_cloud_audio(category - 2, cx),
+            AssetTab::Audio if category >= 4 => self.render_cloud_audio(category - 4, cx),
+            AssetTab::Audio if category >= 2 => self.render_audio_library(category - 2, cx),
             AssetTab::Audio => self.render_audio_tab(category, cx).into_any_element(),
             AssetTab::Text => self.render_text_tab(cx).into_any_element(),
             AssetTab::Captions => self.render_captions_tab(category, cx),
             AssetTab::Transitions => self.render_transitions_tab(category, cx).into_any_element(),
+            AssetTab::Filters if category == 0 => self.render_looks_tab(cx),
             AssetTab::Filters => self.render_filters_tab(cx).into_any_element(),
+            AssetTab::Stickers => self.render_stickers_tab(category, cx),
             AssetTab::Effects => self.render_effects_tab(category, cx).into_any_element(),
             AssetTab::Stock => self.render_stock_tab(category, cx).into_any_element(),
         };

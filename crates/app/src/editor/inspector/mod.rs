@@ -38,6 +38,7 @@ mod easing;
 mod effects;
 mod grading;
 mod speed;
+mod text_style;
 mod tracking;
 mod voice;
 

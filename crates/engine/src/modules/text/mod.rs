@@ -80,6 +80,13 @@ pub use request::{RasterOptions, RasterTarget, TextHighlight, TextRequest, Verti
 
 use crate::modules::project::document::TextMaterial;
 
+/// Fonts the user added through the asset library: one directory per
+/// family, under the data root and never the cache, because a project that
+/// uses one must still draw it after "clear cache".
+pub fn user_fonts_dir() -> std::path::PathBuf {
+    crate::modules::workspace::paths::data_root().join("fonts")
+}
+
 /// parley's two contexts, which are `Send` but not `Sync` in use.
 struct Engine {
     fonts: parley::FontContext,
@@ -119,9 +126,91 @@ impl TextRenderer {
     }
 
     /// The process-wide renderer, built on first use.
+    ///
+    /// It also loads every font under [`user_fonts_dir`]: the families the
+    /// asset library downloaded. Doing it here rather than in the app means
+    /// the export, a CLI and an MCP server draw a title in the same face the
+    /// preview does, without each having to remember to load them.
     pub fn shared() -> &'static Arc<TextRenderer> {
         static SHARED: OnceLock<Arc<TextRenderer>> = OnceLock::new();
-        SHARED.get_or_init(|| Arc::new(TextRenderer::new()))
+        SHARED.get_or_init(|| {
+            let renderer = TextRenderer::new();
+            renderer.register_dir(&user_fonts_dir());
+            Arc::new(renderer)
+        })
+    }
+
+    /// Add the faces in one font file. Returns the family names it brought,
+    /// empty when the bytes are not a font.
+    ///
+    /// The raster cache is cleared, because a title drawn before its font
+    /// arrived was drawn in the fallback face and is keyed on the family
+    /// *name*, which has not changed.
+    pub fn register_font(&self, bytes: Vec<u8>) -> Vec<String> {
+        self.register_font_as(bytes, None)
+    }
+
+    /// Like [`Self::register_font`], under `family` instead of the name the
+    /// file gives. The library's preview tiles use this, so a subset that
+    /// holds only the letters of its own name never stands in for the full
+    /// font of the same family.
+    pub fn register_font_as(&self, bytes: Vec<u8>, family: Option<&str>) -> Vec<String> {
+        let names = {
+            let mut engine = self.engine.lock();
+            let collection = &mut engine.fonts.collection;
+            let overrides = family.map(|name| parley::fontique::FontInfoOverride {
+                family_name: Some(name),
+                ..Default::default()
+            });
+            let added = collection.register_fonts(parley::fontique::Blob::from(bytes), overrides);
+            let mut names: Vec<String> = added
+                .iter()
+                .filter_map(|(id, _)| collection.family_name(*id).map(str::to_string))
+                .collect();
+            names.dedup();
+            names
+        };
+        if !names.is_empty() {
+            self.clear_cache();
+        }
+        names
+    }
+
+    /// Register every `.ttf` and `.otf` under `dir`, one level of
+    /// subdirectories deep (the library keeps one directory per family).
+    /// A missing directory is not an error: nothing has been downloaded yet.
+    pub fn register_dir(&self, dir: &std::path::Path) -> Vec<String> {
+        let mut names = Vec::new();
+        let mut files = Vec::new();
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return names;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if let Ok(inner) = std::fs::read_dir(&path) {
+                    files.extend(inner.flatten().map(|e| e.path()));
+                }
+            } else {
+                files.push(path);
+            }
+        }
+        files.sort();
+        for path in files {
+            let is_font = path
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("ttf") || e.eq_ignore_ascii_case("otf"));
+            if !is_font {
+                continue;
+            }
+            match std::fs::read(&path) {
+                Ok(bytes) => names.extend(self.register_font(bytes)),
+                Err(error) => tracing::warn!(%error, path = %path.display(), "font not loaded"),
+            }
+        }
+        names.sort_unstable();
+        names.dedup();
+        names
     }
 
     /// Every font family the system offers, sorted, for a font picker.

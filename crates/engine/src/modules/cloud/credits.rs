@@ -172,15 +172,19 @@ pub fn summary(project: &Project) -> LicenceSummary {
 pub fn credits_text(summary: &LicenceSummary, title: &str) -> String {
     let mut out = format!("Credits for \"{title}\"\n");
     type Belongs = fn(&LicenceItem) -> bool;
-    let groups: [(&str, Belongs); 4] = [
+    let groups: [(&str, Belongs); 5] = [
         ("Sound and music", |i| {
-            i.kind == MaterialKind::Audio && i.origin.kind == OriginKind::Stock
+            i.kind == MaterialKind::Audio && i.origin.kind != OriginKind::Generated
         }),
         ("Footage", |i| {
-            i.kind == MaterialKind::Video && i.origin.kind == OriginKind::Stock
+            i.kind == MaterialKind::Video && i.origin.kind != OriginKind::Generated
         }),
         ("Images", |i| {
             i.kind == MaterialKind::Image && i.origin.kind == OriginKind::Stock
+        }),
+        // Library pictures are stickers, emoji and icons.
+        ("Stickers", |i| {
+            i.kind == MaterialKind::Image && i.origin.kind == OriginKind::Library
         }),
         ("Generated", |i| i.origin.kind == OriginKind::Generated),
     ];
@@ -340,5 +344,43 @@ mod tests {
         let path = write_credits(&by, &video).unwrap().unwrap();
         assert_eq!(path, dir.join("Trip.credits.txt"));
         assert!(std::fs::read_to_string(path).unwrap().contains("CC BY 4.0"));
+    }
+
+    #[test]
+    fn library_items_are_credited_as_music_and_stickers() {
+        let track = crate::modules::library::sounds::curated(Some("Funny"))[0].origin();
+        let mut project = project_with(vec![track]);
+        let mut sticker = Origin::new(OriginKind::Library, "fluent-emoji");
+        sticker.title = "thumbs up".into();
+        sticker.credit = "\"thumbs up\" from Fluent Emoji by Microsoft, MIT License".into();
+        sticker.licence = crate::modules::library::licence::spdx("MIT");
+        project
+            .materials
+            .images
+            .push(crate::modules::project::ImageMaterial {
+                id: "img".into(),
+                path: "/x/s.png".into(),
+                width: 512,
+                height: 512,
+            });
+        project.materials.origins.insert("img".into(), sticker);
+        project.tracks[0]
+            .segments
+            .push(caption_segment("img", 5_000_000, 1_000_000));
+        let summary = summary(&project);
+        assert_eq!(summary.needs_credit, 1, "the track, not the MIT sticker");
+        let text = credits_text(&summary, "Trip");
+        assert!(
+            text.contains("Sound and music\n- \"Sneaky Snitch\" Kevin MacLeod (incompetech.com)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Stickers\n- \"thumbs up\" from Fluent Emoji"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("Stock media from"),
+            "library items are not stock: {text}"
+        );
     }
 }
