@@ -7,11 +7,17 @@
 //! same functions the app calls — against one [`Session`], so one invocation
 //! has one undo history.
 
+pub mod analysis;
 pub mod audio;
+pub mod cloud;
+pub mod frame;
+pub mod layout;
 pub mod look;
+pub mod markers;
 pub mod project;
 pub mod render;
 pub mod summary;
+pub mod text;
 pub mod timeline;
 
 use serde::de::DeserializeOwned;
@@ -189,6 +195,37 @@ operations!(
     audio::NormalizeArgs,
     audio::DenoiseArgs,
     audio::LoudnessArgs,
+    markers::MarkerAddArgs,
+    markers::MarkerSetArgs,
+    markers::MarkerRemoveArgs,
+    markers::MarkerListArgs,
+    frame::CropArgs,
+    frame::CurveArgs,
+    frame::FreezeArgs,
+    frame::SpeedCurveArgs,
+    layout::LayoutPipArgs,
+    layout::LayoutSplitArgs,
+    text::TitleStyleArgs,
+    text::TitleTemplateArgs,
+    text::TitlePositionArgs,
+    text::TitleDuplicateArgs,
+    analysis::ScenesDetectArgs,
+    analysis::ScenesSplitArgs,
+    analysis::ScenesClearArgs,
+    analysis::StabiliseArgs,
+    analysis::StabiliseSetArgs,
+    analysis::StabiliseRemoveArgs,
+    analysis::BeatsDetectArgs,
+    analysis::BeatsClearArgs,
+    analysis::BeatsCutArgs,
+    analysis::BeatsSnapArgs,
+    analysis::ReframeArgs,
+    analysis::AnalysisArgs,
+    cloud::TranslateCaptionsArgs,
+    cloud::TtsArgs,
+    cloud::StockKindsArgs,
+    cloud::StockSearchArgs,
+    cloud::StockDownloadArgs,
     render::ExportArgs,
     render::RenderFrameArgs,
 );
