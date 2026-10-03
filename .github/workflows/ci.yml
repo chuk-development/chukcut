@@ -14,48 +14,120 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
+# Three jobs run in parallel, so the wall-clock time is the slowest one (the
+# tests), not the sum:
+#
+#   packaging  validates the desktop files and the shell scripts (seconds)
+#   test       fmt, clippy, the engine and app tests (debug)
+#   release    the release build users get, packed as a tarball artifact
+#
+# The system packages are one list, in one place: .github/apt-packages.txt.
+
 jobs:
-  rust:
-    name: Rust
+  packaging:
+    name: Packaging files
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            desktop-file-utils appstream libxml2-utils shellcheck
+      - name: Desktop entry
+        run: desktop-file-validate packaging/linux/chukcut.desktop
+      - name: AppStream metadata
+        run: appstreamcli validate --no-net packaging/linux/io.github.chuk_development.chukcut.metainfo.xml
+      - name: MIME type
+        run: xmllint --noout packaging/linux/chukcut-mime.xml
+      - name: Shell scripts
+        run: shellcheck scripts/*.sh packaging/*.sh packaging/linux/*.sh
+
+  test:
+    name: Lint and test
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
 
-      # FFmpeg's headers, VAAPI, ALSA for cpal, the X11/Wayland/xkb/fontconfig
-      # headers gpui's Linux platform links, and libshaderc —
-      # without the last one shaderc-sys builds glslang from source with CMake,
-      # which works but adds several minutes to a cold build.
-      #
-      # nasm and cmake are for turbojpeg-sys, which builds libjpeg-turbo from
-      # source with REQUIRE_SIMD=ON and fails at "Didn't find assembler"
-      # otherwise. Ubuntu's libjpeg-turbo is too old to link against instead.
+      # The debug test build of the whole workspace (wgpu, GPUI, whisper.cpp,
+      # fourteen engine integration-test binaries) needs more room than the
+      # runner leaves free. The Android SDK and .NET are the two largest
+      # things on the image that this job never uses.
+      - name: Free disk space
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+
       - name: System dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y \
-            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
-            libx11-xcb-dev libxcb1-dev libfontconfig-dev libfreetype-dev \
-            libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev \
-            libavdevice-dev libswscale-dev libswresample-dev \
-            libva-dev libasound2-dev libshaderc-dev nasm cmake
+          sudo apt-get install --no-install-recommends -y $(grep -v '^#' .github/apt-packages.txt)
 
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: debug
 
       - name: Formatting
-        run: cargo fmt --check
+        run: cargo fmt --all --check
 
-      # Reported, not fatal. There is a backlog of about 28 style lints — no
-      # correctness among them — and failing the build on it would only teach
-      # people to ignore a red tick. Clear the backlog, then add `-D warnings`.
+      # Reported, not fatal: clippy fails the step only on deny-level lints.
+      # There is a backlog of style warnings; add `-D warnings` once it is
+      # cleared, not before, or people learn to ignore a red tick.
       - name: Clippy
-        run: cargo clippy --all-targets
+        run: cargo clippy --workspace --all-targets -j 2
 
-      # Tests that need a GPU adapter or FFmpeg binaries skip with a printed
-      # reason rather than fail, so a runner without either still reports
-      # truthfully — it just runs fewer tests. See crates/engine/tests/support.
-      - name: Tests
-        run: cargo test -j 4
+      # The runner has no GPU. Tests that need one skip with a printed reason
+      # (crates/engine/tests/support, `require_gpu!`), as do tests that need
+      # the ffmpeg CLI to generate fixtures. The variables below make "no
+      # adapter" certain: without them, wgpu could find a software Vulkan or
+      # GL driver on the image and run the GPU tests on a configuration
+      # nobody has checked. The GPU suite runs on developer machines;
+      # tests/every_card.rs is the acceptance test there.
+      #
+      # `-j 2` limits parallel rustc jobs: linking the integration-test
+      # binaries in parallel is what runs a 16 GB runner out of memory.
+      - name: Engine tests
+        env:
+          VK_ICD_FILENAMES: /nonexistent.json
+          VK_DRIVER_FILES: /nonexistent.json
+          __EGL_VENDOR_LIBRARY_FILENAMES: /nonexistent.json
+        run: cargo test -p chukcut-engine -j 2
+
+      - name: App tests
+        run: cargo test -p chukcut -j 2
+
+  release:
+    name: Release build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: System dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y $(grep -v '^#' .github/apt-packages.txt)
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # A cache of its own: the release profile (thin LTO) shares no
+      # artifacts with the debug build in the test job.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+
+      - name: Build
+        run: cargo build --release --locked -p chukcut
+
+      - name: Size
+        run: ls -l target/release/chukcut
+
+      - name: Tarball
+        run: packaging/tarball.sh --no-build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chukcut-x86_64-linux
+          path: target/dist/*
+          retention-days: 7

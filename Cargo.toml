@@ -20,3 +20,30 @@ debug = "line-tables-only"
 [profile.dev.package."*"]
 opt-level = 3
 debug = false
+
+# The build users run. Thin LTO lets LLVM inline across crate boundaries
+# (engine into app, and the many small crates under wgpu and GPUI) at a
+# fraction of fat LTO's link time. Eight codegen units keep the release build
+# parallel; one unit buys a few percent more at a much longer build, which is
+# a poor trade when most hot paths are in FFmpeg, the GPU driver and
+# libjpeg-turbo rather than in Rust.
+#
+# `strip = "debuginfo"` drops the standard library's debug info (release
+# builds carry no other) but keeps the symbol table, so a panic backtrace from
+# a user's machine still names functions. "symbols" would save a little more
+# and make those reports useless.
+#
+# This applies to `chukcut-bench` too, which is intended: the suite should
+# measure what ships. Numbers measured before this profile existed are not
+# comparable to numbers after it.
+#
+# Measured 2026-10-03, cold build of `-p chukcut` with -j 4 on a loaded
+# machine, against cargo's default release profile:
+#   default:     511 s, binary 103.4 MB
+#   this one:    454 s, binary  92.3 MB, symbol table kept
+# Treat the build times as rough: the machine load differed between the two
+# runs. Runtime speed was not measured for this change.
+[profile.release]
+lto = "thin"
+codegen-units = 8
+strip = "debuginfo"

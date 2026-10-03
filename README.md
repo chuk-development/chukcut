@@ -1,150 +1,217 @@
 # chukcut
 
-**A fast, modern video editor for Linux.** Rust engine, GPU compositor, native GPU UI.
+**A CapCut-style video editor for Linux, with a native GPU interface.**
+Open a phone video, cut it, grade it, caption it and export it. The interface
+and the compositor both run on the GPU, in one Rust process.
 
 [![CI](https://github.com/chuk-development/chukcut/actions/workflows/ci.yml/badge.svg)](https://github.com/chuk-development/chukcut/actions/workflows/ci.yml)
 [![License: GPL v3](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org)
 
-> **Status: early, and honest about it.** Import, cut, preview and export work
-> end to end, each verified against an independent tool rather than assumed.
-> It is not yet a daily driver. See [`docs/STATUS.md`](docs/STATUS.md) — the most
-> useful file in this repository.
+![The chukcut editor: media panel, player with a title over the clip, the animation presets in the inspector, and the timeline with a text lane and a transition](docs/images/editor.png)
 
-## Why this exists
+> **Status: early.** The features below exist and have tests. The app is not
+> yet a daily driver: some panels have rough edges, and a few controls are
+> placeholders. [`docs/STATUS.md`](docs/STATUS.md) says what works, what does
+> not, and what each number cost to measure.
 
-Linux has professional editors with professional learning curves, and it has
-editors that feel like 2012. What it does not have is the thing most people
-actually want: something quick and obvious, like CapCut, that opens a phone
-video and gets out of the way.
+## Why
 
-There is also a concrete gap. DaVinci Resolve's free build on Linux **cannot
-import or export H.264/H.265 at all**, and even Resolve Studio has no AAC on
-Linux — so the ordinary case, a phone MP4 in and an MP4 out with sound, means
-transcoding around the editor. chukcut treats that case as the default one:
-FFmpeg-based import of arbitrary formats, hardware H.264/HEVC export on the GPU,
-AAC audio, verified frame counts and audio levels in the test suite.
+Linux has editors with a professional learning curve, and it has editors that
+feel old. It does not have the quick, obvious editor that most people want for
+short-form video.
 
-## What works today
+There is also a concrete gap. DaVinci Resolve's free build on Linux cannot
+import or export H.264 or H.265, and Resolve Studio has no AAC on Linux. So the
+ordinary case, a phone MP4 in and an MP4 with sound out, means transcoding
+around the editor. chukcut makes that case the default: FFmpeg import of any
+format, hardware H.264/HEVC export on the GPU, and AAC audio.
 
-Every row here was measured or checked against an independent tool. The full
-evidence, including the commands that reproduce it, is in
-[`docs/STATUS.md`](docs/STATUS.md).
+## Features
 
-| | |
+**Editing**
+- Magnetic timeline: razor, ripple trim and delete, snapping, markers, in and out marks
+- Multi-select, rubber-band selection, cut, copy, paste and duplicate
+- Linked audio and video; detach audio; fades with handles on the clip
+- Keyframes on clips, speed changes, crop, transform and opacity
+- Undo for every edit, including multi-clip edits as one step
+- Start screen with recent projects, autosave, crash recovery and an unsaved-changes guard
+
+**Colour**
+- Basic adjustments: exposure, temperature, tint, saturation, vibrance, shadows, highlights and more
+- HSL, curves and colour wheels (shadows, midtones, highlights, offset)
+- `.cube` LUTs (1D and 3D) with a library, and one-click filters
+- The preview and the export use the same shader, so they show the same pixels
+
+**Effects and transitions**
+- 17 GPU effects: glow, shake, light sweep, RGB split, glitch, blur, vignette, film grain, halation, bloom and more
+- Effects on a clip, or as an effect clip that applies to everything below it
+- Picture in picture and split-screen layouts with rounded corners
+- 120 transitions from the gl-transitions library, plus seamless transitions
+
+**Motion and tracking**
+- In, Out and Combo animation presets with an easing library
+- A text animator by letter, word or line
+- Punch-in zoom, and automatic zoom on jump cuts
+- Motion tracking: draw a box on the player, and a title or overlay follows the object
+
+**Captions and speech**
+- Automatic captions, offline with whisper.cpp or with any OpenAI-compatible server
+- Word or sentence captions, karaoke highlight, styles, emoji
+- SRT and VTT import and export
+- Caption translation (DeepL or an OpenAI-compatible model)
+- Text to speech, sound effects and music with your own ElevenLabs key
+
+**Audio cleanup**
+- Silence and filler-word cutting with a review list
+- Voice cleanup (RNNoise) and a loudness target (EBU R128) on export
+
+**Export**
+- Hardware encode: NVENC on NVIDIA, VAAPI on Intel and AMD; software x264/x265 as the fallback
+- H.264 and HEVC with AAC, range export, presets, frame snapshots
+- Each hardware encoder is test-encoded before the dialog offers it
+
+**Your own accounts, optional:** Pexels, Pixabay and Freesound stock search,
+fal.ai background removal and upscaling with a price shown before you run it.
+Keys stay on your machine (`secrets.toml`, mode 0600).
+
+| Colour grading | Transition library |
 |---|---|
-| **Import** | Any format FFmpeg reads; canvas and frame rate adopted from the first clip |
-| **Timeline** | Magnetic docking, razor, ripple, multi-select, rubber band, clipboard, linked A/V, markers, in/out |
-| **Undo** | Invertible edit commands — a whole multi-clip edit undoes as one step |
-| **Preview** | Frame server over a custom protocol, audio as the clock master, hardware decode by default |
-| **Effects** | GLSL ES → WGSL rewriter, effect package loader, transitions, keyframes |
-| **Text** | Full title rendering — stroke, shadow, box — identical in preview and export |
-| **Export** | Range export, presets, hardware H.264/HEVC, AAC, progress, frame snapshots |
+| ![Colour wheels in the Adjust tab, with the filter tiles in the asset panel](docs/images/colour.png) | ![The transition library in the asset panel, with a cross dissolve between two clips on the timeline](docs/images/transitions.png) |
 
-### Performance, measured
+## Hardware
 
-`cargo run --release --bin chukcut-bench -- --all` generates its own fixtures,
-refuses to report on a busy machine, and writes JSON baselines for regression
-comparison. On an Intel Raptor Lake iGPU:
+NVIDIA and Intel come first. AMD should work through VAAPI and Mesa, but
+nobody tests it regularly.
 
-| | before | after |
-|---|---|---|
-| Preview frame, 1920×1080 (decode → composite → JPEG) | 11.93 ms | **4.36 ms** |
-| Preview frame, 1080×1920 | 11.41 ms | **3.98 ms** |
-| Decode to texture | 20–66 ms | **0.8–3.3 ms** |
+| GPU | Decode | Encode | Notes |
+|---|---|---|---|
+| NVIDIA (proprietary driver) | NVDEC: H.264, HEVC, VP9, AV1 | NVENC | Frames go to the compositor as NV12 textures |
+| Intel (iHD driver) | VAAPI: H.264, HEVC, VP9, AV1 | VAAPI | Zero-copy: decoded frames go to the GPU as DMA-BUF |
+| AMD (Mesa) | VAAPI | VAAPI | Best effort |
+| No GPU | software | x264 / x265 | Needs a Vulkan driver; Mesa's lavapipe works, slowly |
 
-The "after" column is zero-copy: the compositor draws NV12 straight into a VA
-surface the media driver allocated, and decoded frames arrive as DMA-BUF
-textures. Nothing is read back, converted or re-uploaded.
+You need a working Vulkan driver (`vulkaninfo` lists your GPU). chukcut picks
+the hardware path when the driver supports it, and falls back to software when
+it does not. `CHUKCUT_DECODE=software|auto|vaapi|cuda` forces a decode path.
 
-Correctness is pinned the same way. Hardware and software decoders are asserted
-to agree to a mean channel difference under 2 across 34 tests; hardware export
-matches software encode at 51–53 dB PSNR on luma; a decoded frame matches
-FFmpeg's own frame at the same timestamp to a max channel delta of 2.
+## Install
 
-## Build and run
-
-Linux only. NVIDIA and Intel are the targets; AMD should work. Needs Rust
-(stable) and system libraries.
+From a clone of this repository:
 
 ```bash
-# Debian / Ubuntu
+scripts/install.sh
+```
+
+The script checks the build dependencies first. When something is missing, it
+prints the exact `apt` (Debian, Ubuntu, Mint) or `dnf` (Fedora) line for you to
+run, and stops. It never installs packages itself. Then it builds a release
+binary and installs it for your user only, with no sudo:
+
+- `~/.local/bin/chukcut`
+- a menu entry, icons, the `.chukcut` file type and AppStream metadata under `~/.local/share`
+
+Other options: `--check` (only check dependencies), `--cuda` (whisper.cpp with
+CUDA, needs `nvcc`), `--no-build` (install the binary you already built) and
+`--uninstall`. Uninstalling keeps your projects and settings.
+
+A release tarball (`packaging/tarball.sh`) contains the binary and the same
+installer. It links the FFmpeg of the system it was built on, so it runs only
+on a distribution with the same FFmpeg version. [`packaging/README.md`](packaging/README.md)
+says what is bundled and what is not.
+
+## Build
+
+Linux only. You need Rust (stable, from [rustup.rs](https://rustup.rs)) and
+these system packages:
+
+```bash
+# Debian / Ubuntu / Mint
 sudo apt install \
   libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev \
   libavdevice-dev libswscale-dev libswresample-dev \
-  libva-dev libasound2-dev libshaderc-dev nasm cmake \
+  libva-dev libasound2-dev libshaderc-dev libclang-dev \
   libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
-  libx11-xcb-dev libxcb1-dev libfontconfig-dev libfreetype-dev
+  libx11-xcb-dev libxcb1-dev libfontconfig-dev libfreetype-dev \
+  build-essential pkg-config cmake nasm
+```
 
+On Fedora, `scripts/install.sh --check` prints the `dnf` line. FFmpeg with
+H.264 and HEVC comes from RPM Fusion there.
+
+```bash
 cargo build --release -p chukcut
-./target/release/chukcut                      # new project
+./target/release/chukcut                      # start screen
 ./target/release/chukcut clip1.mp4 clip2.mov  # new project with these clips
 ./target/release/chukcut my.chukcut           # open a project
 ```
 
-Hardware acceleration is automatic where the driver supports it — VAAPI on
-Intel today, NVDEC/NVENC next. `CHUKCUT_DECODE=software|auto|vaapi` overrides
-decode if you need to compare.
+The first build compiles wgpu, GPUI and whisper.cpp and takes a while. Use
+`-j 4` on a 32 GB machine; full parallelism can run out of memory.
 
-## Architecture
+For development, `scripts/run-dev.sh` runs a debug build with its own config,
+data and cache directories, so a test session never touches your real
+settings or recent projects:
+
+```bash
+scripts/run-dev.sh --fresh -- _scratch/media/vertical.mp4
+```
+
+## Architecture in one minute
 
 One process. **The engine owns the machine; the app owns the window.**
 
 ```
-crates/engine/   chukcut-engine — media, timeline, compositor, audio, export.
-                 No UI dependency. modules/<name>/commands.rs is the API.
-crates/app/      chukcut — the native app on GPUI (Zed's UI toolkit, wgpu).
+crates/engine/   chukcut-engine: media, timeline, compositor, audio, export.
+                 No UI dependency. modules/<name>/commands.rs is its API.
+crates/app/      chukcut: the native app on GPUI (Zed's UI toolkit).
 ```
 
-Every capability is a command in the engine. The app calls it; a CLI and an
-MCP server will call the same functions. The project document lives in the
-engine and changes only through invertible edit commands.
+- **Every capability is a command** in the engine. The app calls it. A CLI and
+  an MCP server will call the same functions.
+- **Every change to the project is an `EditCommand`.** Each one has an exact
+  inverse, which is how undo, autosave and validation work.
+- **Time is exact:** `i64` microseconds, never floats or frame numbers.
+- **One GPU device.** The engine opens one wgpu device on Vulkan and one VAAPI
+  device, and shares them. The compositor draws every frame, for the preview
+  and the export, with the same shaders.
+- **Media:** FFmpeg through `ffmpeg-next`, with hardware decode and encode.
+  Audio goes out through cpal (ALSA), and the audio device is the playback clock.
+- **A project is one JSON file**, `<name>.chukcut`
+  ([format](docs/architecture/project-format.md)).
 
-| Layer | Choice |
-|---|---|
-| UI | GPUI (native, GPU-rendered) |
-| Engine | Rust |
-| GPU | wgpu on Vulkan |
-| Media | FFmpeg via `ffmpeg-next`; VAAPI today, NVDEC/NVENC next |
-| Audio | cpal (ALSA) |
-| Lint | rustfmt, clippy |
+[`docs/architecture/overview.md`](docs/architecture/overview.md) has the full
+picture.
 
 ## Documentation
 
-This project writes things down. If a session's transcript vanished, the next
-person should still be able to continue.
-
-- **[`docs/STATUS.md`](docs/STATUS.md)** — what works and what it cost to get
-  there. Read this first.
-- [`docs/ROADMAP.md`](docs/ROADMAP.md) — phases, in order
-- [`docs/decisions/`](docs/decisions/) — one file per decision that would be
-  expensive to revisit, written when it was made
-- [`docs/architecture/`](docs/architecture/) — overview, project format, IPC
-  contract, timeline editing, preview pipeline
-- [`docs/research/`](docs/research/) — investigations, including the ones that
-  concluded "no"
-- [`CLAUDE.md`](CLAUDE.md) — the working agreement, for humans and agents alike
+- **[`docs/STATUS.md`](docs/STATUS.md)**: what works, what it cost, and the traps. Read this first.
+- [`CHANGELOG.md`](CHANGELOG.md): what each release contains
+- [`docs/ROADMAP.md`](docs/ROADMAP.md): phases, in order
+- [`docs/decisions/`](docs/decisions/): one file per decision that would be expensive to revisit
+- [`docs/architecture/`](docs/architecture/): overview, project format, timeline editing, preview pipeline, transitions
+- [`docs/design/language.md`](docs/design/language.md): colours, type, spacing and icons of the UI
+- [`docs/research/`](docs/research/): investigations, including the ones that concluded "no"
+- [`packaging/README.md`](packaging/README.md): install routes and what each one bundles
+- [`CLAUDE.md`](CLAUDE.md): the working agreement, for humans and agents
 
 ## Contributing
 
-Yes, please. [`CONTRIBUTING.md`](CONTRIBUTING.md) has the workflow; the short
-version is that tests skip rather than fail when a machine has no GPU or no
-FFmpeg, so you can work on the timeline without a Vulkan device.
-
-Good first areas: keyframe editing UI, audio envelopes, speed curves, masks and
-chroma key, colour tooling. The roadmap marks them.
+Yes, please. [`CONTRIBUTING.md`](CONTRIBUTING.md) has the workflow. You do not
+need a GPU: tests that need one skip with a printed reason, so you can work on
+the timeline without a Vulkan device.
 
 ## Licence
 
 GPL-3.0-or-later. See [`LICENSE`](LICENSE), and
 [`docs/decisions/0010-open-source-under-gpl.md`](docs/decisions/0010-open-source-under-gpl.md)
-for why copyleft rather than something permissive.
+for why copyleft.
 
 Codec patents (H.264, H.265) are licensed separately from software, by the
-patent pools, and are the responsibility of whoever distributes or uses a
-binary. This project distributes source code and pays no royalties, in the same
-position as VLC, Kdenlive and HandBrake. See [`NOTICE.md`](NOTICE.md).
+patent pools. They are the responsibility of whoever distributes or uses a
+binary. This project distributes source code and pays no royalties, in the
+same position as VLC, Kdenlive and HandBrake. See [`NOTICE.md`](NOTICE.md).
 
-No ByteDance-authored assets — effects, fonts, templates, icons — are in this
-repository or in any build. The effect runtime loads packages from a URL the
-user provides at runtime.
+No ByteDance-authored assets (effects, fonts, templates, icons) are in this
+repository or in any build. The screenshots show chukcut's own interface and
+media generated with FFmpeg's test sources.

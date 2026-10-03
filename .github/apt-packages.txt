@@ -1,0 +1,34 @@
+# System packages for building chukcut on Ubuntu 24.04, one per line.
+# CI installs this list; scripts/install.sh checks for the same set.
+#
+# FFmpeg headers (ffmpeg-sys-next binds the system FFmpeg).
+libavcodec-dev
+libavformat-dev
+libavutil-dev
+libavfilter-dev
+libavdevice-dev
+libswscale-dev
+libswresample-dev
+# VAAPI, and ALSA for cpal.
+libva-dev
+libasound2-dev
+# What GPUI's Linux platform links: X11, xcb, Wayland, xkb, fonts.
+libxkbcommon-dev
+libxkbcommon-x11-dev
+libwayland-dev
+libx11-xcb-dev
+libxcb1-dev
+libfontconfig-dev
+libfreetype-dev
+# The effect runtime's GLSL compiler. Without it shaderc-sys builds glslang
+# from source with CMake, which works but adds minutes to a cold build.
+libshaderc-dev
+# whisper.cpp (whisper-rs-sys) and libjpeg-turbo (turbojpeg-sys) are built
+# from source with CMake; libjpeg-turbo needs nasm for its SIMD code and fails
+# at "Didn't find assembler" without it.
+cmake
+nasm
+build-essential
+pkg-config
+# bindgen, used by ffmpeg-sys-next and whisper-rs-sys, loads libclang.
+libclang-dev
