@@ -148,3 +148,21 @@ except a busy spinner.
   column (reset, then keyframe).
 - Truncate with an ellipsis, never wrap, in rows, tiles and headers.
 - Empty states say what to do and offer the one action that does it.
+
+## Using it in code
+
+- `crate::theme` holds every value above; `crate::ui` holds the kit
+  (`Panel`, `PanelHeader`, `IconButton`, `SegmentedTabs`, `RailTab`,
+  `SectionHeader`, `Section`, `PropertyRow`, `KeyframeSlot`, `NumberField`,
+  `Badge`, `EmptyState`) and our glyphs (`ui::icons`). Title bar, asset
+  panel, player and export dialog use them; the timeline and the inspector
+  still draw their own and should move over.
+- **The window's rem stays 16 px.** GPUI Component makes `Theme::font_size`
+  the rem, and every `p_2` or `text_sm` in the app is in rems; shrinking it
+  shrinks the whole layout. The kit sets text sizes in pixels instead.
+- **A GPUI Component `Button`'s label size comes from its `Size`**
+  (`xsmall` 12, `small` 14, default 16); `.text_size()` on the button is
+  overridden by the label. Pick the size, do not style the text.
+- Hover recolouring of a glyph needs `group_hover` on the SVG itself
+  (`IconSrc::svg` returns a plain element for that); an `Icon` resolves its
+  colour when it is built and does not follow its parent's hover.
