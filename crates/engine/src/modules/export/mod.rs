@@ -54,14 +54,18 @@
 pub mod audio;
 pub mod commands;
 pub mod encoder;
+pub mod estimate;
 pub mod hwaccel;
 pub mod hwframes;
 pub mod job;
 pub mod presets;
+pub mod queue;
 pub mod snapshot;
+pub mod store;
 
 pub use audio::{mix_timeline, AudioMixer, AudioRequest, AudioSource, SilentAudioSource};
 pub use encoder::{AudioStreamSpec, MediaWriter, VideoStreamSpec, WriterStats};
+pub use estimate::{EstimateMethod, SizeEstimate};
 pub use hwaccel::{HwAccel, HwEncoder, RateControl};
 pub use hwframes::{HwDeviceContext, HwFramesContext};
 pub use job::{
@@ -71,8 +75,10 @@ pub use job::{
     FnSink, ProgressSink,
 };
 pub use presets::{
-    AudioCodec, Container, ExportPreset, Fps, Quality, VideoCodec, CUSTOM_PRESET_ID,
+    AudioCodec, Container, ExportPreset, Fps, PresetCategory, Quality, VideoCodec, CUSTOM_PRESET_ID,
 };
+pub use queue::{ExportQueue, QueueEvent, QueueItem, QueueStatus};
+pub use store::ExportMemory;
 
 use crate::modules::render::RenderError;
 
@@ -137,3 +143,64 @@ impl ExportError {
 }
 
 pub type Result<T> = std::result::Result<T, ExportError>;
+
+/// Fixtures shared by this module's unit tests.
+#[cfg(test)]
+pub(crate) mod testing {
+    use std::path::PathBuf;
+
+    use crate::modules::project::document::{
+        CanvasConfig, Micros, Project, Segment, TimeRange, Track, TrackKind, Transform,
+        VideoMaterial,
+    };
+
+    /// A project with one video clip of `duration` on a canvas of the given
+    /// size. The clip's file does not exist; settings never open it.
+    pub fn project(width: u32, height: u32, duration: Micros) -> Project {
+        let mut project = Project::new(
+            "t",
+            CanvasConfig {
+                width,
+                height,
+                background: [0.0, 0.0, 0.0, 1.0],
+            },
+            30.0,
+        );
+        project.materials.videos.push(VideoMaterial {
+            id: "v1".into(),
+            path: "/nonexistent/v1.mp4".into(),
+            width,
+            height,
+            duration,
+            fps: 30.0,
+            has_audio: true,
+            rotation: 0,
+        });
+        let mut track = Track::new(TrackKind::Video, "V1");
+        track.segments.push(Segment {
+            id: "s1".into(),
+            material_id: "v1".into(),
+            target_range: TimeRange::new(0, duration),
+            source_range: TimeRange::new(0, duration),
+            render_index: 0,
+            speed: 1.0,
+            volume: 1.0,
+            transform: Transform::default(),
+            crop: None,
+            extras: Vec::new(),
+            keyframes: Vec::new(),
+        });
+        project.tracks.push(track);
+        project
+    }
+
+    /// An empty directory for one test, under the build's target directory.
+    pub fn scratch(name: &str) -> PathBuf {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/test-scratch/export")
+            .join(format!("{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create the test directory");
+        dir
+    }
+}

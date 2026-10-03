@@ -24,11 +24,18 @@ use clap::{Args, Parser, Subcommand};
 use serde_json::{json, Value};
 
 use error::{CliError, CliResult};
+use ops::analysis::*;
 use ops::audio::*;
+use ops::cloud::*;
+use ops::delivery::*;
+use ops::frame::*;
+use ops::layout::*;
 use ops::look::*;
+use ops::markers::*;
 use ops::mask::*;
 use ops::project::*;
 use ops::render::*;
+use ops::text::*;
 use ops::timeline::*;
 use ops::{Ctx, Operation, Outcome};
 use session::Session;
@@ -134,8 +141,47 @@ enum Command {
     /// Add or remove transitions.
     #[command(subcommand)]
     Transition(TransitionCommand),
-    /// Render the timeline to a video file.
+    /// Add, change, remove or list markers on the ruler.
+    #[command(subcommand)]
+    Marker(MarkerCommand),
+    /// Crop a clip's picture.
+    Crop(On<CropArgs>),
+    /// Set one tone curve of a clip's grade from points.
+    Curve(On<CurveArgs>),
+    /// Hold the frame of a video clip at a time.
+    Freeze(On<FreezeArgs>),
+    /// Give a clip a speed ramp from a preset or points, or remove it.
+    SpeedCurve(On<SpeedCurveArgs>),
+    /// Picture in picture and split-screen layouts.
+    #[command(subcommand)]
+    Layout(LayoutCommand),
+    /// Find scene changes in a video clip and cut there.
+    #[command(subcommand)]
+    Scenes(ScenesCommand),
+    /// Stabilise a shaky video clip.
+    #[command(subcommand)]
+    Stabilise(StabiliseCommand),
+    /// Find the beat of a clip's sound and cut to it.
+    #[command(subcommand)]
+    Beats(BeatsCommand),
+    /// Follow the subject of clips for a new canvas shape.
+    Reframe(On<ReframeArgs>),
+    /// Show the scene changes, beats and stabilisation a clip carries.
+    Analysis(On<AnalysisArgs>),
+    /// Cloud features: caption translation, text to speech, stock media.
+    #[command(subcommand)]
+    Cloud(CloudCommand),
+    /// Render the timeline to a file: video, sound only or GIF.
     Export(On<ExportArgs>),
+    /// List the export presets as they fit this project, with sizes and warnings.
+    Presets(On<PresetsArgs>),
+    /// Save or delete a preset of your own.
+    #[command(subcommand)]
+    Preset(PresetCommand),
+    /// Say what an export would produce and how big it would be.
+    Estimate(On<EstimateArgs>),
+    /// Run several exports one after another: presets, ranges, other projects.
+    ExportQueue(On<ExportQueueArgs>),
     /// Render one frame as a PNG.
     RenderFrame(On<RenderFrameArgs>),
     /// Run a JSON list of operations against one project, with one undo history.
@@ -162,6 +208,14 @@ enum TitleCommand {
     Add(On<TitleAddArgs>),
     /// Change a title's words or look.
     Set(On<TitleSetArgs>),
+    /// Add a title in a style, or restyle a title.
+    Style(On<TitleStyleArgs>),
+    /// Add a title from a template, or give a title a template.
+    Template(On<TitleTemplateArgs>),
+    /// Move a title to a cell of the 3 x 3 grid.
+    Position(On<TitlePositionArgs>),
+    /// Copy a title with its own words and style.
+    Duplicate(On<TitleDuplicateArgs>),
 }
 
 #[derive(Subcommand)]
@@ -192,6 +246,82 @@ enum TransitionCommand {
     Add(On<TransitionAddArgs>),
     /// Remove the transition at the start of a clip.
     Remove(On<TransitionRemoveArgs>),
+}
+
+#[derive(Subcommand)]
+enum MarkerCommand {
+    /// Put a marker on the ruler.
+    Add(On<MarkerAddArgs>),
+    /// Move, rename or recolour a marker.
+    Set(On<MarkerSetArgs>),
+    /// Remove markers.
+    Remove(On<MarkerRemoveArgs>),
+    /// List the markers in time order.
+    List(On<MarkerListArgs>),
+}
+
+#[derive(Subcommand)]
+enum LayoutCommand {
+    /// Make a clip a picture in picture in a corner.
+    Pip(On<LayoutPipArgs>),
+    /// Arrange clips into a split screen.
+    Split(On<LayoutSplitArgs>),
+}
+
+#[derive(Subcommand)]
+enum ScenesCommand {
+    /// Find the shot changes in a video clip and mark them.
+    Detect(On<ScenesDetectArgs>),
+    /// Split a clip at the scene changes found.
+    Split(On<ScenesSplitArgs>),
+    /// Forget a clip's scene changes.
+    Clear(On<ScenesClearArgs>),
+}
+
+#[derive(Subcommand)]
+enum StabiliseCommand {
+    /// Measure the camera shake and stabilise the clip.
+    Apply(On<StabiliseArgs>),
+    /// Change strength or crop, or switch the stabilisation on or off.
+    Set(On<StabiliseSetArgs>),
+    /// Take the stabilisation away.
+    Remove(On<StabiliseRemoveArgs>),
+}
+
+#[derive(Subcommand)]
+enum BeatsCommand {
+    /// Find the beats in a clip's sound.
+    Detect(On<BeatsDetectArgs>),
+    /// Forget a clip's beats.
+    Clear(On<BeatsClearArgs>),
+    /// Cut video clips on the beats.
+    Cut(On<BeatsCutArgs>),
+    /// Move cuts onto the nearest beat.
+    Snap(On<BeatsSnapArgs>),
+}
+
+#[derive(Subcommand)]
+enum CloudCommand {
+    /// Translate the captions onto a new caption lane.
+    Translate(On<TranslateCaptionsArgs>),
+    /// Speak a text with a cloud voice and import it.
+    Tts(On<TtsArgs>),
+    /// List the kinds of stock an account has.
+    StockKinds(On<StockKindsArgs>),
+    /// Search a stock library.
+    StockSearch(On<StockSearchArgs>),
+    /// Download a stock result and import it.
+    StockDownload(On<StockDownloadArgs>),
+}
+
+// Parsed once per process; the size difference costs nothing.
+#[allow(clippy::large_enum_variant)]
+#[derive(Subcommand)]
+enum PresetCommand {
+    /// Save export settings as a preset of your own.
+    Save(On<PresetSaveArgs>),
+    /// Delete one of your own presets.
+    Remove(On<PresetRemoveArgs>),
 }
 
 #[derive(Args)]
@@ -346,6 +476,10 @@ fn dispatch(command: Command, dry: bool, ctx: &Ctx) -> CliResult<(&'static str, 
         Command::Keyframe(o) => on(o, dry, ctx),
         Command::Title(TitleCommand::Add(o)) => on(o, dry, ctx),
         Command::Title(TitleCommand::Set(o)) => on(o, dry, ctx),
+        Command::Title(TitleCommand::Style(o)) => on(o, dry, ctx),
+        Command::Title(TitleCommand::Template(o)) => on(o, dry, ctx),
+        Command::Title(TitleCommand::Position(o)) => on(o, dry, ctx),
+        Command::Title(TitleCommand::Duplicate(o)) => on(o, dry, ctx),
         Command::Captions(CaptionsCommand::Transcribe(o)) => on(o, dry, ctx),
         Command::Captions(CaptionsCommand::Import(o)) => on(o, dry, ctx),
         Command::Captions(CaptionsCommand::Export(o)) => on(o, dry, ctx),
@@ -359,7 +493,39 @@ fn dispatch(command: Command, dry: bool, ctx: &Ctx) -> CliResult<(&'static str, 
         Command::Track(o) => on(o, dry, ctx),
         Command::Transition(TransitionCommand::Add(o)) => on(o, dry, ctx),
         Command::Transition(TransitionCommand::Remove(o)) => on(o, dry, ctx),
+        Command::Marker(MarkerCommand::Add(o)) => on(o, dry, ctx),
+        Command::Marker(MarkerCommand::Set(o)) => on(o, dry, ctx),
+        Command::Marker(MarkerCommand::Remove(o)) => on(o, dry, ctx),
+        Command::Marker(MarkerCommand::List(o)) => on(o, dry, ctx),
+        Command::Crop(o) => on(o, dry, ctx),
+        Command::Curve(o) => on(o, dry, ctx),
+        Command::Freeze(o) => on(o, dry, ctx),
+        Command::SpeedCurve(o) => on(o, dry, ctx),
+        Command::Layout(LayoutCommand::Pip(o)) => on(o, dry, ctx),
+        Command::Layout(LayoutCommand::Split(o)) => on(o, dry, ctx),
+        Command::Scenes(ScenesCommand::Detect(o)) => on(o, dry, ctx),
+        Command::Scenes(ScenesCommand::Split(o)) => on(o, dry, ctx),
+        Command::Scenes(ScenesCommand::Clear(o)) => on(o, dry, ctx),
+        Command::Stabilise(StabiliseCommand::Apply(o)) => on(o, dry, ctx),
+        Command::Stabilise(StabiliseCommand::Set(o)) => on(o, dry, ctx),
+        Command::Stabilise(StabiliseCommand::Remove(o)) => on(o, dry, ctx),
+        Command::Beats(BeatsCommand::Detect(o)) => on(o, dry, ctx),
+        Command::Beats(BeatsCommand::Clear(o)) => on(o, dry, ctx),
+        Command::Beats(BeatsCommand::Cut(o)) => on(o, dry, ctx),
+        Command::Beats(BeatsCommand::Snap(o)) => on(o, dry, ctx),
+        Command::Reframe(o) => on(o, dry, ctx),
+        Command::Analysis(o) => on(o, dry, ctx),
+        Command::Cloud(CloudCommand::Translate(o)) => on(o, dry, ctx),
+        Command::Cloud(CloudCommand::Tts(o)) => on(o, dry, ctx),
+        Command::Cloud(CloudCommand::StockKinds(o)) => on(o, dry, ctx),
+        Command::Cloud(CloudCommand::StockSearch(o)) => on(o, dry, ctx),
+        Command::Cloud(CloudCommand::StockDownload(o)) => on(o, dry, ctx),
         Command::Export(o) => on(o, dry, ctx),
+        Command::Presets(o) => on(o, dry, ctx),
+        Command::Preset(PresetCommand::Save(o)) => on(o, dry, ctx),
+        Command::Preset(PresetCommand::Remove(o)) => on(o, dry, ctx),
+        Command::Estimate(o) => on(o, dry, ctx),
+        Command::ExportQueue(o) => on(o, dry, ctx),
         Command::RenderFrame(o) => on(o, dry, ctx),
         Command::Catalog(args) => Ok(("catalog", args.run()?, false)),
         Command::Batch(args) => {
