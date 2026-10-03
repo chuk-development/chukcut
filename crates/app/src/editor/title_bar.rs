@@ -15,8 +15,6 @@ use super::*;
 /// document on screen is the one on disk.
 #[derive(Default)]
 pub(crate) struct TitleState {
-    /// The edit generation that was last written to the project file.
-    saved_generation: Option<u64>,
     /// The generation seen on the previous frame, to notice an edit.
     seen_generation: u64,
     /// When the last edit happened. The engine's autosave writes the working
@@ -27,7 +25,6 @@ pub(crate) struct TitleState {
 impl TitleState {
     /// Called after a successful save to the project file.
     pub(crate) fn mark_saved(&mut self, generation: u64) {
-        self.saved_generation = Some(generation);
         self.seen_generation = generation;
     }
 
@@ -56,9 +53,7 @@ impl Editor {
         let saved_path = self.state.project_path.read().clone();
 
         let (saved_icon, saved_label) = match (&saved_path, self.title.last_edit) {
-            (Some(_), _) if self.title.saved_generation == Some(self.generation) => {
-                (Some(Lucide::CircleCheck), "Saved".to_string())
-            }
+            (Some(_), _) if !self.is_dirty() => (Some(Lucide::CircleCheck), "Saved".to_string()),
             (_, Some(edited)) => (
                 Some(Lucide::CloudCheck),
                 format!("Autosaved {}", ago(edited)),
@@ -94,6 +89,9 @@ impl Editor {
                     .separator()
                     .menu("Import media…", Box::new(Import))
                     .menu("Export…", Box::new(Export))
+                    .separator()
+                    .menu("Settings…", Box::new(OpenSettings))
+                    .menu("Keyboard shortcuts", Box::new(ShowShortcuts))
                     .separator()
                     .menu("Quit", Box::new(Quit))
             });
@@ -184,19 +182,10 @@ impl Editor {
             .child(export)
     }
 
-    /// Menu → New project: an empty 9:16 project, like a fresh start.
-    pub(super) fn on_new_project(&mut self, _: &mut Window, cx: &mut Context<Self>) {
-        self.pause();
-        let result =
-            project_commands::project_new(&self.state, "Untitled".into(), 1080, 1920, 30.0)
-                .map(|_| ());
-        self.selected = None;
-        self.clock.seek(0);
-        self.title = TitleState::default();
-        self.refresh(cx);
-        // The fresh project is not an edit; do not call it autosaved.
-        self.title.seen_generation = self.generation;
-        self.report(result, cx);
+    /// Menu → New project: back to the start screen, which asks for the
+    /// canvas — after the unsaved-changes guard.
+    pub(super) fn on_new_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.request_home(window, cx);
     }
 
     /// Menu → Save as: always asks for a path, even for a saved project.
@@ -223,20 +212,7 @@ impl Editor {
                 }
                 _ => return,
             };
-            let _ = this.update(cx, |editor, cx| {
-                let result = project_commands::project_save(
-                    &editor.state,
-                    Some(path.to_string_lossy().to_string()),
-                );
-                editor.status = Some(match result {
-                    Ok(path) => {
-                        editor.title.mark_saved(editor.generation);
-                        format!("Saved {path}").into()
-                    }
-                    Err(error) => error.into(),
-                });
-                cx.notify();
-            });
+            let _ = this.update(cx, |editor, cx| editor.save_to(Some(path), cx));
         })
         .detach();
     }

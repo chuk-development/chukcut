@@ -958,6 +958,7 @@ dependencies = [
  "gpui-kit",
  "image",
  "parking_lot",
+ "serde_json",
  "tracing",
 ]
 

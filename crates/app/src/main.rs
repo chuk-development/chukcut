@@ -1,7 +1,7 @@
 //! chukcut — the native app.
 //!
 //! ```text
-//! chukcut                      new project
+//! chukcut                      the start screen
 //! chukcut project.chukcut      open a project
 //! chukcut a.mp4 b.mov …        new project with these files on the timeline
 //! ```
@@ -11,9 +11,6 @@ mod edits;
 mod player;
 mod theme;
 
-use std::path::PathBuf;
-
-use chukcut_engine::modules::project::commands as project_commands;
 use chukcut_engine::state::AppState;
 use gpui::application;
 use gpui::{px, size, App, AppContext, Bounds, KeyBinding, WindowBounds, WindowOptions};
@@ -24,29 +21,9 @@ fn main() {
     chukcut_engine::init();
 
     let state = AppState::new();
-    let mut media = Vec::new();
-    let mut opened = false;
-    for argument in std::env::args().skip(1) {
-        let path = PathBuf::from(&argument);
-        if path.extension().is_some_and(|e| e == "chukcut") && !opened {
-            match project_commands::project_open(&state, argument.clone()) {
-                Ok(_) => opened = true,
-                Err(error) => eprintln!("chukcut: {error}"),
-            }
-        } else {
-            media.push(path);
-        }
-    }
-    if !opened {
-        // 9:16 at 30 fps, CapCut's default. The first imported video adopts
-        // its own shape while the timeline is empty.
-        if let Err(error) =
-            project_commands::project_new(&state, "Untitled".into(), 1080, 1920, 30.0)
-        {
-            eprintln!("chukcut: {error}");
-            std::process::exit(1);
-        }
-    }
+    // Before the window: claims crash recovery, then opens or creates what
+    // the command line names. See `editor/shell.rs`.
+    let (startup, recovery) = editor::startup(&state);
 
     application()
         // The whole Lucide catalog, not only the component defaults: the
@@ -81,7 +58,16 @@ fn main() {
                 KeyBinding::new("ctrl-q", Quit, None),
             ]);
             cx.bind_keys(timeline_key_bindings());
-            cx.on_action(|_: &Quit, cx| cx.quit());
+            cx.bind_keys(playback_key_bindings());
+            cx.bind_keys(shortcut_key_bindings());
+            // Quit asks about unsaved changes first; so does the close button.
+            cx.on_action(|_: &Quit, cx| editor::quit(cx));
+            cx.on_window_closed(|cx, _| {
+                if cx.windows().is_empty() {
+                    cx.quit();
+                }
+            })
+            .detach();
 
             let bounds = Bounds::centered(None, size(px(1600.0), px(960.0)), cx);
             // `gpui::open_window` mounts the component Root, which dialogs,
@@ -93,7 +79,7 @@ fn main() {
                     ..Default::default()
                 },
                 cx,
-                |window, cx| cx.new(|cx| Editor::new(state, media, window, cx)),
+                |window, cx| cx.new(|cx| Shell::new(state, startup, recovery, window, cx)),
             )
             .expect("open the editor window");
             cx.activate(true);
