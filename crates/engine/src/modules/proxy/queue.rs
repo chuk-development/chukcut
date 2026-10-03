@@ -47,15 +47,15 @@
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 
 use parking_lot::{Condvar, Mutex};
 use serde::{Deserialize, Serialize};
 
 use super::cache::{ProxyCache, SourceKey};
-use super::decision::decide;
 use super::generate::{self, ProxySpec};
+use super::policy::{self, ProxyPolicy};
 use super::Result;
 
 /// Where a job is in its life.
@@ -220,7 +220,15 @@ struct Inner {
     /// until the next edit. Folding this counter into that fingerprint is the
     /// whole of what the preview has to do to pick a proxy up.
     generation: AtomicU64,
+    /// The user's [`ProxyPolicy`], as [`policy::to_bits`]. Per queue rather
+    /// than global so a test queue is unaffected by the shared one.
+    policy: AtomicU8,
+    /// Run on the worker thread after each proxy lands in the cache. The
+    /// shared queue trims the disk cache here; see [`ProxyQueue::shared`].
+    on_ready: Mutex<Option<ReadyHook>>,
 }
+
+type ReadyHook = Arc<dyn Fn() + Send + Sync>;
 
 /// The queue. Cheap to clone; every clone is the same queue.
 #[derive(Clone)]
@@ -243,6 +251,8 @@ impl ProxyQueue {
             transcoder,
             next_id: AtomicU64::new(1),
             generation: AtomicU64::new(0),
+            policy: AtomicU8::new(policy::to_bits(ProxyPolicy::Auto)),
+            on_ready: Mutex::new(None),
         });
 
         let worker = Arc::clone(&inner);
@@ -259,9 +269,55 @@ impl ProxyQueue {
     }
 
     /// The process-wide queue, against the process-wide cache.
+    ///
+    /// It starts **Off** and stays off until a shell applies the user's
+    /// settings (`workspace_settings_apply`, which `crate::init` calls). A test
+    /// that opens a project through the command layer must not start
+    /// transcoding its fixtures into the real cache, and a shell that never
+    /// read the settings has no business guessing them.
     pub fn shared() -> &'static ProxyQueue {
         static SHARED: std::sync::OnceLock<ProxyQueue> = std::sync::OnceLock::new();
-        SHARED.get_or_init(|| ProxyQueue::new(ProxyCache::shared()))
+        SHARED.get_or_init(|| {
+            let queue = ProxyQueue::new(ProxyCache::shared());
+            queue
+                .inner
+                .policy
+                .store(policy::to_bits(ProxyPolicy::Off), Ordering::Relaxed);
+            // A new proxy is the one thing that grows the cache by gigabytes,
+            // so it is the moment to bring it back under the user's limit.
+            queue.on_ready(Arc::new(
+                crate::modules::workspace::trim::trim_to_configured_limit,
+            ));
+            queue
+        })
+    }
+
+    /// The policy enqueueing and the preview switch follow.
+    pub fn policy(&self) -> ProxyPolicy {
+        policy::from_bits(self.inner.policy.load(Ordering::Relaxed))
+    }
+
+    /// Change the policy. Turning proxies off cancels whatever is queued or
+    /// building — the user just said they do not want it. Any change bumps
+    /// [`Self::generation`], so a preview keyed on it re-resolves its sources
+    /// and switches to or from the proxies already on disk.
+    pub fn set_policy(&self, policy: ProxyPolicy) {
+        let previous = self
+            .inner
+            .policy
+            .swap(policy::to_bits(policy), Ordering::Relaxed);
+        if previous == policy::to_bits(policy) {
+            return;
+        }
+        if policy == ProxyPolicy::Off {
+            self.cancel_all();
+        }
+        self.inner.generation.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Run `hook` on the worker thread after every proxy that lands.
+    pub fn on_ready(&self, hook: ReadyHook) {
+        *self.inner.on_ready.lock() = Some(hook);
     }
 
     pub fn cache(&self) -> &ProxyCache {
@@ -300,6 +356,13 @@ impl ProxyQueue {
     /// [`Self::enqueue`] with a decode cost the caller has measured, which
     /// overrules the model. See [`super::decision::decide`].
     pub fn enqueue_with(&self, source: &Path, measured_ms: Option<f64>) -> Result<EnqueueOutcome> {
+        let policy = self.policy();
+        // Before any IO: with proxies off, an import costs nothing extra.
+        if policy == ProxyPolicy::Off {
+            return Ok(EnqueueOutcome::NotNeeded {
+                reason: policy::OFF_REASON.into(),
+            });
+        }
         let key = SourceKey::of(source)?;
 
         if let Some(existing) = self.inner.cache.lookup_by_key(&key) {
@@ -316,7 +379,7 @@ impl ProxyQueue {
         }
 
         let (profile, spec) = generate::plan(source)?;
-        let decision = decide(&profile, measured_ms);
+        let decision = policy::decide_with_policy(policy, &profile, measured_ms);
         if !decision.build {
             return Ok(EnqueueOutcome::NotNeeded {
                 reason: decision.reason,
@@ -602,6 +665,11 @@ fn run_one(inner: &Inner, job: Job) {
             // After the insert, so anything that re-resolves on seeing a new
             // generation finds the proxy already in the index.
             inner.generation.fetch_add(1, Ordering::Relaxed);
+            // Cloned out so the hook never runs under the lock.
+            let hook = inner.on_ready.lock().clone();
+            if let Some(hook) = hook {
+                hook();
+            }
             ProxyEvent {
                 job_id: job.id.clone(),
                 source_path,
@@ -707,6 +775,9 @@ impl ProxyQueue {
     /// The other half of the switch. Note the return type: a
     /// [`super::PreviewSource`], which nothing in the export path accepts.
     pub fn preview_source(&self, source: &Path) -> super::PreviewSource {
+        if !policy::preview_uses_proxies(self.policy()) {
+            return super::PreviewSource::original_only(source);
+        }
         match self.inner.cache.lookup(source) {
             Some(proxy) => super::PreviewSource::with_proxy(source, proxy),
             None => super::PreviewSource::original_only(source),
@@ -930,6 +1001,54 @@ mod tests {
         let queue = ProxyQueue::new(cache);
         assert!(!queue.cancel("no-such-job"));
         queue.shutdown();
+    }
+
+    #[test]
+    fn a_missing_file_is_a_sentence_not_a_panic() {
+        let root = crate::modules::workspace::trim::test_scratch("queue-missing");
+        let queue = ProxyQueue::new(Arc::new(ProxyCache::open(&root, 1 << 30)));
+        let error = queue
+            .enqueue(Path::new("/nonexistent/clip.mp4"))
+            .expect_err("a missing file cannot be proxied")
+            .to_string();
+        assert!(error.contains("/nonexistent/clip.mp4"), "{error}");
+        queue.shutdown();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Off answers before any IO, and keeps the preview on the original even
+    /// when a valid proxy is sitting in the cache. Turning it back on hands
+    /// the proxy over again, and both changes move the generation so a
+    /// preview keyed on it notices.
+    #[test]
+    fn the_policy_gates_enqueueing_and_the_preview_switch() {
+        let root = crate::modules::workspace::trim::test_scratch("queue-policy");
+        let cache = Arc::new(ProxyCache::open(root.join("cache"), 1 << 30));
+        let source = root.join("clip.mp4");
+        std::fs::write(&source, b"not really a video").expect("source");
+        let key = SourceKey::of(&source).expect("key");
+        std::fs::write(cache.path_for(&key), b"proxy").expect("proxy");
+        cache.insert(key, 640, 360).expect("insert");
+
+        let queue = ProxyQueue::new(cache);
+        assert_eq!(queue.policy(), ProxyPolicy::Auto);
+        assert!(queue.preview_source(&source).is_proxied());
+
+        let before = queue.generation();
+        queue.set_policy(ProxyPolicy::Off);
+        assert!(queue.generation() > before);
+        assert!(!queue.preview_source(&source).is_proxied());
+        assert!(matches!(
+            queue.enqueue(Path::new("/nonexistent/clip.mp4")),
+            Ok(EnqueueOutcome::NotNeeded { .. })
+        ));
+
+        let before = queue.generation();
+        queue.set_policy(ProxyPolicy::Always);
+        assert!(queue.generation() > before);
+        assert!(queue.preview_source(&source).is_proxied());
+        queue.shutdown();
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

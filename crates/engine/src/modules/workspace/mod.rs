@@ -14,6 +14,7 @@ pub mod hardware;
 pub mod logging;
 pub mod paths;
 pub mod settings;
+pub mod trim;
 
 pub use hardware::{HardwareCodec, HardwareReport};
 pub use settings::{RecentProject, RecentProjects, Settings};

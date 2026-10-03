@@ -329,6 +329,25 @@ impl ProxyCache {
         true
     }
 
+    /// Drop index entries whose file is gone — deleted by the workspace's
+    /// cache trim, or by a person in a file manager. Returns how many.
+    ///
+    /// `lookup` already does this one entry at a time; this is for the
+    /// totals, which would otherwise go on counting files that no longer
+    /// exist until something asked for each of them.
+    pub fn forget_missing(&self) -> usize {
+        let mut index = self.index.lock();
+        let before = index.entries.len();
+        index
+            .entries
+            .retain(|entry| self.root.join(&entry.file).exists());
+        let forgotten = before - index.entries.len();
+        if forgotten > 0 {
+            self.save(&index);
+        }
+        forgotten
+    }
+
     /// Delete every proxy and forget them all.
     pub fn clear(&self) -> Result<()> {
         let mut index = self.index.lock();
@@ -533,6 +552,30 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    /// A proxy deleted behind the cache's back — by the workspace trim —
+    /// stops counting as soon as the index is reconciled.
+    #[test]
+    fn forgetting_missing_files_corrects_the_totals() {
+        let root = crate::modules::workspace::trim::test_scratch("proxy-forget");
+        let cache = ProxyCache::open(root.join("cache"), 1 << 30);
+        let mut keys = Vec::new();
+        for name in ["a.mp4", "b.mp4"] {
+            let source = root.join(name);
+            std::fs::write(&source, name.as_bytes()).expect("source");
+            let key = SourceKey::of(&source).expect("key");
+            place(&cache, &key, 100);
+            cache.insert(key.clone(), 640, 360).expect("insert");
+            keys.push(key);
+        }
+        std::fs::remove_file(cache.path_for(&keys[0])).expect("delete behind its back");
+
+        assert_eq!(cache.forget_missing(), 1);
+        assert_eq!(cache.stats().entries, 1);
+        assert_eq!(cache.stats().bytes, 100);
+        assert_eq!(cache.forget_missing(), 0);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Put a fake proxy of `bytes` bytes where the cache expects one.

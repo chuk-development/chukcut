@@ -1659,6 +1659,60 @@ Don't save leaves it alone and deletes the working copy.
 - File dialogs need xdg-desktop-portal; on a bare Xvfb they fail, so Open…
   and Save as were not exercised there.
 
+## Proxy policy and cache limit take effect (2026-10-03)
+
+The two Settings rows the shell wave stored but nothing read now act. Both are
+engine-side; the app only writes the settings.
+
+- **`workspace_settings_set` applies what it saves** through
+  `workspace_settings_apply`, which `crate::init` also calls with the stored
+  settings at startup. No shell has to remember to push them.
+- **Proxy policy lives on the queue** (`proxy::policy`, `ProxyQueue::policy`).
+  Off: nothing is queued, the preview never decodes a proxy, and turning it
+  off cancels running jobs. Automatic: `decision::decide` unchanged. Always:
+  every video a proxy would make meaningfully smaller — the shrink clause
+  survives, because a 720p "proxy" of a 720p file decodes no faster. A policy
+  change bumps `ProxyQueue::generation()`.
+- **The shared queue starts Off** until settings are applied. Integration tests
+  open projects through the command layer and must not transcode their
+  fixtures into the real `~/.cache/chukcut/proxies`.
+- **Enqueueing**: `project_open`, `project_new`, recovery restore, the working
+  copy restore and `project_import_media` call `proxy_request_media`, which
+  probes on its own thread and returns at once. Import requests only the new
+  file. Turning the policy on from Off considers the open project's media.
+- **The preview half is not wired in the app yet.** `ProxyQueue::preview_source`
+  honours the policy, but `crates/app/src/player.rs` still builds
+  `MediaSourceProvider::from_project`, so the player decodes originals whatever
+  the policy says. That file belongs to the perf agent, who plans "proxies on
+  by default for heavy files"; the patch is decision 0003's provider seam plus
+  folding `proxy_generation()` into the player's provider key. When it lands,
+  drop "The player does not switch to proxies yet." from the Settings hint.
+- **Cache limit**: `workspace::trim`, command `workspace_trim_cache(limit)`.
+  Least recently used first, by the later of mtime and atime, except proxies,
+  whose index records every lookup to the millisecond. Kept: the open
+  project's thumbnail and waveform directories and its proxies (the engine
+  learns the media from the project commands via `workspace_cache_in_use`),
+  dot-prefixed / `.part` / `.tmp` files being written, `proxies/index.json`,
+  and the whole of `whisper/` — a downloaded model is not derived data, so it
+  is outside the count too. Voice cleanup renders are ordinary LRU candidates:
+  their key needs the clip's strength, which is not cheap to know here.
+  Protected files still count; a limit below what the open project needs
+  deletes everything else and stops.
+- **When it runs**: after every proxy lands (the shared queue's ready hook),
+  when the limit changes, and once at startup — but **not before the first
+  project is opened, created, restored or closed**. `crate::init` runs before
+  the startup project is open, and a trim there raced the open and could
+  delete the thumbnails it was about to show. A session that never leaves the
+  start screen does not trim.
+- The proxy cache keeps its own 20 GiB cap underneath; the setting is the
+  whole cache's ceiling. `ProxyCache::forget_missing` reconciles the index
+  after a trim so the Settings readout stops counting deleted proxies.
+- Tests: `proxy::policy::tests::the_policy_decides_what_gets_enqueued`,
+  `queue::tests::the_policy_gates_enqueueing_and_the_preview_switch`,
+  `workspace::trim::tests::trimming_removes_the_oldest_first_and_leaves_protected_files`
+  and the pure `plan` tests. Their scratch directories are under
+  `target/<profile>/test-scratch/`, not the system temp directory.
+
 ## Colour grading (2026-10-03)
 
 The Adjust tab is complete: Basic, HSL, Curves and Colour wheels, plus `.cube`

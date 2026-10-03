@@ -51,7 +51,29 @@ pub fn project_new(
     // A new project has never been saved anywhere, which is exactly the case
     // where losing it to a restart hurts most.
     super::autosave::schedule(&project, None);
+    media_opened(&project);
     Ok(project)
+}
+
+/// A document became the open one: its media is now in use, which keeps its
+/// thumbnails, waveforms and proxies out of the cache trim, and its videos are
+/// considered for proxies under the user's policy. Neither blocks: the proxy
+/// probing runs on a thread of its own and does nothing with proxies off.
+fn media_opened(project: &Project) {
+    let pool = &project.materials;
+    let videos: Vec<String> = pool.videos.iter().map(|m| m.path.clone()).collect();
+    crate::modules::workspace::commands::workspace_cache_in_use(media_paths(project));
+    crate::modules::proxy::commands::proxy_request_media(videos);
+}
+
+fn media_paths(project: &Project) -> Vec<String> {
+    let pool = &project.materials;
+    pool.videos
+        .iter()
+        .map(|m| m.path.clone())
+        .chain(pool.audios.iter().map(|m| m.path.clone()))
+        .chain(pool.images.iter().map(|m| m.path.clone()))
+        .collect()
 }
 pub fn project_open(state: &Arc<AppState>, path: String) -> Result<Project, String> {
     let raw = fs::read_to_string(&path).map_err(|e| format!("cannot read {path}: {e}"))?;
@@ -70,6 +92,7 @@ pub fn project_open(state: &Arc<AppState>, path: String) -> Result<Project, Stri
     *state.project_path.write() = Some(path.clone());
     state.history.write().clear();
     super::autosave::schedule(&project, Some(path));
+    media_opened(&project);
     Ok(project)
 }
 pub fn project_save(state: &Arc<AppState>, path: Option<String>) -> Result<String, String> {
@@ -366,6 +389,11 @@ pub async fn project_import_media(
     if let Some(project) = state.project.read().clone() {
         let origin = state.project_path.read().clone();
         super::autosave::schedule(&project, origin);
+        crate::modules::workspace::commands::workspace_cache_in_use(media_paths(&project));
+    }
+    // Only the new file: the rest of the pool was considered when it came in.
+    if info.has_video {
+        crate::modules::proxy::commands::proxy_request_media(vec![path]);
     }
     Ok(imported)
 }
@@ -417,6 +445,7 @@ fn restore_working_copy(state: &AppState) -> Option<Project> {
     // The restored document is where the user was, not something they did.
     // Undo must not walk back into a session that is over.
     state.history.write().clear();
+    media_opened(&project);
     Some(project)
 }
 
@@ -501,6 +530,7 @@ pub fn project_close(state: &Arc<AppState>, exiting: bool) {
     *state.project_path.write() = None;
     state.history.write().clear();
     super::recovery::close_at(&super::autosave::file(), exiting);
+    crate::modules::workspace::commands::workspace_cache_in_use(Vec::new());
 }
 
 /// Called once at launch, before any project is opened: set a crashed
@@ -527,6 +557,7 @@ pub fn project_recovery_restore(state: &Arc<AppState>) -> Result<Project, String
     *state.project_path.write() = restored.path.clone();
     state.history.write().clear();
     super::autosave::schedule(&project, restored.path);
+    media_opened(&project);
     Ok(project)
 }
 

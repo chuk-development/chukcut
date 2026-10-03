@@ -167,9 +167,14 @@ impl SettingsDialog {
     fn change(&mut self, edit: impl FnOnce(&mut Settings), cx: &mut Context<Self>) {
         let before = self.settings.clone();
         edit(&mut self.settings);
+        // The engine applies the proxy policy and the cache limit itself, in
+        // `workspace_settings_set`.
         match workspace_commands::workspace_settings_set(self.settings.clone()) {
             Ok(()) => {
                 self.notice = None;
+                if self.settings.cache_limit != before.cache_limit {
+                    self.trim_then_measure(cx);
+                }
                 if let Some(editor) = self.editor.as_ref().and_then(|e| e.upgrade()) {
                     let settings = self.settings.clone();
                     editor.update(cx, |editor, cx| editor.apply_settings(&settings, cx));
@@ -181,6 +186,22 @@ impl SettingsDialog {
             }
         }
         cx.notify();
+    }
+
+    /// Show the cache size after a new limit has had its effect. The engine
+    /// already started a trim; this one queues behind it and finds nothing
+    /// left to do, which is what makes the size shown afterwards true.
+    fn trim_then_measure(&mut self, cx: &mut Context<Self>) {
+        let limit = self.settings.cache_limit;
+        self.cache_bytes = None;
+        self.proxy_bytes = None;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .spawn(async move { workspace_commands::workspace_trim_cache(limit) })
+                .await;
+            let _ = this.update(cx, |dialog, cx| dialog.measure_cache(cx));
+        })
+        .detach();
     }
 
     fn clear_cache(&mut self, cx: &mut Context<Self>) {
@@ -379,14 +400,14 @@ impl SettingsDialog {
             vec![
                 row(
                     "Proxy media",
-                    Some("Small stand-ins for footage too heavy to play; the export always uses the originals. The player does not switch to proxies yet."),
+                    Some("Small stand-ins for footage too heavy to play, built in the background after import. Automatic picks the heavy files; the export always uses the originals. The player does not switch to proxies yet."),
                     policy,
                 ),
                 row("Proxies on disk", None, proxies),
                 row("Cache", Some("Safe to clear at any time."), cache),
                 row(
                     "Cache limit",
-                    Some("Kept as your limit; the cache is not trimmed to it automatically yet."),
+                    Some("Past this, the least recently used files are deleted. The open project's are kept."),
                     limit,
                 ),
             ],
