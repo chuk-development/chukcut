@@ -10,6 +10,7 @@ mod editor;
 mod edits;
 mod player;
 mod theme;
+mod ui;
 
 use std::path::PathBuf;
 
