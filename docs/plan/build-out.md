@@ -84,3 +84,13 @@ column current.
 13. **Run GPU tests on both adapters** — `test_context()` takes the default adapter. Agents testing on lavapipe missed the NVIDIA alpha rounding; run engine GPU tests once on the real GPU and once with `VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json`.
 
 **Paused 2026-10-03 by the owner:** all agents and builds stopped because builds filled the SSD (4 GB free). Before restarting: every agent must share one CARGO_TARGET_DIR or delete its target/ after its branch merges; check `df -h /` first.
+
+## Open for the next session (2026-10-03)
+
+- **Restart rule:** agents share one `CARGO_TARGET_DIR` (or delete their `target/` right after their branch merges); check `df -h /` before launching.
+- **ML worker** (backlog 3): partial, uncommitted work in `/home/user/git/chukcut-mlworker` (branch agent/mlworker) — review it, commit or redo.
+- **Release build is stale:** rebuild `cargo build --release -p chukcut`; the running binary predates the alpha fixes (d9d86dd, agent/alpha merge).
+- **CI:** check that the run after the font fix (635bad8) and later commits is green on GitHub.
+- **Dependabot PRs** (rust-minor group, ffmpeg-next 9.0) are unreviewed; ffmpeg-next 9 needs a build + full test run before merging.
+- **Owner decisions pending:** (1) a project identity (URL + project e-mail, not the owner's) for Wikimedia/Musopen User-Agent — until then those sources stay off; (2) delete the fork `chukfinley/filmcraft` (needs `gh auth refresh -h github.com -s delete_repo`).
+- **Follow-up:** check `effects/graph.rs:735` (data-driven blend state) for the NVIDIA alpha rounding.
