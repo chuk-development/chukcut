@@ -1960,6 +1960,30 @@ nothing else in the system would say so.
 
 ## Traps that have already cost time
 
+- **GPUI Component theme colours set through `Theme::global_mut` never reach
+  the widgets.** A Button reads the resolved `theme.tokens`, and the tokens
+  only follow `theme.colors` when the edit goes through `Theme::update`, which
+  reconciles them. Edited in place, the primary Export button stayed white.
+  `theme::apply` now uses `update`; also set `button_primary*`, which is its
+  own colour, not `primary`.
+
+- **A shortcut bound to a plain key fires while the user types.** GPUI matches
+  a key binding before a text field sees the character, so "s" split the clip
+  and Space played while typing in the asset search. Plain-key bindings take
+  the context `!Input` (`main.rs`). The editor root takes focus back on every
+  mouse down in the capture phase, so a click outside a field restores the
+  shortcuts; a field under the pointer refocuses itself afterwards.
+
+- **Do not drive the app on the shared desktop.** Other sessions run their own
+  `chukcut` windows there, and one of them on top of yours swallows the
+  clicks — `xdotool mousemove --window` moves the real pointer, so the click
+  lands on whatever window is on top at that spot. Run UI checks on a private
+  Xvfb display with lavapipe (`VK_ICD_FILENAMES=.../lvp_icd.json`; GPUI and the
+  engine both render there, NVENC detection still works) and close stray
+  instances with `xkill -id` on their windows: a PID from one tool call may not
+  exist in the next call's PID namespace. Pick an unusual display number; a
+  second session on the same Xvfb puts its window over yours.
+
 - **The frontend suite's flakiness was vitest's 5 s default, not the
   components.** Eight tests across six files failed at 5.1–6.9 s, and the set
   changed between runs — App, the export dialog, the preview, the media

@@ -13,8 +13,7 @@ use std::sync::Arc;
 
 use chukcut_engine::modules::audio::AudioEngine;
 use chukcut_engine::modules::export::commands as export_commands;
-use chukcut_engine::modules::export::presets::VideoCodec;
-use chukcut_engine::modules::export::{ExportProgress, ExportRequest, ExportStage};
+use chukcut_engine::modules::export::{ExportProgress, ExportStage};
 use chukcut_engine::modules::preview::clock::{frame_at, PlaybackClock};
 use chukcut_engine::modules::project::commands as project_commands;
 use chukcut_engine::modules::project::{Micros, Project, Track, TrackKind};
@@ -93,6 +92,12 @@ pub struct Editor {
     /// export thread and read by [`Self::tick`].
     export_progress: Arc<parking_lot::Mutex<Option<ExportProgress>>>,
     inspector: inspector::Inspector,
+    /// The title bar's save state.
+    title: title_bar::TitleState,
+    /// The asset panel's tabs, search and thumbnails.
+    assets: assets::AssetPanel,
+    /// The player's preview quality.
+    preview: preview::PreviewState,
     _ticker: Task<()>,
 }
 
@@ -125,6 +130,7 @@ impl Editor {
             }
         });
 
+        let assets = assets::AssetPanel::new(window, cx);
         let mut editor = Self {
             state,
             audio,
@@ -142,6 +148,9 @@ impl Editor {
             timeline: timeline::TimelineState::new(cx),
             export_progress: Arc::new(parking_lot::Mutex::new(None)),
             inspector: inspector::Inspector::default(),
+            title: Default::default(),
+            assets,
+            preview: Default::default(),
             _ticker: ticker,
         };
         // Hardware encoder detection opens each device and encodes a test
@@ -197,7 +206,7 @@ impl Editor {
             self.project.canvas.height as f32,
         );
         let fit = (bw / cw).min(bh / ch) * self.scale;
-        let fit = fit.min(1.0);
+        let fit = fit.min(1.0) * self.preview.quality.scale();
         Some(((cw * fit).round() as u32, (ch * fit).round() as u32))
     }
 
@@ -359,7 +368,7 @@ impl Editor {
         });
         cx.spawn(async move |this, cx| match picked.await {
             Ok(Ok(Some(paths))) => {
-                let _ = this.update(cx, |editor, cx| editor.import_paths(paths, cx));
+                let _ = this.update(cx, |editor, cx| editor.import_to_library(paths, cx));
             }
             Ok(Err(error)) => {
                 let _ = this.update(cx, |editor, cx| editor.dialog_failed(error, cx));
@@ -402,6 +411,9 @@ impl Editor {
     fn on_save(&mut self, _: &Save, _: &mut Window, cx: &mut Context<Self>) {
         if self.state.project_path.read().is_some() {
             let result = project_commands::project_save(&self.state, None).map(|_| ());
+            if result.is_ok() {
+                self.title.mark_saved(self.generation);
+            }
             self.status = Some(match &result {
                 Ok(()) => "Saved".into(),
                 Err(error) => error.clone().into(),
@@ -424,7 +436,10 @@ impl Editor {
                     Some(path.to_string_lossy().to_string()),
                 );
                 editor.status = Some(match result {
-                    Ok(path) => format!("Saved {path}").into(),
+                    Ok(path) => {
+                        editor.title.mark_saved(editor.generation);
+                        format!("Saved {path}").into()
+                    }
                     Err(error) => error.into(),
                 });
                 cx.notify();
@@ -534,6 +549,13 @@ impl Render for Editor {
             .map(|root| self.timeline_actions(root, cx))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
+            .on_drop(cx.listener(Self::on_media_drop))
+            // A click anywhere gives the keyboard back to the editor; a text
+            // field under the pointer takes it again in its own handler,
+            // which runs after this capture-phase one.
+            .capture_any_mouse_down(cx.listener(|this, _, window, cx| {
+                window.focus(&this.focus, cx);
+            }))
             .size_full()
             .flex()
             .flex_col()

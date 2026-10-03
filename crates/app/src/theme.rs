@@ -41,7 +41,13 @@ fn hsla(hex: u32) -> Hsla {
 /// Dark mode, with the component theme's surfaces and accent set to ours.
 pub(crate) fn apply(cx: &mut App) {
     Theme::change(ThemeMode::Dark, None, cx);
-    let theme = Theme::global_mut(cx);
+    // `update`, not `global_mut`: widgets read the theme's resolved tokens,
+    // which only follow `colors` when the edit goes through `update`. Edited
+    // in place, the colours below never reached a Button.
+    Theme::update(cx, apply_colors);
+}
+
+fn apply_colors(theme: &mut Theme) {
     theme.font_family = "Noto Sans".into();
     let c = &mut theme.colors;
     c.background = hsla(BG);
@@ -52,6 +58,10 @@ pub(crate) fn apply(cx: &mut App) {
     c.primary_hover = hsla(ACCENT_HOVER);
     c.primary_active = hsla(ACCENT);
     c.primary_foreground = hsla(0x0b1214);
+    c.button_primary = hsla(ACCENT);
+    c.button_primary_hover = hsla(ACCENT_HOVER);
+    c.button_primary_active = hsla(ACCENT);
+    c.button_primary_foreground = hsla(0x0b1214);
     c.accent = hsla(PANEL_RAISED);
     c.accent_foreground = hsla(TEXT);
     c.secondary = hsla(PANEL_RAISED);

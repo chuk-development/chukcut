@@ -364,6 +364,19 @@ impl Editor {
         )
     }
 
+    /// Where a drag from another panel would land: the timeline time under
+    /// `position` and the lane there, or `None` outside the lanes.
+    pub(super) fn drop_target(&self, position: Point<Pixels>) -> Option<(Micros, Option<String>)> {
+        if !self.timeline.lanes.get().contains(&position) {
+            return None;
+        }
+        let (x, y) = self.lanes_local(position);
+        let lane = self
+            .row_at(y)
+            .map(|row| self.project.tracks[row.track].id.clone());
+        Some((self.x_to_time(x), lane))
+    }
+
     /// Lanes-local coordinates of a window position.
     fn lanes_local(&self, position: Point<Pixels>) -> (f32, f32) {
         let bounds = self.timeline.lanes.get();

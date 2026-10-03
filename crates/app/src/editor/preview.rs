@@ -1,6 +1,94 @@
-//! The player in the middle: the canvas and the transport.
+//! The player in the middle, laid out like CapCut's: a header with the
+//! timeline's name and a menu, the canvas, and a transport bar with the time
+//! on the left, play in the centre and the view controls on the right.
+
+use chukcut_engine::modules::project::ProjectConfig;
+use gpui::assets::IconName as Lucide;
+use gpui::component::button::{Button, ButtonVariants as _};
+use gpui::component::menu::{DropdownMenu as _, PopupMenuItem};
+use gpui::component::Sizable as _;
 
 use super::*;
+
+/// How many pixels the preview renders, relative to what fits the viewer.
+/// Lower is cheaper; playback of heavy timelines stays smooth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum PreviewQuality {
+    #[default]
+    Full,
+    Half,
+    Quarter,
+}
+
+impl PreviewQuality {
+    const ALL: [PreviewQuality; 3] = [
+        PreviewQuality::Full,
+        PreviewQuality::Half,
+        PreviewQuality::Quarter,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            PreviewQuality::Full => "Full",
+            PreviewQuality::Half => "Half",
+            PreviewQuality::Quarter => "Quarter",
+        }
+    }
+
+    pub(crate) fn scale(self) -> f32 {
+        match self {
+            PreviewQuality::Full => 1.0,
+            PreviewQuality::Half => 0.5,
+            PreviewQuality::Quarter => 0.25,
+        }
+    }
+}
+
+/// The player's own state, one field on the editor.
+#[derive(Default)]
+pub(crate) struct PreviewState {
+    pub(crate) quality: PreviewQuality,
+}
+
+/// Canvas shapes the ratio menu offers, as (label, long, short) where the
+/// short side keeps the canvas's current short side.
+const RATIOS: [(&str, u32, u32); 6] = [
+    ("16:9", 16, 9),
+    ("9:16", 9, 16),
+    ("1:1", 1, 1),
+    ("4:3", 4, 3),
+    ("3:4", 3, 4),
+    ("21:9", 21, 9),
+];
+
+/// The canvas for a ratio, keeping the current short side.
+fn canvas_for_ratio(width: u32, height: u32, (w, h): (u32, u32)) -> (u32, u32) {
+    let short = width.min(height).max(2);
+    let even = |value: f64| ((value.round() as u32) + 1) & !1;
+    if w >= h {
+        (even(short as f64 * w as f64 / h as f64), short & !1)
+    } else {
+        (short & !1, even(short as f64 * h as f64 / w as f64))
+    }
+}
+
+/// `00:00:00:00` — hours, minutes, seconds, frames, as CapCut writes it.
+fn long_timecode(time: Micros, fps: f64) -> String {
+    let total = time.max(0) as f64 / 1_000_000.0;
+    let whole = total.floor() as i64;
+    let frames = if fps > 0.0 {
+        (total.fract() * fps).floor() as i64
+    } else {
+        0
+    };
+    format!(
+        "{:02}:{:02}:{:02}:{:02}",
+        whole / 3600,
+        whole / 60 % 60,
+        whole % 60,
+        frames
+    )
+}
 
 impl Editor {
     pub(super) fn render_preview(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -36,11 +124,100 @@ impl Editor {
 
         let playing = self.clock.is_playing();
         let position = self.clock.position();
+        let fps = self.project.fps;
+        let quality = self.preview.quality;
+
+        let editor = cx.entity().downgrade();
+        let header_menu = Button::new("player-menu")
+            .icon(Lucide::Menu)
+            .ghost()
+            .xsmall()
+            .dropdown_menu_with_anchor(gpui::Anchor::TopRight, move |menu, _, _| {
+                let snapshot = editor.clone();
+                menu.min_w(px(180.0))
+                    .item(
+                        PopupMenuItem::new("Save frame as image…").on_click(move |_, _, cx| {
+                            let _ = snapshot.update(cx, |editor, cx| editor.save_frame(cx));
+                        }),
+                    )
+            });
+
+        let editor = cx.entity().downgrade();
+        let quality_menu = Button::new("player-quality")
+            .label(quality.label())
+            .ghost()
+            .xsmall()
+            .tooltip("Preview quality")
+            .dropdown_menu_with_anchor(gpui::Anchor::BottomRight, move |menu, _, _| {
+                PreviewQuality::ALL.into_iter().fold(menu, |menu, each| {
+                    let editor = editor.clone();
+                    menu.item(
+                        PopupMenuItem::new(each.label())
+                            .checked(each == quality)
+                            .on_click(move |_, _, cx| {
+                                let _ = editor.update(cx, |editor, cx| {
+                                    editor.preview.quality = each;
+                                    // A new size is a new request.
+                                    editor.last_request = None;
+                                    cx.notify();
+                                });
+                            }),
+                    )
+                })
+            });
+
+        let editor = cx.entity().downgrade();
+        let (canvas_w, canvas_h) = (self.project.canvas.width, self.project.canvas.height);
+        let ratio_menu = Button::new("player-ratio")
+            .label("Ratio")
+            .ghost()
+            .xsmall()
+            .tooltip("Canvas aspect ratio")
+            .dropdown_menu_with_anchor(gpui::Anchor::BottomRight, move |menu, _, _| {
+                RATIOS.into_iter().fold(menu, |menu, (label, w, h)| {
+                    let editor = editor.clone();
+                    let (width, height) = canvas_for_ratio(canvas_w, canvas_h, (w, h));
+                    let current = (width, height) == (canvas_w, canvas_h);
+                    menu.item(PopupMenuItem::new(label).checked(current).on_click(
+                        move |_, _, cx| {
+                            let _ = editor
+                                .update(cx, |editor, cx| editor.set_canvas(width, height, cx));
+                        },
+                    ))
+                })
+            });
+
+        let transport_icon = |id: &'static str, icon: Lucide, tooltip: &'static str| {
+            Button::new(id).icon(icon).ghost().xsmall().tooltip(tooltip)
+        };
+
         div()
             .flex_1()
+            .min_w(px(0.0))
             .flex()
             .flex_col()
-            .bg(rgb(BG))
+            .rounded_md()
+            .overflow_hidden()
+            .bg(rgb(PANEL))
+            .child(
+                div()
+                    .h(px(36.0))
+                    .flex_none()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .px_3()
+                    .border_b_1()
+                    .border_color(rgb(BG))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(TEXT))
+                            .child("Player – Timeline 01"),
+                    )
+                    .child(header_menu),
+            )
             .child(
                 div()
                     .flex_1()
@@ -49,7 +226,7 @@ impl Editor {
                     .items_center()
                     .justify_center()
                     .overflow_hidden()
-                    .m_3()
+                    .m_2()
                     .child(
                         canvas(move |bounds, _, _| viewer.set(bounds), |_, _, _, _| {})
                             .absolute()
@@ -60,34 +237,152 @@ impl Editor {
             .child(
                 div()
                     .h(px(40.0))
+                    .flex_none()
+                    .relative()
                     .flex()
                     .flex_row()
                     .items_center()
-                    .justify_center()
-                    .gap_3()
-                    .border_t_1()
-                    .border_color(rgb(BORDER))
+                    .px_3()
                     .child(
                         div()
-                            .text_sm()
-                            .text_color(rgb(TEXT))
-                            .child(timecode(position, self.project.fps)),
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_1()
+                            .text_xs()
+                            .child(
+                                div()
+                                    .text_color(rgb(ACCENT))
+                                    .child(long_timecode(position, fps)),
+                            )
+                            .child(div().text_color(rgb(TEXT_DIM)).child("/"))
+                            .child(
+                                div()
+                                    .text_color(rgb(TEXT_DIM))
+                                    .child(long_timecode(self.project.duration(), fps)),
+                            ),
                     )
-                    .child(button(
-                        "play",
-                        if playing { "Pause" } else { "Play" },
-                        cx.listener(|this, _, w, cx| this.on_play_pause(&PlayPause, w, cx)),
-                    ))
+                    // The play button is centred on the bar, not between
+                    // the groups either side of it.
                     .child(
                         div()
-                            .text_sm()
-                            .text_color(rgb(TEXT_DIM))
-                            .child(timecode(self.project.duration(), self.project.fps)),
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .size_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                Button::new("play")
+                                    .icon(if playing { Lucide::Pause } else { Lucide::Play })
+                                    .ghost()
+                                    .small()
+                                    .tooltip(if playing {
+                                        "Pause (Space)"
+                                    } else {
+                                        "Play (Space)"
+                                    })
+                                    .on_click(cx.listener(|this, _, w, cx| {
+                                        this.on_play_pause(&PlayPause, w, cx)
+                                    })),
+                            ),
                     )
-                    .child(div().text_xs().text_color(rgb(TEXT_DIM)).child(format!(
-                        "{}×{} · {:.2} fps",
-                        self.project.canvas.width, self.project.canvas.height, self.project.fps
-                    ))),
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_1()
+                            .child(quality_menu)
+                            .child(
+                                transport_icon("player-fit", Lucide::Scan, "Zoom to fit").on_click(
+                                    cx.listener(|this, _, _, cx| {
+                                        // The canvas always fits the viewer;
+                                        // re-render at the current size.
+                                        this.last_request = None;
+                                        cx.notify();
+                                    }),
+                                ),
+                            )
+                            .child(ratio_menu)
+                            .child(
+                                transport_icon(
+                                    "player-fullscreen",
+                                    Lucide::Maximize,
+                                    "Full screen",
+                                )
+                                .on_click(|_, window, _| window.toggle_fullscreen()),
+                            ),
+                    ),
             )
+    }
+
+    /// Ratio menu: a new canvas shape, as one undoable project edit.
+    fn set_canvas(&mut self, width: u32, height: u32, cx: &mut Context<Self>) {
+        let config = ProjectConfig {
+            width,
+            height,
+            ..ProjectConfig::of(&self.project)
+        };
+        let result = project_commands::project_configure(&self.state, config).map(|_| ());
+        self.refresh(cx);
+        self.report(result, cx);
+    }
+
+    /// Player menu → Save frame: the frame at the playhead, full size, as PNG.
+    fn save_frame(&mut self, cx: &mut Context<Self>) {
+        let time = self.clock.position() + chukcut_engine::modules::project::SAMPLE_SLACK;
+        let directory = std::env::var_os("HOME")
+            .map(|home| PathBuf::from(home).join("Pictures"))
+            .filter(|path| path.is_dir())
+            .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+            .unwrap_or_else(|| PathBuf::from("."));
+        let name = format!("{} frame.png", self.project.name);
+        let picked = cx.prompt_for_new_path(&directory, Some(&name));
+        let state = Arc::clone(&self.state);
+        cx.spawn(async move |this, cx| {
+            let path = match picked.await {
+                Ok(Ok(Some(path))) => path,
+                Ok(Err(error)) => {
+                    let _ = this.update(cx, |editor, cx| editor.dialog_failed(error, cx));
+                    return;
+                }
+                _ => return,
+            };
+            let result =
+                export_commands::export_snapshot(&state, time, path.to_string_lossy().to_string())
+                    .await;
+            let _ = this.update(cx, |editor, cx| {
+                editor.status = Some(match result {
+                    Ok(path) => format!("Saved frame {path}").into(),
+                    Err(error) => error.into(),
+                });
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_ratio_keeps_the_short_side() {
+        assert_eq!(canvas_for_ratio(1080, 1920, (16, 9)), (1920, 1080));
+        assert_eq!(canvas_for_ratio(1920, 1080, (9, 16)), (1080, 1920));
+        assert_eq!(canvas_for_ratio(1080, 1920, (1, 1)), (1080, 1080));
+        assert_eq!(canvas_for_ratio(1920, 1080, (4, 3)), (1440, 1080));
+        assert_eq!(canvas_for_ratio(1920, 1080, (21, 9)), (2520, 1080));
+    }
+
+    #[test]
+    fn the_timecode_has_hours_and_frames() {
+        assert_eq!(long_timecode(133_966_667, 30.0), "00:02:13:29");
+        assert_eq!(long_timecode(0, 30.0), "00:00:00:00");
+        assert_eq!(long_timecode(3_600_000_000, 25.0), "01:00:00:00");
     }
 }
