@@ -29,10 +29,12 @@ pub(crate) enum AssetTab {
     Transitions,
     Filters,
     Effects,
+    /// Pexels, Pixabay and Freesound with the user's keys (`editor/cloud`).
+    Stock,
 }
 
 impl AssetTab {
-    const ALL: [AssetTab; 7] = [
+    const ALL: [AssetTab; 8] = [
         AssetTab::Media,
         AssetTab::Audio,
         AssetTab::Text,
@@ -40,6 +42,7 @@ impl AssetTab {
         AssetTab::Effects,
         AssetTab::Transitions,
         AssetTab::Filters,
+        AssetTab::Stock,
     ];
 
     fn label(self) -> &'static str {
@@ -51,6 +54,7 @@ impl AssetTab {
             AssetTab::Transitions => "Transitions",
             AssetTab::Filters => "Filters",
             AssetTab::Effects => "Effects",
+            AssetTab::Stock => "Stock",
         }
     }
 
@@ -63,24 +67,38 @@ impl AssetTab {
             AssetTab::Transitions => icons::TRANSITIONS,
             AssetTab::Filters => icons::FILTERS,
             AssetTab::Effects => icons::EFFECTS,
+            AssetTab::Stock => super::cloud::STOCK_GLYPH,
         }
     }
 
     /// The entries of the category column. The first one is the default.
     fn categories(self) -> &'static [&'static str] {
         match self {
-            AssetTab::Media => &["Import", "Project media"],
-            AssetTab::Audio => &["Import", "Project audio"],
+            // The entries after the first two are `editor/cloud`'s.
+            AssetTab::Media => &["Import", "Project media", "AI tools"],
+            AssetTab::Audio => &[
+                "Import",
+                "Project audio",
+                super::cloud::AUDIO_CATEGORIES[0],
+                super::cloud::AUDIO_CATEGORIES[1],
+                super::cloud::AUDIO_CATEGORIES[2],
+            ],
             AssetTab::Text => &["Add text"],
             AssetTab::Captions => super::captions::CATEGORIES,
             AssetTab::Transitions => &library::TRANSITION_CATEGORIES,
             AssetTab::Filters => &["Filters"],
             AssetTab::Effects => &effects::CATEGORIES,
+            AssetTab::Stock => super::cloud::STOCK_CATEGORIES,
         }
     }
 
-    fn searchable(self) -> bool {
-        !matches!(self, AssetTab::Text | AssetTab::Captions)
+    fn searchable(self, category: usize) -> bool {
+        match self {
+            AssetTab::Text | AssetTab::Captions | AssetTab::Stock => false,
+            // The cloud categories have fields of their own.
+            AssetTab::Media | AssetTab::Audio => category < 2,
+            _ => true,
+        }
     }
 }
 
@@ -102,6 +120,8 @@ pub(crate) struct AssetPanel {
     thumbs: HashMap<String, Thumb>,
     /// The tile last clicked, drawn with an outline.
     picked: Option<String>,
+    /// Text to speech, sound effects, music, stock, AI tools, translation.
+    pub(crate) cloud: super::cloud::CloudPanel,
     _search_changed: Subscription,
 }
 
@@ -119,6 +139,7 @@ impl AssetPanel {
             search,
             thumbs: HashMap::new(),
             picked: None,
+            cloud: super::cloud::CloudPanel::new(window, cx),
             _search_changed: subscription,
         }
     }
@@ -209,13 +230,16 @@ impl Editor {
             .collect::<Vec<_>>();
 
         let content = match tab {
+            AssetTab::Media if category >= 2 => self.render_ai_tools(cx),
             AssetTab::Media => self.render_media_tab(category, cx).into_any_element(),
+            AssetTab::Audio if category >= 2 => self.render_cloud_audio(category - 2, cx),
             AssetTab::Audio => self.render_audio_tab(category, cx).into_any_element(),
             AssetTab::Text => self.render_text_tab(cx).into_any_element(),
             AssetTab::Captions => self.render_captions_tab(category, cx),
             AssetTab::Transitions => self.render_transitions_tab(category, cx).into_any_element(),
             AssetTab::Filters => self.render_filters_tab(cx).into_any_element(),
             AssetTab::Effects => self.render_effects_tab(category, cx).into_any_element(),
+            AssetTab::Stock => self.render_stock_tab(category, cx).into_any_element(),
         };
 
         Panel::new("asset-panel")
@@ -267,7 +291,7 @@ impl Editor {
                             .flex_col()
                             .gap(px(10.0))
                             .p(px(PAD))
-                            .when(tab.searchable(), |column| {
+                            .when(tab.searchable(category), |column| {
                                 column.child(
                                     Input::new(&self.assets.search)
                                         .small()

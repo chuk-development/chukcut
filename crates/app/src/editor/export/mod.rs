@@ -2,6 +2,7 @@
 //! the title bar shows while it runs.
 
 mod dialog;
+mod licences;
 mod loudness;
 mod settings;
 

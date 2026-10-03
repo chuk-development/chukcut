@@ -132,6 +132,9 @@ ureq = "2.12"
 sha2 = "0.10"
 # `secrets.toml` and `accounts.toml`.
 toml = "0.8"
+# ElevenLabs sends speech with timestamps as base64 inside JSON. Already in
+# the tree through wgpu and ureq; this only names it.
+base64 = "0.22"
 # Local transcription: whisper.cpp, built from source by `whisper-rs-sys` with
 # CMake. Optional because that build costs a few minutes once; the app turns it
 # on. `local-whisper-cuda` adds the CUDA backend and needs `nvcc`. See

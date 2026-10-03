@@ -21,6 +21,44 @@ pub enum ProviderKind {
     /// Anything that speaks OpenAI's REST format: OpenAI, Groq, a local
     /// whisper.cpp or faster-whisper server.
     OpenaiCompatible,
+    /// Voices, sound effects and music, with one `xi-api-key`.
+    Elevenlabs,
+    /// One key for hundreds of models behind one queue API; chukcut uses it
+    /// to process clips (remove background, upscale, interpolate).
+    Fal,
+    /// Stock photos and videos.
+    Pexels,
+    /// Stock photos and videos.
+    Pixabay,
+    /// Sound effects under Creative Commons licences.
+    Freesound,
+    /// Caption translation.
+    Deepl,
+}
+
+impl ProviderKind {
+    pub const ALL: [ProviderKind; 7] = [
+        ProviderKind::OpenaiCompatible,
+        ProviderKind::Elevenlabs,
+        ProviderKind::Fal,
+        ProviderKind::Pexels,
+        ProviderKind::Pixabay,
+        ProviderKind::Freesound,
+        ProviderKind::Deepl,
+    ];
+
+    /// The id used in provenance records and file names: `"elevenlabs"`.
+    pub fn id(self) -> &'static str {
+        match self {
+            ProviderKind::OpenaiCompatible => "openai_compatible",
+            ProviderKind::Elevenlabs => "elevenlabs",
+            ProviderKind::Fal => "fal",
+            ProviderKind::Pexels => "pexels",
+            ProviderKind::Pixabay => "pixabay",
+            ProviderKind::Freesound => "freesound",
+            ProviderKind::Deepl => "deepl",
+        }
+    }
 }
 
 /// What the UI needs to offer a kind.
@@ -29,26 +67,124 @@ pub struct ProviderDescriptor {
     pub kind: ProviderKind,
     pub name: &'static str,
     pub capabilities: &'static [Capability],
-    /// Ready-made accounts: `(name, base URL, default model)`.
+    /// Ready-made accounts: `(name, base URL, default model)`. The first one
+    /// is what "Add" fills in.
     pub presets: &'static [(&'static str, &'static str, &'static str)],
     /// Where the user gets a key.
     pub key_page: &'static str,
+    /// The vendor's terms for what may be done with the results.
+    pub terms: &'static str,
+    /// Whether the account form shows the base URL. Fixed for every vendor
+    /// except the OpenAI-compatible kind; still stored, so tests and
+    /// self-hosted mirrors can point an account elsewhere.
+    pub custom_url: bool,
+    /// Whether the form shows a model field.
+    pub has_model: bool,
+    /// Whether a key is required. A local OpenAI-compatible server is not.
+    pub needs_key: bool,
+    /// One or two sentences for the account form: what the key gives, and
+    /// what the vendor's terms ask of the user.
+    pub help: &'static str,
 }
 
-pub const PROVIDERS: &[ProviderDescriptor] = &[ProviderDescriptor {
-    kind: ProviderKind::OpenaiCompatible,
-    name: "OpenAI-compatible",
-    capabilities: &[Capability::Transcribe],
-    presets: &[
-        ("OpenAI", "https://api.openai.com/v1", "whisper-1"),
-        (
-            "Groq",
-            "https://api.groq.com/openai/v1",
-            "whisper-large-v3-turbo",
-        ),
-    ],
-    key_page: "https://platform.openai.com/api-keys",
-}];
+pub const PROVIDERS: &[ProviderDescriptor] = &[
+    ProviderDescriptor {
+        kind: ProviderKind::OpenaiCompatible,
+        name: "OpenAI-compatible",
+        capabilities: &[Capability::Transcribe, Capability::Tts, Capability::Translate],
+        presets: &[
+            ("OpenAI", "https://api.openai.com/v1", "whisper-1"),
+            (
+                "Groq",
+                "https://api.groq.com/openai/v1",
+                "whisper-large-v3-turbo",
+            ),
+        ],
+        key_page: "https://platform.openai.com/api-keys",
+        terms: "https://openai.com/policies/usage-policies/",
+        custom_url: true,
+        has_model: true,
+        needs_key: false,
+        help: "OpenAI, Groq or a local server such as Kokoro-FastAPI. Transcription, speech and caption translation. OpenAI asks you to disclose that a voice is AI-generated.",
+    },
+    ProviderDescriptor {
+        kind: ProviderKind::Elevenlabs,
+        name: "ElevenLabs",
+        capabilities: &[
+            Capability::Tts,
+            Capability::VoiceList,
+            Capability::SoundEffects,
+            Capability::Music,
+        ],
+        presets: &[("ElevenLabs", "https://api.elevenlabs.io", "eleven_multilingual_v2")],
+        key_page: "https://elevenlabs.io/app/settings/api-keys",
+        terms: "https://elevenlabs.io/terms-of-use",
+        custom_url: false,
+        has_model: true,
+        needs_key: true,
+        help: "Voices with word timing, sound effects and music. The free plan does not allow commercial use; chukcut records the plan with every file and warns at export. A key limited to text to speech, sound effects and music, with a credit cap, is enough.",
+    },
+    ProviderDescriptor {
+        kind: ProviderKind::Fal,
+        name: "fal.ai",
+        capabilities: &[Capability::Process],
+        presets: &[("fal.ai", "https://queue.fal.run", "")],
+        key_page: "https://fal.ai/dashboard/keys",
+        terms: "https://fal.ai/terms",
+        custom_url: false,
+        has_model: false,
+        needs_key: true,
+        help: "Remove a video's background, upscale it, or smooth a slow motion. The clip is uploaded to fal.ai; the price is shown before anything runs. Each model has its own licence.",
+    },
+    ProviderDescriptor {
+        kind: ProviderKind::Pexels,
+        name: "Pexels",
+        capabilities: &[Capability::StockSearch],
+        presets: &[("Pexels", "https://api.pexels.com", "")],
+        key_page: "https://www.pexels.com/api/new/",
+        terms: "https://www.pexels.com/license/",
+        custom_url: false,
+        has_model: false,
+        needs_key: true,
+        help: "Free stock photos and videos. No credit required, but chukcut lists the photographer in the credits file. 200 searches an hour.",
+    },
+    ProviderDescriptor {
+        kind: ProviderKind::Pixabay,
+        name: "Pixabay",
+        capabilities: &[Capability::StockSearch],
+        presets: &[("Pixabay", "https://pixabay.com", "")],
+        key_page: "https://pixabay.com/api/docs/",
+        terms: "https://pixabay.com/service/license-summary/",
+        custom_url: false,
+        has_model: false,
+        needs_key: true,
+        help: "Free stock photos and videos under the Pixabay Content License. Results are cached for a day, as Pixabay asks.",
+    },
+    ProviderDescriptor {
+        kind: ProviderKind::Freesound,
+        name: "Freesound",
+        capabilities: &[Capability::StockSearch],
+        presets: &[("Freesound", "https://freesound.org/apiv2", "")],
+        key_page: "https://freesound.org/apiv2/apply",
+        terms: "https://freesound.org/help/tos_api/",
+        custom_url: false,
+        has_model: false,
+        needs_key: true,
+        help: "Sound effects under CC0 and CC BY. Non-commercial sounds are hidden unless you ask for them. Uses the high-quality previews, so the API token is enough.",
+    },
+    ProviderDescriptor {
+        kind: ProviderKind::Deepl,
+        name: "DeepL",
+        capabilities: &[Capability::Translate],
+        presets: &[("DeepL", "https://api.deepl.com", "")],
+        key_page: "https://www.deepl.com/your-account/keys",
+        terms: "https://www.deepl.com/pro-license",
+        custom_url: false,
+        has_model: false,
+        needs_key: true,
+        help: "Caption translation that keeps every line where it was. Free keys (ending in :fx) work too.",
+    },
+];
 
 pub fn descriptor(kind: ProviderKind) -> &'static ProviderDescriptor {
     PROVIDERS
@@ -67,6 +203,25 @@ pub struct Account {
     pub base_url: String,
     #[serde(default)]
     pub default_model: String,
+}
+
+impl Account {
+    /// A new account of `kind` with its first preset filled in.
+    pub fn of_kind(kind: ProviderKind) -> Self {
+        let descriptor = descriptor(kind);
+        let (name, url, model) =
+            descriptor
+                .presets
+                .first()
+                .copied()
+                .unwrap_or((descriptor.name, "", ""));
+        Self::new(kind, name, url, model)
+    }
+
+    /// The URL the account talks to.
+    pub fn url(&self, path: &str) -> String {
+        super::http::join(&self.base_url, path)
+    }
 }
 
 impl Account {

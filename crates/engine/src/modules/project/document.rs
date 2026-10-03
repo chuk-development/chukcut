@@ -407,6 +407,13 @@ pub struct MaterialPool {
     /// and no code path looks at it.
     #[serde(default)]
     pub links: BTreeSet<Id>,
+    /// Where generated and stock media came from and what their licences
+    /// allow, by material id: the record from the file's `asset.json`, copied
+    /// in at import so the project keeps its credits when the cache is
+    /// cleared or the file moves. See `modules::cloud::provenance`; the export
+    /// dialog's licence summary and the credits file read it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub origins: BTreeMap<Id, crate::modules::cloud::provenance::Origin>,
     /// Non-media parameter blocks referenced by segments (speed curves,
     /// transitions, effect instances). Kept as one map so adding a new kind
     /// does not change the schema.

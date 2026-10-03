@@ -53,8 +53,10 @@ actions!(
     ]
 );
 
+mod accounts;
 mod assets;
 mod captions;
+mod cloud;
 mod export;
 mod home;
 mod inspector;

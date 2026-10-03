@@ -22,6 +22,21 @@ pub fn agent() -> ureq::Agent {
         .build()
 }
 
+/// `send_json` for `ureq::Request` without ureq's `json` feature (and the
+/// second copy of serde glue it brings).
+pub trait SendJson {
+    // `ureq::Error` carries the response; it is returned once per request.
+    #[allow(clippy::result_large_err)]
+    fn send_json(self, body: serde_json::Value) -> Result<ureq::Response, ureq::Error>;
+}
+
+impl SendJson for ureq::Request {
+    fn send_json(self, body: serde_json::Value) -> Result<ureq::Response, ureq::Error> {
+        self.set("Content-Type", "application/json")
+            .send_string(&body.to_string())
+    }
+}
+
 /// `base` and `path` joined with exactly one slash.
 pub fn join(base: &str, path: &str) -> String {
     format!(
@@ -100,6 +115,7 @@ pub fn describe(error: ureq::Error, key: &str) -> String {
                 .ok()
                 .and_then(|v| {
                     v.pointer("/error/message")
+                        .or_else(|| v.pointer("/detail/message"))
                         .or_else(|| v.pointer("/error"))
                         .or_else(|| v.pointer("/message"))
                         .or_else(|| v.pointer("/detail"))
@@ -128,6 +144,92 @@ pub fn describe(error: ureq::Error, key: &str) -> String {
             )
         }
     }
+}
+
+/// The largest answer read into memory: a ten-minute music track at 192
+/// kbit/s is 15 MB, so this leaves room without letting a broken server fill
+/// the RAM.
+pub const MAX_BODY: u64 = 256 * 1024 * 1024;
+
+/// A response body as bytes, up to [`MAX_BODY`]. `ureq`'s `into_string`
+/// stops at 10 MB, which a minute of WAV already passes.
+pub fn read_bytes(response: ureq::Response) -> Result<Vec<u8>, String> {
+    use std::io::Read as _;
+    let mut bytes = Vec::new();
+    response
+        .into_reader()
+        .take(MAX_BODY)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("the answer broke off: {e}"))?;
+    Ok(bytes)
+}
+
+/// A JSON response body.
+pub fn read_json(response: ureq::Response) -> Result<serde_json::Value, String> {
+    let bytes = read_bytes(response)?;
+    serde_json::from_slice(&bytes).map_err(|e| format!("the provider's answer is not JSON ({e})"))
+}
+
+/// Fetch `url` into `dest` without holding it in memory: written to a
+/// `.part` beside it and renamed when complete, so a broken download never
+/// looks like a finished file. `progress` gets the bytes so far. No key is
+/// sent: every URL fetched this way is a public or signed CDN link.
+pub fn download(
+    url: &str,
+    dest: &std::path::Path,
+    progress: &dyn Fn(u64),
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<u64, String> {
+    use std::io::{Read as _, Write as _};
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+    }
+    let response = agent().get(url).call().map_err(|e| describe(e, ""))?;
+    let mut reader = response.into_reader().take(8 * MAX_BODY);
+    let part = dest.with_extension(format!(
+        "{}.part",
+        dest.extension().and_then(|e| e.to_str()).unwrap_or("bin")
+    ));
+    let mut file = std::fs::File::create(&part)
+        .map_err(|e| format!("cannot write {}: {e}", part.display()))?;
+    let mut buffer = vec![0u8; 256 * 1024];
+    let mut total = 0u64;
+    loop {
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            drop(file);
+            let _ = std::fs::remove_file(&part);
+            return Err("cancelled".to_string());
+        }
+        let n = reader
+            .read(&mut buffer)
+            .map_err(|e| format!("the download broke off: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        file.write_all(&buffer[..n])
+            .map_err(|e| format!("cannot write {}: {e}", part.display()))?;
+        total += n as u64;
+        progress(total);
+    }
+    file.sync_all().map_err(|e| e.to_string())?;
+    drop(file);
+    std::fs::rename(&part, dest).map_err(|e| format!("cannot write {}: {e}", dest.display()))?;
+    Ok(total)
+}
+
+/// `text` with `%`-escapes where a URL query value needs them.
+pub fn encode(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for byte in text.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
 }
 
 /// Remove `key` from `text`, in case a provider echoes it back.
@@ -171,8 +273,14 @@ pub(crate) mod test_server {
 
     /// Serve `responses` in order: `(status, content type, body)`.
     pub fn serve(responses: Vec<(u16, &'static str, Vec<u8>)>) -> Server {
+        serve_with(|_| responses)
+    }
+
+    /// Like [`serve`], for answers that must name the server's own URL.
+    pub fn serve_with(responses: impl FnOnce(&str) -> Vec<(u16, &'static str, Vec<u8>)>) -> Server {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let url = format!("http://{}", listener.local_addr().unwrap());
+        let responses = responses(&url);
         let requests = Arc::new(Mutex::new(Vec::new()));
         let log = Arc::clone(&requests);
         std::thread::spawn(move || {
@@ -223,6 +331,12 @@ pub(crate) mod test_server {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn query_values_are_escaped() {
+        assert_eq!(encode("rain & thunder"), "rain%20%26%20thunder");
+        assert_eq!(encode("ü"), "%C3%BC");
+    }
 
     #[test]
     fn urls_join_with_one_slash() {

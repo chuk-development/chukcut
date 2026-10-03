@@ -2589,6 +2589,60 @@ with exit 143/144 and nothing in its log was most likely killed by another
 agent's `pkill chukcut`. Run your copy under another process name
 (`cp target/debug/chukcut _scratch/ccsil; exec -a ccsil ./_scratch/ccsil`).
 
+## Cloud integrations with the user's own key (2026-10-03)
+
+Settings → Accounts holds the user's keys for ElevenLabs, fal.ai, Pexels,
+Pixabay, Freesound, DeepL and any OpenAI-compatible server (list, add, edit,
+test, delete; keys in `secrets.toml`, 0600, shown by their last four
+characters). On top of it:
+
+- **Audio tab:** Text to speech (ElevenLabs voices with previews, model,
+  stability, similarity, speed; word timing becomes captions at the
+  playhead; or an OpenAI-compatible `/audio/speech`), Sound effects and Music
+  (ElevenLabs).
+- **Stock tab:** Pexels and Pixabay videos and photos, Freesound sounds with
+  CC BY-NC hidden unless asked for. A "+" downloads with an `asset.json` and
+  puts the item at the playhead.
+- **Media tab → AI tools:** fal.ai remove background (BiRefNet, ProRes 4444
+  with alpha), upscale ×2 (SeedVR2), smooth motion (RIFE). The price comes
+  from fal's pricing API before the Run button is live; progress, cancel; the
+  result goes on a lane above the clip or replaces it.
+- **Captions tab → Translate:** DeepL or an OpenAI-compatible chat model, onto
+  a new lane above the originals, one undo step.
+- **Export:** a licence summary at the top of the dialog (non-commercial,
+  share-alike, needs credit, unknown terms) and `<name>.credits.txt` beside
+  the video when anything needs credit. Decision 0016.
+
+Every provider is tested against a mock HTTP server
+(`cloud::http::test_server`); no real key was ever used. For looking at the
+panels without keys, a Python stand-in for all six vendors was used: write
+`accounts.toml` with each account's `base_url` pointing at it (the field is
+stored for every kind, only the OpenAI-compatible form shows it) and run the
+app with its own `XDG_CONFIG_HOME`.
+
+Not verified against the real services (no keys exist): the exact fal storage
+upload (`rest.fal.ai/storage/upload/initiate?storage_type=fal-cdn-v3`, taken
+from fal's own JS client), the fal model input enums (taken from the model
+pages on 2026-10-03), ElevenLabs `eleven_v4*` model ids, and Pexels/Pixabay
+answer shapes beyond what their docs show.
+
+Rough or missing:
+
+- **No job journal and no per-provider concurrency limit.** A fal job lives
+  in the app's memory; quitting while it runs loses the result (fal may still
+  bill it). Research §7.4 describes both.
+- **The whole source file is uploaded** to fal, not the clip's trimmed range,
+  and the estimate is for the whole file.
+- **Alpha from "Remove background" depends on the decoder keeping it.** The
+  result is ProRes 4444; whether the compositor draws its alpha was not
+  checked.
+- Auditions ("Play" on a voice or a sound) open their own output stream next
+  to the timeline's audio engine.
+- No ElevenLabs voice changer, dubbing, Stable Audio, Higgsfield or Freesound
+  OAuth originals (research waves 7–8).
+- Generated files are not offered to move into the project folder when it is
+  first saved.
+
 ## The research
 
 The documents under `docs/research/` were produced by dedicated agents and are
