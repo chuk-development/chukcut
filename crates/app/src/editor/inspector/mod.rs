@@ -32,6 +32,7 @@ use super::*;
 
 mod analysis;
 mod animation;
+mod audio_fx;
 mod clip;
 mod controls;
 mod details;
@@ -70,6 +71,8 @@ pub(crate) struct Inspector {
     grading: grading::GradingState,
     /// The Effects tab's sliders and drag.
     effects: effects::EffectsPanel,
+    /// The audio effect sliders of the Audio tab.
+    audio_fx: audio_fx::AudioFxPanel,
     /// The Animation tab's hover, sliders and drags.
     animation: animation::AnimationTab,
     /// The Speed tab's curve editor.

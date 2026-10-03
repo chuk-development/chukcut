@@ -2979,6 +2979,58 @@ with exit 143/144 and nothing in its log was most likely killed by another
 agent's `pkill chukcut`. Run your copy under another process name
 (`cp target/debug/chukcut _scratch/ccsil; exec -a ccsil ./_scratch/ccsil`).
 
+## Audio tools: time stretch, effects, ducking, voiceover (2026-10-03)
+
+Engine: `modules/audiofx` (decision 0020). UI: the Audio tab's Equalizer,
+Parametric EQ, Compressor, Reverb, Echo and Pitch sections and the Voice
+changer (`editor/inspector/audio_fx.rs`), "Duck under speech" in a sound
+clip's menu and the record button in the timeline toolbar
+(`editor/audio_tools.rs`). CLI: `audio-effect`, `voice`, `audio-pitch`,
+`duck`, `record`, `catalog audio`.
+
+What works, verified:
+
+- **Pitch-preserving speed.** Every constant speed change keeps its pitch
+  (Signalsmith Stretch); "Change audio pitch" (Speed tab, also under the
+  Curve editor) brings back the tape behaviour. **Curved clips are heard**
+  now, through the curve. `tests/audio_tools.rs`: a 440 Hz tone at 2x
+  measures 440 Hz, FFmpeg's `rubberband` agrees; a curved 330 Hz tone is
+  330 Hz in its slow part.
+- **Preview = export.** A processed clip is rendered per clip; the export
+  renders inline, the preview plays a cached 48 kHz float WAV of the same
+  spec (`cache_root()/audiofx/`) made by a background thread, and the audio
+  fill thread re-plans when it lands. The test compares the real preview mixer
+  with the export mixer: worst difference below 1e-5. Until a render lands a
+  constant-speed clip plays as before (resampled, dry) and a curved one is
+  silent; a minute of clip renders in about a second.
+- **Effects** (in stack order, after the time stretch): 3-band EQ, 5-band
+  parametric EQ (matches FFmpeg's `lowshelf`/`equalizer`/`highshelf` to
+  below −40 dB), compressor (soft knee, smooth decoupled peak detector),
+  Freeverb, echo with a darkening feedback loop, pitch shift ±12 st with or
+  without formant keeping, voices deep, chipmunk, robot (phase-zeroing at
+  100 Hz), telephone, megaphone with an intensity.
+- **Auto-ducking**: speech on other lanes found by RMS + RNNoise voice
+  probability, written as `Volume` keyframes multiplied into the clip's fades,
+  one undo step; ducking again starts from the clip's own keyframes, "Remove
+  ducking" restores them. Tested against FFmpeg `flite` speech: −12 dB
+  measured in an export.
+- **Voiceover**: the toolbar's microphone opens the default input, counts in
+  3 s (meter live), starts the playhead at the punch-in, and on stop puts the
+  take on a new audio lane there (one undo step). Takes go to
+  `<project dir>/<name> Media/`, or `recordings/` under the data dir for an
+  unsaved project.
+
+Rough or missing:
+
+- Effect parameters are not keyframable; a slider writes on release only.
+- Only the first effect of a kind shows in the Audio tab (the CLI can stack
+  two of the same).
+- The export re-renders every processed clip instead of reading the cache.
+- A take is capped at wall time (+0.5 s): ALSA's `null` capture device
+  delivers input unpaced, which made a 6 s take 35 min on the test display.
+  Not verified with a real microphone on this machine.
+- Ducking reads the speech clips' original sound, not their processed one.
+
 ## Cloud integrations with the user's own key (2026-10-03)
 
 Settings → Accounts holds the user's keys for ElevenLabs, fal.ai, Pexels,

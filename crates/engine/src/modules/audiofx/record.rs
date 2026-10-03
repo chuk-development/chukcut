@@ -240,6 +240,7 @@ pub struct Recorder {
     writer: Option<JoinHandle<Result<Take, String>>>,
     rate: u32,
     channels: u16,
+    opened: std::time::Instant,
 }
 
 impl Recorder {
@@ -292,6 +293,7 @@ impl Recorder {
             writer: Some(handle),
             rate,
             channels,
+            opened: std::time::Instant::now(),
         })
     }
 
@@ -305,6 +307,11 @@ impl Recorder {
             sample_rate: self.rate,
             channels: self.channels,
         }
+    }
+
+    /// When the input opened: the count-in runs from here.
+    pub fn opened(&self) -> std::time::Instant {
+        self.opened
     }
 
     /// Whether the device went away mid-take.
@@ -375,6 +382,17 @@ where
         .map_err(|e| format!("the input device cannot be opened: {e}"))
 }
 
+/// Input samples a device can honestly have delivered `elapsed` after it
+/// opened, with half a second of slack for its buffering.
+///
+/// Real hardware is paced by its clock. ALSA's `null` plugin (and a few
+/// virtual devices) deliver input as fast as it is read: on the test display
+/// that made a six-second take 35 minutes long and skipped the count-in. So
+/// input beyond wall time is dropped; on a real microphone this never bites.
+fn wall_limit(elapsed: Duration, rate: u32, channels: u16) -> u64 {
+    ((elapsed.as_secs_f64() + 0.5) * rate as f64) as u64 * channels as u64
+}
+
 fn drain(
     mut writer: TakeWriter,
     mut consumer: RingConsumer,
@@ -382,11 +400,17 @@ fn drain(
 ) -> Result<Take, String> {
     let mut buffer = vec![0.0f32; 16_384];
     let mut level = 0.0f32;
+    let opened = std::time::Instant::now();
+    let (rate, channels) = (writer.rate, writer.channels);
+    let mut taken: u64 = 0;
     loop {
         let stopping = shared.stop.load(Ordering::Acquire);
         let n = consumer.pop(&mut buffer);
         if n > 0 {
-            let peak = writer.push(&buffer[..n])?;
+            let limit = wall_limit(opened.elapsed(), rate, channels);
+            let keep = (n as u64).min(limit.saturating_sub(taken)) as usize;
+            taken += keep as u64;
+            let peak = writer.push(&buffer[..keep])?;
             // A meter that falls by about 20 dB a second and jumps to peaks.
             level = peak.max(level * 0.9);
             shared.level.store(level.to_bits(), Ordering::Relaxed);
@@ -394,6 +418,10 @@ fn drain(
                 .counting_in
                 .store(writer.counting_in(), Ordering::Relaxed);
             shared.frames.store(writer.frames(), Ordering::Relaxed);
+            if keep < n {
+                // Ahead of the clock: wait for it rather than spin.
+                std::thread::sleep(Duration::from_millis(5));
+            }
         } else if stopping {
             break;
         } else {
@@ -461,6 +489,12 @@ mod tests {
             .map(|b| f32::from_le_bytes(*b))
             .collect();
         assert_eq!(data, vec![0.1, -0.1, 0.1, -0.1, 0.1, -0.1]);
+    }
+
+    #[test]
+    fn input_faster_than_the_clock_is_capped_at_wall_time() {
+        let one_second = wall_limit(Duration::from_secs(1), 48_000, 2);
+        assert_eq!(one_second, 144_000, "a second plus half a second of slack");
     }
 
     #[test]
