@@ -49,7 +49,9 @@ fn main() {
     }
 
     application()
-        .with_assets(gpui::assets::Assets)
+        // The whole Lucide catalog, not only the component defaults: the
+        // timeline needs icons (scissors, lock, magnet …) the defaults lack.
+        .with_assets(gpui::assets::AllAssets)
         .run(move |cx: &mut App| {
             // GPUI Component's widgets, then our colours over its dark theme.
             gpui::init(cx);
@@ -75,6 +77,7 @@ fn main() {
                 KeyBinding::new("ctrl--", ZoomOut, None),
                 KeyBinding::new("ctrl-q", Quit, None),
             ]);
+            cx.bind_keys(timeline_key_bindings());
             cx.on_action(|_: &Quit, cx| cx.quit());
 
             let bounds = Bounds::centered(None, size(px(1600.0), px(960.0)), cx);

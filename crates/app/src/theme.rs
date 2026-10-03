@@ -7,7 +7,6 @@
 
 use std::time::Duration;
 
-use chukcut_engine::modules::project::TrackKind;
 use gpui::component::theme::{Theme, ThemeMode};
 use gpui::{rgb, App, Hsla};
 
@@ -29,19 +28,8 @@ pub(crate) const CLIP_AUDIO_WAVE: u32 = 0x3d6fae;
 pub(crate) const CLIP_TEXT: u32 = 0x9a6b2f;
 pub(crate) const CLIP_OTHER: u32 = 0x55555c;
 
-pub(crate) const HEADER_W: f32 = 96.0;
-pub(crate) const RULER_H: f32 = 26.0;
-pub(crate) const TIMELINE_H: f32 = 280.0;
 pub(crate) const MEDIA_W: f32 = 640.0;
 pub(crate) const INSPECTOR_W: f32 = 590.0;
-
-pub(crate) fn row_height(kind: TrackKind) -> f32 {
-    match kind {
-        TrackKind::Video => 58.0,
-        TrackKind::Audio => 42.0,
-        _ => 34.0,
-    }
-}
 
 /// How often the view checks the clock and the render thread.
 pub(crate) const TICK: Duration = Duration::from_millis(8);
