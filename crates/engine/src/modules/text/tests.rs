@@ -422,6 +422,167 @@ fn a_background_box_fills_behind_the_text() {
 }
 
 #[test]
+fn a_rounded_box_leaves_its_corners_clear() {
+    let renderer = TextRenderer::new();
+    let mut square = request("box", "sans-serif", 48.0);
+    square.background = Some([1.0, 0.0, 0.0, 1.0]);
+    square.background_padding = Some(16.0);
+    let mut round = square.clone();
+    round.background_radius = 24.0;
+
+    let square = renderer.rasterize_uncached(&square, &RasterOptions::tight());
+    let round = renderer.rasterize_uncached(&round, &RasterOptions::tight());
+    // Two pixels in from the corner of a tight raster: inside a square box,
+    // outside the curve of a rounded one.
+    assert!(square.pixel(2, 2)[3] > 200, "{:?}", square.pixel(2, 2));
+    assert!(round.pixel(2, 2)[3] < 40, "{:?}", round.pixel(2, 2));
+}
+
+#[test]
+fn more_padding_makes_a_bigger_box() {
+    let renderer = TextRenderer::new();
+    let mut small = request("box", "sans-serif", 48.0);
+    small.background = Some([1.0, 0.0, 0.0, 1.0]);
+    small.background_padding = Some(4.0);
+    let mut large = small.clone();
+    large.background_padding = Some(30.0);
+    let small = renderer.rasterize_uncached(&small, &RasterOptions::tight());
+    let large = renderer.rasterize_uncached(&large, &RasterOptions::tight());
+    assert!(
+        large.width >= small.width + 50,
+        "{} vs {}",
+        large.width,
+        small.width
+    );
+}
+
+#[test]
+fn letter_spacing_widens_the_line() {
+    let renderer = TextRenderer::new();
+    let tight = request("Spacing", "sans-serif", 48.0);
+    let mut loose = tight.clone();
+    loose.letter_spacing = 10.0;
+    let options = RasterOptions::tight();
+    let a = renderer.layout(&tight, &options).width;
+    let b = renderer.layout(&loose, &options).width;
+    // Seven letters, six gaps at least.
+    assert!(b > a + 55.0, "{a} -> {b}");
+}
+
+#[test]
+fn line_height_sets_the_distance_between_lines() {
+    let renderer = TextRenderer::new();
+    let mut single = request("one\ntwo", "sans-serif", 40.0);
+    single.line_height = Some(1.0);
+    let mut double = single.clone();
+    double.line_height = Some(2.0);
+    let options = RasterOptions::tight();
+    let a = renderer.layout(&single, &options);
+    let b = renderer.layout(&double, &options);
+    let gap = |l: &TextLayout| l.lines[1].baseline - l.lines[0].baseline;
+    assert!(
+        (gap(&a) - 40.0).abs() < 2.0,
+        "1.0 is one font size: {}",
+        gap(&a)
+    );
+    assert!((gap(&b) - 80.0).abs() < 2.0, "2.0 is two: {}", gap(&b));
+}
+
+/// The longest run of opaque pixels in row `y`.
+fn filled_run(image: &RasteredText, y: u32) -> u32 {
+    let (mut best, mut run) = (0, 0);
+    for x in 0..image.width {
+        if image.pixel(x, y)[3] > 200 {
+            run += 1;
+            best = best.max(run);
+        } else {
+            run = 0;
+        }
+    }
+    best
+}
+
+#[test]
+fn an_underline_runs_under_the_whole_line_and_moves_with_its_letters() {
+    let renderer = TextRenderer::new();
+    // No descenders, so anything solid below the baseline is the underline.
+    let plain = request("onewar", "sans-serif", 64.0);
+    let mut lined = plain.clone();
+    lined.underline = true;
+
+    let bare = renderer.rasterize_uncached(&plain, &RasterOptions::tight());
+    let image = renderer.rasterize_uncached(&lined, &RasterOptions::tight());
+    let line = &image.layout.lines[0];
+    let baseline = (image.origin.1 + line.baseline).ceil() as u32 + 1;
+
+    let longest = |image: &RasteredText| {
+        (baseline..image.height)
+            .map(|y| filled_run(image, y))
+            .max()
+            .unwrap_or(0)
+    };
+    assert!(longest(&bare) < 4, "nothing below the baseline without it");
+    let run = longest(&image);
+    assert!(
+        run as f32 > line.width * 0.95,
+        "a solid line as wide as the text: {run} of {}",
+        line.width
+    );
+
+    // Every letter's rectangle reaches down over the line, so an animator
+    // that moves a letter moves the piece of underline under it.
+    let below = baseline as f32 + 2.0;
+    for rect in &image.glyph_rects {
+        assert!(rect[3] >= below, "{rect:?} stops above {below}");
+    }
+}
+
+#[test]
+fn a_material_carries_every_style_field_into_the_request() {
+    let material = crate::modules::project::document::TextMaterial {
+        content: "x".into(),
+        underline: true,
+        letter_spacing: 3.0,
+        line_height: Some(1.3),
+        background_padding: Some(9.0),
+        background_radius: 7.0,
+        ..Default::default()
+    };
+    let request = TextRequest::from(&material);
+    assert!(request.underline);
+    assert_eq!(request.letter_spacing, 3.0);
+    assert_eq!(request.line_height, Some(1.3));
+    assert_eq!(request.background_padding, Some(9.0));
+    assert_eq!(request.background_radius, 7.0);
+}
+
+#[test]
+fn a_title_saved_before_the_style_fields_existed_reads_with_their_defaults() {
+    let old = r#"{"id":"t","content":"Hi","font_family":"sans-serif","font_size":40.0,
+        "color":[1,1,1,1],"bold":false,"italic":false,"align":"center",
+        "stroke_width":0.0,"stroke_color":[0,0,0,1],"shadow":null,"background":null}"#;
+    let material: crate::modules::project::document::TextMaterial =
+        serde_json::from_str(old).expect("an old title reads");
+    assert!(!material.underline);
+    assert_eq!(material.letter_spacing, 0.0);
+    assert_eq!(material.line_height, None);
+    assert_eq!(material.background_padding, None);
+    assert_eq!(material.background_radius, 0.0);
+
+    // And at their defaults they stay out of the file, so it saves as it did.
+    let saved = serde_json::to_string(&material).expect("saves");
+    for key in [
+        "underline",
+        "letter_spacing",
+        "line_height",
+        "background_padding",
+        "background_radius",
+    ] {
+        assert!(!saved.contains(key), "{key} was written: {saved}");
+    }
+}
+
+#[test]
 fn a_stroke_widens_the_ink_and_paints_its_own_colour() {
     let renderer = TextRenderer::new();
     let plain = request("O", "sans-serif", 96.0);

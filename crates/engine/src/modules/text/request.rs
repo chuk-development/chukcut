@@ -10,11 +10,8 @@ use crate::modules::project::document::{TextAlign, TextMaterial, TextShadow};
 
 /// A text layer to lay out and paint.
 ///
-/// This mirrors [`TextMaterial`] and adds the typographic controls the document
-/// does not carry yet — line height, letter spacing and the background box's
-/// geometry. Those have defaults that reproduce what a `TextMaterial` alone
-/// implies, so `TextRequest::from(&material)` is lossless in both directions
-/// until the document grows the fields.
+/// This mirrors [`TextMaterial`] field for field, plus the karaoke highlight,
+/// which is a property of an instant rather than of the document.
 ///
 /// Not `PartialEq`: comparing two of these is always a question about whether
 /// they *draw* the same, and the answer to that is the cache key, not field
@@ -38,8 +35,9 @@ pub struct TextRequest {
     pub shadow: Option<TextShadow>,
     /// Fill of the box drawn behind the text, if any.
     pub background: Option<[f32; 4]>,
-
-    // --- not in `TextMaterial` yet ---
+    /// A line under each line of text, painted with the glyphs: in the fill
+    /// colour, outlined and shadowed like them.
+    pub underline: bool,
     /// Line advance as a multiple of the font size. `None` uses the font's own
     /// ascent + descent + line gap, which is what a word processor does and
     /// what looks right for a paragraph. A title usually wants a number.
@@ -67,7 +65,7 @@ pub struct TextHighlight {
 }
 
 impl TextRequest {
-    pub(crate) fn background_padding_px(&self) -> f32 {
+    pub fn background_padding_px(&self) -> f32 {
         self.background_padding
             .unwrap_or(self.font_size * 0.2)
             .max(0.0)
@@ -106,6 +104,7 @@ impl Default for TextRequest {
             stroke_color: [0.0, 0.0, 0.0, 1.0],
             shadow: None,
             background: None,
+            underline: false,
             line_height: None,
             letter_spacing: 0.0,
             background_padding: None,
@@ -129,7 +128,12 @@ impl From<&TextMaterial> for TextRequest {
             stroke_color: material.stroke_color,
             shadow: material.shadow,
             background: material.background,
-            ..Self::default()
+            underline: material.underline,
+            line_height: material.line_height,
+            letter_spacing: material.letter_spacing,
+            background_padding: material.background_padding,
+            background_radius: material.background_radius,
+            highlight: None,
         }
     }
 }

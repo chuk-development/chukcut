@@ -154,11 +154,16 @@ except a busy spinner.
 - `crate::theme` holds every value above; `crate::ui` holds the kit
   (`Panel`, `PanelHeader`, `IconButton`, `SegmentedTabs`, `RailTab`,
   `SectionHeader`, `Section`, `PropertyRow`, `KeyframeSlot`, `NumberField`,
-  `Badge`, `EmptyState`) and our glyphs (`ui::icons`). Every panel uses
+  `Badge`, `EmptyState`, `ColorPicker` with its `color_button`) and our
+  glyphs (`ui::icons`). Every panel uses
   them. The inspector's helpers in `editor/inspector/controls.rs`
   (`Section`, `number_box`, `slider_row`, `field_row`, `sub_tabs`,
   `top_tabs`, `panel_button`, `panel_footer`) keep their signatures and
   render the kit, so a new tab built with them is already in the language.
+- **Colours the user picks go through `ui::ColorPicker`**, never a row of
+  fixed swatches alone: it previews while dragged and commits once, so the
+  owner writes one undo step. Picked colours are content, not chrome; the
+  preset colours in `ui/color.rs` are not theme tokens.
 - Clip colours come from the media kind: the body token, and its title
   strip from `theme::clip_title(body)`.
 - **Side panels give way on narrow windows.** `theme::side_widths` keeps

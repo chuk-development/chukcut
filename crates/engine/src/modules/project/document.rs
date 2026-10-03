@@ -628,6 +628,24 @@ pub struct TextMaterial {
     pub shadow: Option<TextShadow>,
     #[serde(default)]
     pub background: Option<[f32; 4]>,
+    /// A line under each line of text, in the fill colour, with the outline
+    /// and shadow of the letters.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub underline: bool,
+    /// Extra space between letters, in document pixels. Negative tightens.
+    #[serde(default = "zero", skip_serializing_if = "is_zero_f32")]
+    pub letter_spacing: f32,
+    /// Line advance as a multiple of the font size. `None` is the font's own
+    /// ascent, descent and gap, which is what titles had before this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_height: Option<f32>,
+    /// How far the background box reaches past the text, in document
+    /// pixels. `None` is a fifth of the font size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_padding: Option<f32>,
+    /// Corner radius of the background box, in document pixels.
+    #[serde(default = "zero", skip_serializing_if = "is_zero_f32")]
+    pub background_radius: f32,
     /// Present when this title is a caption: the spoken words behind it and
     /// how they are highlighted. `None` for an ordinary title.
     ///
@@ -636,6 +654,34 @@ pub struct TextMaterial {
     /// the argument `MaterialPool::transitions` makes for its own fields.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub caption: Option<CaptionData>,
+}
+
+/// A plain white title in the fallback face, with no id and no words. For
+/// builders that set a few fields and take the rest from here, so a field
+/// added to the document does not have to be spelled out at every one.
+impl Default for TextMaterial {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            content: String::new(),
+            font_family: "sans-serif".to_string(),
+            font_size: default_font_size(),
+            color: opaque_white(),
+            bold: false,
+            italic: false,
+            align: TextAlign::default(),
+            stroke_width: 0.0,
+            stroke_color: opaque_black(),
+            shadow: None,
+            background: None,
+            underline: false,
+            letter_spacing: 0.0,
+            line_height: None,
+            background_padding: None,
+            background_radius: 0.0,
+            caption: None,
+        }
+    }
 }
 
 /// What makes a title a caption. See `modules/captions`.
@@ -1070,6 +1116,17 @@ fn one() -> f32 {
 
 fn zero() -> f32 {
     0.0
+}
+
+// The text style fields that came after the first file format are left out
+// of the file at their defaults, so a project that does not use them saves
+// byte for byte as it did before they existed.
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+fn is_zero_f32(value: &f32) -> bool {
+    *value == 0.0
 }
 
 fn default_fps() -> f64 {

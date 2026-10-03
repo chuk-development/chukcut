@@ -137,6 +137,7 @@ pub(crate) fn cache_key(request: &TextRequest, options: &RasterOptions) -> u64 {
     request.font_family.hash(&mut hasher);
     request.bold.hash(&mut hasher);
     request.italic.hash(&mut hasher);
+    request.underline.hash(&mut hasher);
     (request.align as u8).hash(&mut hasher);
     for value in [
         request.font_size,
@@ -237,6 +238,26 @@ mod tests {
 
         let mut changed = base.clone();
         changed.color[0] = 0.5;
+        assert_ne!(cache_key(&changed, &options), key);
+
+        let mut changed = base.clone();
+        changed.underline = true;
+        assert_ne!(cache_key(&changed, &options), key);
+
+        let mut changed = base.clone();
+        changed.letter_spacing = 2.0;
+        assert_ne!(cache_key(&changed, &options), key);
+
+        let mut changed = base.clone();
+        changed.line_height = Some(1.4);
+        assert_ne!(cache_key(&changed, &options), key);
+
+        let mut changed = base.clone();
+        changed.background_radius = 6.0;
+        assert_ne!(cache_key(&changed, &options), key);
+
+        let mut changed = base.clone();
+        changed.background_padding = Some(10.0);
         assert_ne!(cache_key(&changed, &options), key);
 
         assert_ne!(cache_key(&base, &options.with_scale(2.0)), key);

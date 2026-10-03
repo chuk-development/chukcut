@@ -28,6 +28,8 @@
 //!   crate does them. See [`raster`].
 //! - **A cache keyed on content.** A title does not change between frames, so
 //!   it is rasterised once and held; see `cache.rs`.
+//! - **Title styles and templates** of our own, and the compositor tiles that
+//!   show them: see [`presets`].
 //! - **Placing a title on the timeline.** How long a new title is, which lane
 //!   it lands on, what happens when that instant is taken — see [`edit`], which
 //!   is pure, and [`commands`], which is the IPC surface over it.
@@ -52,9 +54,6 @@
 //! - **Vertical CJK (`writing-mode: vertical-rl`) is not implemented**, because
 //!   no Rust text stack has the layout half of it. `docs/research/rust-crate-survey.md`
 //!   §4 has the shape of the work if it is ever needed.
-//! - **The document has no line height or letter spacing**, so
-//!   [`TextRequest`] carries them with defaults and `TextMaterial` cannot yet
-//!   set them.
 
 pub mod animate;
 mod cache;
@@ -62,6 +61,7 @@ pub mod commands;
 pub mod edit;
 mod font;
 pub mod layout;
+pub mod presets;
 pub mod raster;
 pub mod request;
 

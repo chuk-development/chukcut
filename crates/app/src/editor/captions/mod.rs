@@ -80,6 +80,8 @@ pub(crate) struct CaptionsPanel {
     key: Entity<InputState>,
     text: Entity<InputState>,
     chars: Entity<InputState>,
+    /// The colour pickers at the end of each colour row, by row id.
+    pub(super) colours: std::collections::HashMap<&'static str, Entity<crate::ui::ColorPicker>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -107,7 +109,7 @@ impl CaptionsPanel {
             })
         });
 
-        let subscriptions = vec![
+        let mut subscriptions = vec![
             cx.subscribe_in(
                 &text,
                 window,
@@ -130,6 +132,24 @@ impl CaptionsPanel {
                 },
             ),
         ];
+
+        // A colour from a picker restyles once, on release: the captions
+        // are not previewed while its field is dragged.
+        let mut colours = std::collections::HashMap::new();
+        for prefix in view::COLOUR_ROWS {
+            let alpha = prefix == "cap-box";
+            let picker = cx.new(|cx| crate::ui::ColorPicker::new(window, cx).with_alpha(alpha));
+            subscriptions.push(cx.subscribe(
+                &picker,
+                move |this: &mut Editor, _, event: &crate::ui::ColorEvent, cx| {
+                    if let crate::ui::ColorEvent::Commit(color) = *event {
+                        let apply = view::caption_colour(prefix);
+                        this.restyle_captions(move |s| apply(s, Some(color)), cx);
+                    }
+                },
+            ));
+            colours.insert(prefix, picker);
+        }
 
         Self {
             accounts: cloud_commands::cloud_accounts(
@@ -154,6 +174,7 @@ impl CaptionsPanel {
             key,
             text,
             chars,
+            colours,
             _subscriptions: subscriptions,
         }
     }

@@ -357,6 +357,7 @@ pub(crate) mod tests {
             shadow: None,
             background: None,
             caption: None,
+            ..Default::default()
         });
         let samples = (0..=100)
             .map(|i| TrackSample {

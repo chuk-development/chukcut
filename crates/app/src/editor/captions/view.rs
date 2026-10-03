@@ -29,6 +29,32 @@ const COLORS: [[f32; 4]; 10] = [
     [0.3, 0.9, 0.4, 1.0],
 ];
 
+/// What a colour row sets, by its id: the fill, the outline (switched on
+/// with a colour, off with none), the box and the karaoke highlight.
+pub(super) fn caption_colour(prefix: &str) -> fn(&mut CaptionStyle, Option<[f32; 4]>) {
+    match prefix {
+        "cap-stroke" => |s, c| match c {
+            Some(c) => {
+                s.stroke_color = c;
+                if s.stroke_width <= 0.0 {
+                    s.stroke_width = (s.font_size * 0.07).round().max(1.0);
+                }
+            }
+            None => s.stroke_width = 0.0,
+        },
+        // A swatch is opaque, and a box at full opacity hides the picture;
+        // three quarters is what the swatches always gave it.
+        "cap-box" => |s, c| {
+            s.background = c.map(|c| [c[0], c[1], c[2], if c[3] >= 1.0 { 0.75 } else { c[3] }])
+        },
+        "cap-highlight" => |s, c| s.highlight = c,
+        _ => |s, c| s.color = c.unwrap_or(s.color),
+    }
+}
+
+/// The colour rows' ids, each with a picker.
+pub(super) const COLOUR_ROWS: [&str; 4] = ["cap-color", "cap-stroke", "cap-box", "cap-highlight"];
+
 fn hex(color: [f32; 4]) -> u32 {
     let c = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u32;
     (c(color[0]) << 16) | (c(color[1]) << 8) | c(color[2])
@@ -982,6 +1008,7 @@ impl Editor {
             }),
         );
 
+        let pickers = self.captions.colours.clone();
         let color_row = |prefix: &'static str,
                          current: Option<[f32; 4]>,
                          allow_none: bool,
@@ -1014,6 +1041,22 @@ impl Editor {
                     .into_any_element(),
                 );
             }
+            // Any other colour: the kit's picker, as the last swatch.
+            if let Some(picker) = pickers.get(prefix) {
+                if let Some(color) = current {
+                    picker.update(cx, |picker, _| picker.sync(color));
+                }
+                swatches.push(
+                    crate::ui::color_button(
+                        format!("{prefix}-picker"),
+                        picker,
+                        Some("Custom".into()),
+                        true,
+                        cx,
+                    )
+                    .into_any_element(),
+                );
+            }
             row().children(swatches)
         };
 
@@ -1021,22 +1064,14 @@ impl Editor {
             "cap-color",
             Some(style.color),
             false,
-            |s, c| s.color = c.unwrap_or(s.color),
+            caption_colour("cap-color"),
             cx,
         );
         let outline_colors = color_row(
             "cap-stroke",
             (style.stroke_width > 0.0).then_some(style.stroke_color),
             true,
-            |s, c| match c {
-                Some(c) => {
-                    s.stroke_color = c;
-                    if s.stroke_width <= 0.0 {
-                        s.stroke_width = (s.font_size * 0.07).round().max(1.0);
-                    }
-                }
-                None => s.stroke_width = 0.0,
-            },
+            caption_colour("cap-stroke"),
             cx,
         );
         let outline_width = row()
@@ -1054,14 +1089,14 @@ impl Editor {
             "cap-box",
             style.background.map(|c| [c[0], c[1], c[2], 1.0]),
             true,
-            |s, c| s.background = c.map(|c| [c[0], c[1], c[2], 0.75]),
+            caption_colour("cap-box"),
             cx,
         );
         let highlight_colors = color_row(
             "cap-highlight",
             style.highlight,
             true,
-            |s, c| s.highlight = c,
+            caption_colour("cap-highlight"),
             cx,
         );
 

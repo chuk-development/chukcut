@@ -610,6 +610,7 @@ impl Render for Editor {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_drop(cx.listener(Self::on_media_drop))
             .on_drop(cx.listener(Self::on_effect_drop))
+            .on_drop(cx.listener(Self::on_title_drop))
             // A click anywhere gives the keyboard back to the editor; a text
             // field under the pointer takes it again in its own handler,
             // which runs after this capture-phase one.

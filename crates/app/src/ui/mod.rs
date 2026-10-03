@@ -17,6 +17,7 @@
 //! | [`PropertyRow`], [`KeyframeSlot`] | label · control · reset · keyframe, aligned |
 //! | [`NumberField`] | a mono value in a well with unit and stepper |
 //! | [`Badge`] | durations on tiles, states, counts |
+//! | [`ColorPicker`], [`color_button`] | a colour: field, hue, opacity, hex, presets, recent |
 //! | [`EmptyState`] | what a region says before it has content; drop zones |
 
 // Parts of the kit wait for the timeline and inspector to adopt them.
@@ -27,6 +28,7 @@ pub(crate) type OnClick = std::rc::Rc<dyn Fn(&gpui::ClickEvent, &mut gpui::Windo
 
 mod badge;
 mod button;
+pub(crate) mod color;
 mod empty;
 pub(crate) mod icons;
 mod number;
@@ -39,6 +41,8 @@ mod tabs;
 pub(crate) use badge::{Badge, Tone};
 #[allow(unused_imports)]
 pub(crate) use button::{IconButton, IconSize};
+#[allow(unused_imports)]
+pub(crate) use color::{color_button, ColorEvent, ColorPicker};
 #[allow(unused_imports)]
 pub(crate) use empty::EmptyState;
 #[allow(unused_imports)]

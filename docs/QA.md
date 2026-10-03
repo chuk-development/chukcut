@@ -93,13 +93,14 @@ display with lavapipe as the window's Vulkan driver.
 ### High
 
 - ~~No way to save or choose a file without a portal~~ — fixed above.
-- **There is no text styling UI** (the titles agent is on it). A title's inspector has Video, Animation,
-  Tracking and Effects; nothing sets the font, size, colour, stroke, shadow or
-  box. The engine has it all (`text_set`); the wave-3 "text & titles" row in
-  the plan was never run. Captions are styled in the Captions tab, titles not
-  at all.
-  Steps: Text tab → Default text → select the title → look for a font or
-  colour control.
+- ~~**There is no text styling UI.**~~ **Closed on `agent/titles`.** A
+  title's inspector has a Text tab (words, font, size, bold/italic/underline,
+  letter and line spacing, alignment, colour and opacity, outline, shadow,
+  box with padding and radius, a 3×3 position grid), every change one undo
+  step; the asset panel's Text tab has 29 styles and 10 templates drawn by
+  the compositor. Verified on Xvfb: typing, a colour drag and a slider drag
+  each undo in one step; a template click restyles and animates the selected
+  title; a tile dragged onto the timeline lands where it was dropped.
 
 ### Medium
 

@@ -97,6 +97,7 @@ fn seed_project() -> Project {
         shadow: None,
         background: None,
         caption: None,
+        ..Default::default()
     });
 
     for (index, kind) in [TrackKind::Video, TrackKind::Video, TrackKind::Audio]

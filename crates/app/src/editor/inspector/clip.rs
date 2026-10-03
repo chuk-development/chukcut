@@ -124,7 +124,7 @@ impl Editor {
                     )
                 }
                 effects::EFFECTS => (None, self.effects_tab(&segment, window, cx), None),
-                text_style::TEXT_TAB => (None, self.text_style_tab(&segment, cx), None),
+                text_style::TEXT_TAB => (None, self.text_style_tab(&segment, window, cx), None),
                 AUDIO | BASIC => (None, self.audio_basic(window, cx), None),
                 VOICE => (None, not_yet("Voice changer"), None),
                 TRACKING => (None, self.tracking_tab(&segment, window, cx), None),
