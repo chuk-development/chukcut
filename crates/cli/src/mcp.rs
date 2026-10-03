@@ -46,6 +46,7 @@ every clip with a `ref` (lane:index) and an `id`, and other tools accept either.
 to the file immediately and can be undone with `undo` for as long as this connection lasts. \
 Times are seconds as numbers, or strings like \"2.5s\", \"250ms\", \"1:02.5\", \"45f\". \
 `catalog` lists effects, transitions, animations, grade controls and export presets. \
+`presets` shows how each export preset fits the project; `export_queue` runs several exports. \
 `view_frame` shows the picture at a time.";
 
 /// The tools whose operation only reads: MCP's `readOnlyHint`.
@@ -61,6 +62,8 @@ const READ_ONLY: &[&str] = &[
     "analysis",
     "stock_kinds",
     "stock_search",
+    "presets",
+    "estimate",
 ];
 
 /// The tools that talk to a service outside this machine: MCP's
@@ -680,6 +683,11 @@ mod tests {
             "stock_kinds",
             "stock_search",
             "stock_download",
+            "presets",
+            "preset_save",
+            "preset_remove",
+            "estimate",
+            "export_queue",
         ] {
             assert!(names.contains(&added), "{added} is a tool");
         }

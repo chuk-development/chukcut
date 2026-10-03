@@ -225,7 +225,7 @@ Lists what you can use. Does not need a project.
 | `transitions` | the built-in kinds and the library presets |
 | `animations` | clip presets (which slot each one fits), text presets, easings |
 | `grade` | every grade control name and its resting value |
-| `presets` | export presets |
+| `presets` | export presets, built in and your own (`presets PROJECT` also shows how each fits a project) |
 | `hardware` | hardware encoders, and which ones work on this machine |
 | `models` | local transcription models, and which ones are downloaded |
 | `luts` | `.cube` files in the LUT library |
@@ -828,33 +828,133 @@ one clip, or for the whole mix as the export would make it.
 
 #### `export PROJECT OUTPUT`
 
-Renders the timeline to a video file. The command waits until the file is
+Renders the timeline to a file. The command waits until the file is
 complete and shows progress on stderr.
 
 | Option | |
 |---|---|
-| `--preset` | `youtube_1080p`, `youtube_4k`, `vertical_1080x1920`, `instagram_square`, or `custom` (the project's canvas and frame rate; the default) |
+| `--preset ID` | a preset from `presets` (see below), or `custom` (the project's canvas and frame rate; the default) |
 | `--hardware ID` | a hardware encoder from `catalog hardware` (`nvenc_h264`, `vaapi_h265`, …), `auto` for the first one that works, or `software` |
 | `--width`, `--height`, `--fps` | override the preset |
-| `--codec` | `h264`, `h265`, `vp9`, `av1` |
+| `--codec` | `h264`, `h265`, `vp9`, `av1`, `prores`, `gif` |
 | `--crf N` or `--bitrate BPS` | quality |
-| `--container` | `mp4`, `mov`, `mkv`, `webm`; the file extension follows the container |
-| `--audio-codec` | `aac`, `opus`, `none` |
+| `--container` | `mp4`, `mov`, `mkv`, `webm`, `gif`; sound only: `m4a`, `mp3`, `wav`. The file extension follows the container |
+| `--audio-codec` | `aac`, `opus`, `mp3`, `pcm`, `none` |
+| `--audio-bitrate BPS` | |
 | `--no-audio` | |
-| `--loudness LUFS` | bring the mix to this loudness, true peak at -1 dBTP |
+| `--loudness LUFS` | bring the mix to this loudness, true peak at -1 dBTP; overrides the preset's target |
+| `--no-loudness` | keep the mix as edited, also when the preset has a target |
 | `--from TIME`, `--to TIME` | export only this range |
 | `--sidecar srt\|vtt` | also write the captions next to the video |
 
+The built-in presets:
+
+| Preset | Size | Rate | Picture | Sound | Loudness |
+|---|---|---|---|---|---|
+| `tiktok` | 1080p, canvas shape | 30 | H.264 CRF 20 | AAC 192k | -14 LUFS |
+| `instagram_reels` | 1080p, canvas shape | 30 | H.264 CRF 21 | AAC 192k | -14 LUFS |
+| `youtube_shorts` | 1080p, canvas shape | 30 | H.264 CRF 20 | AAC 256k | -14 LUFS |
+| `instagram_square` | 1080×1080 | 30 | H.264 CRF 21 | AAC 192k | -14 LUFS |
+| `x_twitter` | 1080p, canvas shape | 30 | H.264 8 Mbit/s | AAC 128k | -14 LUFS |
+| `youtube_1080p` | 1080p, canvas shape | project | H.264 CRF 20 | AAC 384k | -14 LUFS |
+| `youtube_4k` | 2160p, canvas shape | project | H.265 CRF 22 | AAC 384k | -14 LUFS |
+| `master_prores` | canvas | project | ProRes 422 HQ 10-bit, .mov | PCM 16-bit | as edited |
+| `master_h264` | canvas | project | H.264 CRF 14 | AAC 320k | as edited |
+| `master_hevc` | canvas | project | H.265 CRF 16 | AAC 320k | as edited |
+| `audio_aac` | — | — | — | AAC 256k .m4a | -16 LUFS |
+| `audio_mp3` | — | — | — | MP3 320k | -16 LUFS |
+| `audio_wav` | — | — | — | PCM 16-bit .wav | as edited |
+| `gif` | 480p, canvas shape | 15 | GIF, 252 colours | — | — |
+
+"1080p, canvas shape" means: the shorter side is 1080 and the aspect ratio
+is the canvas's. A 9:16 canvas gives 1080×1920, a 16:9 canvas 1920×1080. The
+composition is never boxed into another shape. When the canvas does not
+have the shape that the platform shows full screen, or the timeline is
+longer than the platform accepts, the result has a `warnings` list. The old
+id `vertical_1080x1920` still works and means `tiktok`.
+
 The software encoder is the default. A hardware encoder is a choice, because
-the engine trial-encodes each one before it uses it.
+the engine trial-encodes each one before it uses it. ProRes, GIF and sound
+only always use the software encoder.
 
 The result gives the path, the size in bytes, the frame count, the time it
-took and the encode speed.
+took, the encode speed, the output size, the loudness target and the
+warnings.
 
 ```bash
-chukcut-cli export reel.chukcut out/reel.mp4 --preset vertical_1080x1920 \
-  --hardware auto --loudness -14 --sidecar srt --json
+chukcut-cli export reel.chukcut out/reel.mp4 --preset tiktok \
+  --hardware auto --sidecar srt --json
+chukcut-cli export reel.chukcut out/voice.mp3 --preset audio_mp3
 ```
+
+#### `presets PROJECT`
+
+Lists every preset as it fits this project: the size and frame rate it
+exports at on this canvas, the container, the loudness target, the warnings
+and an instant size estimate. Your own presets come last, with `user: true`.
+
+#### `preset save PROJECT NAME [export options]`
+
+Saves export settings as a preset of your own. Start from a preset and add
+overrides; every export option except the output is allowed. The preset
+keeps the resolution class, so a "1080p" preset also exports 1080p on a
+canvas of another shape. The id is `user_` and the name in lower case.
+Saving the same name again replaces the preset. Presets are stored in
+`<config>/chukcut/export-presets.json`; the app and the CLI share them.
+
+```bash
+chukcut-cli preset save reel.chukcut "Reel HQ" --preset instagram_reels --crf 18
+chukcut-cli export reel.chukcut out/reel.mp4 --preset user_reel_hq
+```
+
+#### `preset remove PROJECT ID`
+
+Deletes one of your own presets. A built-in preset cannot be deleted.
+
+#### `estimate PROJECT [export options] [--sample]`
+
+Tells what an export will produce and how big it will be, without writing
+it. The size of a CRF export depends on the picture. Without `--sample`,
+the size of a CRF export is a rough guess from a table
+(`estimate.method: "table"`). With `--sample`, the engine encodes three
+two-second windows of the timeline (the whole timeline when it is 8 s or
+shorter) with the real settings and measures the size
+(`method: "sampled"`). A bitrate export and a sound-only export are
+calculated, not sampled (`method: "bitrate"`, `"exact"` for WAV). The
+estimate includes the audio and the container overhead. In the tests the
+sampled and calculated estimates are within 2 % of the real files.
+
+#### `export-queue PROJECT [--presets ID,ID…] [--out-dir DIR] [--jobs FILE]`
+
+Queues several exports and runs them one after another. The command waits
+until all files are written. Progress shows the item and its percentage.
+
+- `--presets ID,ID,…` (a list, or the flag repeated) exports this project
+  once per preset, to
+  `<out-dir>/<project>-<preset>.<ext>`. The other export options (for
+  example `--from`/`--to`, `--hardware`) apply to each of these. Without
+  `--out-dir`, the files go next to the project. `--preset ID` alone queues
+  one export.
+- `--jobs FILE` (or `-` for stdin) is a JSON list of jobs. A job is an
+  object with `output` and the export options (`preset`, `from`, `to`,
+  `crf`, `container`, …). A job can name another project file in `project`
+  and a name for the progress lines in `label`.
+
+Every job is checked before the first one starts, so a wrong preset name in
+the third job stops the command at once. When an export fails, the others
+still run; then the command fails with exit code 5 and names the failed
+jobs.
+
+```bash
+chukcut-cli export-queue reel.chukcut --presets tiktok,youtube_shorts,audio_mp3 \
+  --out-dir out/
+echo '[{"output":"out/intro.mp4","preset":"x_twitter","from":0,"to":10},
+      {"output":"out/other.mp4","project":"other.chukcut","preset":"youtube_1080p"}]' \
+  | chukcut-cli export-queue reel.chukcut --jobs -
+```
+
+In the app, the export dialog has the same queue: "Add to queue" puts the
+export in the queue and the queue keeps running when the dialog is closed.
 
 #### `render-frame PROJECT --at TIME OUTPUT`
 
@@ -911,8 +1011,10 @@ The operation names are the MCP tool names: `info`, `validate`, `configure`,
 `scenes_split`, `scenes_clear`, `stabilise`, `stabilise_set`,
 `stabilise_remove`, `beats_detect`, `beats_clear`, `beats_cut`, `beats_snap`,
 `reframe`, `analysis`, `translate_captions`, `tts`, `stock_kinds`,
-`stock_search`, `stock_download`, `export`, `render_frame`. The arguments are the command's options and
-positional arguments without the project. `chukcut-cli mcp` lists each one's
+`stock_search`, `stock_download`, `export`, `presets`, `preset_save`,
+`preset_remove`, `estimate`, `export_queue`, `render_frame`. The arguments
+are the command's options and positional arguments without the project.
+In `export_queue`, the jobs are a `jobs` list rather than a file. `chukcut-cli mcp` lists each one's
 JSON Schema (see below).
 
 ## The MCP server
@@ -960,7 +1062,7 @@ an unknown tool or a malformed request is a JSON-RPC error.
 
 Read-only tools have `readOnlyHint`: `info`, `validate`, `captions_list`,
 `silence_detect`, `loudness`, `catalog`, `view_frame`, `marker_list`,
-`analysis`, `stock_kinds`, `stock_search`.
+`analysis`, `stock_kinds`, `stock_search`, `presets`, `estimate`.
 
 Tools that send data to a service outside this machine have
 `openWorldHint`: `captions_transcribe`, `translate_captions`, `tts`,
@@ -1049,7 +1151,8 @@ ffprobe -v error -count_frames -show_entries stream=nb_read_frames out.mp4
   Vulkan driver, `export`, `render-frame` and `view_frame` fail with exit
   code 5.
 - **No cancel.** Ctrl+C stops the process; an export that stops early leaves
-  a partial file.
+  a partial file. The same is true for `export-queue`: the queue lives in
+  the process, so the exports not yet run are not run.
 - **Undo history lives only in one session** (one command, one batch, one MCP
   connection). The project file does not store it.
 - **Cloud features need an account** that you set up in the app. The CLI

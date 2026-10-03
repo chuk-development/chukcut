@@ -10,6 +10,7 @@
 pub mod analysis;
 pub mod audio;
 pub mod cloud;
+pub mod delivery;
 pub mod frame;
 pub mod layout;
 pub mod look;
@@ -165,6 +166,11 @@ operations!(
     project::ImportArgs,
     project::UndoArgs,
     project::RedoArgs,
+    delivery::PresetsArgs,
+    delivery::PresetSaveArgs,
+    delivery::PresetRemoveArgs,
+    delivery::EstimateArgs,
+    delivery::ExportQueueArgs,
     timeline::AppendArgs,
     timeline::PlaceArgs,
     timeline::SplitArgs,

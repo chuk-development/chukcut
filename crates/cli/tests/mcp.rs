@@ -157,6 +157,12 @@ fn an_mcp_session_edits_undoes_and_looks() {
         ("tts", json!(["project", "text", "voice"])),
         ("stock_search", json!(["project", "query"])),
         ("stock_download", json!(["project", "query", "id"])),
+        ("presets", json!(["project"])),
+        ("preset_save", json!(["project", "name"])),
+        ("preset_remove", json!(["project", "id"])),
+        ("estimate", json!(["project"])),
+        ("export_queue", json!(["project"])),
+        ("export", json!(["project", "output"])),
     ] {
         let tool = tools
             .iter()
@@ -172,6 +178,22 @@ fn an_mcp_session_edits_undoes_and_looks() {
     };
     assert!(read_only("marker_list") && read_only("analysis") && read_only("stock_search"));
     assert!(!read_only("marker_add") && !read_only("scenes_detect"));
+    assert!(read_only("presets") && read_only("estimate") && !read_only("export_queue"));
+    // The export options are one shared set, flattened into each tool.
+    for name in ["export", "estimate", "preset_save"] {
+        let tool = tools.iter().find(|t| t["name"] == name).unwrap();
+        for option in ["preset", "crf", "from", "to", "no_loudness"] {
+            assert!(
+                tool["inputSchema"]["properties"].get(option).is_some(),
+                "{name} takes {option}"
+            );
+        }
+    }
+    let queue = tools.iter().find(|t| t["name"] == "export_queue").unwrap();
+    assert!(queue["inputSchema"]["properties"].get("jobs").is_some());
+    assert!(queue["inputSchema"]["properties"]
+        .get("jobs_file")
+        .is_none());
     let tts = tools.iter().find(|t| t["name"] == "tts").unwrap();
     assert_eq!(tts["annotations"]["openWorldHint"], true);
 

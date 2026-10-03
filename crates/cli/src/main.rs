@@ -27,6 +27,7 @@ use error::{CliError, CliResult};
 use ops::analysis::*;
 use ops::audio::*;
 use ops::cloud::*;
+use ops::delivery::*;
 use ops::frame::*;
 use ops::layout::*;
 use ops::look::*;
@@ -163,8 +164,17 @@ enum Command {
     /// Cloud features: caption translation, text to speech, stock media.
     #[command(subcommand)]
     Cloud(CloudCommand),
-    /// Render the timeline to a video file.
+    /// Render the timeline to a file: video, sound only or GIF.
     Export(On<ExportArgs>),
+    /// List the export presets as they fit this project, with sizes and warnings.
+    Presets(On<PresetsArgs>),
+    /// Save or delete a preset of your own.
+    #[command(subcommand)]
+    Preset(PresetCommand),
+    /// Say what an export would produce and how big it would be.
+    Estimate(On<EstimateArgs>),
+    /// Run several exports one after another: presets, ranges, other projects.
+    ExportQueue(On<ExportQueueArgs>),
     /// Render one frame as a PNG.
     RenderFrame(On<RenderFrameArgs>),
     /// Run a JSON list of operations against one project, with one undo history.
@@ -295,6 +305,16 @@ enum CloudCommand {
     StockSearch(On<StockSearchArgs>),
     /// Download a stock result and import it.
     StockDownload(On<StockDownloadArgs>),
+}
+
+// Parsed once per process; the size difference costs nothing.
+#[allow(clippy::large_enum_variant)]
+#[derive(Subcommand)]
+enum PresetCommand {
+    /// Save export settings as a preset of your own.
+    Save(On<PresetSaveArgs>),
+    /// Delete one of your own presets.
+    Remove(On<PresetRemoveArgs>),
 }
 
 #[derive(Args)]
@@ -491,6 +511,11 @@ fn dispatch(command: Command, dry: bool, ctx: &Ctx) -> CliResult<(&'static str, 
         Command::Cloud(CloudCommand::StockSearch(o)) => on(o, dry, ctx),
         Command::Cloud(CloudCommand::StockDownload(o)) => on(o, dry, ctx),
         Command::Export(o) => on(o, dry, ctx),
+        Command::Presets(o) => on(o, dry, ctx),
+        Command::Preset(PresetCommand::Save(o)) => on(o, dry, ctx),
+        Command::Preset(PresetCommand::Remove(o)) => on(o, dry, ctx),
+        Command::Estimate(o) => on(o, dry, ctx),
+        Command::ExportQueue(o) => on(o, dry, ctx),
         Command::RenderFrame(o) => on(o, dry, ctx),
         Command::Catalog(args) => Ok(("catalog", args.run()?, false)),
         Command::Batch(args) => {
