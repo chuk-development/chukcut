@@ -1,13 +1,65 @@
 //! Commands for settings, recent projects and cache management.
 
 use super::settings::{RecentProjects, Settings};
-use super::{logging, paths};
+use super::{logging, paths, trim};
+use crate::modules::proxy::commands as proxy_commands;
+use crate::modules::proxy::ProxyPolicy;
 
 pub fn workspace_settings_get() -> Settings {
     Settings::load()
 }
+
+/// Persist the settings and put the ones the engine acts on into effect.
 pub fn workspace_settings_set(settings: Settings) -> Result<(), String> {
-    settings.save()
+    settings.save()?;
+    workspace_settings_apply(&settings);
+    Ok(())
+}
+
+/// Put the settings the engine acts on into effect, without writing them.
+///
+/// `crate::init` calls this with the stored settings at startup, and
+/// [`workspace_settings_set`] after every change, so a shell never has to.
+/// Cheap and non-blocking: a trim, when one is due, runs on its own thread.
+///
+/// - **Proxy policy**: whether imports and opened projects queue proxies, and
+///   whether the preview decodes them. Turning proxies on considers the open
+///   project's media at once rather than waiting for the next import.
+/// - **Cache limit**: trims when the limit changes. The startup trim waits for
+///   the first project to be opened, so it knows what not to delete; see
+///   `workspace::trim`.
+pub fn workspace_settings_apply(settings: &Settings) {
+    let was = proxy_commands::proxy_policy();
+    proxy_commands::proxy_set_policy(settings.proxy_policy);
+    if was == ProxyPolicy::Off && settings.proxy_policy != ProxyPolicy::Off {
+        proxy_commands::proxy_request_media(
+            trim::in_use()
+                .into_iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect(),
+        );
+    }
+
+    let previous = trim::set_limit(settings.cache_limit);
+    if previous != settings.cache_limit {
+        trim::trim_in_background();
+    }
+}
+
+/// Delete least-recently-used cache files until the cache fits in
+/// `limit_bytes` (0: no limit, nothing is deleted). The open project's
+/// thumbnails, waveforms and proxies are kept; see `workspace::trim`.
+///
+/// Walks the cache directory: call it off the UI thread.
+pub fn workspace_trim_cache(limit_bytes: u64) -> trim::TrimReport {
+    trim::trim_cache(limit_bytes)
+}
+
+/// Tell the engine which media the open document uses, so trimming the cache
+/// keeps their derived files. The project commands call this on open, import
+/// and close; an empty list means nothing is open.
+pub fn workspace_cache_in_use(media: Vec<String>) {
+    trim::set_in_use(media.into_iter().map(std::path::PathBuf::from).collect());
 }
 pub fn workspace_recent_list() -> Vec<super::settings::RecentProject> {
     let mut recent = RecentProjects::load();

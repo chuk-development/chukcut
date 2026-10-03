@@ -578,6 +578,47 @@ pub fn split(
     Ok((vec![left, right], command, ids))
 }
 
+/// The two materials the timeline's split gives a caption cut `offset` into
+/// its clip: the left keeps the material's id and the words before the cut,
+/// the right is a new material with the words from the cut on. Word times
+/// stay in source time, because the timeline's right half starts its source
+/// at the cut (`timeline::ops::split_at`).
+///
+/// `None` for a clip that is not a caption, and for a cut with no text on one
+/// side — a one-word caption — where both halves keep the whole caption as
+/// before rather than one of them showing nothing.
+pub fn split_material(
+    project: &Project,
+    segment: &Segment,
+    offset: Micros,
+) -> Option<(TextMaterial, TextMaterial)> {
+    let material = project
+        .materials
+        .text(&segment.material_id)
+        .filter(|m| m.caption.is_some())?;
+    let cut = segment.source_range.start + offset;
+    let words = material
+        .caption
+        .as_ref()
+        .map(|c| c.words.clone())
+        .unwrap_or_default();
+    let (left_text, right_text) =
+        split_text(material, &words, cut, offset, segment.target_range.duration);
+    if left_text.is_empty() || right_text.is_empty() {
+        return None;
+    }
+    let mut left = material.clone();
+    left.content = left_text;
+    let mut right = material.clone();
+    right.id = new_id();
+    right.content = right_text;
+    if let (Some(l), Some(r)) = (left.caption.as_mut(), right.caption.as_mut()) {
+        l.words = words.iter().filter(|w| w.start < cut).cloned().collect();
+        r.words = words.iter().filter(|w| w.start >= cut).cloned().collect();
+    }
+    Some((left, right))
+}
+
 /// Where the text divides: at the first word spoken after the cut, found in
 /// the text as the user has it; or, without words, at the space nearest the
 /// same fraction of the text as the cut is of the time.
@@ -963,6 +1004,57 @@ mod tests {
 
         command.invert().apply(&mut p).unwrap();
         assert_eq!(clips(&p).len(), 2);
+    }
+
+    #[test]
+    fn the_timeline_split_divides_a_caption_like_the_panel_and_undoes_exactly() {
+        use crate::modules::timeline::{ops::split_at, History};
+        let mut p = project();
+        sample(&mut p);
+        let first = clips(&p)[0].clone();
+        let before = serde_json::to_value(&p).unwrap();
+        let cues_before = cues(&p);
+
+        let mut history = History::new();
+        let command = split_at(&p, &first.segment_id, 1_350_000).unwrap();
+        history.apply(&mut p, command).unwrap();
+        assert!(p
+            .validate()
+            .iter()
+            .all(|i| i.severity != crate::modules::project::Severity::Error));
+
+        let listed = clips(&p);
+        assert_eq!(listed.len(), 3);
+        assert_eq!(listed[0].text, "hello");
+        assert_eq!(listed[1].text, "big world");
+        // The left half keeps its id, the right one has a material of its own.
+        assert_eq!(listed[0].segment_id, first.segment_id);
+        assert_ne!(listed[0].material_id, listed[1].material_id);
+        // In timeline time every word is where it was.
+        let after = cues(&p);
+        assert_eq!(after[0].words.len(), 1);
+        assert_eq!(after[1].words[0].start, cues_before[0].words[1].start);
+
+        history.undo(&mut p).unwrap();
+        assert_eq!(serde_json::to_value(&p).unwrap(), before);
+        history.redo(&mut p).unwrap();
+        assert_eq!(clips(&p).len(), 3);
+    }
+
+    #[test]
+    fn the_timeline_split_of_a_one_word_caption_keeps_the_word_on_both_halves() {
+        use crate::modules::timeline::ops::split_at;
+        let mut p = project();
+        sample(&mut p);
+        let second = clips(&p)[1].clone();
+        let command = split_at(&p, &second.segment_id, 2_000_000).unwrap();
+        command.apply(&mut p).unwrap();
+        let listed = clips(&p);
+        assert_eq!(listed.len(), 3);
+        assert_eq!(
+            (listed[1].text.as_str(), listed[2].text.as_str()),
+            ("second", "second")
+        );
     }
 
     #[test]

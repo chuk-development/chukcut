@@ -6,6 +6,7 @@
 //! mode, smoothing, re-track, bake and remove. A running analysis shows its
 //! progress and a Cancel in place of either.
 
+use chukcut_engine::modules::tracking::validate::link_status;
 use chukcut_engine::modules::tracking::{FollowMode, LOW_CONFIDENCE};
 use gpui::component::button::{Button, ButtonVariants as _};
 use gpui::component::menu::{DropdownMenu as _, PopupMenuItem};
@@ -47,6 +48,8 @@ impl Editor {
             ]
         } else if self.tracking.select.is_some() {
             self.selecting_rows(cx)
+        } else if self.follow_is_broken(segment) {
+            self.target_missing_rows(cx)
         } else if let Some((track_id, target_id)) = self.followed(segment) {
             self.following_rows(&track_id, &target_id, window, cx)
         } else {
@@ -153,6 +156,33 @@ impl Editor {
                     .on_click(cx.listener(|this, _, _, cx| this.cancel_box_select(cx)))
                     .into_any_element(),
             ]),
+        ]
+    }
+
+    /// Whether the clip carries a follow link with nothing left to follow
+    /// (`tracking::validate::link_status`).
+    fn follow_is_broken(&self, segment: &Segment) -> bool {
+        self.project
+            .materials
+            .follow_of(segment)
+            .is_some_and(|link| link_status(&self.project, link).is_broken())
+    }
+
+    /// When the tracked video (or its track) was deleted: the link stays, so
+    /// undoing the delete brings the motion back, but it moves nothing.
+    fn target_missing_rows(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        vec![
+            hint("Target missing".to_string()),
+            hint(
+                "The tracked video is no longer in the project, so this clip stays still. \
+                 Undo the delete to bring the motion back, or stop following."
+                    .to_string(),
+            ),
+            actions(vec![Button::new("tracking-detach-missing")
+                .small()
+                .label("Stop following")
+                .on_click(cx.listener(|this, _, _, cx| this.stop_following(cx)))
+                .into_any_element()]),
         ]
     }
 

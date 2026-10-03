@@ -532,6 +532,54 @@ pub fn bake(project: &Project, overlay_id: &str) -> Result<TrackingCommand, Stri
     })
 }
 
+/// Bake `followers` to keyframes, then run the timeline edit `then` builds —
+/// all as one undo step.
+///
+/// The bakes have to come first: a follow is evaluated through the tracked
+/// clip, so once that clip is gone there is no motion left to bake. `then` is
+/// built against the document as the bakes leave it, and gets the same two
+/// expansions `DocumentHistory::apply` gives every timeline edit (link
+/// partners, then transitions that lose their cut), because it does not pass
+/// through there.
+pub fn bake_then(
+    project: &Project,
+    followers: &[Id],
+    label: &str,
+    then: impl FnOnce(&Project) -> Result<EditCommand, String>,
+) -> Result<TrackingCommand, String> {
+    let mut scratch = project.clone();
+    let mut commands = Vec::new();
+    for overlay_id in followers {
+        let command = bake(&scratch, overlay_id)?;
+        command.apply(&mut scratch)?;
+        commands.push(command);
+    }
+    let edit = then(&scratch)?;
+    let edit = crate::modules::timeline::ops::mirror_linked_edits(&scratch, edit);
+    let edit = crate::modules::timeline::ops::detach_broken_transitions(&scratch, edit);
+    commands.push(TrackingCommand::Edit(edit));
+    Ok(TrackingCommand::Composite {
+        label: label.into(),
+        commands,
+    })
+}
+
+/// Delete clips with `delete` (the primitives a delete gesture produced, as
+/// `timeline_apply_many` takes them), baking every overlay that follows one of
+/// `deleted` first, so the overlays keep their motion as keyframes. One undo
+/// step. See `validate::dependent_followers` for which overlays those are.
+pub fn bake_and_delete(
+    project: &Project,
+    deleted: &[Id],
+    delete: Vec<EditCommand>,
+    label: &str,
+) -> Result<TrackingCommand, String> {
+    let followers = super::validate::dependent_followers(project, deleted);
+    bake_then(project, &followers, label, |scratch| {
+        crate::modules::timeline::ops::compose_edits(scratch, label, delete)
+    })
+}
+
 /// Drop points a straight line between their neighbours reproduces within
 /// `tolerance` (greedy; keeps both ends).
 fn simplify(points: &[(Micros, f32)], tolerance: f32) -> Vec<(Micros, f32)> {
@@ -774,6 +822,38 @@ mod tests {
         assert_eq!(default_target(&p, "o", 1_000_000).as_deref(), Some("v"));
         p.tracks[0].segments[0].target_range = TimeRange::new(20_000_000, 1_000_000);
         assert_eq!(default_target(&p, "o", 1_000_000), None);
+    }
+
+    #[test]
+    fn bake_then_delete_keeps_the_motion_and_undoes_in_one_step() {
+        // The fixture as it ships: the overlay follows the track through "v".
+        let mut p = super::super::follow::tests::project();
+        let original = json(&p);
+        let (track, video) = p.segment("v").unwrap();
+        let delete = vec![EditCommand::RemoveSegment {
+            track_id: track.id.clone(),
+            segment: video.clone(),
+            index: 0,
+        }];
+        let command = bake_and_delete(&p, &["v".into()], delete, "Delete clip").unwrap();
+        let mut history = crate::state::DocumentHistory::new();
+        history.apply_tracking(&mut p, command).unwrap();
+
+        assert!(p.segment("v").is_none());
+        let overlay = p.segment("o").unwrap().1;
+        assert!(p.materials.follow_of(overlay).is_none());
+        assert!(p.materials.follows.is_empty());
+        let x = overlay
+            .keyframes
+            .iter()
+            .find(|t| t.property == AnimatableProperty::PositionX)
+            .expect("the motion is baked");
+        assert!(x.keyframes.len() >= 2);
+        // Nothing left that follows a missing target.
+        assert!(super::super::validate::issues(&p).is_empty());
+
+        history.undo(&mut p).unwrap();
+        assert!(json(&p) == original, "undo was not exact");
     }
 
     #[test]

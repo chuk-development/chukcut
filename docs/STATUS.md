@@ -1659,6 +1659,60 @@ Don't save leaves it alone and deletes the working copy.
 - File dialogs need xdg-desktop-portal; on a bare Xvfb they fail, so Open…
   and Save as were not exercised there.
 
+## Proxy policy and cache limit take effect (2026-10-03)
+
+The two Settings rows the shell wave stored but nothing read now act. Both are
+engine-side; the app only writes the settings.
+
+- **`workspace_settings_set` applies what it saves** through
+  `workspace_settings_apply`, which `crate::init` also calls with the stored
+  settings at startup. No shell has to remember to push them.
+- **Proxy policy lives on the queue** (`proxy::policy`, `ProxyQueue::policy`).
+  Off: nothing is queued, the preview never decodes a proxy, and turning it
+  off cancels running jobs. Automatic: `decision::decide` unchanged. Always:
+  every video a proxy would make meaningfully smaller — the shrink clause
+  survives, because a 720p "proxy" of a 720p file decodes no faster. A policy
+  change bumps `ProxyQueue::generation()`.
+- **The shared queue starts Off** until settings are applied. Integration tests
+  open projects through the command layer and must not transcode their
+  fixtures into the real `~/.cache/chukcut/proxies`.
+- **Enqueueing**: `project_open`, `project_new`, recovery restore, the working
+  copy restore and `project_import_media` call `proxy_request_media`, which
+  probes on its own thread and returns at once. Import requests only the new
+  file. Turning the policy on from Off considers the open project's media.
+- **The preview half is not wired in the app yet.** `ProxyQueue::preview_source`
+  honours the policy, but `crates/app/src/player.rs` still builds
+  `MediaSourceProvider::from_project`, so the player decodes originals whatever
+  the policy says. That file belongs to the perf agent, who plans "proxies on
+  by default for heavy files"; the patch is decision 0003's provider seam plus
+  folding `proxy_generation()` into the player's provider key. When it lands,
+  drop "The player does not switch to proxies yet." from the Settings hint.
+- **Cache limit**: `workspace::trim`, command `workspace_trim_cache(limit)`.
+  Least recently used first, by the later of mtime and atime, except proxies,
+  whose index records every lookup to the millisecond. Kept: the open
+  project's thumbnail and waveform directories and its proxies (the engine
+  learns the media from the project commands via `workspace_cache_in_use`),
+  dot-prefixed / `.part` / `.tmp` files being written, `proxies/index.json`,
+  and the whole of `whisper/` — a downloaded model is not derived data, so it
+  is outside the count too. Voice cleanup renders are ordinary LRU candidates:
+  their key needs the clip's strength, which is not cheap to know here.
+  Protected files still count; a limit below what the open project needs
+  deletes everything else and stops.
+- **When it runs**: after every proxy lands (the shared queue's ready hook),
+  when the limit changes, and once at startup — but **not before the first
+  project is opened, created, restored or closed**. `crate::init` runs before
+  the startup project is open, and a trim there raced the open and could
+  delete the thumbnails it was about to show. A session that never leaves the
+  start screen does not trim.
+- The proxy cache keeps its own 20 GiB cap underneath; the setting is the
+  whole cache's ceiling. `ProxyCache::forget_missing` reconciles the index
+  after a trim so the Settings readout stops counting deleted proxies.
+- Tests: `proxy::policy::tests::the_policy_decides_what_gets_enqueued`,
+  `queue::tests::the_policy_gates_enqueueing_and_the_preview_switch`,
+  `workspace::trim::tests::trimming_removes_the_oldest_first_and_leaves_protected_files`
+  and the pure `plan` tests. Their scratch directories are under
+  `target/<profile>/test-scratch/`, not the system temp directory.
+
 ## Colour grading (2026-10-03)
 
 The Adjust tab is complete: Basic, HSL, Curves and Colour wheels, plus `.cube`
@@ -1849,10 +1903,25 @@ caption added after the first frame was drawn as the red offline placeholder,
 and a retyped one kept its old pixels. `MediaSourceProvider::sync_texts` now
 runs before every preview frame and drops the cached upload of a changed title.
 
+**The timeline's split divides a caption's words** (glue, 2026-10-03).
+`split_at` asks `captions::edit::split_material` for two materials: the left
+half keeps its material (shortened by a `SetTextMaterial`), the right half
+gets a new one through `AddMaterial(PoolMaterial::Text)` — the first text
+material minted *inside* an undoable command, so S, Ctrl+B, the blade, split
+all and silence cuts all divide captions and undo exactly. Word times stay in
+source time; the right half's source starts at the cut. A cut with no text
+on one side (a one-word caption) keeps the whole caption on both halves.
+`tests/split_glue.rs` splits a document where clips carry a grade, an
+animation, keyframes, transitions, a link, a follower and captions, a few
+hundred seeded times, and checks validate, every `extras` reference, every
+follow link, every caption word's timeline time and byte-exact undo/redo. It
+found one real bug: undoing a split whose left half lost its animation put
+the animation id back at the end of `extras`; `SetAnimation` now carries the
+`slot` it removed the id from.
+
 Known gaps: the emoji *picker* is drawn by GPUI, which shows some emoji as
 monochrome outlines (the caption itself is colour, drawn by our rasteriser);
-the timeline's own split (S) duplicates a caption's text into both
-halves — the panel's "Split at playhead" divides the words properly; a font
+a font
 from an online library has a hook (any family registered with the text
 renderer shows up in the font list) but no library yet; the drag frame on the
 player is a rectangle, not handles.
@@ -2161,8 +2230,22 @@ pointer, a scrollbar, a resizable split (42% of the window by default).
   step, so a later Unlink leaves a silent picture and an independent sound
   rather than the same sound twice. Right-click a clip for split, delete,
   duplicate, copy, cut, paste, detach audio, link, unlink, reset speed and
-  select all. **No freeze frame**: the engine has no still-from-a-video
-  material, and `check_speed` refuses speed 0.
+  select all, and freeze frame.
+- **Freeze frame** (right-click a video clip under the playhead;
+  `timeline::freeze`, command `timeline_freeze_frame`). Not a speed-0 clip
+  (`check_speed` refuses it) but a still: the frame at the playhead is
+  decoded from the original file (software, off the UI thread, no project
+  lock held) into a PNG under `paths::freeze_frames_dir()` —
+  `$XDG_DATA_HOME/chukcut/freeze-frames`, not the cache, because the project
+  references it. The edit is one `Composite`: `AddMaterial` (image), the
+  `split_at`, right-to-left `MoveSegment`s of everything from the cut on the
+  clip's lane and its linked lanes (`silence::cut::rippled_lanes`, the same
+  rule as silence cutting: music on other lanes stays), then the still in the
+  gap. The still carries the clip's crop and its *animated* transform at the
+  playhead, no keyframes, and the clip's colour/effect extras. Undo leaves
+  the PNG on disk on purpose, so redo still has it; nothing collects orphaned
+  stills yet. Default length 3 s (`freeze::DEFAULT_FREEZE`); there is no UI
+  to choose another.
 - **Transitions draw as a badge over their cut**, as wide as the stretch they
   cover. Click selects it (Del removes it); its ends change the length
   symmetrically, clamped to `transitions::edit::allowed_duration`, through
@@ -2190,6 +2273,25 @@ pointer, a scrollbar, a resizable split (42% of the window by default).
   `xdotool` and `import -window` on `:77` can then click, drag and capture
   freely. It is slow (pointer moves lag), and do not press Space there: the
   audio still goes to the real speakers.
+
+## Motion tracking: broken follow links and deleting the tracked clip
+
+- **A follow link is broken** when its tracking material is gone, or its
+  named clip is gone *and* no clip of the tracked file is left on the
+  timeline (`tracking::validate::link_status`; any clip of the file stands in,
+  as `follow::target_segment` does at render time). `Project::validate` warns
+  once per follower clip; the inspector's Tracking tab shows "Target missing"
+  with only "Stop following". The link is kept, so undoing the delete brings
+  the motion back.
+- **Delete on a tracked clip asks first** ("Bake and delete" / "Delete" /
+  "Cancel") when an overlay follows it by name, or follows a track of the
+  same file (`validate::dependent_followers`, deliberately broad). "Bake and
+  delete" is `tracking_bake_and_delete`: one `TrackingCommand::Composite` of
+  every `bake` followed by the delete gesture's own commands run through
+  `compose_edits`, `mirror_linked_edits` and `detach_broken_transitions` —
+  one undo step. The bakes must come first: a follow is evaluated through the
+  tracked clip, so after the delete there is nothing left to bake. Only the
+  Delete key / menu / toolbar ask; **Ctrl+X does not** (it deletes plainly).
 
 ## The log file, and what an export writes into it
 
@@ -2248,6 +2350,14 @@ nothing else in the system would say so.
   the context `!Input` (`main.rs`). The editor root takes focus back on every
   mouse down in the capture phase, so a click outside a field restores the
   shortcuts; a field under the pointer refocuses itself afterwards.
+
+- **A field focused from a mouse-down handler loses focus again** unless the
+  handler calls `window.prevent_default()`: the editor root tracks focus and
+  takes it in the bubble phase, after the handler. The timeline's inline text
+  box (double-click a title or caption, `timeline/inline_text.rs`) does this.
+  Its "click elsewhere commits" uses `on_mouse_down_out`, because the field's
+  `InputEvent::Blur` did not arrive for a click on the lanes (Xvfb,
+  2026-10-03).
 
 - **Do not drive the app on the shared desktop.** Other sessions run their own
   `chukcut` windows there, and one of them on top of yours swallows the
@@ -2567,15 +2677,19 @@ What works, verified:
 
 Rough or missing:
 
-- **Only the clip's lane and linked lanes ripple.** Captions, music and
-  overlays on other lanes stay put, so cutting after captions exist leaves
-  them out of step. Cut first, caption second — or teach `remove_ranges` to
-  move caption clips by the same shift.
-- **Filler words need a transcript provider.** `silence::filler::WordTimings`
-  is the seam; nothing registers one yet. The captions branch stores caption
-  words in caption-segment source time and transcripts in timeline time; an
-  adapter maps those into the cut clip's source time and calls
-  `register_word_timings` at startup.
+- **"Keep everything in sync"** (the panel's default, glue 2026-10-03):
+  `remove_ranges_in_sync` cuts the same stretches out of every unlocked lane.
+  A title or caption a cut runs through is shortened, and a caption's words
+  are re-timed through the closed-up timeline, so it stays one caption on
+  its words; music and overlays are split at the cut's edges and the inside
+  removed; a clip wholly inside a cut goes; locked lanes stay. Off, only the
+  clip's own and linked lanes ripple, as before. One undo step either way.
+- **Filler words read the captions.** `captions::words::CaptionWordTimings`
+  implements `silence::filler::WordTimings`: caption words (timeline time)
+  through the cut clip's placement and speed into its source time.
+  `AppState::new` registers it. Captions from an `.srt` have no word times
+  and give no transcript — estimating them would cut beside the filler.
+  `captions::TimedWord` is the one word type.
 - Normalize and Reduce noise act on one clip. After a silence cut the pieces
   share the cleanup block (splitting clones `extras`) but a normalise applied
   afterwards lands on the selected piece only.

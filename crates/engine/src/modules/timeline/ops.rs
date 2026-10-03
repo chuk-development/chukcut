@@ -24,15 +24,19 @@ use crate::modules::transitions;
 ///
 /// The whole material rather than its id, for the reason `RemoveSegment`
 /// carries the whole segment: undo has to put back exactly what was there, and
-/// an id cannot rebuild a probe result. Text materials are deliberately absent
-/// — they are created and deleted through the text module and have no file to
-/// go missing.
+/// an id cannot rebuild a probe result.
+///
+/// Text materials are mostly created through the text module, which pushes
+/// them outside the history. `Text` exists for edits that have to mint one as
+/// part of an undoable step: splitting a caption gives the right half its own
+/// words (`split_at`), and that has to undo exactly like the split itself.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PoolMaterial {
     Video(VideoMaterial),
     Audio(AudioMaterial),
     Image(ImageMaterial),
+    Text(TextMaterial),
 }
 
 impl PoolMaterial {
@@ -41,6 +45,7 @@ impl PoolMaterial {
             PoolMaterial::Video(m) => &m.id,
             PoolMaterial::Audio(m) => &m.id,
             PoolMaterial::Image(m) => &m.id,
+            PoolMaterial::Text(m) => &m.id,
         }
     }
 }
@@ -245,6 +250,13 @@ pub enum EditCommand {
         segment_id: String,
         before: Option<AnimationMaterial>,
         after: Option<AnimationMaterial>,
+        /// Where the reference sits in the segment's `extras` when it is
+        /// there: written by a removal, so that its inverse puts the id back
+        /// at the same place rather than at the end. Without it, undoing a
+        /// split whose left half lost its animation reordered `extras`, and
+        /// undo was no longer byte-exact.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        slot: Option<usize>,
     },
     /// Replace a title's parameters, keeping its id — the variant
     /// `text/commands.rs` asks for. Captions edit their words, timing and style
@@ -994,7 +1006,8 @@ impl EditCommand {
                 segment_id,
                 before,
                 after,
-            } => motion::edit::set(project, segment_id, before.as_ref(), after.as_ref()),
+                slot,
+            } => motion::edit::set(project, segment_id, before.as_ref(), after.as_ref(), *slot),
             EditCommand::SetTextMaterial { before, after } => {
                 crate::modules::captions::edit::set_text_material(project, before, after)
             }
@@ -1219,10 +1232,12 @@ impl EditCommand {
                 segment_id,
                 before,
                 after,
+                slot,
             } => EditCommand::SetAnimation {
                 segment_id: segment_id.clone(),
                 before: after.clone(),
                 after: before.clone(),
+                slot: *slot,
             },
             EditCommand::Composite { label, commands } => EditCommand::Composite {
                 label: label.clone(),
@@ -1262,6 +1277,7 @@ fn remove_pool_material(
         PoolMaterial::Video(m) => take(&mut project.materials.videos, index, &m.id, |m| &m.id),
         PoolMaterial::Audio(m) => take(&mut project.materials.audios, index, &m.id, |m| &m.id),
         PoolMaterial::Image(m) => take(&mut project.materials.images, index, &m.id, |m| &m.id),
+        PoolMaterial::Text(m) => take(&mut project.materials.texts, index, &m.id, |m| &m.id),
     }
 }
 
@@ -1291,6 +1307,7 @@ fn add_pool_material(project: &mut Project, material: &PoolMaterial, index: usiz
         PoolMaterial::Video(m) => put(&mut project.materials.videos, index, m),
         PoolMaterial::Audio(m) => put(&mut project.materials.audios, index, m),
         PoolMaterial::Image(m) => put(&mut project.materials.images, index, m),
+        PoolMaterial::Text(m) => put(&mut project.materials.texts, index, m),
     }
 }
 
@@ -1334,6 +1351,7 @@ pub fn split_at(project: &Project, segment_id: &str, at: Micros) -> Result<EditC
             Err(_) => continue,
         };
         commands.push(split.trim);
+        commands.extend(split.material);
         commands.push(split.insert);
         if let Some((_, original)) = project.segment(target) {
             commands.extend(motion::edit::split_commands(
@@ -1369,6 +1387,9 @@ pub fn split_at(project: &Project, segment_id: &str, at: Micros) -> Result<EditC
 /// puts the remainder back.
 struct SplitHalves {
     trim: EditCommand,
+    /// For a caption: the new material of the right half (added before the
+    /// insert that names it) and the left half's shortened words.
+    material: Vec<EditCommand>,
     insert: EditCommand,
     right_id: String,
 }
@@ -1436,6 +1457,40 @@ fn split_one(project: &Project, segment_id: &str, at: Micros) -> Result<SplitHal
     // so neither half's playback moves.
     rebase_keyframes_for_split(&mut right.keyframes, left_duration);
 
+    // A caption's words divide at the cut, as the Captions panel's split does;
+    // copying the material would show the whole sentence under both halves.
+    // The right half's source starts at the cut, and caption words are in
+    // source time, so neither half's words need moving.
+    let mut material = Vec::new();
+    let shared = |id: &str| {
+        project
+            .tracks
+            .iter()
+            .flat_map(|t| &t.segments)
+            .filter(|s| s.material_id == id)
+            .count()
+            > 1
+    };
+    if let Some((left_text, right_text)) =
+        crate::modules::captions::edit::split_material(project, segment, left_duration)
+    {
+        right.material_id = right_text.id.clone();
+        material.push(EditCommand::AddMaterial {
+            index: project.materials.texts.len(),
+            material: PoolMaterial::Text(right_text),
+        });
+        // A material another clip still shows (a legacy split, an old copy)
+        // keeps its text; only this clip's right half changes then.
+        if !shared(&segment.material_id) {
+            if let Some(before) = project.materials.text(&segment.material_id) {
+                material.push(EditCommand::SetTextMaterial {
+                    before: before.clone(),
+                    after: left_text,
+                });
+            }
+        }
+    }
+
     let right_id = right.id.clone();
     let index = track
         .segments
@@ -1457,6 +1512,7 @@ fn split_one(project: &Project, segment_id: &str, at: Micros) -> Result<SplitHal
             segment: right,
             index,
         },
+        material,
         right_id,
     })
 }

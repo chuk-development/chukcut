@@ -70,6 +70,9 @@ pub(crate) struct SilencePanel {
     language: &'static str,
     /// Why there are no filler cuts, when that is not "there are none".
     filler_note: Option<String>,
+    /// Ripple every other lane (captions, music, overlays) across each cut
+    /// too. On by default: captions made before the cut stay on their words.
+    keep_in_sync: bool,
     cuts: Vec<Cut>,
     threshold: Entity<SliderState>,
     min_pause: Entity<SliderState>,
@@ -141,6 +144,7 @@ impl SilencePanel {
             filler_padding: FILLER_PADDING,
             language: "auto",
             filler_note: None,
+            keep_in_sync: true,
             cuts: Vec::new(),
             threshold,
             min_pause,
@@ -288,6 +292,7 @@ impl SilencePanel {
             self.segment_id.clone(),
             cuts,
             label.to_string(),
+            self.keep_in_sync,
         )
         .map(|_| ());
         match result {
@@ -340,6 +345,26 @@ impl SilencePanel {
                 .into_any_element()
         };
         let mut rows = Vec::new();
+        {
+            let panel = cx.entity().downgrade();
+            rows.push(
+                PropertyRow::new("silence-sync", "Keep in sync")
+                    .no_actions()
+                    .child(
+                        Checkbox::new("silence-sync-check")
+                            .small()
+                            .checked(self.keep_in_sync)
+                            .label("Keep everything in sync: captions, music and overlays move too")
+                            .on_click(move |checked, _, cx| {
+                                let _ = panel.update(cx, |panel, cx| {
+                                    panel.keep_in_sync = *checked;
+                                    cx.notify();
+                                });
+                            }),
+                    )
+                    .into_any_element(),
+            );
+        }
         match self.mode {
             CutMode::Pauses => {
                 rows.push(row(

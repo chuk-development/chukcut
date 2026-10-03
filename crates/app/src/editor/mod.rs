@@ -381,7 +381,11 @@ impl Editor {
         self.report(result, cx);
     }
 
-    fn on_delete(&mut self, _: &DeleteSelected, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_delete(&mut self, _: &DeleteSelected, window: &mut Window, cx: &mut Context<Self>) {
+        // A tracked clip takes its followers' motion with it; ask first.
+        if self.offer_bake_before_delete(window, cx) {
+            return;
+        }
         // The timeline owns what is selected: clips, a keyframe, a transition.
         self.delete_selection(cx);
     }

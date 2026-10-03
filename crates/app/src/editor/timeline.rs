@@ -16,6 +16,7 @@
 mod batch;
 mod clipboard;
 mod envelope;
+mod inline_text;
 mod links;
 mod media_cache;
 mod ripple;
@@ -25,6 +26,7 @@ use chukcut_engine::modules::inspector::commands as inspector_commands;
 use chukcut_engine::modules::project::{Marker, MarkerColor, Segment, TimeRange};
 use chukcut_engine::modules::text::commands as text_commands;
 use chukcut_engine::modules::timeline::ops::TrackFlags;
+use chukcut_engine::modules::tracking::commands as tracking_commands;
 use chukcut_engine::modules::transitions::commands as transition_commands;
 use chukcut_engine::modules::transitions::edit as transition_edit;
 use chukcut_engine::modules::transitions::resolve as transition_resolve;
@@ -58,7 +60,8 @@ actions!(
         DetachAudio,
         LinkClips,
         UnlinkClips,
-        ResetSpeed
+        ResetSpeed,
+        FreezeFrame
     ]
 );
 
@@ -271,6 +274,7 @@ struct MenuState {
     can_link: bool,
     can_unlink: bool,
     can_reset_speed: bool,
+    can_freeze: bool,
 }
 
 /// One lane as drawn: where it is, in lanes-local pixels.
@@ -338,6 +342,8 @@ pub(crate) struct TimelineState {
     drop_media: Option<super::assets::MediaDrag>,
     /// Where a wheel scroll is gliding to.
     scroll_target: Option<f32>,
+    /// The text box open on a title or caption clip.
+    inline_text: Option<inline_text::InlineText>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -383,6 +389,7 @@ impl TimelineState {
             drop_hover: None,
             drop_media: None,
             scroll_target: None,
+            inline_text: None,
             _subscriptions: vec![subscription],
         }
     }
@@ -944,7 +951,12 @@ impl Editor {
 
     // --- pointer -------------------------------------------------------------------
 
-    fn on_lanes_down(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_lanes_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let (x, y) = self.lanes_local(event.position);
         let (width, height) = self.lanes_size();
         let time = self.x_to_time(x);
@@ -972,6 +984,20 @@ impl Editor {
             self.timeline.drag = Some(Drag::Scrub);
             cx.notify();
             return;
+        }
+
+        // A double-click on a title or a caption edits its words in place.
+        if event.click_count == 2 && self.timeline.tool == Tool::Select {
+            if let Some((_, Hit::Clip { segment_id, .. })) = self.hit(x, y) {
+                if self.can_edit_inline(&segment_id) {
+                    self.open_inline_text(segment_id, window, cx);
+                    // The editor root tracks focus and takes it on a mouse
+                    // down that is not prevented, after this handler: it
+                    // would pull the keyboard straight out of the new box.
+                    window.prevent_default();
+                    return;
+                }
+            }
         }
 
         if self.timeline.tool == Tool::Select {
@@ -1776,16 +1802,8 @@ impl Editor {
 
     /// Delete a clip; on the main lane with the magnet on, close the hole.
     pub(super) fn remove_clip(&mut self, segment_id: &str, cx: &mut Context<Self>) {
-        let ripple = self.timeline.magnet
-            && self
-                .project
-                .segment(segment_id)
-                .is_some_and(|(track, _)| self.is_main_track(&track.id));
-        let commands = ripple::remove(&self.project, segment_id, ripple).map(|mut commands| {
-            commands.extend(ripple::drop_emptied_lane(&self.project, segment_id, None));
-            commands
-        });
-        self.apply_many(commands, "Delete clip", cx);
+        let (commands, label) = self.clip_delete_commands(&[segment_id.to_string()]);
+        self.apply_many(commands, label, cx);
     }
 
     /// Delete what is selected on the timeline: a transition, a keyframe
@@ -1808,18 +1826,66 @@ impl Editor {
             return;
         }
         let ids = self.selection();
-        match ids.as_slice() {
-            [] => {}
+        if ids.is_empty() {
+            return;
+        }
+        self.clear_selection();
+        let (commands, label) = self.clip_delete_commands(&ids);
+        self.apply_many(commands, label, cx);
+    }
+
+    /// The clips the Delete key would remove now: none when a transition or a
+    /// keyframe is selected, because then Delete removes that instead.
+    pub(super) fn clips_to_delete(&self) -> Vec<String> {
+        if self.timeline.selected_transition.is_some() || self.timeline.selected_keyframe.is_some()
+        {
+            return Vec::new();
+        }
+        self.selection()
+    }
+
+    /// Delete the selected clips as Delete does, baking every overlay that
+    /// follows one of them to keyframes first — one undo step.
+    pub(super) fn delete_selection_baking(&mut self, cx: &mut Context<Self>) {
+        let ids = self.clips_to_delete();
+        if ids.is_empty() {
+            return;
+        }
+        self.clear_selection();
+        let (commands, label) = self.clip_delete_commands(&ids);
+        let result = commands.and_then(|commands| {
+            tracking_commands::tracking_bake_and_delete(&self.state, ids, commands, label.into())
+                .map(|_| ())
+        });
+        self.refresh(cx);
+        self.report(result.map_err(|error| friendly(&error)), cx);
+    }
+
+    /// The edit that deletes the clips `ids` the way the Delete key does —
+    /// rippling the main lane when the magnet is on — and its undo label.
+    pub(super) fn clip_delete_commands(
+        &self,
+        ids: &[String],
+    ) -> (Result<Vec<EditCommand>, String>, &'static str) {
+        match ids {
             [one] => {
-                let one = one.clone();
-                self.clear_selection();
-                self.remove_clip(&one, cx);
+                let ripple = self.timeline.magnet
+                    && self
+                        .project
+                        .segment(one)
+                        .is_some_and(|(track, _)| self.is_main_track(&track.id));
+                let commands = ripple::remove(&self.project, one, ripple).map(|mut commands| {
+                    commands.extend(ripple::drop_emptied_lane(&self.project, one, None));
+                    commands
+                });
+                (commands, "Delete clip")
             }
             _ => {
-                self.clear_selection();
                 let magnet = self.magnet_lane();
-                let commands = batch::group_delete(&self.project, &ids, magnet.as_deref());
-                self.apply_many(commands, "Delete clips", cx);
+                (
+                    batch::group_delete(&self.project, ids, magnet.as_deref()),
+                    "Delete clips",
+                )
             }
         }
     }
@@ -2013,7 +2079,58 @@ impl Editor {
                     .segment(id)
                     .is_some_and(|(_, s)| s.speed != 1.0)
             }),
+            can_freeze: self.freeze_target().is_some(),
         }
+    }
+
+    /// The clip "Freeze frame" holds: the selected clip, when it is a video
+    /// clip on a video lane and the playhead is over it. The engine checks the
+    /// same again (`timeline::freeze::freeze_source`); this only decides
+    /// whether the menu entry is live.
+    fn freeze_target(&self) -> Option<String> {
+        let at = self.clock.position();
+        let (track, segment) = self
+            .selected
+            .as_deref()
+            .and_then(|id| self.project.segment(id))?;
+        (track.kind == TrackKind::Video
+            && !track.locked
+            && self.project.materials.video(&segment.material_id).is_some()
+            && segment.target_range.contains(at))
+        .then(|| segment.id.clone())
+    }
+
+    /// Hold the selected clip's frame at the playhead for three seconds. The
+    /// decode runs off the UI thread; the edit lands as one undo step.
+    fn freeze_frame(&mut self, cx: &mut Context<Self>) {
+        let Some(segment_id) = self.freeze_target() else {
+            self.status = Some("Select a video clip under the playhead to freeze".into());
+            cx.notify();
+            return;
+        };
+        let at = self.clock.position();
+        let state = Arc::clone(&self.state);
+        self.status = Some("Freezing frame…".into());
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    timeline_commands::timeline_freeze_frame(
+                        &state,
+                        segment_id,
+                        at,
+                        chukcut_engine::modules::timeline::freeze::DEFAULT_FREEZE,
+                    )
+                    .map(|_| ())
+                })
+                .await;
+            let _ = this.update(cx, |editor, cx| {
+                editor.refresh(cx);
+                editor.report(result.map_err(|error| friendly(&error)), cx);
+            });
+        })
+        .detach();
     }
 
     /// The clip Q and W act on: the selected one when the playhead is inside
@@ -2157,6 +2274,7 @@ impl Editor {
         .on_action(cx.listener(|this, _: &LinkClips, _, cx| this.link_selection(cx)))
         .on_action(cx.listener(|this, _: &UnlinkClips, _, cx| this.unlink_selection(cx)))
         .on_action(cx.listener(|this, _: &ResetSpeed, _, cx| this.reset_speed(cx)))
+        .on_action(cx.listener(|this, _: &FreezeFrame, _, cx| this.freeze_frame(cx)))
     }
 
     // --- media -----------------------------------------------------------------------
@@ -3321,6 +3439,7 @@ impl Editor {
             .children(blade_line)
             .children(playhead)
             .children(scrollbar)
+            .children(self.render_inline_text(lanes_w, cx))
             .context_menu({
                 let editor = cx.entity();
                 let focus = self.focus.clone();
@@ -3844,6 +3963,7 @@ fn clip_menu(
 ) -> gpui::component::menu::PopupMenu {
     let menu = menu
         .menu_with_disabled("Split", Box::new(Split), !s.can_split)
+        .menu_with_disabled("Freeze frame", Box::new(FreezeFrame), !s.can_freeze)
         .menu_with_disabled("Delete", Box::new(DeleteSelected), !s.clips)
         .menu_with_disabled("Duplicate", Box::new(DuplicateClips), !s.clips)
         .separator()
