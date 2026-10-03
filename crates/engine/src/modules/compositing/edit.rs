@@ -14,7 +14,7 @@
 use crate::modules::project::compositing::{
     clamp_param, BlendMode, ChromaKey, CompositingMaterial, Mask, MaskOp, MaskShape, MASK_PARAMS,
 };
-use crate::modules::project::document::{new_id, Micros, Project, Segment};
+use crate::modules::project::document::{new_id, MaterialKind, Micros, Project, Segment};
 use crate::modules::timeline::ops::EditCommand;
 
 /// What an edit produced: the material to put into the pool first (`None`
@@ -28,6 +28,9 @@ pub fn current(project: &Project, segment_id: &str) -> Result<CompositingMateria
         .ok_or_else(|| format!("unknown segment {segment_id}"))?;
     if project.materials.is_effect_clip(segment) {
         return Err("an effect clip has no picture to mask".into());
+    }
+    if project.materials.kind_of(&segment.material_id) == Some(MaterialKind::Audio) {
+        return Err("a sound clip has no picture to mask".into());
     }
     Ok(project
         .materials

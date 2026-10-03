@@ -252,10 +252,23 @@ impl ClipFrame {
             let image = pool.image(&segment.material_id)?;
             (image.width, image.height)
         };
-        let mut transform = layout::animated_transform(segment, time);
+        // Placed the way the compositor places it: a followed clip by its
+        // track, a stabilised one through its crop window, then keyframes and
+        // keyframe-free animation.
+        let followed = chukcut_engine::modules::tracking::follow::resolve(project, segment, time);
+        let resolved =
+            chukcut_engine::modules::analysis::stabilise::resolve(project, followed, time);
+        let keyed = layout::animated_transform(&resolved, time);
+        let mut transform = chukcut_engine::modules::motion::clip_motion(
+            &project.materials,
+            &resolved,
+            time,
+            keyed,
+        )
+        .map_or(keyed, |m| m.transform);
         transform.opacity = 1.0;
         let canvas = (project.canvas.width, project.canvas.height);
-        let m = layout::place_quad(canvas, source, &transform, segment.crop)?.mvp;
+        let m = layout::place_quad(canvas, source, &transform, resolved.crop)?.mvp;
         let (dw, dh) = size;
         let a = [
             m[0] * dw * 0.5,

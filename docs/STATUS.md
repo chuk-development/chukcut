@@ -2226,9 +2226,9 @@ Backlog item 1. Engine in `project/compositing.rs`, `modules/compositing/`,
 Not done: text, brush and pen masks (need a mask texture; decision 0020);
 Adjust › Mask (a grade inside a mask); a blended clip draws as normal inside
 a transition window and with motion blur; masks and key are not carried by
-"Paste attributes" or "Apply to all"; mask handles ignore keyframe-free
-animation (`motion::clip_motion`) when they place themselves; mask and key
-cost not measured.
+"Paste attributes" or "Apply to all"; the handles follow a clip's motion
+but not a motion reveal (wipe-in animations); mask and key cost not
+measured.
 
 ## Not built yet
 
