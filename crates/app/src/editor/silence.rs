@@ -348,13 +348,13 @@ impl SilencePanel {
         {
             let panel = cx.entity().downgrade();
             rows.push(
-                PropertyRow::new("silence-sync", "Keep everything in sync")
+                PropertyRow::new("silence-sync", "Keep in sync")
                     .no_actions()
                     .child(
                         Checkbox::new("silence-sync-check")
                             .small()
                             .checked(self.keep_in_sync)
-                            .label("Captions, music and overlays move with the cuts")
+                            .label("Keep everything in sync: captions, music and overlays move too")
                             .on_click(move |checked, _, cx| {
                                 let _ = panel.update(cx, |panel, cx| {
                                     panel.keep_in_sync = *checked;
