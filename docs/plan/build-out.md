@@ -49,7 +49,8 @@ column current.
 | 3 | motion | animation presets (in/out/combo) via keyframes, masks, speed curves | |
 | 3 | effects | our own GPU effects (blur, glow, shake, zoom, glitch, RGB split, vignette) via the effect runtime; filters tab | |
 | 3 | audio | audio effects (fades, denoise, normalise), voiceover record, beat markers | |
-| 3 | captions | SRT import/export, caption lane and styles | |
+| 2 | captions | auto captions (OpenAI-compatible API with own base URL/key/model, or local Whisper), word/sentence mode, SRT/VTT, caption lane, styles (font, colour, stroke, box, position, karaoke highlight), emoji | running (branch agent/captions) |
+| 2 | research | `docs/research/ml-features.md` (tracking first), `docs/research/open-assets.md` | running (agent/mlresearch, agent/assetsresearch) |
 | 4 | perf | shared GPU device with GPUI (no readback), playback at 4K, proxies on by default for heavy files | |
 | 4 | QA | end-to-end tests over the command layer, a test pass over every panel, fixes | |
 | 4 | packaging | release build, desktop entry, icon, install script, README | |
