@@ -1839,6 +1839,32 @@ impl Editor {
             }
         }
 
+        // An empty timeline says how to start, in the main lane.
+        if project.duration() <= 0 {
+            if let Some(row) = rows.iter().find(|row| row.main) {
+                lanes.push(
+                    div()
+                        .absolute()
+                        .left(px(8.0))
+                        .top(px(row.top + 6.0))
+                        .w(px((lanes_w - 16.0).clamp(0.0, 640.0)))
+                        .h(px(row.height - 12.0))
+                        .rounded(px(4.0))
+                        .border_1()
+                        .border_dashed()
+                        .border_color(rgb(BORDER))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .gap(px(8.0))
+                        .text_size(px(12.0))
+                        .text_color(rgb(TEXT_DIM))
+                        .child(Icon::new(IconName::Film).small().text_color(rgb(TEXT_DIM)))
+                        .child("Drop media here, or import it with Ctrl+I"),
+                );
+            }
+        }
+
         // --- guides: snap line, blade line, playhead
         let tracks_bottom = lanes_h - SCROLLBAR_H;
         let snap_line = self.timeline.snap.map(|time| {
@@ -1924,6 +1950,11 @@ impl Editor {
             })
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_lanes_down))
             .on_scroll_wheel(cx.listener(Self::on_timeline_scroll))
+            // Files dropped from the file manager land at the end of their
+            // lane, like an import.
+            .on_drop(cx.listener(|this, paths: &gpui::ExternalPaths, _, cx| {
+                this.import_paths(paths.paths().to_vec(), cx);
+            }))
             .child(
                 canvas(move |bounds, _, _| probe.set(bounds), |_, _, _, _| {})
                     .absolute()
