@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/engine", "crates/app", "crates/cli"]
+members = ["crates/engine", "crates/app", "crates/cli", "crates/ml-worker"]
 default-members = ["crates/app"]
 
 # Development builds run the full pipeline — decode, JPEG encode, pixel work —
