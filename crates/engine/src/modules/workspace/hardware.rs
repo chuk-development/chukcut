@@ -32,7 +32,7 @@ pub struct HardwareCodec {
     pub id: String,
     /// What to show: "H.264", "HEVC".
     pub label: String,
-    /// The accelerator behind it: `vaapi`, `qsv`, `nvenc`, `videotoolbox`.
+    /// The accelerator behind it: `vaapi`, `qsv`, `nvenc`, `nvdec`.
     pub accel: String,
     /// Present in the build at all.
     pub available: bool,
@@ -83,12 +83,23 @@ pub fn report() -> HardwareReport {
         })
         .collect();
 
+    // VAAPI is always listed, refusals included, because on Intel and AMD it
+    // is the path that should work. NVDEC is listed where it works: on a
+    // machine without an NVIDIA card, four "no device" rows say nothing.
+    let cuda = hwdecode::capabilities_for(hwdecode::HwBackend::Cuda);
+    let cuda_rows = if cuda.iter().any(|support| support.usable) {
+        cuda
+    } else {
+        &[]
+    };
     let decoders = hwdecode::capabilities()
         .iter()
+        .chain(cuda_rows.iter())
         .map(|support| HardwareCodec {
             id: support.decoder_name.clone(),
             label: support.codec.label().to_string(),
-            accel: "vaapi".to_string(),
+            // VAAPI and NVDEC rows both come from this probe; say which.
+            accel: support.backend.label().to_lowercase(),
             available: support.in_build,
             usable: support.usable,
             note: support.note.clone(),

@@ -81,3 +81,93 @@ pub async fn workspace_hardware() -> super::HardwareReport {
             }
         })
 }
+
+/// One row of the start screen's project list.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecentEntry {
+    pub path: String,
+    /// The project's own name when the file could be read, else the name it
+    /// had when it was last opened.
+    pub name: String,
+    /// Unix millis of the last open.
+    pub opened_at: i64,
+    /// The file is gone. Shown, not hidden: a project on an unmounted drive
+    /// is still the user's, and silently dropping it reads as data loss.
+    pub missing: bool,
+    pub duration: Option<crate::modules::project::Micros>,
+    /// A picture for the card, when the project has one.
+    pub poster: Option<Poster>,
+}
+
+/// The first visual clip of a project, to draw its card with.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Poster {
+    /// The media file the clip shows.
+    pub path: String,
+    /// An image file, usable as it is; otherwise a video to take a frame of.
+    pub still: bool,
+}
+
+/// The recent list for the start screen, unpruned and with what each card
+/// needs. Reads each project file, so call it off the UI thread.
+pub fn workspace_recent_entries() -> Vec<RecentEntry> {
+    RecentProjects::load()
+        .entries
+        .into_iter()
+        .map(|entry| {
+            let document = std::fs::read_to_string(&entry.path)
+                .ok()
+                .and_then(|raw| crate::modules::project::migrate::load(&raw).ok())
+                .map(|loaded| loaded.project);
+            RecentEntry {
+                missing: !std::path::Path::new(&entry.path).exists(),
+                name: document
+                    .as_ref()
+                    .map(|p| p.name.clone())
+                    .unwrap_or(entry.name),
+                path: entry.path,
+                opened_at: entry.opened_at,
+                duration: document.as_ref().map(|p| p.duration()),
+                poster: document.as_ref().and_then(poster_of),
+            }
+        })
+        .collect()
+}
+
+/// The earliest clip on a video lane whose material is a picture.
+pub fn poster_of(project: &crate::modules::project::Project) -> Option<Poster> {
+    use crate::modules::project::TrackKind;
+    let pool = &project.materials;
+    project
+        .tracks
+        .iter()
+        .filter(|track| track.kind == TrackKind::Video)
+        .flat_map(|track| track.segments.iter())
+        .filter_map(|segment| {
+            let id = &segment.material_id;
+            let poster = if let Some(video) = pool.videos.iter().find(|m| &m.id == id) {
+                Poster {
+                    path: video.path.clone(),
+                    still: false,
+                }
+            } else {
+                let image = pool.images.iter().find(|m| &m.id == id)?;
+                Poster {
+                    path: image.path.clone(),
+                    still: true,
+                }
+            };
+            Some((segment.target_range.start, poster))
+        })
+        .min_by_key(|(start, _)| *start)
+        .map(|(_, poster)| poster)
+}
+
+/// Take one project off the recent list. The file is not touched.
+pub fn workspace_recent_forget(path: String) -> Result<(), String> {
+    let mut recent = RecentProjects::load();
+    recent.entries.retain(|entry| entry.path != path);
+    recent.save()
+}

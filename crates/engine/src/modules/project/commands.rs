@@ -484,3 +484,53 @@ pub fn project_path(state: &Arc<AppState>) -> Option<String> {
         .as_ref()
         .map(|p| p.to_string_lossy().to_string())
 }
+
+// ---------------------------------------------------------------------------
+// Lifecycle: close, and crash recovery (`recovery.rs`)
+// ---------------------------------------------------------------------------
+
+/// Close the open document cleanly: nothing open, no undo history, and the
+/// working copy deleted, because the user has saved or chosen to discard by
+/// the time a shell calls this. With `exiting`, the app is about to quit and
+/// the session lock is released as well.
+///
+/// The working copy surviving a session is how the next launch knows the
+/// session crashed, so every clean way out must come through here.
+pub fn project_close(state: &Arc<AppState>, exiting: bool) {
+    *state.project.write() = None;
+    *state.project_path.write() = None;
+    state.history.write().clear();
+    super::recovery::close_at(&super::autosave::file(), exiting);
+}
+
+/// Called once at launch, before any project is opened: set a crashed
+/// session's working copy aside and answer what can be restored.
+pub fn project_recovery_claim() -> Option<super::recovery::RecoveryInfo> {
+    super::recovery::claim_at(&super::autosave::file())
+}
+
+/// What can be restored, without claiming anything.
+pub fn project_recovery_pending() -> Option<super::recovery::RecoveryInfo> {
+    super::recovery::pending_at(&super::autosave::file())
+}
+
+/// Open the recovered work. The document comes back pointing at the file it
+/// came from, if it had one, so Ctrl+S goes where the user expects — but it is
+/// not *in* that file yet, which the shell shows as unsaved.
+pub fn project_recovery_restore(state: &Arc<AppState>) -> Result<Project, String> {
+    let restored = super::recovery::take_at(&super::autosave::file())?;
+    for warning in &restored.warnings {
+        tracing::warn!("restoring unsaved work: {warning}");
+    }
+    let project = restored.project;
+    *state.project.write() = Some(project.clone());
+    *state.project_path.write() = restored.path.clone();
+    state.history.write().clear();
+    super::autosave::schedule(&project, restored.path);
+    Ok(project)
+}
+
+/// Throw the recovered work away.
+pub fn project_recovery_discard() {
+    super::recovery::discard_at(&super::autosave::file());
+}

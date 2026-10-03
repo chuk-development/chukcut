@@ -54,6 +54,41 @@ pub struct Settings {
     /// would only be a third copy of the same fields to keep in step.
     #[serde(default)]
     pub export_defaults: Option<serde_json::Value>,
+    /// The native player's resolution relative to what fits the panel: 1.0,
+    /// 0.5 or 0.25. Lower is cheaper on heavy timelines.
+    pub preview_scale: f32,
+    /// Play a moment of sound under the playhead while it is dragged or
+    /// stepped.
+    pub audio_scrubbing: bool,
+    /// When proxies are made for imported video.
+    pub proxy_policy: ProxyPolicy,
+}
+
+/// When proxies are made for imported video.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProxyPolicy {
+    /// Never; always decode the original.
+    Off,
+    /// When `proxy::decision` says the file will not play smoothly here.
+    #[default]
+    Auto,
+    /// For every imported video, whatever it is.
+    Always,
+}
+
+impl Settings {
+    /// [`Self::preview_scale`] snapped to the three steps the player offers,
+    /// so a hand-edited file cannot ask for a zero-sized preview.
+    pub fn preview_scale(&self) -> f32 {
+        if self.preview_scale <= 0.375 {
+            0.25
+        } else if self.preview_scale <= 0.75 {
+            0.5
+        } else {
+            1.0
+        }
+    }
 }
 
 /// The current schema version. Bump it when a migration is added below.
@@ -73,6 +108,9 @@ impl Default for Settings {
             settings_version: SETTINGS_VERSION,
             export_remember: false,
             export_defaults: None,
+            preview_scale: 1.0,
+            audio_scrubbing: true,
+            proxy_policy: ProxyPolicy::Auto,
         }
     }
 }
@@ -238,6 +276,25 @@ mod tests {
             recent.entries[0].path,
             format!("/p{}.chukcut", RECENT_LIMIT + 9)
         );
+    }
+
+    #[test]
+    fn a_file_from_before_the_native_settings_gets_their_defaults() {
+        let stored: Settings =
+            serde_json::from_str(r#"{"default_fps": 25.0, "settings_version": 1}"#).unwrap();
+        assert_eq!(stored.default_fps, 25.0);
+        assert_eq!(stored.preview_scale(), 1.0);
+        assert!(stored.audio_scrubbing);
+        assert_eq!(stored.proxy_policy, ProxyPolicy::Auto);
+    }
+
+    #[test]
+    fn the_preview_scale_snaps_to_a_step() {
+        let mut settings = Settings::default();
+        for (stored, step) in [(0.0, 0.25), (0.3, 0.25), (0.5, 0.5), (0.9, 1.0), (7.0, 1.0)] {
+            settings.preview_scale = stored;
+            assert_eq!(settings.preview_scale(), step, "{stored}");
+        }
     }
 
     #[test]

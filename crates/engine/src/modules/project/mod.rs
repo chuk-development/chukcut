@@ -18,6 +18,7 @@ pub mod commands;
 pub mod configure;
 pub mod document;
 pub mod migrate;
+pub mod recovery;
 
 pub use configure::{ConfigureCommand, ProjectConfig};
 pub use document::*;
