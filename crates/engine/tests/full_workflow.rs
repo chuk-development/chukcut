@@ -465,7 +465,7 @@ fn a_whole_session_through_the_command_layer() {
     let state = AppState::new();
     ok(
         "new",
-        project::project_new(&state, "QA".into(), W, H, FPS).map(|_| ()),
+        project::project_new(&state, "QA".into(), W, H, FPS, false).map(|_| ()),
     );
     let import = |path: &Path| {
         ok(
@@ -973,7 +973,20 @@ fn a_whole_session_through_the_command_layer() {
         std::fs::read(&again).unwrap(),
         "a reopened project saves byte for byte the same"
     );
-    assert_eq!(json(&snapshot(&reopened)), json(&final_project));
+    // The file leaves out the materials nothing reaches any more (the grade
+    // edits above left three colour adjustments behind); everything else is
+    // the session's document exactly.
+    let mut final_file = final_project.clone();
+    let pruned = chukcut_engine::modules::project::prune::prune_unreferenced(&mut final_file);
+    assert!(
+        pruned >= 3,
+        "superseded grades are left out of the file: {pruned}"
+    );
+    assert_eq!(json(&snapshot(&reopened)), json(&final_file));
+    // The live pool still has them: undo below needs every one.
+    assert!(
+        snapshot(&state).materials.color_adjusts.len() > final_file.materials.color_adjusts.len()
+    );
 
     // --- undo everything, redo everything ---------------------------------------
     let mut undone = 0;

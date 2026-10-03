@@ -14,7 +14,9 @@ use std::sync::Arc;
 use chukcut_engine::modules::audio::AudioEngine;
 use chukcut_engine::modules::export::commands as export_commands;
 use chukcut_engine::modules::export::{ExportProgress, ExportStage};
-use chukcut_engine::modules::preview::clock::{frame_at, PlaybackClock};
+use chukcut_engine::modules::preview::clock::{
+    frame_at, frame_start, nearest_frame_time, PlaybackClock,
+};
 use chukcut_engine::modules::project::commands as project_commands;
 use chukcut_engine::modules::project::{Micros, Project, Track, TrackKind};
 use chukcut_engine::modules::timeline::commands as timeline_commands;
@@ -24,8 +26,8 @@ use chukcut_engine::state::AppState;
 use gpui::prelude::*;
 use gpui::{
     actions, canvas, div, img, px, rgb, App, Bounds, Context, FocusHandle, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, Point, RenderImage,
-    ScrollWheelEvent, SharedString, Task, Window,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, RenderImage, ScrollWheelEvent,
+    SharedString, Task, Window,
 };
 
 use crate::edits;
@@ -59,6 +61,7 @@ mod assets;
 mod captions;
 mod cloud;
 mod export;
+mod files;
 mod font_picker;
 mod home;
 mod inspector;
@@ -80,6 +83,7 @@ mod tracking;
 mod widgets;
 
 use crate::theme::*;
+use files::{FileRequest, Filter};
 use widgets::*;
 
 // --- state -------------------------------------------------------------------
@@ -102,6 +106,9 @@ pub struct Editor {
 
     selected: Option<String>,
     status: Option<SharedString>,
+    /// The status line as last seen by the tick, and since when; see
+    /// `expire_status`.
+    status_since: Option<(SharedString, std::time::Instant)>,
 
     viewer: Rc<Cell<Bounds<Pixels>>>,
     timeline: timeline::TimelineState,
@@ -175,6 +182,7 @@ impl Editor {
             scale: window.scale_factor(),
             selected: None,
             status: None,
+            status_since: None,
             viewer: Rc::new(Cell::new(Bounds::default())),
             timeline: timeline::TimelineState::new(cx),
             export_progress: Arc::new(parking_lot::Mutex::new(None)),
@@ -245,6 +253,7 @@ impl Editor {
             self.status = Some(export::export_status(&progress).into());
             changed = true;
         }
+        changed |= self.expire_status();
         changed |= self.poll_tracking(cx);
         changed |= self.poll_analysis(cx);
         if let Some(frame) = self.player.take(self.clock.position()) {
@@ -358,6 +367,33 @@ impl Editor {
         cx.notify();
     }
 
+    /// Let a finished message go after a while, so an old error ("cannot
+    /// open …") does not sit in the title bar until something else is said.
+    /// A message of work in progress ("Importing…", "Exporting 40 %") stays
+    /// until the work replaces it. Answers whether the line changed.
+    fn expire_status(&mut self) -> bool {
+        const SHOWN_FOR: std::time::Duration = std::time::Duration::from_secs(8);
+        let Some(status) = self.status.clone() else {
+            self.status_since = None;
+            return false;
+        };
+        match &self.status_since {
+            Some((seen, since)) if *seen == status => {
+                let ongoing = status.ends_with('\u{2026}') || status.starts_with("Exporting");
+                if !ongoing && since.elapsed() >= SHOWN_FOR {
+                    self.status = None;
+                    self.status_since = None;
+                    return true;
+                }
+                false
+            }
+            _ => {
+                self.status_since = Some((status, std::time::Instant::now()));
+                false
+            }
+        }
+    }
+
     fn report(&mut self, result: Result<(), String>, cx: &mut Context<Self>) {
         self.status = result.err().map(SharedString::from);
         cx.notify();
@@ -418,7 +454,9 @@ impl Editor {
     }
 
     fn on_split(&mut self, _: &Split, _: &mut Window, cx: &mut Context<Self>) {
-        let at = self.clock.position();
+        // On the start of the frame on screen, never between frames: the
+        // playhead may be anywhere inside a frame while playing.
+        let at = frame_start(self.clock.position(), self.project.fps);
         let result = match self.selected.clone() {
             Some(id) => timeline_commands::timeline_split(&self.state, id, at),
             None => timeline_commands::timeline_split_all(&self.state, at),
@@ -450,20 +488,11 @@ impl Editor {
     }
 
     fn on_import(&mut self, _: &Import, _: &mut Window, cx: &mut Context<Self>) {
-        let picked = cx.prompt_for_paths(PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: true,
-            prompt: Some("Import".into()),
-        });
-        cx.spawn(async move |this, cx| match picked.await {
-            Ok(Ok(Some(paths))) => {
+        let picked = files::choose(FileRequest::open_many("Import", Filter::Media), cx);
+        cx.spawn(async move |this, cx| {
+            if let Some(paths) = picked.await {
                 let _ = this.update(cx, |editor, cx| editor.import_to_library(paths, cx));
             }
-            Ok(Err(error)) => {
-                let _ = this.update(cx, |editor, cx| editor.dialog_failed(error, cx));
-            }
-            _ => {}
         })
         .detach();
     }
@@ -473,30 +502,7 @@ impl Editor {
     }
 
     fn on_save(&mut self, _: &Save, _: &mut Window, cx: &mut Context<Self>) {
-        if self.state.project_path.read().is_some() {
-            self.save_to(None, cx);
-            return;
-        }
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("."));
-        let name = format!("{}.chukcut", self.project.name);
-        let picked = cx.prompt_for_new_path(&home, Some(&name));
-        cx.spawn(async move |this, cx| {
-            let Ok(Ok(Some(path))) = picked.await else {
-                return;
-            };
-            let _ = this.update(cx, |editor, cx| editor.save_to(Some(path), cx));
-        })
-        .detach();
-    }
-
-    /// A file dialog that could not be opened — on Linux usually a missing
-    /// or broken xdg-desktop-portal — is said out loud, never swallowed.
-    fn dialog_failed(&mut self, error: anyhow::Error, cx: &mut Context<Self>) {
-        tracing::error!(%error, "the file dialog could not be opened");
-        self.status = Some(format!("File dialog failed: {error}").into());
-        cx.notify();
+        self.save_interactively(cx).detach();
     }
 
     fn step(&mut self, frames: i64) {

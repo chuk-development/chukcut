@@ -150,6 +150,18 @@ impl Transcript {
     }
 }
 
+/// `cues` with word timing estimated where they have none — what an `.srt`
+/// or `.vtt` gives — so karaoke highlighting and word-wise splitting work on
+/// imported subtitles as they do on transcribed ones.
+pub fn with_estimated_words(mut cues: Vec<Cue>) -> Vec<Cue> {
+    for cue in &mut cues {
+        if cue.words.is_empty() {
+            cue.words = estimate_words(&cue.text, cue.start, cue.end);
+        }
+    }
+    cues
+}
+
 /// Spread `start..end` over the words of `text` by their length.
 pub fn estimate_words(text: &str, start: Micros, end: Micros) -> Vec<TimedWord> {
     let tokens: Vec<&str> = text.split_whitespace().collect();
@@ -183,6 +195,25 @@ pub fn estimate_words(text: &str, start: Micros, end: Micros) -> Vec<TimedWord> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn imported_cues_get_words_and_timed_ones_keep_theirs() {
+        let timed = Cue {
+            words: vec![TimedWord {
+                text: "kept".into(),
+                start: 0,
+                end: 10,
+            }],
+            ..Cue::new(0, 1_000_000, "kept")
+        };
+        let cues = with_estimated_words(vec![Cue::new(0, 2_000_000, "two\nlines"), timed]);
+        let words: Vec<&str> = cues[0].words.iter().map(|w| w.text.as_str()).collect();
+        assert_eq!(words, ["two", "lines"]);
+        assert_eq!(cues[0].words.last().unwrap().end, 2_000_000);
+        assert_eq!(cues[0].text, "two\nlines");
+        assert_eq!(cues[1].words.len(), 1);
+        assert_eq!(cues[1].words[0].end, 10);
+    }
 
     #[test]
     fn estimated_words_cover_the_segment_without_gaps() {

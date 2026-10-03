@@ -70,6 +70,9 @@ pub fn startup(state: &Arc<AppState>) -> (Startup, Option<RecoveryInfo>) {
             width,
             height,
             settings.default_fps,
+            // Media on the command line, no canvas picked: the first clip
+            // sets the shape.
+            false,
         ) {
             eprintln!("chukcut: {error}");
             return (Startup::Home, recovery);
@@ -160,11 +163,15 @@ impl Shell {
             _events: None,
             closing: false,
         };
+        // Only on the start screen: a launch that opened a project or media
+        // asked for that, not for a question about another session. The
+        // work stays offered on the start screen and at the next launch.
+        let prompt = recovery.is_some() && matches!(startup, Startup::Home);
         match startup {
             Startup::Home => shell.show_home(window, cx),
             Startup::Editor { media } => shell.show_editor(media, false, window, cx),
         }
-        if recovery.is_some() {
+        if prompt {
             let this = cx.weak_entity();
             // After the window's root exists: dialogs draw into it.
             window.defer(cx, move |window, cx| {
@@ -226,6 +233,7 @@ impl Shell {
                 width,
                 height,
                 fps,
+                canvas_chosen,
             } => {
                 match project_commands::project_new(
                     &self.state,
@@ -233,6 +241,7 @@ impl Shell {
                     *width,
                     *height,
                     *fps,
+                    *canvas_chosen,
                 ) {
                     Ok(_) => self.show_editor(Vec::new(), false, window, cx),
                     Err(error) => self.home_notice(error, cx),
@@ -302,25 +311,11 @@ impl Shell {
     }
 
     fn browse(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let picked = cx.prompt_for_paths(PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: false,
-            prompt: Some("Open project".into()),
-        });
-        cx.spawn_in(window, async move |this, cx| match picked.await {
-            Ok(Ok(Some(paths))) => {
-                if let Some(path) = paths.into_iter().next() {
-                    let _ =
-                        this.update_in(cx, |shell, window, cx| shell.open_path(path, window, cx));
-                }
+        let picked = files::choose_one(FileRequest::open("Open project", Filter::Projects), cx);
+        cx.spawn_in(window, async move |this, cx| {
+            if let Some(path) = picked.await {
+                let _ = this.update_in(cx, |shell, window, cx| shell.open_path(path, window, cx));
             }
-            Ok(Err(error)) => {
-                let _ = this.update(cx, |shell, cx| {
-                    shell.home_notice(format!("File dialog failed: {error}"), cx)
-                });
-            }
-            _ => {}
         })
         .detach();
     }

@@ -28,6 +28,9 @@ anyhow = "1"
 parking_lot = "0.12"
 tracing = "0.1"
 serde_json = "1"
+# The answer channel of the built-in file browser; the same crate GPUI's
+# own file prompts answer on.
+futures-channel = "0.3"
 
 [features]
 cuda = ["chukcut-engine/local-whisper-cuda"]

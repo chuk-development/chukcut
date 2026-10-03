@@ -105,7 +105,7 @@ pub fn captions_import(
     // turns the odd "é" into a replacement mark instead of refusing the file.
     let text = String::from_utf8(bytes)
         .unwrap_or_else(|e| e.into_bytes().iter().map(|&b| b as char).collect());
-    let cues = srt::parse(&text)?;
+    let cues = super::with_estimated_words(srt::parse(&text)?);
     captions_add(state, &cues, style, options)
 }
 

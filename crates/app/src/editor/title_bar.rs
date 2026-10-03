@@ -80,16 +80,12 @@ impl Editor {
             .small()
             .dropdown_caret(true)
             .dropdown_menu(move |menu, _, _| {
-                let new_project = editor.clone();
                 let save_as = editor.clone();
                 menu.action_context(focus.clone())
                     .min_w(px(220.0))
-                    .item(
-                        PopupMenuItem::new("New project").on_click(move |_, window, cx| {
-                            let _ = new_project
-                                .update(cx, |editor, cx| editor.on_new_project(window, cx));
-                        }),
-                    )
+                    // As an action, so the menu shows its Ctrl+N; the shell
+                    // handles it by way of the unsaved-changes guard.
+                    .menu("New project", Box::new(NewProject))
                     .menu("Open…", Box::new(Open))
                     .separator()
                     .menu("Save", Box::new(Save))
@@ -211,35 +207,20 @@ impl Editor {
             .child(export)
     }
 
-    /// Menu → New project: back to the start screen, which asks for the
-    /// canvas — after the unsaved-changes guard.
-    pub(super) fn on_new_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.request_home(window, cx);
-    }
-
     /// Menu → Save as: always asks for a path, even for a saved project.
     pub(super) fn on_save_as(&mut self, cx: &mut Context<Self>) {
-        let directory = self
-            .state
-            .project_path
-            .read()
-            .as_ref()
-            .and_then(|path| path.parent().map(PathBuf::from))
-            .unwrap_or_else(|| {
-                std::env::var_os("HOME")
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| PathBuf::from("."))
-            });
-        let name = format!("{}.chukcut", self.project.name);
-        let picked = cx.prompt_for_new_path(&directory, Some(&name));
+        let mut request = FileRequest::save(
+            "Save as",
+            Filter::Projects,
+            format!("{}.chukcut", self.project.name),
+        );
+        if let Some(dir) = files::project_dir(self.state.project_path.read().as_deref()) {
+            request = request.starting_in(dir);
+        }
+        let picked = files::choose_one(request, cx);
         cx.spawn(async move |this, cx| {
-            let path = match picked.await {
-                Ok(Ok(Some(path))) => path,
-                Ok(Err(error)) => {
-                    let _ = this.update(cx, |editor, cx| editor.dialog_failed(error, cx));
-                    return;
-                }
-                _ => return,
+            let Some(path) = picked.await else {
+                return;
             };
             let _ = this.update(cx, |editor, cx| editor.save_to(Some(path), cx));
         })

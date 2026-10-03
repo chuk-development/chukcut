@@ -144,24 +144,16 @@ impl Editor {
 
     /// Save, asking for a path first when the project has none. Answers
     /// whether the document is now in a file.
-    fn save_interactively(&mut self, cx: &mut Context<Self>) -> Task<bool> {
+    pub(super) fn save_interactively(&mut self, cx: &mut Context<Self>) -> Task<bool> {
         if self.state.project_path.read().is_some() {
             return Task::ready(self.save_to(None, cx));
         }
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("."));
         let name = format!("{}.chukcut", self.project.name);
-        let picked = cx.prompt_for_new_path(&home, Some(&name));
+        let picked = files::choose_one(FileRequest::save("Save", Filter::Projects, name), cx);
         cx.spawn(async move |this, cx| {
-            let path = match picked.await {
-                Ok(Ok(Some(path))) => path,
-                Ok(Err(error)) => {
-                    let _ = this.update(cx, |editor, cx| editor.dialog_failed(error, cx));
-                    return false;
-                }
-                // Cancelled: the work is not saved, so nothing may proceed.
-                _ => return false,
+            // Cancelled: the work is not saved, so nothing may proceed.
+            let Some(path) = picked.await else {
+                return false;
             };
             this.update(cx, |editor, cx| editor.save_to(Some(path), cx))
                 .unwrap_or(false)
@@ -252,25 +244,14 @@ impl Editor {
     /// Ctrl+O: pick a project, then hand it to the shell.
     pub(crate) fn request_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.guard_unsaved(window, cx, |_, _, cx| {
-            let picked = cx.prompt_for_paths(PathPromptOptions {
-                files: true,
-                directories: false,
-                multiple: false,
-                prompt: Some("Open project".into()),
-            });
-            cx.spawn(async move |this, cx| match picked.await {
-                Ok(Ok(Some(paths))) => {
-                    if let Some(path) = paths.into_iter().next() {
-                        let _ = this.update(cx, |editor, cx| {
-                            editor.pause();
-                            cx.emit(EditorEvent::Open(path));
-                        });
-                    }
+            let picked = files::choose_one(FileRequest::open("Open project", Filter::Projects), cx);
+            cx.spawn(async move |this, cx| {
+                if let Some(path) = picked.await {
+                    let _ = this.update(cx, |editor, cx| {
+                        editor.pause();
+                        cx.emit(EditorEvent::Open(path));
+                    });
                 }
-                Ok(Err(error)) => {
-                    let _ = this.update(cx, |editor, cx| editor.dialog_failed(error, cx));
-                }
-                _ => {}
             })
             .detach();
         });

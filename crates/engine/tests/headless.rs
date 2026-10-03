@@ -25,7 +25,7 @@ fn edits_in_a_headless_process_leave_the_working_copy_alone() {
     assert!(!autosave::is_enabled());
 
     let state: Arc<AppState> = AppState::new();
-    project_commands::project_new(&state, "headless".into(), 1080, 1920, 30.0).unwrap();
+    project_commands::project_new(&state, "headless".into(), 1080, 1920, 30.0, false).unwrap();
     timeline_commands::timeline_apply(
         &state,
         EditCommand::AddTrack {

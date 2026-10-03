@@ -545,11 +545,12 @@ impl Editor {
             .map(|row| self.project.tracks[row.track].id.clone());
         // A drop snaps like a dragged clip's head: to cuts, the playhead and
         // markers.
+        // Otherwise on a frame boundary, so the clip's edges sit on the grid.
         let time = self.x_to_time(x);
         let time = self
             .snap(&[time], &[])
             .map(|(shift, _)| time + shift)
-            .unwrap_or(time);
+            .unwrap_or_else(|| nearest_frame_time(time, self.project.fps));
         Some((time, lane))
     }
 
@@ -1016,7 +1017,8 @@ impl Editor {
 
         if y < RULER_H {
             self.pause();
-            self.seek(time);
+            // On a frame boundary: a split there must cut between frames.
+            self.seek(nearest_frame_time(time, self.project.fps));
             self.timeline.drag = Some(Drag::Scrub);
             cx.notify();
             return;
@@ -1300,7 +1302,7 @@ impl Editor {
         let time = self.x_to_time(x);
         match self.timeline.drag.take() {
             Some(Drag::Scrub) => {
-                self.seek(time);
+                self.seek(nearest_frame_time(time, self.project.fps));
                 self.timeline.drag = Some(Drag::Scrub);
             }
             Some(Drag::Band {
@@ -1364,6 +1366,9 @@ impl Editor {
                     if let Some((shift, point)) = self.snap(&[start, start + duration], &exclude) {
                         start = (start + shift).max(floor);
                         self.timeline.snap = Some(point);
+                    } else {
+                        // Off any snap target, the head lands on a frame.
+                        start = nearest_frame_time(start, self.project.fps).max(floor);
                     }
                     new_lane = false;
                     // A selection changes lanes only when it all sits on one.
@@ -1424,6 +1429,9 @@ impl Editor {
                 if let Some((shift, point)) = self.snap(&[to], &exclude) {
                     to += shift;
                     self.timeline.snap = Some(point);
+                } else {
+                    // Off any snap target, the edge lands on a frame.
+                    to = nearest_frame_time(to, self.project.fps);
                 }
                 let Some((target, source)) = self.live_trim(&segment_id, edge, to, ripple) else {
                     return;
@@ -1623,7 +1631,7 @@ impl Editor {
                 from, moved: false, ..
             }) => {
                 let time = self.x_to_time(from.0);
-                self.seek(time);
+                self.seek(nearest_frame_time(time, self.project.fps));
             }
             Some(Drag::Keyframe {
                 segment_id,
@@ -2160,7 +2168,8 @@ impl Editor {
             cx.notify();
             return;
         };
-        let at = self.clock.position();
+        // Cut where the frame on screen starts, as Split does.
+        let at = frame_start(self.clock.position(), self.project.fps);
         let state = Arc::clone(&self.state);
         self.status = Some("Freezing frame…".into());
         cx.notify();
@@ -2220,7 +2229,8 @@ impl Editor {
         let Some((track, segment)) = self.project.segment(&id) else {
             return;
         };
-        let at = self.clock.position();
+        // Like Split: on the start of the frame on screen.
+        let at = frame_start(self.clock.position(), self.project.fps);
         let ripple = self.timeline.magnet && self.is_main_track(&track.id);
         let limit = ripple::source_limit(&self.project, &segment.material_id);
         let start = segment.target_range.start;

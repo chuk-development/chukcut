@@ -328,6 +328,8 @@ impl Editor {
         let config = ProjectConfig {
             width,
             height,
+            // A ratio picked from the menu is a choice, even the one in use.
+            canvas_chosen: true,
             ..ProjectConfig::of(&self.project)
         };
         let result = project_commands::project_configure(&self.state, config).map(|_| ());
@@ -338,22 +340,14 @@ impl Editor {
     /// Player menu → Save frame: the frame at the playhead, full size, as PNG.
     fn save_frame(&mut self, cx: &mut Context<Self>) {
         let time = self.clock.position() + chukcut_engine::modules::project::SAMPLE_SLACK;
-        let directory = std::env::var_os("HOME")
-            .map(|home| PathBuf::from(home).join("Pictures"))
-            .filter(|path| path.is_dir())
-            .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
-            .unwrap_or_else(|| PathBuf::from("."));
         let name = format!("{} frame.png", self.project.name);
-        let picked = cx.prompt_for_new_path(&directory, Some(&name));
+        let request = FileRequest::save("Save frame", Filter::Png, name)
+            .starting_in(files::home().join("Pictures"));
+        let picked = files::choose_one(request, cx);
         let state = Arc::clone(&self.state);
         cx.spawn(async move |this, cx| {
-            let path = match picked.await {
-                Ok(Ok(Some(path))) => path,
-                Ok(Err(error)) => {
-                    let _ = this.update(cx, |editor, cx| editor.dialog_failed(error, cx));
-                    return;
-                }
-                _ => return,
+            let Some(path) = picked.await else {
+                return;
             };
             let result =
                 export_commands::export_snapshot(&state, time, path.to_string_lossy().to_string())

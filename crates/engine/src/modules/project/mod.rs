@@ -21,6 +21,7 @@ pub mod document;
 pub mod effects;
 pub mod grade;
 pub mod migrate;
+pub mod prune;
 pub mod recovery;
 pub mod speed;
 

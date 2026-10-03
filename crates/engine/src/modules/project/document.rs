@@ -98,6 +98,18 @@ pub struct Project {
     #[serde(default = "default_fps")]
     pub fps: f64,
 
+    /// Whether the user picked the canvas (size and frame rate) on purpose:
+    /// on the start screen, in the project settings, or from the player's
+    /// ratio menu. A project made without a choice — `chukcut clip.mp4`, the
+    /// CLI's `new` — takes the first imported clip's shape instead
+    /// (`commands::import_material`); a chosen one keeps what was chosen.
+    ///
+    /// Older files have no key and read as "not chosen", which is what they
+    /// were treated as when they were made. `false` is not written, so their
+    /// round trip stays byte-identical.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub canvas_chosen: bool,
+
     pub materials: MaterialPool,
     pub tracks: Vec<Track>,
 
@@ -170,6 +182,7 @@ impl Project {
             updated_at: 0,
             canvas,
             fps,
+            canvas_chosen: false,
             materials: MaterialPool::default(),
             tracks: Vec::new(),
             markers: Vec::new(),

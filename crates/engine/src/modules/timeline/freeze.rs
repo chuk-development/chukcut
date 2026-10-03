@@ -65,10 +65,17 @@ pub fn freeze_source(
         .materials
         .video(&segment.material_id)
         .ok_or("only a video clip can be frozen")?;
+    if !segment.target_range.contains(at) {
+        return Err("the playhead is not over the clip".into());
+    }
+    // The frame on screen at `at` is the one rendering samples a slack inside
+    // it. Taken at `at` itself, a cut on a frame start (`at` rounded down to
+    // the microsecond) would decode the frame before.
+    let sample = (at + crate::modules::project::SAMPLE_SLACK).min(segment.target_range.end() - 1);
     let source_time = project
         .materials
         .time_map(segment)
-        .source_time_at(at)
+        .source_time_at(sample)
         .ok_or("the playhead is not over the clip")?;
     Ok(FreezeSource {
         path: video.path.clone(),

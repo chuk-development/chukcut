@@ -444,17 +444,9 @@ impl Editor {
 
     /// Pick a `.cube` file, copy it into the library, and attach it.
     fn import_lut(&mut self, cx: &mut Context<Self>) {
-        let picked = cx.prompt_for_paths(PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: false,
-            prompt: Some("Import LUT".into()),
-        });
+        let picked = files::choose_one(FileRequest::open("Import LUT", Filter::Luts), cx);
         cx.spawn(async move |this, cx| {
-            let Ok(Ok(Some(paths))) = picked.await else {
-                return;
-            };
-            let Some(path) = paths.into_iter().next() else {
+            let Some(path) = picked.await else {
                 return;
             };
             let _ = this.update(

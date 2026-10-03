@@ -68,7 +68,7 @@ impl Session {
     pub fn create(path: &Path, name: String, width: u32, height: u32, fps: f64) -> CliResult<Self> {
         let path = absolute(path);
         let state = AppState::new();
-        project_commands::project_new(&state, name, width, height, fps)
+        project_commands::project_new(&state, name, width, height, fps, false)
             .map_err(CliError::refused)?;
         Ok(Self {
             state,

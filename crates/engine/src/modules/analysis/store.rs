@@ -26,6 +26,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::modules::project::document::{new_id, Id, Micros, Project, Segment, TimeRange};
+use crate::modules::project::TimeMap;
 use crate::modules::timeline::ops::EditCommand;
 
 /// Scene cuts of a video file.
@@ -215,21 +216,23 @@ pub fn swap_entry(
     })
 }
 
-/// Where source time `source` of `segment` sits on the timeline, or `None`
-/// when the clip does not show that instant.
+/// Where source time `source` of the clip `map` describes sits on the
+/// timeline, or `None` when the clip does not show that instant.
 ///
-/// The inverse of `Segment::source_time_at`, found by bisection on it rather
-/// than by inverting its formula, so it stays right for any mapping that only
-/// moves forward — a speed curve included — without this module knowing how
-/// the mapping is computed.
-pub fn timeline_time_of(segment: &Segment, source: Micros) -> Option<Micros> {
-    let range = segment.target_range;
+/// Through the clip's `TimeMap` (`project.materials.time_map(segment)`), so a
+/// speed curve is honoured: `Segment::source_time_at` knows only the constant
+/// speed and put every beat and scene cut of a ramped clip on the wrong frame.
+/// Found by bisection on the forward mapping rather than by inverting it, so
+/// it stays right for any mapping that only moves forward without this module
+/// knowing how the mapping is computed.
+pub fn timeline_time_of(map: &TimeMap<'_>, source: Micros) -> Option<Micros> {
+    let range = map.segment.target_range;
     if range.duration <= 0 {
         return None;
     }
     let last = range.end() - 1;
-    let first_source = segment.source_time_at(range.start)?;
-    let last_source = segment.source_time_at(last)?;
+    let first_source = map.source_time_at(range.start)?;
+    let last_source = map.source_time_at(last)?;
     if source < first_source || source > last_source {
         return None;
     }
@@ -237,7 +240,7 @@ pub fn timeline_time_of(segment: &Segment, source: Micros) -> Option<Micros> {
     let (mut lo, mut hi) = (range.start, last);
     while lo < hi {
         let mid = lo + (hi - lo) / 2;
-        match segment.source_time_at(mid) {
+        match map.source_time_at(mid) {
             Some(t) if t >= source => hi = mid,
             _ => lo = mid + 1,
         }
@@ -284,13 +287,21 @@ mod tests {
             let s = segment(1_000_000, 4_000_000, 2_000_000, speed);
             for t in [1_000_000, 1_333_333, 2_500_000, 4_999_999] {
                 let src = s.source_time_at(t).unwrap();
-                let back = timeline_time_of(&s, src).unwrap();
+                let map = TimeMap {
+                    segment: &s,
+                    curve: None,
+                };
+                let back = timeline_time_of(&map, src).unwrap();
                 assert_eq!(s.source_time_at(back), Some(src), "speed {speed}");
                 assert!((back - t).abs() <= speed.recip().ceil() as Micros + 1);
             }
         }
         let s = segment(0, 1_000_000, 0, 1.0);
-        assert_eq!(timeline_time_of(&s, 2_000_000), None);
+        let map = TimeMap {
+            segment: &s,
+            curve: None,
+        };
+        assert_eq!(timeline_time_of(&map, 2_000_000), None);
     }
 
     #[test]

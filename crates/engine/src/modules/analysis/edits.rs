@@ -6,8 +6,7 @@
 use super::reframe::{Axis, PathPoint};
 use super::store::{self, timeline_time_of, Beats, SceneCuts};
 use crate::modules::project::document::{
-    source_duration_for, AnimatableProperty, Easing, Id, Keyframe, Micros, Project, Segment,
-    TimeRange, TrackKind,
+    AnimatableProperty, Easing, Id, Keyframe, Micros, Project, Segment, TimeRange, TrackKind,
 };
 use crate::modules::render::layout::{crop_extent, crop_uv, fit_size};
 use crate::modules::timeline::ops::{mirror_linked_edits, split_at, EditCommand};
@@ -69,9 +68,10 @@ pub fn scene_cut_times(project: &Project, segment: &Segment) -> Vec<Micros> {
     let Some((_, cuts)) = store::entry_of::<SceneCuts>(project, segment) else {
         return Vec::new();
     };
+    let map = project.materials.time_map(segment);
     cuts.cuts
         .iter()
-        .filter_map(|&t| timeline_time_of(segment, t))
+        .filter_map(|&t| timeline_time_of(&map, t))
         .map(|t| store::snap_to_frame(t, project.fps))
         .collect()
 }
@@ -81,10 +81,11 @@ pub fn segment_beats(project: &Project, segment: &Segment) -> Vec<Micros> {
     let Some((_, beats)) = store::entry_of::<Beats>(project, segment) else {
         return Vec::new();
     };
+    let map = project.materials.time_map(segment);
     beats
         .beats
         .iter()
-        .filter_map(|&t| timeline_time_of(segment, t))
+        .filter_map(|&t| timeline_time_of(&map, t))
         .collect()
 }
 
@@ -156,22 +157,20 @@ fn material_length(project: &Project, material_id: &str) -> Option<Micros> {
 /// keeping the other edge, or `None` when the file has no frames to show
 /// there or the clip would vanish.
 fn edge_trim(project: &Project, segment: &Segment, head: bool, to: Micros) -> Option<EditCommand> {
-    let (target, source, speed) = (segment.target_range, segment.source_range, segment.speed);
+    let (target, source) = (segment.target_range, segment.source_range);
     let min = frame(project);
-    let (after_target, after_source) = if head {
-        let duration = target.end() - to;
-        let shift = source_duration_for(to - target.start, speed);
-        (
-            TimeRange::new(to, duration),
-            TimeRange::new(source.start + shift, source_duration_for(duration, speed)),
-        )
+    let after_target = if head {
+        TimeRange::new(to, target.end() - to)
     } else {
-        let duration = to - target.start;
-        (
-            TimeRange::new(target.start, duration),
-            TimeRange::new(source.start, source_duration_for(duration, speed)),
-        )
+        TimeRange::new(target.start, to - target.start)
     };
+    // Through the time map, as every trim does: at constant speed this is
+    // `source_duration_for` on the moved edge, on a speed curve it is the part
+    // of the file the curve carries the new edges to.
+    let after_source = project
+        .materials
+        .time_map(segment)
+        .retimed_source(after_target);
     if after_target.duration < min || after_source.start < 0 || after_target.start < 0 {
         return None;
     }
@@ -365,9 +364,10 @@ pub fn reframe_command(
         Axis::Vertical => AnimatableProperty::PositionY,
     };
 
+    let map = project.materials.time_map(segment);
     let mut keys: Vec<Keyframe> = Vec::new();
     for (i, point) in path.iter().enumerate() {
-        let Some(at) = timeline_time_of(segment, point.t) else {
+        let Some(at) = timeline_time_of(&map, point.t) else {
             continue;
         };
         let time = at - segment.target_range.start;
@@ -589,6 +589,115 @@ pub(crate) mod tests {
         assert_eq!(b.source_range.start, 8_000_000 - (4_000_000 - beat));
         command.invert().apply(&mut q).unwrap();
         assert_eq!(q.tracks[0].segments[0].target_range.end(), 4_000_000);
+    }
+
+    /// Clip "a" played through a speed curve, its `speed` field left at 1 —
+    /// what the legacy mapping read — with scene cuts and beats on it.
+    fn curved(points: Vec<crate::modules::project::SpeedPoint>, length: Micros) -> Project {
+        use crate::modules::project::speed::{curve_target_duration, SpeedCurveMaterial};
+        let mut p = project();
+        let source = TimeRange::new(1_000_000, length);
+        p.materials.speed_curves.push(SpeedCurveMaterial {
+            id: "curve".into(),
+            preset: None,
+            points: points.clone(),
+        });
+        let duration = curve_target_duration(&points, source);
+        let cuts = store::new_entry(&SceneCuts {
+            media_id: "v".into(),
+            analysed: source,
+            cuts: vec![3_000_000, 5_000_000, 7_000_000],
+            sensitivity: 0.5,
+        });
+        let beats = store::new_entry(&Beats {
+            media_id: "v".into(),
+            analysed: source,
+            beats: vec![2_000_000, 4_000_000, 8_000_000],
+            bpm: 120.0,
+        });
+        let a = &mut p.tracks[0].segments[0];
+        a.source_range = source;
+        a.target_range = TimeRange::new(0, duration);
+        a.extras = vec!["curve".into(), cuts.0.clone(), beats.0.clone()];
+        p.materials.extras.insert(cuts.0, cuts.1);
+        p.materials.extras.insert(beats.0, beats.1);
+        // Clip "b" butts against the curved clip's new end.
+        p.tracks[0].segments[1].target_range.start = duration;
+        p
+    }
+
+    #[test]
+    fn scene_cuts_and_beats_follow_a_speed_curve() {
+        use crate::modules::project::SpeedPoint;
+        // Twice real time all the way: source 1 s..9 s plays in 4 s, so
+        // source instant s is on screen at (s - 1 s) / 2. The constant
+        // `speed` of 1 would have said s - 1 s.
+        let p = curved(
+            vec![SpeedPoint {
+                source: 0,
+                speed: 2.0,
+            }],
+            8_000_000,
+        );
+        let a = p.tracks[0].segments[0].clone();
+        assert_eq!(a.target_range.duration, 4_000_000);
+        assert_eq!(
+            scene_cut_times(&p, &a),
+            vec![1_000_000, 2_000_000, 3_000_000]
+        );
+        assert_eq!(segment_beats(&p, &a), vec![500_000, 1_500_000, 3_500_000]);
+        // Auto-cut puts the splits on those frames.
+        let command = auto_cut_to_beat(&p, &["a".into()], 1).unwrap();
+        let mut q = p.clone();
+        command.apply(&mut q).unwrap();
+        let starts: Vec<Micros> = q.tracks[0]
+            .segments
+            .iter()
+            .map(|s| s.target_range.start)
+            .collect();
+        assert_eq!(starts, vec![0, 500_000, 1_500_000, 3_500_000, 4_000_000]);
+    }
+
+    #[test]
+    fn markers_on_a_ramp_land_where_the_ramp_plays_them() {
+        use crate::modules::project::speed::elapsed;
+        use crate::modules::project::SpeedPoint;
+        // Slow at the start, fast at the end.
+        let points = vec![
+            SpeedPoint {
+                source: 1_000_000,
+                speed: 0.5,
+            },
+            SpeedPoint {
+                source: 9_000_000,
+                speed: 3.0,
+            },
+        ];
+        let p = curved(points.clone(), 8_000_000);
+        let a = p.tracks[0].segments[0].clone();
+        let on_screen = |source: Micros| elapsed(&points, 1_000_000.0, source as f64);
+        let frame = 1e6 / 30.0;
+        for (got, source) in scene_cut_times(&p, &a)
+            .into_iter()
+            .zip([3_000_000, 5_000_000, 7_000_000])
+        {
+            // On the frame grid, within half a frame of where it plays.
+            assert!(
+                (got as f64 - on_screen(source)).abs() <= frame / 2.0 + 1.0,
+                "cut at {source}: {got} against {}",
+                on_screen(source)
+            );
+        }
+        for (got, source) in segment_beats(&p, &a)
+            .into_iter()
+            .zip([2_000_000, 4_000_000, 8_000_000])
+        {
+            assert!(
+                (got as f64 - on_screen(source)).abs() <= 1.0,
+                "beat at {source}: {got} against {}",
+                on_screen(source)
+            );
+        }
     }
 
     #[test]

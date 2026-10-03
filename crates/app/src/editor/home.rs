@@ -27,6 +27,9 @@ pub(crate) enum HomeEvent {
         width: u32,
         height: u32,
         fps: f64,
+        /// The user clicked a canvas or a frame rate, rather than taking the
+        /// preselected default; the project then keeps it on import.
+        canvas_chosen: bool,
     },
     Open(PathBuf),
     /// Open the file dialog for a project.
@@ -48,6 +51,10 @@ pub(crate) struct Home {
     posters: HashMap<String, Poster>,
     preset: usize,
     fps: f64,
+    /// Whether the user picked the canvas or the frame rate here. The
+    /// preselection is the settings' default, not a choice: a project made
+    /// with it adopts the first clip's shape.
+    chosen: bool,
     name: Entity<InputState>,
     pub(crate) recovery: Option<RecoveryInfo>,
     /// The last thing that went wrong, e.g. a project that would not open.
@@ -74,6 +81,7 @@ impl Home {
             posters: HashMap::new(),
             preset,
             fps: settings.default_fps,
+            chosen: false,
             name,
             recovery,
             notice: None,
@@ -114,6 +122,7 @@ impl Home {
             width,
             height,
             fps: self.fps,
+            canvas_chosen: self.chosen,
         });
     }
 
@@ -328,6 +337,7 @@ impl Home {
                     .hover(|style| style.bg(rgb(PANEL_RAISED)))
                     .on_click(cx.listener(move |home, _, _, cx| {
                         home.preset = index;
+                        home.chosen = true;
                         cx.notify();
                     }))
                     .child(
@@ -364,6 +374,7 @@ impl Home {
                             .on_click(move |_, _, cx| {
                                 let _ = this.update(cx, |home, cx| {
                                     home.fps = fps;
+                                    home.chosen = true;
                                     cx.notify();
                                 });
                             }),

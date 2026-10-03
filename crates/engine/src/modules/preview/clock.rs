@@ -321,9 +321,50 @@ pub fn pace(cursor: i64, position: Micros, fps: f64, read_ahead: usize) -> Pacin
     }
 }
 
+/// The start of the frame displayed at `time`: where a cut at the playhead
+/// goes, so that the frame on screen becomes the first frame after the cut.
+/// Rendering then samples it at this time plus `project::SAMPLE_SLACK`.
+pub fn frame_start(time: Micros, fps: f64) -> Micros {
+    frame_time(frame_at(time.max(0), fps), fps)
+}
+
+/// The frame boundary nearest to `time`. Where a click or a drag on the
+/// ruler puts the playhead: on the grid, so that a split there cuts exactly
+/// between two frames and the timecode reads a whole frame.
+pub fn nearest_frame_time(time: Micros, fps: f64) -> Micros {
+    let n = frame_at(time.max(0), fps);
+    let (here, next) = (frame_time(n, fps), frame_time(n + 1, fps));
+    if time.max(0) - here > next - time.max(0) {
+        next
+    } else {
+        here
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ruler_times_land_on_the_frame_grid() {
+        // 3.016761 s, the cut QA found: frame 90 starts at 3 000 000 and
+        // frame 91 at 3 033 333, so that click goes to 91; one a little
+        // earlier goes to 90.
+        assert_eq!(nearest_frame_time(3_016_761, 30.0), 3_033_333);
+        assert_eq!(nearest_frame_time(3_016_000, 30.0), 3_000_000);
+        assert_eq!(frame_start(3_033_332, 30.0), 3_000_000);
+        assert_eq!(frame_start(3_033_333, 30.0), 3_033_333);
+        // Every result is a frame time, at any rate.
+        for fps in [23.976, 25.0, 29.97, 30.0, 59.94, 60.0] {
+            for t in (0..2_000_000).step_by(7_919) {
+                for snapped in [nearest_frame_time(t, fps), frame_start(t, fps)] {
+                    assert_eq!(frame_time(frame_at(snapped, fps), fps), snapped);
+                }
+                assert!(frame_start(t, fps) <= t);
+            }
+        }
+        assert_eq!(nearest_frame_time(-5, 30.0), 0);
+    }
     use std::sync::Arc;
 
     /// Every frame rate a project is plausibly at, including the two broadcast

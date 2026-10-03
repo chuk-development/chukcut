@@ -30,6 +30,10 @@ pub struct ProjectConfig {
     pub fps: f64,
     /// Linear RGBA 0..1, exactly as `CanvasConfig::background` stores it.
     pub background: [f32; 4],
+    /// `Project::canvas_chosen`. Part of the snapshot so that undoing the
+    /// edit that chose a canvas also forgets the choice.
+    #[serde(default)]
+    pub canvas_chosen: bool,
 }
 
 impl ProjectConfig {
@@ -40,7 +44,15 @@ impl ProjectConfig {
             height: project.canvas.height,
             fps: project.fps,
             background: project.canvas.background,
+            canvas_chosen: project.canvas_chosen,
         }
+    }
+
+    /// Whether this config sets a different canvas size or frame rate than
+    /// `project` has.
+    pub fn changes_canvas(&self, project: &Project) -> bool {
+        (self.width, self.height) != (project.canvas.width, project.canvas.height)
+            || self.fps != project.fps
     }
 
     /// Refuse values the rest of the engine cannot work with.
@@ -81,6 +93,7 @@ impl ProjectConfig {
         project.canvas.height = self.height;
         project.canvas.background = self.background;
         project.fps = self.fps;
+        project.canvas_chosen = self.canvas_chosen;
     }
 }
 
@@ -156,6 +169,7 @@ mod tests {
                 height: 1080,
                 fps: 60.0,
                 background: [0.1, 0.2, 0.3, 1.0],
+                canvas_chosen: true,
             },
         );
         command.apply(&mut p).unwrap();

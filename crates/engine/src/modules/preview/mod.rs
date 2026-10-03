@@ -109,8 +109,8 @@ pub mod zerocopy;
 
 pub use cache::{CachedFrame, FrameCache, Lookup, DEFAULT_CAPACITY};
 pub use clock::{
-    frame_at, frame_interval, frame_time, is_late, pace, ManualSource, MonotonicSource, Pacing,
-    PlaybackClock, TimeSource, DEFAULT_READ_AHEAD,
+    frame_at, frame_interval, frame_start, frame_time, is_late, nearest_frame_time, pace,
+    ManualSource, MonotonicSource, Pacing, PlaybackClock, TimeSource, DEFAULT_READ_AHEAD,
 };
 pub use encoder::{
     encode_jpeg, encode_preview_jpeg, encode_preview_jpeg_dmabuf, hardware_available, Backend,
