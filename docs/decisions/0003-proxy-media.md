@@ -299,3 +299,14 @@ enum Purpose {
 -    let provider = Arc::new(MediaSourceProvider::from_project(project));
 +    let provider = Arc::new(MediaSourceProvider::from_project_for_preview(project));
 ```
+
+## Addendum 2026-10-03: the user's policy
+
+Settings → Proxy media (Off / Automatic / Always) is applied in
+`proxy::policy::decide_with_policy`, on top of `decide` rather than inside it,
+so the measured rule stays a pure function of the file. Always keeps the shrink
+clause and drops only the cost clause. The policy is a field of the queue, not
+a global, and the shared queue starts Off until `workspace_settings_apply` runs.
+`ProxyQueue::preview_source` returns the original under Off, so the provider
+seam above inherits the policy without knowing about it. `docs/STATUS.md`,
+"Proxy policy and cache limit take effect".
