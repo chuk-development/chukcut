@@ -323,10 +323,13 @@ impl Operation for RedoArgs {
 
 /// List what the engine offers: `effects`, `transitions`, `animations`,
 /// `grade` controls, export `presets` and `hardware` encoders, caption
-/// transcription `models`, `luts` in the library, or `fonts`.
+/// transcription `models`, `luts` in the library, `fonts`, `title_styles`,
+/// `title_templates`, split-screen and picture-in-picture `layouts`,
+/// `speed_presets`, or cloud `accounts`.
 #[derive(Debug, Clone, Args, Deserialize, JsonSchema)]
 pub struct CatalogArgs {
-    /// effects, transitions, animations, grade, presets, hardware, models, luts or fonts.
+    /// effects, transitions, animations, grade, presets, hardware, models, luts, fonts,
+    /// title_styles, title_templates, layouts, speed_presets or accounts.
     pub kind: String,
 }
 
@@ -350,9 +353,14 @@ impl CatalogArgs {
             }),
             "luts" => json!(inspector::commands::inspector_lut_library()),
             "fonts" => json!(pollster::block_on(text::commands::text_fonts())?),
+            "title_styles" | "styles" => super::text::styles_catalog(),
+            "title_templates" | "templates" => super::text::templates_catalog(),
+            "layouts" => super::layout::layouts_catalog(),
+            "speed_presets" => json!(chukcut_engine::modules::speed::commands::speed_presets()),
+            "accounts" => super::cloud::accounts_catalog(),
             other => {
                 return Err(CliError::usage(format!(
-                    "there is no catalog called {other:?}; choose effects, transitions, animations, grade, presets, hardware, models, luts or fonts"
+                    "there is no catalog called {other:?}; choose effects, transitions, animations, grade, presets, hardware, models, luts, fonts, title_styles, title_templates, layouts, speed_presets or accounts"
                 )))
             }
         };

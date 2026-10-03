@@ -137,9 +137,12 @@ All four below were fixed by the polish pass; kept for the record.
 - ~~The restore prompt offers to bring back an empty "Untitled" (0 clips) and
   shows even when a project was opened from the command line.~~
 - The title bar's "Autosaved … ago" does not move after a transition edit.
-- The export dialog does not remember the resolution or loudness target
+- ~~The export dialog does not remember the resolution or loudness target
   (the folder it now remembers), and its size estimate was 24 MB for a
-  3.4 MB file.
+  3.4 MB file.~~ Fixed on agent/exportq: the dialog opens with the project's
+  last settings (else the last ones of any project), and the size is
+  measured by a sample encode (`export::estimate`, within ±25 % by test,
+  2 % measured).
 - ~~Settings → Hardware says "Zero-copy decode: Yes" on a machine where no
   VAAPI decoder works.~~
 - ~~The title bar keeps the last error until the next status message.~~

@@ -105,6 +105,13 @@ pub struct VideoStreamSpec {
 impl VideoStreamSpec {
     /// The rate-control configurations to try at `avcodec_open2`, best first.
     fn rate_controls(&self) -> Vec<RateControl> {
+        if self.has_no_rate_control() {
+            return vec![RateControl {
+                label: "the codec's own data rate",
+                bit_rate: 0,
+                options: Vec::new(),
+            }];
+        }
         let fallback = hwaccel::fallback_bitrate(self.width, self.height, self.fps, self.quality);
         self.accel.rate_control_ladder(self.quality, fallback)
     }
@@ -124,6 +131,12 @@ impl VideoStreamSpec {
         // happily default to a 10-bit profile that half the world cannot play.
         if self.encoder_name == "libx265" {
             options.push(("profile".into(), "main".into()));
+        }
+        // ProRes 422 HQ: what "a ProRes master" means to every application
+        // that will open the file. Profile 3 in prores_ks's numbering.
+        if self.encoder_name == "prores_ks" {
+            options.push(("profile".into(), "3".into()));
+            options.push(("vendor".into(), "apl0".into()));
         }
 
         options.extend(rate_control.options.iter().cloned());
@@ -146,7 +159,18 @@ impl VideoStreamSpec {
 
     /// What swscale converts the compositor's RGBA into.
     fn upload_format(&self) -> format::Pixel {
-        self.accel.upload_format()
+        match self.encoder_name.as_str() {
+            // prores_ks takes 10-bit 4:2:2 and nothing 8-bit.
+            "prores_ks" => format::Pixel::YUV422P10LE,
+            "gif" => format::Pixel::PAL8,
+            _ => self.accel.upload_format(),
+        }
+    }
+
+    /// Intra-only codecs without a quality knob: no CRF, no bitrate, no
+    /// B-frames.
+    fn has_no_rate_control(&self) -> bool {
+        matches!(self.encoder_name.as_str(), "prores_ks" | "gif")
     }
 }
 
@@ -178,7 +202,8 @@ impl AudioStreamSpec {
 pub struct MediaWriter {
     path: PathBuf,
     octx: format::context::Output,
-    video: VideoTrack,
+    /// `None` for a sound-only file (.m4a, .mp3, .wav).
+    video: Option<VideoTrack>,
     audio: Option<AudioTrack>,
     /// Set by `finish`. A writer dropped without it leaves an unplayable file,
     /// which `Drop` complains about loudly.
@@ -202,6 +227,10 @@ pub struct WriterStats {
     /// Taking a surface, `av_hwframe_transfer_data` into it, `send_frame`, and
     /// draining whatever packets came back.
     pub submit_ns: u64,
+    /// Bytes of encoded video and audio handed to the muxer, without the
+    /// container's own headers and index. The size estimate samples these.
+    pub video_bytes: u64,
+    pub audio_bytes: u64,
 }
 
 impl WriterStats {
@@ -221,7 +250,9 @@ struct VideoTrack {
     time_base: Rational,
     /// What the muxer settled on, read back after `write_header`.
     stream_time_base: Rational,
-    scaler: scaling::Context,
+    /// RGBA to the encoder's format. `None` for a GIF, whose palette this
+    /// file builds itself (`quantize_pal8`): swscale cannot write PAL8.
+    scaler: Option<scaling::Context>,
     /// The surface pool, when the encoder will not take system memory.
     ///
     /// Kept alive for the writer's whole life: the codec context holds its own
@@ -260,7 +291,26 @@ impl MediaWriter {
         video: &VideoStreamSpec,
         audio: Option<&AudioStreamSpec>,
     ) -> Result<Self> {
+        Self::open(path, Some(video), audio)
+    }
+
+    /// A file with sound and no picture: .m4a, .mp3, .wav.
+    pub fn create_audio_only(path: &Path, audio: &AudioStreamSpec) -> Result<Self> {
+        Self::open(path, None, Some(audio))
+    }
+
+    fn open(
+        path: &Path,
+        video: Option<&VideoStreamSpec>,
+        audio: Option<&AudioStreamSpec>,
+    ) -> Result<Self> {
         crate::modules::media::ensure_initialized();
+
+        if video.is_none() && audio.is_none() {
+            return Err(ExportError::Settings(
+                "a file needs a picture or sound, and this export asked for neither".into(),
+            ));
+        }
 
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() && !parent.exists() {
@@ -281,7 +331,10 @@ impl MediaWriter {
         // a file some players refuse.
         let global_header = octx.format().flags().contains(format::Flags::GLOBAL_HEADER);
 
-        let mut video_track = add_video(&mut octx, video, global_header)?;
+        let mut video_track = match video {
+            Some(spec) => Some(add_video(&mut octx, spec, global_header)?),
+            None => None,
+        };
         let mut audio_track = match audio {
             Some(spec) => Some(add_audio(&mut octx, spec, global_header)?),
             None => None,
@@ -292,10 +345,12 @@ impl MediaWriter {
 
         // The muxer is allowed to rewrite the time bases it was handed, and MP4
         // always does.
-        video_track.stream_time_base = octx
-            .stream(video_track.stream_index)
-            .map(|s| s.time_base())
-            .unwrap_or(video_track.time_base);
+        if let Some(track) = video_track.as_mut() {
+            track.stream_time_base = octx
+                .stream(track.stream_index)
+                .map(|s| s.time_base())
+                .unwrap_or(track.time_base);
+        }
         if let Some(track) = audio_track.as_mut() {
             track.stream_time_base = octx
                 .stream(track.stream_index)
@@ -323,7 +378,7 @@ impl MediaWriter {
     }
 
     pub fn frames_written(&self) -> u64 {
-        self.video.frames
+        self.video.as_ref().map_or(0, |video| video.frames)
     }
 
     pub fn has_audio(&self) -> bool {
@@ -342,26 +397,33 @@ impl MediaWriter {
     /// `Compositor::render_frame` returns. `index` is the frame's position in
     /// the output, which *is* its PTS in the encoder's time base.
     pub fn write_video_frame(&mut self, rgba: &[u8], index: u64) -> Result<()> {
-        let expected = self.video.width as usize * self.video.height as usize * 4;
+        let Some(video) = self.video.as_mut() else {
+            return Err(no_picture());
+        };
+        let expected = video.width as usize * video.height as usize * 4;
         if rgba.len() != expected {
             return Err(ExportError::Settings(format!(
                 "the renderer produced {} bytes for a {}x{} frame, expected {expected}",
                 rgba.len(),
-                self.video.width,
-                self.video.height
+                video.width,
+                video.height
             )));
         }
 
         let prepared = Instant::now();
-        let mut source =
-            frame::Video::new(format::Pixel::RGBA, self.video.width, self.video.height);
-        copy_packed_rows(&mut source, rgba, self.video.width as usize * 4);
+        let mut source = frame::Video::new(format::Pixel::RGBA, video.width, video.height);
+        copy_packed_rows(&mut source, rgba, video.width as usize * 4);
 
-        let mut converted = frame::Video::empty();
-        self.video
-            .scaler
-            .run(&source, &mut converted)
-            .map_err(ExportError::ffmpeg("converting the frame to YUV"))?;
+        let mut converted = match video.scaler.as_mut() {
+            Some(scaler) => {
+                let mut converted = frame::Video::empty();
+                scaler
+                    .run(&source, &mut converted)
+                    .map_err(ExportError::ffmpeg("converting the frame to YUV"))?;
+                converted
+            }
+            None => quantize_pal8(rgba, video.width, video.height),
+        };
         converted.set_pts(Some(index as i64));
         self.stats.prepare_ns += prepared.elapsed().as_nanos() as u64;
         let submitted = Instant::now();
@@ -372,9 +434,8 @@ impl MediaWriter {
         // copies pixels and nothing else, and a surface sent with no PTS makes
         // libavcodec invent one, which is how a hardware export ends up a frame
         // out of step with its own audio.
-        match self.video.hw.as_ref() {
-            None => self
-                .video
+        match video.hw.as_ref() {
+            None => video
                 .encoder
                 .send_frame(&converted)
                 .map_err(ExportError::ffmpeg("encoding a video frame"))?,
@@ -382,16 +443,16 @@ impl MediaWriter {
                 let mut surface = pool.empty_frame()?;
                 pool.upload(&converted, &mut surface)?;
                 surface.set_pts(Some(index as i64));
-                self.video
+                video
                     .encoder
                     .send_frame(&surface)
                     .map_err(ExportError::ffmpeg("encoding a video frame on the GPU"))?;
             }
         }
 
-        self.video.frames = self.video.frames.max(index + 1);
+        video.frames = video.frames.max(index + 1);
         self.stats.frames += 1;
-        let drained = drain_video(&mut self.octx, &mut self.video);
+        let drained = drain_video(&mut self.octx, video, &mut self.stats);
         self.stats.submit_ns += submitted.elapsed().as_nanos() as u64;
         drained
     }
@@ -403,7 +464,9 @@ impl MediaWriter {
     /// the swscale pass rather than remove it — so the caller keeps the RGBA
     /// path for those.
     pub fn wants_nv12(&self) -> bool {
-        self.video.upload_format == format::Pixel::NV12
+        self.video
+            .as_ref()
+            .is_some_and(|video| video.upload_format == format::Pixel::NV12)
     }
 
     /// Encode one composited frame that is already NV12.
@@ -424,14 +487,17 @@ impl MediaWriter {
         uv_stride: usize,
         index: u64,
     ) -> Result<()> {
-        if !self.wants_nv12() {
+        let Some(video) = self.video.as_mut() else {
+            return Err(no_picture());
+        };
+        if video.upload_format != format::Pixel::NV12 {
             return Err(ExportError::Settings(format!(
                 "this encoder is fed {:?}, not NV12",
-                self.video.upload_format
+                video.upload_format
             )));
         }
 
-        let (width, height) = (self.video.width as usize, self.video.height as usize);
+        let (width, height) = (video.width as usize, video.height as usize);
         let uv_rows = height.div_ceil(2);
         if y_stride < width || uv_stride < width {
             return Err(ExportError::Settings(format!(
@@ -451,17 +517,15 @@ impl MediaWriter {
         }
 
         let prepared = Instant::now();
-        let mut source =
-            frame::Video::new(format::Pixel::NV12, self.video.width, self.video.height);
+        let mut source = frame::Video::new(format::Pixel::NV12, video.width, video.height);
         copy_plane(&mut source, 0, y, y_stride, width, height);
         copy_plane(&mut source, 1, uv, uv_stride, width, uv_rows);
         source.set_pts(Some(index as i64));
         self.stats.prepare_ns += prepared.elapsed().as_nanos() as u64;
         let submitted = Instant::now();
 
-        match self.video.hw.as_ref() {
-            None => self
-                .video
+        match video.hw.as_ref() {
+            None => video
                 .encoder
                 .send_frame(&source)
                 .map_err(ExportError::ffmpeg("encoding a video frame"))?,
@@ -472,16 +536,16 @@ impl MediaWriter {
                 // nothing else, so a surface with no PTS makes libavcodec
                 // invent one and the export ends up a frame out of step.
                 surface.set_pts(Some(index as i64));
-                self.video
+                video
                     .encoder
                     .send_frame(&surface)
                     .map_err(ExportError::ffmpeg("encoding a video frame on the GPU"))?;
             }
         }
 
-        self.video.frames = self.video.frames.max(index + 1);
+        video.frames = video.frames.max(index + 1);
         self.stats.frames += 1;
-        let drained = drain_video(&mut self.octx, &mut self.video);
+        let drained = drain_video(&mut self.octx, video, &mut self.stats);
         self.stats.submit_ns += submitted.elapsed().as_nanos() as u64;
         drained
     }
@@ -503,7 +567,10 @@ impl MediaWriter {
         buffer: &hwframes::Nv12Dmabuf<'_>,
         index: u64,
     ) -> Result<frame::Video> {
-        let Some(pool) = self.video.hw.as_ref() else {
+        let Some(video) = self.video.as_mut() else {
+            return Err(no_picture());
+        };
+        let Some(pool) = video.hw.as_ref() else {
             return Err(ExportError::Settings(
                 "a DMA-BUF can only be given to a hardware encoder".into(),
             ));
@@ -515,14 +582,14 @@ impl MediaWriter {
         self.stats.prepare_ns += prepared.elapsed().as_nanos() as u64;
 
         let submitted = Instant::now();
-        self.video
+        video
             .encoder
             .send_frame(&surface)
             .map_err(ExportError::ffmpeg("encoding a video frame on the GPU"))?;
 
-        self.video.frames = self.video.frames.max(index + 1);
+        video.frames = video.frames.max(index + 1);
         self.stats.frames += 1;
-        let drained = drain_video(&mut self.octx, &mut self.video);
+        let drained = drain_video(&mut self.octx, video, &mut self.stats);
         self.stats.submit_ns += submitted.elapsed().as_nanos() as u64;
         drained?;
         Ok(surface)
@@ -542,16 +609,24 @@ impl MediaWriter {
         let chunk = audio.frame_size * audio.channels;
         while audio.pending.len() >= chunk {
             let samples: Vec<f32> = audio.pending.drain(..chunk).collect();
-            encode_audio_chunk(&mut self.octx, audio, &samples, audio.frame_size)?;
+            encode_audio_chunk(
+                &mut self.octx,
+                audio,
+                &samples,
+                audio.frame_size,
+                &mut self.stats,
+            )?;
         }
         Ok(())
     }
 
-    /// Flush both encoders, write the trailer, close the file.
+    /// Flush both encoders, write the trailer, close the file. Returns the
+    /// final stats, which include the packets the flush produced — for a
+    /// lookahead encoder that is the last second or two of the file.
     ///
     /// Consumes `self` because there is no valid state after it and no reason
     /// to allow a second call.
-    pub fn finish(mut self) -> Result<()> {
+    pub fn finish(mut self) -> Result<WriterStats> {
         if let Some(audio) = self.audio.as_mut() {
             // The tail is normally a partial frame. Encoders accept a short
             // final frame; dropping it loses up to 20 ms off the end, which is
@@ -560,27 +635,29 @@ impl MediaWriter {
                 let samples: Vec<f32> = std::mem::take(&mut audio.pending);
                 let frames = samples.len() / audio.channels.max(1);
                 if frames > 0 {
-                    encode_audio_chunk(&mut self.octx, audio, &samples, frames)?;
+                    encode_audio_chunk(&mut self.octx, audio, &samples, frames, &mut self.stats)?;
                 }
             }
             audio
                 .encoder
                 .send_eof()
                 .map_err(ExportError::ffmpeg("flushing the audio encoder"))?;
-            drain_audio(&mut self.octx, audio)?;
+            drain_audio(&mut self.octx, audio, &mut self.stats)?;
         }
 
-        self.video
-            .encoder
-            .send_eof()
-            .map_err(ExportError::ffmpeg("flushing the video encoder"))?;
-        drain_video(&mut self.octx, &mut self.video)?;
+        if let Some(video) = self.video.as_mut() {
+            video
+                .encoder
+                .send_eof()
+                .map_err(ExportError::ffmpeg("flushing the video encoder"))?;
+            drain_video(&mut self.octx, video, &mut self.stats)?;
+        }
 
         self.octx
             .write_trailer()
             .map_err(ExportError::ffmpeg("finalising the file"))?;
         self.finished = true;
-        Ok(())
+        Ok(self.stats)
     }
 
     /// Give up and remove the half-written file.
@@ -616,8 +693,11 @@ impl std::fmt::Debug for MediaWriter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MediaWriter")
             .field("path", &self.path)
-            .field("size", &(self.video.width, self.video.height))
-            .field("frames", &self.video.frames)
+            .field(
+                "size",
+                &self.video.as_ref().map(|video| (video.width, video.height)),
+            )
+            .field("frames", &self.frames_written())
             .field("audio", &self.audio.is_some())
             .finish()
     }
@@ -689,7 +769,7 @@ fn open_video_encoder(
         // not do B-frames — Intel's low-power entrypoint is the common case —
         // clamps this to zero inside `avcodec_open2` and logs it, rather than
         // failing, so it is safe to ask for on both paths.
-        encoder.set_max_b_frames(2);
+        encoder.set_max_b_frames(if spec.has_no_rate_control() { 0 } else { 2 });
         // swscale writes limited-range YUV by default; tagging it full range
         // would make every player stretch the levels and crush the blacks.
         encoder.set_color_range(ffmpeg::color::Range::MPEG);
@@ -810,19 +890,25 @@ fn add_video(
         ost.set_parameters(&opened);
     }
 
-    let scaler = scaling::Context::get(
-        format::Pixel::RGBA,
-        spec.width,
-        spec.height,
-        spec.upload_format(),
-        spec.width,
-        spec.height,
-        // Input and output are the same size, so this is a colour conversion,
-        // not a resize, and the scaling filter never runs. BILINEAR is simply
-        // the cheapest thing to ask for.
-        scaling::Flags::BILINEAR,
-    )
-    .map_err(ExportError::ffmpeg("preparing the colour converter"))?;
+    let scaler = if spec.upload_format() == format::Pixel::PAL8 {
+        None
+    } else {
+        Some(
+            scaling::Context::get(
+                format::Pixel::RGBA,
+                spec.width,
+                spec.height,
+                spec.upload_format(),
+                spec.width,
+                spec.height,
+                // Input and output are the same size, so this is a colour
+                // conversion, not a resize, and the scaling filter never runs.
+                // BILINEAR is simply the cheapest thing to ask for.
+                scaling::Flags::BILINEAR,
+            )
+            .map_err(ExportError::ffmpeg("preparing the colour converter"))?,
+        )
+    };
 
     Ok(VideoTrack {
         encoder: opened,
@@ -1022,6 +1108,85 @@ fn add_audio(
 // Frame and packet plumbing
 // ---------------------------------------------------------------------------
 
+/// The error for a picture handed to a sound-only file.
+fn no_picture() -> ExportError {
+    ExportError::Settings("this file has no picture stream to write a frame to".into())
+}
+
+/// The 1024-byte palette of a PAL8 frame. libavutil allocates it as
+/// `data[1]` but reports no line size for it, so `ffmpeg-next`'s plane
+/// accessors do not see it.
+fn palette_mut(frame: &mut frame::Video) -> Option<&mut [u8]> {
+    unsafe {
+        let data = (*frame.as_mut_ptr()).data[1];
+        (!data.is_null()).then(|| std::slice::from_raw_parts_mut(data, 1024))
+    }
+}
+
+/// Levels per channel of the GIF palette: 6 × 7 × 6 = 252 colours, with green
+/// getting the extra level because the eye resolves it best.
+const PAL_LEVELS: [u32; 3] = [6, 7, 6];
+
+/// A 4×4 Bayer matrix, as thresholds in 0..16.
+const BAYER4: [[u8; 4]; 4] = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
+
+/// Turn packed RGBA into a PAL8 frame with a fixed 252-colour palette and
+/// ordered dithering.
+///
+/// A fixed palette rather than one computed per frame: the same colour maps
+/// to the same index in every frame, so flat areas do not shimmer when the
+/// palette changes between frames, and the GIF encoder's inter-frame diffing
+/// finds more unchanged pixels. Ordered (Bayer) rather than error-diffusion
+/// dithering for the same reason — a static pattern compresses and does not
+/// crawl. swscale's own RGB8 output has only 3-3-2 bits, which bands badly.
+pub(crate) fn quantize_pal8(rgba: &[u8], width: u32, height: u32) -> frame::Video {
+    let mut target = frame::Video::new(format::Pixel::PAL8, width, height);
+    let stride = target.stride(0);
+    let (w, h) = (width as usize, height as usize);
+    {
+        let indices = target.data_mut(0);
+        for y in 0..h {
+            for x in 0..w {
+                let i = (y * w + x) * 4;
+                let threshold = f32::from(BAYER4[y % 4][x % 4]) / 16.0 - 0.5 + 1.0 / 32.0;
+                let mut index = 0u32;
+                for (channel, levels) in PAL_LEVELS.iter().enumerate() {
+                    let steps = (levels - 1) as f32;
+                    let value = f32::from(rgba[i + channel]) / 255.0 * steps + threshold;
+                    let level = value.round().clamp(0.0, steps) as u32;
+                    index = index * levels + level;
+                }
+                indices[y * stride + x] = index as u8;
+            }
+        }
+    }
+    {
+        // The palette plane: 256 native-endian 0xAARRGGBB words.
+        let Some(palette) = palette_mut(&mut target) else {
+            return target;
+        };
+        for index in 0..256u32 {
+            let colour = if index < PAL_LEVELS.iter().product::<u32>() {
+                let b = index % PAL_LEVELS[2];
+                let g = index / PAL_LEVELS[2] % PAL_LEVELS[1];
+                let r = index / (PAL_LEVELS[2] * PAL_LEVELS[1]);
+                let scale = |level: u32, levels: u32| (level * 255 / (levels - 1)) & 0xFF;
+                0xFF00_0000
+                    | scale(r, PAL_LEVELS[0]) << 16
+                    | scale(g, PAL_LEVELS[1]) << 8
+                    | scale(b, PAL_LEVELS[2])
+            } else {
+                0xFF00_0000
+            };
+            let at = index as usize * 4;
+            if at + 4 <= palette.len() {
+                palette[at..at + 4].copy_from_slice(&colour.to_ne_bytes());
+            }
+        }
+    }
+    target
+}
+
 /// Copy `rows` rows of `row_bytes` from `source` into plane `plane`.
 ///
 /// Two strides, both of which are somebody else's decision: the GPU picked
@@ -1063,6 +1228,7 @@ fn encode_audio_chunk(
     audio: &mut AudioTrack,
     interleaved: &[f32],
     frames: usize,
+    stats: &mut WriterStats,
 ) -> Result<()> {
     let mut source = frame::Audio::new(
         format::Sample::F32(format::sample::Type::Packed),
@@ -1097,10 +1263,14 @@ fn encode_audio_chunk(
         .encoder
         .send_frame(&converted)
         .map_err(ExportError::ffmpeg("encoding audio"))?;
-    drain_audio(octx, audio)
+    drain_audio(octx, audio, stats)
 }
 
-fn drain_video(octx: &mut format::context::Output, video: &mut VideoTrack) -> Result<()> {
+fn drain_video(
+    octx: &mut format::context::Output,
+    video: &mut VideoTrack,
+    stats: &mut WriterStats,
+) -> Result<()> {
     let mut packet = Packet::empty();
     loop {
         match video.encoder.receive_packet(&mut packet) {
@@ -1115,6 +1285,7 @@ fn drain_video(octx: &mut format::context::Output, video: &mut VideoTrack) -> Re
                 })
             }
         }
+        stats.video_bytes += packet.size() as u64;
         packet.set_stream(video.stream_index);
         packet.rescale_ts(video.time_base, video.stream_time_base);
         // Matroska in particular wants durations; without one it guesses from
@@ -1127,7 +1298,11 @@ fn drain_video(octx: &mut format::context::Output, video: &mut VideoTrack) -> Re
     }
 }
 
-fn drain_audio(octx: &mut format::context::Output, audio: &mut AudioTrack) -> Result<()> {
+fn drain_audio(
+    octx: &mut format::context::Output,
+    audio: &mut AudioTrack,
+    stats: &mut WriterStats,
+) -> Result<()> {
     let mut packet = Packet::empty();
     loop {
         match audio.encoder.receive_packet(&mut packet) {
@@ -1141,6 +1316,7 @@ fn drain_audio(octx: &mut format::context::Output, audio: &mut AudioTrack) -> Re
                 })
             }
         }
+        stats.audio_bytes += packet.size() as u64;
         packet.set_stream(audio.stream_index);
         packet.rescale_ts(audio.time_base, audio.stream_time_base);
         packet
@@ -1415,6 +1591,55 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_gif_palette_reproduces_primaries_and_greys() {
+        // 8x8 of one colour each; with dithering the average must be close.
+        for colour in [
+            [255u8, 0, 0],
+            [0, 255, 0],
+            [0, 0, 255],
+            [128, 128, 128],
+            [0, 0, 0],
+        ] {
+            let rgba: Vec<u8> = (0..64)
+                .flat_map(|_| [colour[0], colour[1], colour[2], 255])
+                .collect();
+            let mut frame = quantize_pal8(&rgba, 8, 8);
+            let palette = palette_mut(&mut frame).expect("a palette").to_vec();
+            let stride = frame.stride(0);
+            let mut sum = [0u32; 3];
+            for y in 0..8 {
+                for x in 0..8 {
+                    let index = frame.data(0)[y * stride + x] as usize;
+                    let word =
+                        u32::from_ne_bytes(palette[index * 4..index * 4 + 4].try_into().unwrap());
+                    sum[0] += (word >> 16) & 0xFF;
+                    sum[1] += (word >> 8) & 0xFF;
+                    sum[2] += word & 0xFF;
+                }
+            }
+            for channel in 0..3 {
+                let mean = sum[channel] as i32 / 64;
+                assert!(
+                    (mean - i32::from(colour[channel])).abs() <= 12,
+                    "{colour:?}: channel {channel} averaged {mean}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn prores_and_gif_open_without_a_quality_target() {
+        let prores = spec(HwAccel::Software, "prores_ks", Quality::Crf(20));
+        assert_eq!(prores.upload_format(), format::Pixel::YUV422P10LE);
+        let options = prores.dictionary();
+        assert!(!options.iter().any(|(k, _)| k == "crf"), "{options:?}");
+        assert!(options.contains(&("profile".into(), "3".into())));
+        let gif = spec(HwAccel::Software, "gif", Quality::Bitrate(5_000_000));
+        assert_eq!(gif.upload_format(), format::Pixel::PAL8);
+        assert_eq!(gif.rate_controls()[0].bit_rate, 0);
     }
 
     #[test]

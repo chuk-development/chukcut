@@ -46,6 +46,7 @@ every clip with a `ref` (lane:index) and an `id`, and other tools accept either.
 to the file immediately and can be undone with `undo` for as long as this connection lasts. \
 Times are seconds as numbers, or strings like \"2.5s\", \"250ms\", \"1:02.5\", \"45f\". \
 `catalog` lists effects, transitions, animations, grade controls and export presets. \
+`presets` shows how each export preset fits the project; `export_queue` runs several exports. \
 `view_frame` shows the picture at a time.";
 
 /// The tools whose operation only reads: MCP's `readOnlyHint`.
@@ -57,6 +58,23 @@ const READ_ONLY: &[&str] = &[
     "loudness",
     "catalog",
     "view_frame",
+    "marker_list",
+    "analysis",
+    "stock_kinds",
+    "stock_search",
+    "presets",
+    "estimate",
+];
+
+/// The tools that talk to a service outside this machine: MCP's
+/// `openWorldHint`.
+const OPEN_WORLD: &[&str] = &[
+    "captions_transcribe",
+    "translate_captions",
+    "tts",
+    "stock_kinds",
+    "stock_search",
+    "stock_download",
 ];
 
 type Out = Arc<Mutex<std::io::Stdout>>;
@@ -485,7 +503,7 @@ fn tool_json(name: &str, description: &str, schema: Value) -> Value {
         "annotations": {
             "readOnlyHint": READ_ONLY.contains(&name),
             "destructiveHint": false,
-            "openWorldHint": name == "captions_transcribe",
+            "openWorldHint": OPEN_WORLD.contains(&name),
         },
     })
 }
@@ -633,6 +651,49 @@ mod tests {
             }
         }
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        for added in [
+            "marker_add",
+            "marker_set",
+            "marker_remove",
+            "marker_list",
+            "crop",
+            "curve",
+            "freeze",
+            "speed_curve",
+            "layout_pip",
+            "layout_split",
+            "title_style",
+            "title_template",
+            "title_position",
+            "title_duplicate",
+            "scenes_detect",
+            "scenes_split",
+            "scenes_clear",
+            "stabilise",
+            "stabilise_set",
+            "stabilise_remove",
+            "beats_detect",
+            "beats_clear",
+            "beats_cut",
+            "beats_snap",
+            "reframe",
+            "analysis",
+            "translate_captions",
+            "tts",
+            "stock_kinds",
+            "stock_search",
+            "stock_download",
+            "presets",
+            "preset_save",
+            "preset_remove",
+            "estimate",
+            "export_queue",
+        ] {
+            assert!(names.contains(&added), "{added} is a tool");
+        }
+        for name in READ_ONLY.iter().chain(OPEN_WORLD) {
+            assert!(names.contains(name), "{name} in a hint list is a tool");
+        }
         let mut unique = names.clone();
         unique.sort();
         unique.dedup();
