@@ -34,6 +34,7 @@ pub fn set(
     segment_id: &str,
     before: Option<&AnimationMaterial>,
     after: Option<&AnimationMaterial>,
+    slot: Option<usize>,
 ) -> Result<(), String> {
     let (_, segment) = project
         .segment(segment_id)
@@ -80,7 +81,10 @@ pub fn set(
         (Some(i), None) => {
             segment.extras.remove(i);
         }
-        (None, Some(after)) => segment.extras.push(after.id.clone()),
+        (None, Some(after)) => {
+            let at = slot.unwrap_or(usize::MAX).min(segment.extras.len());
+            segment.extras.insert(at, after.id.clone());
+        }
         (None, None) => {}
     }
 
@@ -129,10 +133,12 @@ pub fn edit_command(
         return Err("nothing to change".into());
     }
     let after = (!next.is_empty()).then_some(next);
+    let slot = slot_of(segment, before.as_ref());
     Ok(EditCommand::SetAnimation {
         segment_id: segment_id.to_string(),
         before,
         after,
+        slot,
     })
 }
 
@@ -203,6 +209,7 @@ pub fn split_commands(project: &Project, original: &Segment, right_id: &str) -> 
             segment_id: original.id.clone(),
             before: Some(material.clone()),
             after: (!left.is_empty()).then_some(left),
+            slot: slot_of(original, Some(material)),
         });
     }
 
@@ -218,9 +225,17 @@ pub fn split_commands(project: &Project, original: &Segment, right_id: &str) -> 
             segment_id: right_id.to_string(),
             before: None,
             after: Some(right),
+            slot: None,
         });
     }
     commands
+}
+
+/// Where `material`'s id sits in `segment`'s extras, for
+/// `EditCommand::SetAnimation::slot`.
+fn slot_of(segment: &Segment, material: Option<&AnimationMaterial>) -> Option<usize> {
+    let id = &material?.id;
+    segment.extras.iter().position(|e| e == id)
 }
 
 /// The clips cut from one take that sit end to end with `segment_id`: same
