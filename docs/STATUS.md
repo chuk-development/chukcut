@@ -1848,6 +1848,41 @@ Two things to carry forward from it, because they generalise past this module:
   wait for. `encodes_dispatched_onto_the_rayon_pool_all_finish` is the test that
   can reach it, and it is the one that found the second deadlock above.
 
+## The native timeline (2026-10-03)
+
+`crates/app/src/editor/timeline.rs`, with `timeline/ripple.rs` (multi-clip
+gestures as `EditCommand` batches, unit-tested) and `timeline/media_cache.rs`
+(filmstrips and waveforms). Laid out after CapCut: toolbar, track headers with
+lock / eye / mute, a Cover box before the main lane, filmstrip video clips,
+waveform audio clips, trim handles, snapping, Ctrl+wheel zoom around the
+pointer, a scrollbar, a resizable split (42% of the window by default).
+
+- **The main track magnet is on by default**, as in CapCut. The first video
+  lane stays gapless: delete, trim and Q/W ripple through it, a drag along it
+  reorders, a clip lifted off it leaves no hole. A reorder parks the dragged
+  clip past the end of everything first, so `compose_edits`' move ordering
+  never makes a clip pass through a neighbour. Known gap: a *linked* clip on
+  the main lane follows the park move, not the final one — the app creates no
+  links yet, so nothing reaches it.
+- **Dropping above the video lanes or below the audio lanes makes a new lane;
+  a move that empties an overlay lane removes it.** One undo step each.
+- **Filmstrips are one strip per material and zoom bucket** (a power of two of
+  tiles over the whole file), decoded off the UI thread, at most two jobs at a
+  time; the nearest ready bucket stands in while the right one loads.
+- **The app embeds `gpui::assets::AllAssets`** (the full Lucide set). The
+  component default bundle lacks scissors, locks, magnets and most of a
+  timeline's icons, and an icon whose SVG is missing draws as nothing, silently.
+- **Single-letter shortcuts (Q, W, M, P, N, A, B, S, Space) are bound with no
+  key context**, like the existing ones. A text field elsewhere in the window
+  may lose those letters to the timeline; scope them when one appears.
+- **To look at the app without touching the desktop**, run it on a private
+  Xvfb with Mesa's software Vulkan:
+  `Xvfb :77 -screen 0 1920x1080x24 &` then
+  `DISPLAY=:77 VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json ./target/debug/chukcut …`.
+  `xdotool` and `import -window` on `:77` can then click, drag and capture
+  freely. It is slow (pointer moves lag), and do not press Space there: the
+  audio still goes to the real speakers.
+
 ## The log file, and what an export writes into it
 
 Until 2026-07-26 the app logged to stdout and nowhere else, which is fine when
