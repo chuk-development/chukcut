@@ -1827,7 +1827,10 @@ impl Editor {
                 self.set_zoom(self.timeline.zoom * factor, x.max(0.0));
             }
         } else if event.modifiers.shift {
-            self.timeline.scroll_y -= dy;
+            // GPUI's X11 backend already turns a shifted wheel into a
+            // horizontal delta, so dy is 0 there and the lanes below the
+            // panel could not be reached at all; take whichever axis moved.
+            self.timeline.scroll_y -= if dy != 0.0 { dy } else { dx };
         } else {
             let step = if dx.abs() > dy.abs() { dx } else { dy };
             if event.delta.precise() {
