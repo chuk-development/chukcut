@@ -60,6 +60,7 @@ pub mod context;
 #[cfg(target_os = "linux")]
 pub mod dmabuf;
 pub mod error;
+pub mod grade;
 pub mod layout;
 pub mod lut;
 pub mod nv12;

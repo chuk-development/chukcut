@@ -116,6 +116,28 @@ pub fn recent_projects_file() -> PathBuf {
     config_root().join("recent.json")
 }
 
+/// Root for user data the app keeps on the user's behalf — files they
+/// imported and would miss, which are neither settings nor cache.
+///
+/// Linux: `$XDG_DATA_HOME/chukcut`, or `~/.local/share/chukcut` when the
+/// variable is unset.
+pub fn data_root() -> PathBuf {
+    std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| home().map(|h| h.join(".local/share")))
+        .unwrap_or_else(std::env::temp_dir)
+        .join(APP_DIR)
+}
+
+/// The LUT library: `.cube` files imported through the colour panel are
+/// copied here, so a project keeps its look when the original download is
+/// cleaned up. Under [`data_root`], never the cache: "clear cache" must not
+/// take a look away from a project that uses it.
+pub fn luts_dir() -> PathBuf {
+    data_root().join("luts")
+}
+
 /// Create a directory and every missing parent, returning it for chaining.
 pub fn ensure(dir: PathBuf) -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(&dir)?;
