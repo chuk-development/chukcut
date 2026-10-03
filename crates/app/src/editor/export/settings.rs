@@ -265,7 +265,8 @@ pub(crate) const GIF_RATES: [(f64, &str); 4] = [
 ];
 
 /// CapCut's frame-rate list, with the NTSC rates spelled as people know them.
-pub(crate) const FRAME_RATES: [(f64, &str); 7] = [
+pub(crate) const FRAME_RATES: [(f64, &str); 8] = [
+    (23.976, "23.976 fps"),
     (24.0, "24 fps"),
     (25.0, "25 fps"),
     (29.97, "29.97 fps"),
@@ -389,6 +390,55 @@ impl ExportChoices {
         }
         self.loudness_target = fitted.loudness_target;
         self.preset = Some(preset.id.clone());
+        self.snap_fps();
+    }
+
+    /// Put the frame rate on the nearest entry of the list the dialog shows
+    /// for this kind of file, so the picker never shows nothing.
+    fn snap_fps(&mut self) {
+        let list: &[(f64, &str)] = match self.kind {
+            OutputKind::Gif => &GIF_RATES,
+            _ => &FRAME_RATES,
+        };
+        let fps = self.fps;
+        if let Some(rate) = list
+            .iter()
+            .map(|(rate, _)| *rate)
+            .min_by(|a, b| (a - fps).abs().total_cmp(&(b - fps).abs()))
+        {
+            self.fps = rate;
+        }
+    }
+
+    /// Switch between video, sound only and GIF. A GIF's frame rate and
+    /// silence do not carry over into a video, nor a video's 4K into a GIF:
+    /// each side gets the nearest setting that makes sense for it.
+    pub(crate) fn set_kind(&mut self, kind: OutputKind) {
+        if kind == self.kind {
+            return;
+        }
+        let nearest = |list: &[(f64, &str)], fps: f64| {
+            list.iter()
+                .map(|(rate, _)| *rate)
+                .min_by(|a, b| (a - fps).abs().total_cmp(&(b - fps).abs()))
+                .unwrap_or(fps)
+        };
+        match kind {
+            OutputKind::Gif => {
+                self.fps = nearest(&GIF_RATES, self.fps.min(15.0));
+                if self.resolution.short_side() > 720 {
+                    self.resolution = Resolution::P480;
+                }
+            }
+            OutputKind::Video => {
+                if self.kind == OutputKind::Gif {
+                    self.fps = nearest(&FRAME_RATES, 30.0);
+                    self.audio = true;
+                }
+            }
+            OutputKind::Audio => {}
+        }
+        self.kind = kind;
     }
 
     /// Show a quality on the bitrate control: the level whose CRF is
@@ -468,6 +518,9 @@ impl ExportChoices {
         self.loudness_target = o.loudness_target;
         self.audio = memory.include_audio;
         self.preset = None;
+        // A remembered rate that this kind of file does not offer (an old
+        // setting, another version) would leave the picker empty.
+        self.snap_fps();
     }
 
     /// What to remember of these choices for the next export.
@@ -815,6 +868,33 @@ mod tests {
         assert_eq!(o.container, Some(Container::Gif));
         assert_eq!((o.width, o.height), (Some(854), Some(480)));
         assert!(o.loudness_off);
+    }
+
+    #[test]
+    fn switching_from_a_gif_to_a_video_brings_back_sound_and_a_video_rate() {
+        let p = project(1080, 1920, 30.0);
+        let mut choices = ExportChoices::for_project(&p, PathBuf::from("/out"));
+        choices.apply_preset(&p, &ExportPreset::by_id("gif").unwrap());
+        assert_eq!((choices.fps, choices.audio), (15.0, false));
+        choices.set_kind(OutputKind::Video);
+        assert_eq!((choices.fps, choices.audio), (30.0, true));
+        choices.resolution = Resolution::K4;
+        choices.set_kind(OutputKind::Gif);
+        assert_eq!(choices.resolution, Resolution::P480);
+        assert_eq!(choices.fps, 15.0);
+    }
+
+    #[test]
+    fn a_remembered_rate_the_list_lacks_lands_on_the_nearest_one() {
+        let p = project(1080, 1920, 30.0);
+        let mut memory = ExportChoices::for_project(&p, PathBuf::new()).memory(&p);
+        memory.overrides.fps = Some(15.0);
+        let restored = ExportChoices::opening(&p, PathBuf::new(), Some(&memory));
+        assert_eq!(restored.fps, 23.976);
+        let film = project(1920, 1080, 23.976);
+        let mut choices = ExportChoices::for_project(&film, PathBuf::new());
+        choices.apply_preset(&film, &ExportPreset::by_id("master_prores").unwrap());
+        assert!((choices.fps - 23.976).abs() < 1e-9);
     }
 
     #[test]

@@ -27,7 +27,9 @@ impl Editor {
         let state = Arc::clone(&self.state);
         let project = Arc::clone(&self.project);
         let progress = Arc::clone(&self.export_progress);
-        let dialog = cx.new(|cx| ExportDialog::new(editor, state, project, progress, window, cx));
+        let marks = self.play_range();
+        let dialog =
+            cx.new(|cx| ExportDialog::new(editor, state, project, progress, marks, window, cx));
         window.open_dialog(cx, move |surface, _, cx| {
             // A running export cannot be dismissed by a stray click or Esc;
             // its own Cancel button is the way out.

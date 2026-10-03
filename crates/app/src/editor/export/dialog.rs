@@ -104,6 +104,7 @@ impl ExportDialog {
         state: Arc<AppState>,
         project: Arc<Project>,
         editor_progress: Slot,
+        marks: (Option<Micros>, Option<Micros>),
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -112,15 +113,13 @@ impl ExportDialog {
             ExportChoices::opening(&project, settings::default_directory(), memory.as_ref());
         // In/out marks: offered as a range, never chosen by themselves — an
         // export of part of the timeline has to be asked for.
-        let marks = editor.upgrade().and_then(|editor| {
-            let (mark_in, mark_out) = editor.read(cx).play_range();
-            (mark_in.is_some() || mark_out.is_some()).then(|| {
-                let start = mark_in.unwrap_or(0).max(0);
-                let end = mark_out
-                    .unwrap_or(project.duration())
-                    .min(project.duration());
-                (start, end)
-            })
+        let marks = (marks.0.is_some() || marks.1.is_some()).then(|| {
+            let start = marks.0.unwrap_or(0).max(0);
+            let end = marks
+                .1
+                .unwrap_or(project.duration())
+                .min(project.duration());
+            (start, end)
         });
         let marks = marks.filter(|(start, end)| end > start);
         choices.range = None;
@@ -830,7 +829,7 @@ impl ExportDialog {
             &OutputKind::ALL,
             kind,
             OutputKind::label,
-            |c, k| c.kind = k,
+            |c, k| c.set_kind(k),
             cx,
         );
         let range_row = self.marks.map(|(start, end)| {
@@ -1454,7 +1453,9 @@ impl Render for ExportDialog {
                             .child(self.project.name.clone()),
                     )
                     .child(div().flex_1())
-                    .children(queue_button),
+                    .children(queue_button)
+                    // Room for the dialog's own close button in the corner.
+                    .child(div().w(px(28.0))),
             )
             .child(
                 div()
