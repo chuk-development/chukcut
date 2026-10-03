@@ -715,6 +715,17 @@ fn a_whole_session_through_the_command_layer() {
             .map(|_| ()),
     );
 
+    // The working copy has the transition: a crash now must not lose it.
+    chukcut_engine::modules::project::autosave::flush();
+    let working = std::fs::read_to_string(chukcut_engine::modules::project::autosave::file())
+        .expect("the working copy is written");
+    let working: Project = serde_json::from_str(&working).unwrap();
+    assert_eq!(
+        working.materials.transitions.len(),
+        1,
+        "the transition is autosaved"
+    );
+
     // --- tracking with a follower title ----------------------------------------
     let follower = ok(
         "follower title",

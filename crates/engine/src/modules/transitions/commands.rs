@@ -109,6 +109,11 @@ fn apply(
     }
 
     let project = state.project.read().clone().ok_or("no project is open")?;
+    // Every edit persists the working copy on the way out, as
+    // `timeline::commands::respond` does; without this a transition was
+    // lost to a crash until the next edit of another kind.
+    let origin = state.project_path.read().clone();
+    crate::modules::project::autosave::schedule(&project, origin);
     let history = state.history.read();
     Ok(EditResponse {
         project,
