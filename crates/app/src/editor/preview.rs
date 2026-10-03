@@ -328,6 +328,8 @@ impl Editor {
         let config = ProjectConfig {
             width,
             height,
+            // A ratio picked from the menu is a choice, even the one in use.
+            canvas_chosen: true,
             ..ProjectConfig::of(&self.project)
         };
         let result = project_commands::project_configure(&self.state, config).map(|_| ());

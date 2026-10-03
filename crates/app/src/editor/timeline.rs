@@ -1016,7 +1016,8 @@ impl Editor {
 
         if y < RULER_H {
             self.pause();
-            self.seek(time);
+            // On a frame boundary: a split there must cut between frames.
+            self.seek(nearest_frame_time(time, self.project.fps));
             self.timeline.drag = Some(Drag::Scrub);
             cx.notify();
             return;
@@ -1300,7 +1301,7 @@ impl Editor {
         let time = self.x_to_time(x);
         match self.timeline.drag.take() {
             Some(Drag::Scrub) => {
-                self.seek(time);
+                self.seek(nearest_frame_time(time, self.project.fps));
                 self.timeline.drag = Some(Drag::Scrub);
             }
             Some(Drag::Band {
@@ -1623,7 +1624,7 @@ impl Editor {
                 from, moved: false, ..
             }) => {
                 let time = self.x_to_time(from.0);
-                self.seek(time);
+                self.seek(nearest_frame_time(time, self.project.fps));
             }
             Some(Drag::Keyframe {
                 segment_id,
@@ -2160,7 +2161,8 @@ impl Editor {
             cx.notify();
             return;
         };
-        let at = self.clock.position();
+        // Cut where the frame on screen starts, as Split does.
+        let at = frame_start(self.clock.position(), self.project.fps);
         let state = Arc::clone(&self.state);
         self.status = Some("Freezing frame…".into());
         cx.notify();
@@ -2220,7 +2222,8 @@ impl Editor {
         let Some((track, segment)) = self.project.segment(&id) else {
             return;
         };
-        let at = self.clock.position();
+        // Like Split: on the start of the frame on screen.
+        let at = frame_start(self.clock.position(), self.project.fps);
         let ripple = self.timeline.magnet && self.is_main_track(&track.id);
         let limit = ripple::source_limit(&self.project, &segment.material_id);
         let start = segment.target_range.start;

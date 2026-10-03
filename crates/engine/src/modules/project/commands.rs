@@ -26,12 +26,19 @@ fn write_project(path: &PathBuf, project: &Project) -> Result<(), String> {
     fs::rename(&tmp, path).map_err(|e| e.to_string())?;
     Ok(())
 }
+
+/// Make a new, empty project the open one.
+///
+/// `canvas_chosen` says whether the user picked the canvas on purpose (the
+/// start screen does); a project made without a choice adopts the first
+/// imported clip's shape — see `Project::canvas_chosen`.
 pub fn project_new(
     state: &Arc<AppState>,
     name: String,
     width: u32,
     height: u32,
     fps: f64,
+    canvas_chosen: bool,
 ) -> Result<Project, String> {
     let canvas = CanvasConfig {
         width,
@@ -39,6 +46,7 @@ pub fn project_new(
         background: [0.0, 0.0, 0.0, 1.0],
     };
     let mut project = Project::new(name, canvas, fps);
+    project.canvas_chosen = canvas_chosen;
 
     // A brand new project always has one video and one audio lane; an editor
     // that opens with nothing to drop onto is hostile.
@@ -106,7 +114,14 @@ pub fn project_save(state: &Arc<AppState>, path: Option<String>) -> Result<Strin
     };
 
     let project = state.project.read().clone().ok_or("no project is open")?;
-    write_project(&target, &project)?;
+    // The file leaves out parameter materials nothing reaches any more; the
+    // live pool keeps them for undo, redo and the clipboard (`prune.rs`).
+    let mut file = project.clone();
+    let pruned = super::prune::prune_unreferenced(&mut file);
+    if pruned > 0 {
+        tracing::debug!(pruned, "unreferenced materials left out of the file");
+    }
+    write_project(&target, &file)?;
     *state.project_path.write() = Some(target.clone());
     // Freeze-frame stills this session made and nothing reaches any more —
     // not this document, not undo or redo, not a file saved earlier.
@@ -245,8 +260,10 @@ pub fn import_material(
             //
             // Only while the timeline is empty: once anything has been cut, the
             // canvas is a decision the user has made and moving it under them
-            // would reframe their work.
-            if project.tracks.iter().all(|t| t.segments.is_empty()) {
+            // would reframe their work. And never when the user picked the
+            // canvas on purpose (start screen, project settings): 9:16 chosen
+            // for a vertical edit of landscape footage is the whole point.
+            if !project.canvas_chosen && project.tracks.iter().all(|t| t.segments.is_empty()) {
                 let (w, h) = (video.display_width.max(2), video.display_height.max(2));
 
                 // Take the clip's *shape*, not its resolution.
@@ -490,11 +507,15 @@ pub struct ConfigureResponse {
 ///   command relies on it.
 pub fn project_configure(
     state: &Arc<AppState>,
-    config: super::configure::ProjectConfig,
+    mut config: super::configure::ProjectConfig,
 ) -> Result<ConfigureResponse, String> {
     {
         let mut guard = state.project.write();
         let project = guard.as_mut().ok_or("no project is open")?;
+        // A canvas set by hand is a choice the first import must not undo.
+        if config.changes_canvas(project) {
+            config.canvas_chosen = true;
+        }
         let command = super::configure::ConfigureCommand::new(project, config);
         if !command.is_noop() {
             state.history.write().apply_configure(project, command)?;
@@ -581,4 +602,133 @@ pub fn project_recovery_restore(state: &Arc<AppState>) -> Result<Project, String
 /// Throw the recovered work away.
 pub fn project_recovery_discard() {
     super::recovery::discard_at(&super::autosave::file());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::modules::media::{MediaInfo, VideoStreamInfo};
+    use crate::modules::project::ProjectConfig;
+
+    fn landscape() -> MediaInfo {
+        MediaInfo {
+            path: "/media/wide.mp4".into(),
+            format: "mov,mp4,m4a,3gp,3g2,mj2".into(),
+            duration: 5_000_000,
+            file_size: 1,
+            has_video: true,
+            has_audio: false,
+            video: Some(VideoStreamInfo {
+                index: 0,
+                width: 1920,
+                height: 1080,
+                display_width: 1920,
+                display_height: 1080,
+                fps: 25.0,
+                codec: "h264".into(),
+                rotation: 0,
+                duration: 5_000_000,
+            }),
+            audio: None,
+        }
+    }
+
+    fn vertical(chosen: bool) -> Project {
+        let mut project = Project::new("Cut", CanvasConfig::default(), 30.0);
+        project.canvas_chosen = chosen;
+        project
+    }
+
+    #[test]
+    fn an_unchosen_canvas_takes_the_first_clips_shape() {
+        let mut project = vertical(false);
+        import_material(&mut project, "/media/wide.mp4", "wide.mp4", &landscape()).unwrap();
+        assert_eq!((project.canvas.width, project.canvas.height), (1920, 1080));
+        assert_eq!(project.fps, 25.0);
+    }
+
+    #[test]
+    fn a_chosen_canvas_survives_the_first_import() {
+        let mut project = vertical(true);
+        import_material(&mut project, "/media/wide.mp4", "wide.mp4", &landscape()).unwrap();
+        assert_eq!((project.canvas.width, project.canvas.height), (1080, 1920));
+        assert_eq!(project.fps, 30.0);
+    }
+
+    #[test]
+    fn the_choice_is_saved_and_old_files_read_as_unchosen() {
+        let chosen = serde_json::to_string(&vertical(true)).unwrap();
+        assert!(chosen.contains("\"canvas_chosen\":true"));
+        let back: Project = serde_json::from_str(&chosen).unwrap();
+        assert!(back.canvas_chosen);
+
+        // An unchosen project writes no key at all, so a file from before the
+        // flag existed saves back byte for byte.
+        let unchosen = serde_json::to_string(&vertical(false)).unwrap();
+        assert!(!unchosen.contains("canvas_chosen"));
+        let old: Project = serde_json::from_str(&unchosen).unwrap();
+        assert!(!old.canvas_chosen);
+    }
+
+    #[test]
+    fn a_save_leaves_orphans_out_of_the_file_but_not_out_of_undo() {
+        use crate::modules::project::document::ColorAdjustMaterial;
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/test-scratch/project-save-prune");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("p.chukcut");
+        let state = AppState::new();
+        let mut project = vertical(false);
+        let orphan: ColorAdjustMaterial =
+            serde_json::from_value(serde_json::json!({ "id": "orphan" })).unwrap();
+        project.materials.color_adjusts.push(orphan);
+        *state.project.write() = Some(project);
+
+        project_save(&state, Some(path.to_string_lossy().into_owned())).unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(!written.contains("orphan"));
+        // The live pool is untouched: an undo may still need it.
+        assert_eq!(
+            state
+                .with_project(|p| p.materials.color_adjusts.len())
+                .unwrap(),
+            1
+        );
+        // Open and save again: the same bytes.
+        project_open(&state, path.to_string_lossy().into_owned()).unwrap();
+        project_save(&state, None).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), written);
+    }
+
+    #[test]
+    fn setting_the_canvas_by_hand_chooses_it_and_undo_forgets_it() {
+        let state = AppState::new();
+        *state.project.write() = Some(vertical(false));
+        let current = state.with_project(ProjectConfig::of).unwrap();
+
+        // A rename is not a canvas choice.
+        project_configure(
+            &state,
+            ProjectConfig {
+                name: "Renamed".into(),
+                ..current.clone()
+            },
+        )
+        .unwrap();
+        assert!(!state.with_project(|p| p.canvas_chosen).unwrap());
+
+        project_configure(
+            &state,
+            ProjectConfig {
+                width: 1080,
+                height: 1080,
+                ..state.with_project(ProjectConfig::of).unwrap()
+            },
+        )
+        .unwrap();
+        assert!(state.with_project(|p| p.canvas_chosen).unwrap());
+
+        crate::modules::timeline::commands::timeline_undo(&state).unwrap();
+        assert!(!state.with_project(|p| p.canvas_chosen).unwrap());
+    }
 }

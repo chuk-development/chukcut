@@ -70,6 +70,9 @@ pub fn startup(state: &Arc<AppState>) -> (Startup, Option<RecoveryInfo>) {
             width,
             height,
             settings.default_fps,
+            // Media on the command line, no canvas picked: the first clip
+            // sets the shape.
+            false,
         ) {
             eprintln!("chukcut: {error}");
             return (Startup::Home, recovery);
@@ -226,6 +229,7 @@ impl Shell {
                 width,
                 height,
                 fps,
+                canvas_chosen,
             } => {
                 match project_commands::project_new(
                     &self.state,
@@ -233,6 +237,7 @@ impl Shell {
                     *width,
                     *height,
                     *fps,
+                    *canvas_chosen,
                 ) {
                     Ok(_) => self.show_editor(Vec::new(), false, window, cx),
                     Err(error) => self.home_notice(error, cx),

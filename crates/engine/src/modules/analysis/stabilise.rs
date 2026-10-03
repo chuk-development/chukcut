@@ -469,15 +469,6 @@ pub fn applied(project: &Project, segment: &Segment) -> Option<Arc<Applied>> {
     built
 }
 
-/// Source time of `segment` at `time`, held at its edges.
-fn clamped_source_time(segment: &Segment, time: Micros) -> Micros {
-    let start = segment.target_range.start;
-    let end = (segment.target_range.end() - 1).max(start);
-    segment
-        .source_time_at(time.clamp(start, end))
-        .unwrap_or(segment.source_range.start)
-}
-
 /// `segment` as the compositor should draw it at `time`: itself, or a copy
 /// whose crop window and transform hold the picture still. Borrowed when the
 /// clip is not stabilised, so a project without stabilisation pays one map
@@ -490,7 +481,12 @@ pub fn resolve<'a>(project: &Project, segment: Cow<'a, Segment>, time: Micros) -
     if !applied.enabled {
         return segment;
     }
-    let source = clamped_source_time(&segment, time);
+    // Through the time map: a stabilised clip on a speed curve must look
+    // up the correction for the frame it actually shows.
+    let source = project
+        .materials
+        .time_map(&segment)
+        .clamped_source_time(time);
     let base = segment.crop.unwrap_or_default();
     let (window, scale, roll) = applied.window(base, source);
     let mut transform = animated_transform(&segment, time);

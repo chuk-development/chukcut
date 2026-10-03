@@ -14,7 +14,9 @@ use std::sync::Arc;
 use chukcut_engine::modules::audio::AudioEngine;
 use chukcut_engine::modules::export::commands as export_commands;
 use chukcut_engine::modules::export::{ExportProgress, ExportStage};
-use chukcut_engine::modules::preview::clock::{frame_at, PlaybackClock};
+use chukcut_engine::modules::preview::clock::{
+    frame_at, frame_start, nearest_frame_time, PlaybackClock,
+};
 use chukcut_engine::modules::project::commands as project_commands;
 use chukcut_engine::modules::project::{Micros, Project, Track, TrackKind};
 use chukcut_engine::modules::timeline::commands as timeline_commands;
@@ -418,7 +420,9 @@ impl Editor {
     }
 
     fn on_split(&mut self, _: &Split, _: &mut Window, cx: &mut Context<Self>) {
-        let at = self.clock.position();
+        // On the start of the frame on screen, never between frames: the
+        // playhead may be anywhere inside a frame while playing.
+        let at = frame_start(self.clock.position(), self.project.fps);
         let result = match self.selected.clone() {
             Some(id) => timeline_commands::timeline_split(&self.state, id, at),
             None => timeline_commands::timeline_split_all(&self.state, at),

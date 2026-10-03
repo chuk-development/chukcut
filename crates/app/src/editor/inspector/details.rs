@@ -382,6 +382,8 @@ impl Editor {
                 height: number(read(&form.height), "the height")?.round() as u32,
                 fps: number(read(&form.fps), "the frame rate")?,
                 background: self.project.canvas.background,
+                // Saved from the settings form: the canvas is chosen.
+                canvas_chosen: true,
             })
         })();
         let result = config
