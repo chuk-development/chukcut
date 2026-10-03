@@ -142,3 +142,40 @@ Whichever lands, delete the other half of `recovery.ts`.
 - **Editing the recent list** (pin, remove, clear). Rust prunes missing files
   before answering and the frontend drops an entry whose open fails; that covers
   the case people actually hit.
+
+## The native app (2026-10-03)
+
+The GPUI shell implements this decision again, in `crates/app/src/editor/`:
+`shell.rs` (the window root and every way in and out of a document),
+`home.rs` (the start screen), `lifecycle.rs` (dirty state, the guard, saving,
+the window title), `settings.rs`, `shortcuts.rs` and `playback.rs`.
+
+**Crash recovery took seam 2, offer-first.** A clean way out of a document
+(`project_close`: going home, quitting, closing the window after the guard)
+deletes the working copy, so one that survives to the next launch means the
+session crashed. At launch, before the command line can open anything,
+`project_recovery_claim` moves it into a recovery slot
+(`autosave.recovered.chukcut`) — otherwise opening `chukcut x.chukcut` would
+schedule an autosave over the very work about to be offered. The app then
+asks: Restore, Discard, or Not now (the start screen keeps a banner, and the
+slot survives to the next launch). A working copy identical to the file it
+came from is discarded silently; a session lock with the process id keeps a
+second instance from taking a running one's working copy for a crash.
+`project_get`'s apply-on-first-call path is not used by the native app.
+
+**Dirty is a fingerprint, not a counter.** The editor hashes the serialised
+document and compares it with the hash at the last save, open or creation.
+The serialisation is deterministic, so undoing back to the saved state is
+clean again. Restored work has no baseline and is always unsaved.
+
+**The window-close guard exists now.** GPUI's `on_window_should_close` can
+veto a close and the app quits itself once the guard passes, so the reason
+it was left out of the webview (a guard that could trap the user) no longer
+applies.
+
+**Settings that reach the native app:** `default_canvas`, `default_fps`
+(start screen and command-line imports), `preview_scale` and
+`preview_max_edge` (the player's render size, live), `audio_scrubbing`
+(live). `proxy_policy` and `cache_limit` are persisted and shown, but nothing
+acts on them yet: the player does not switch to proxies, and nothing trims
+the cache. The dialog says so.

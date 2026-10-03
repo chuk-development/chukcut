@@ -55,9 +55,19 @@ actions!(
 
 mod assets;
 mod export;
+mod home;
 mod inspector;
+mod lifecycle;
+mod playback;
 mod preview;
+mod settings;
+mod shell;
+mod shortcuts;
 mod timeline;
+pub(crate) use playback::key_bindings as playback_key_bindings;
+pub(crate) use shell::{quit, startup, Shell};
+pub(crate) use shortcuts::key_bindings as shortcut_key_bindings;
+use shortcuts::{NewProject, OpenSettings, ShowShortcuts};
 pub(crate) use timeline::key_bindings as timeline_key_bindings;
 mod title_bar;
 mod widgets;
@@ -98,6 +108,9 @@ pub struct Editor {
     assets: assets::AssetPanel,
     /// The player's preview quality.
     preview: preview::PreviewState,
+    /// Unsaved-changes tracking, settings, transport extras (`lifecycle.rs`,
+    /// `playback.rs`).
+    shell: lifecycle::ShellState,
     _ticker: Task<()>,
 }
 
@@ -131,6 +144,10 @@ impl Editor {
         });
 
         let assets = assets::AssetPanel::new(window, cx);
+        let shell = lifecycle::ShellState::new(&project);
+        let preview = preview::PreviewState {
+            quality: settings::quality_for_scale(shell.settings.preview_scale()),
+        };
         let mut editor = Self {
             state,
             audio,
@@ -150,7 +167,8 @@ impl Editor {
             inspector: inspector::Inspector::default(),
             title: Default::default(),
             assets,
-            preview: Default::default(),
+            preview,
+            shell,
             _ticker: ticker,
         };
         // Hardware encoder detection opens each device and encodes a test
@@ -168,7 +186,8 @@ impl Editor {
     // --- the clock and the picture --------------------------------------------
 
     fn tick(&mut self, cx: &mut Context<Self>) {
-        let playing = self.clock.is_playing();
+        self.tick_playback();
+        let playing = self.clock.is_playing() || self.shell.playback_driven();
         if playing && self.clock.is_at_end() {
             self.pause();
         }
@@ -205,7 +224,12 @@ impl Editor {
             self.project.canvas.width as f32,
             self.project.canvas.height as f32,
         );
-        let fit = (bw / cw).min(bh / ch) * self.scale;
+        let mut fit = (bw / cw).min(bh / ch) * self.scale;
+        // A long-edge cap from the settings, for weak machines. 0 = none.
+        let cap = self.shell.settings.preview_max_edge;
+        if cap > 0 {
+            fit = fit.min(cap as f32 / cw.max(ch));
+        }
         let fit = fit.min(1.0) * self.preview.quality.scale();
         Some(((cw * fit).round() as u32, (ch * fit).round() as u32))
     }
@@ -235,6 +259,7 @@ impl Editor {
         if self.clock.is_at_end() {
             self.clock.seek(0);
         }
+        self.before_play();
         self.audio.set_project(Arc::clone(&self.project));
         self.audio.play(self.clock.position());
         self.clock.play();
@@ -243,6 +268,7 @@ impl Editor {
     fn pause(&mut self) {
         self.clock.pause();
         self.audio.pause();
+        self.after_pause();
     }
 
     fn seek(&mut self, to: Micros) {
@@ -250,6 +276,8 @@ impl Editor {
         self.clock.seek(to);
         if self.clock.is_playing() {
             self.audio.seek(to);
+        } else {
+            self.scrub_sound(to);
         }
     }
 
@@ -378,47 +406,13 @@ impl Editor {
         .detach();
     }
 
-    fn on_open(&mut self, _: &Open, _: &mut Window, cx: &mut Context<Self>) {
-        let picked = cx.prompt_for_paths(PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: false,
-            prompt: Some("Open project".into()),
-        });
-        cx.spawn(async move |this, cx| {
-            let Ok(Ok(Some(paths))) = picked.await else {
-                return;
-            };
-            let Some(path) = paths.into_iter().next() else {
-                return;
-            };
-            let _ = this.update(cx, |editor, cx| {
-                editor.pause();
-                let result = project_commands::project_open(
-                    &editor.state,
-                    path.to_string_lossy().to_string(),
-                )
-                .map(|_| ());
-                editor.selected = None;
-                editor.clock.seek(0);
-                editor.refresh(cx);
-                editor.report(result, cx);
-            });
-        })
-        .detach();
+    fn on_open(&mut self, _: &Open, window: &mut Window, cx: &mut Context<Self>) {
+        self.request_open(window, cx);
     }
 
     fn on_save(&mut self, _: &Save, _: &mut Window, cx: &mut Context<Self>) {
         if self.state.project_path.read().is_some() {
-            let result = project_commands::project_save(&self.state, None).map(|_| ());
-            if result.is_ok() {
-                self.title.mark_saved(self.generation);
-            }
-            self.status = Some(match &result {
-                Ok(()) => "Saved".into(),
-                Err(error) => error.clone().into(),
-            });
-            cx.notify();
+            self.save_to(None, cx);
             return;
         }
         let home = std::env::var_os("HOME")
@@ -430,20 +424,7 @@ impl Editor {
             let Ok(Ok(Some(path))) = picked.await else {
                 return;
             };
-            let _ = this.update(cx, |editor, cx| {
-                let result = project_commands::project_save(
-                    &editor.state,
-                    Some(path.to_string_lossy().to_string()),
-                );
-                editor.status = Some(match result {
-                    Ok(path) => {
-                        editor.title.mark_saved(editor.generation);
-                        format!("Saved {path}").into()
-                    }
-                    Err(error) => error.into(),
-                });
-                cx.notify();
-            });
+            let _ = this.update(cx, |editor, cx| editor.save_to(Some(path), cx));
         })
         .detach();
     }
@@ -457,9 +438,7 @@ impl Editor {
     }
 
     fn step(&mut self, frames: i64) {
-        let interval = (1_000_000.0 / self.project.fps.max(1.0)) as Micros;
-        self.pause();
-        self.seek(self.clock.position() + frames * interval);
+        self.step_frames(frames);
     }
 
     // --- drawing --------------------------------------------------------------------
@@ -515,6 +494,7 @@ impl Editor {
 impl Render for Editor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.scale = window.scale_factor();
+        self.sync_window_title(window);
         div()
             .track_focus(&self.focus)
             .key_context("Editor")
@@ -547,6 +527,10 @@ impl Render for Editor {
             .on_action(cx.listener(|this, _: &ZoomIn, _, cx| this.zoom_by(1.4, cx)))
             .on_action(cx.listener(|this, _: &ZoomOut, _, cx| this.zoom_by(1.0 / 1.4, cx)))
             .map(|root| self.timeline_actions(root, cx))
+            .map(|root| self.playback_actions(root, cx))
+            .on_action(
+                cx.listener(|this, _: &NewProject, window, cx| this.request_home(window, cx)),
+            )
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_drop(cx.listener(Self::on_media_drop))

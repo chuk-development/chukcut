@@ -1630,6 +1630,34 @@ Basic · Voice changer · Speed for sound. Every edit is an engine command.
   and check it. A helper that also printed a path made `--window` garbage, and
   a drag then silently did nothing, which looked like a GPUI drag bug.
 
+## The native app shell (GPUI, 2026-10-03)
+
+`crates/app/src/editor/{shell,home,lifecycle,settings,shortcuts,playback}.rs`,
+decision 0004 ("The native app"). Verified on Xvfb with isolated XDG
+directories: start screen, preset → editor, recent card with poster and
+missing state, crash → prompt → restore, Ctrl+Q and the close button
+(`WM_DELETE_WINDOW`) both guarded, Save in the guard writes the file,
+Don't save leaves it alone and deletes the working copy.
+
+- **The root view is `Shell`, not `Editor`.** Every document gets a fresh
+  `Editor`; the editor asks for Home / Open / Quit through `EditorEvent`
+  after `guard_unsaved`. The engine's state is open before `Editor::new`.
+- **Test against your own config.** The app reads and writes
+  `~/.config/chukcut` (settings, recent list, working copy). Run test
+  instances with `XDG_CONFIG_HOME`, `XDG_CACHE_HOME` and `XDG_STATE_HOME`
+  pointed into `_scratch/`, or a test session claims the owner's working copy
+  as a crash.
+- **Trap: an app-wide action handler cannot update the window it came
+  from.** GPUI dispatches it while that window is borrowed, so
+  `window.update` fails. The first Quit fell back to `cx.quit()` on that
+  failure and quit without asking. `shell::quit` defers.
+- **J/K/L above 1× and in reverse are silent**: the audio engine has no rate
+  control, so a driven shuttle pauses the clock and moves the playhead from
+  the tick. In/out marks and loop live in `playback.rs`; the timeline ruler
+  does not draw them yet (`Editor::play_range` is there for it).
+- File dialogs need xdg-desktop-portal; on a bare Xvfb they fail, so Open…
+  and Save as were not exercised there.
+
 ## Not built yet
 
 Both keyframe editing and audio waveforms landed overnight and this line was
