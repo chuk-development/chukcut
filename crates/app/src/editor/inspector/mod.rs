@@ -21,7 +21,8 @@
 use std::collections::{HashMap, HashSet};
 
 use chukcut_engine::modules::inspector::commands as inspector_commands;
-use chukcut_engine::modules::inspector::edit::{self as inspector_edit, ColorEdit};
+use chukcut_engine::modules::inspector::edit::{self as inspector_edit, GradeControl, GradeEdit};
+use chukcut_engine::modules::project::grade::{CurveChannel, WheelKind};
 use chukcut_engine::modules::project::{AnimatableProperty, Easing, Keyframe, Segment, Transform};
 use gpui::component::input::{InputEvent, InputState};
 use gpui::component::slider::{SliderEvent, SliderState};
@@ -32,6 +33,7 @@ use super::*;
 mod clip;
 mod controls;
 mod details;
+mod grading;
 
 pub(super) use details::SettingsForm;
 
@@ -55,6 +57,8 @@ pub(crate) struct Inspector {
     preview: Option<Preview>,
     /// The project settings form, while it is open.
     settings: Option<SettingsForm>,
+    /// The Adjust tab's own state: HSL band, curve and wheel drags, LUT list.
+    grading: grading::GradingState,
 }
 
 /// The widgets behind one property: a number box and, for most, a slider.
@@ -98,12 +102,26 @@ pub(crate) enum Prop {
     Shadows,
     Whites,
     Blacks,
-    Brilliance,
+    Exposure,
+    Vibrance,
     Sharpen,
     Clarity,
     Grain,
     Fade,
     Vignette,
+    VignetteMidpoint,
+    VignetteFeather,
+    LutIntensity,
+    /// One HSL band's three sliders, by band index.
+    HslHue(u8),
+    HslSaturation(u8),
+    HslLuminance(u8),
+    /// A colour wheel's luminance slider.
+    WheelLuma(WheelKind),
+    /// Not a slider: the drag of a curve point or a wheel puck, which uses
+    /// the same preview-then-commit machinery as a slider drag.
+    Curve(CurveChannel),
+    WheelPuck(WheelKind),
 }
 
 /// The fixed facts about a [`Prop`].
@@ -143,10 +161,6 @@ impl Prop {
             supported: true,
         };
         let colour = |label, min: f32| spec(label, min, 100.0, 1.0, 0.0, 0, "", true);
-        let missing = |mut s: Spec| {
-            s.supported = false;
-            s
-        };
         match self {
             Prop::Scale => spec("Scale", 1.0, 400.0, 1.0, 100.0, 0, "%", true),
             Prop::ScaleX => spec("Scale width", 1.0, 400.0, 1.0, 100.0, 0, "%", true),
@@ -161,20 +175,65 @@ impl Prop {
             Prop::FadeIn => spec("Fade in", 0.0, 10.0, 0.1, 0.0, 1, "s", true),
             Prop::FadeOut => spec("Fade out", 0.0, 10.0, 0.1, 0.0, 1, "s", true),
             Prop::Temperature => colour("Temperature", -100.0),
-            Prop::Tint => missing(colour("Tint", -100.0)),
+            Prop::Tint => colour("Tint", -100.0),
             Prop::Saturation => colour("Saturation", -100.0),
             Prop::Brightness => colour("Brightness", -100.0),
             Prop::Contrast => colour("Contrast", -100.0),
-            Prop::Highlights => missing(colour("Highlights", -100.0)),
-            Prop::Shadows => missing(colour("Shadows", -100.0)),
-            Prop::Whites => missing(colour("Whites", -100.0)),
-            Prop::Blacks => missing(colour("Blacks", -100.0)),
-            Prop::Brilliance => missing(colour("Brilliance", -100.0)),
-            Prop::Sharpen => missing(colour("Sharpen", 0.0)),
-            Prop::Clarity => missing(colour("Clarity", 0.0)),
-            Prop::Grain => missing(colour("Grain", 0.0)),
-            Prop::Fade => missing(colour("Fade", 0.0)),
-            Prop::Vignette => missing(colour("Vignette", -100.0)),
+            Prop::Exposure => colour("Exposure", -100.0),
+            Prop::Highlights => colour("Highlights", -100.0),
+            Prop::Shadows => colour("Shadows", -100.0),
+            Prop::Whites => colour("Whites", -100.0),
+            Prop::Blacks => colour("Blacks", -100.0),
+            Prop::Vibrance => colour("Vibrance", -100.0),
+            Prop::Sharpen => colour("Sharpen", 0.0),
+            Prop::Clarity => colour("Clarity", -100.0),
+            Prop::Grain => colour("Grain", 0.0),
+            Prop::Fade => colour("Fade", 0.0),
+            Prop::Vignette => colour("Vignette", -100.0),
+            Prop::VignetteMidpoint => spec("Midpoint", 0.0, 100.0, 1.0, 50.0, 0, "", true),
+            Prop::VignetteFeather => spec("Feather", 0.0, 100.0, 1.0, 50.0, 0, "", true),
+            Prop::LutIntensity => spec("Intensity", 0.0, 100.0, 1.0, 100.0, 0, "%", true),
+            Prop::HslHue(_) => colour("Hue", -100.0),
+            Prop::HslSaturation(_) => colour("Saturation", -100.0),
+            Prop::HslLuminance(_) => colour("Luminance", -100.0),
+            Prop::WheelLuma(_) => colour("Luminance", -100.0),
+            Prop::Curve(_) => spec("Curve", 0.0, 1.0, 0.01, 0.0, 2, "", false),
+            Prop::WheelPuck(_) => spec("Wheel", 0.0, 1.0, 0.01, 0.0, 2, "", false),
+        }
+    }
+
+    /// The grade control behind a colour row, with how panel units map to
+    /// document units: `document = offset + panel * scale`.
+    pub(crate) fn grade_control(self) -> Option<(GradeControl, f32, f32)> {
+        use GradeControl as G;
+        let unit = |c| Some((c, 0.01, 0.0));
+        match self {
+            Prop::Temperature => unit(G::Temperature),
+            Prop::Tint => unit(G::Tint),
+            Prop::Saturation => Some((G::Saturation, 0.01, 1.0)),
+            Prop::Brightness => unit(G::Brightness),
+            Prop::Contrast => Some((G::Contrast, 0.01, 1.0)),
+            // The slider's ±100 is ±2 stops: a wider range is a broken
+            // shot, not a grade, and the number box still takes it.
+            Prop::Exposure => Some((G::Exposure, 0.02, 0.0)),
+            Prop::Highlights => unit(G::Highlights),
+            Prop::Shadows => unit(G::Shadows),
+            Prop::Whites => unit(G::Whites),
+            Prop::Blacks => unit(G::Blacks),
+            Prop::Vibrance => unit(G::Vibrance),
+            Prop::Sharpen => unit(G::Sharpen),
+            Prop::Clarity => unit(G::Clarity),
+            Prop::Grain => unit(G::Grain),
+            Prop::Fade => unit(G::Fade),
+            Prop::Vignette => unit(G::VignetteAmount),
+            Prop::VignetteMidpoint => unit(G::VignetteMidpoint),
+            Prop::VignetteFeather => unit(G::VignetteFeather),
+            Prop::LutIntensity => unit(G::LutIntensity),
+            Prop::HslHue(band) => unit(G::HslHue(band)),
+            Prop::HslSaturation(band) => unit(G::HslSaturation(band)),
+            Prop::HslLuminance(band) => unit(G::HslLuminance(band)),
+            Prop::WheelLuma(kind) => unit(G::WheelLuma(kind)),
+            _ => None,
         }
     }
 
@@ -254,7 +313,8 @@ impl Prop {
 #[derive(Clone)]
 enum Change {
     Edit(EditCommand),
-    Color(Option<ColorEdit>),
+    /// The clip's whole grade; `None` clears it.
+    Grade(Option<GradeEdit>),
     Speed(f32),
 }
 
@@ -454,11 +514,12 @@ impl Editor {
             Prop::Volume => gain_to_db(segment.volume),
             Prop::FadeIn => fades(segment).0 as f32 / 1_000_000.0,
             Prop::FadeOut => fades(segment).1 as f32 / 1_000_000.0,
-            Prop::Temperature => colour.map_or(0.0, |c| c.temperature * 100.0),
-            Prop::Saturation => colour.map_or(0.0, |c| (c.saturation - 1.0) * 100.0),
-            Prop::Brightness => colour.map_or(0.0, |c| c.brightness * 100.0),
-            Prop::Contrast => colour.map_or(0.0, |c| (c.contrast - 1.0) * 100.0),
-            _ => prop.spec().default,
+            _ => match prop.grade_control() {
+                Some((control, scale, offset)) => {
+                    (control.get(&GradeEdit::of(colour)) - offset) / scale
+                }
+                None => prop.spec().default,
+            },
         }
     }
 
@@ -534,22 +595,14 @@ impl Editor {
                 };
                 Ok(Change::Edit(fade_command(segment, fade_in, fade_out)?))
             }
-            Prop::Temperature | Prop::Saturation | Prop::Brightness | Prop::Contrast => {
-                let current = project.materials.color_adjust_of(segment);
-                let mut edit = ColorEdit {
-                    brightness: current.map_or(0.0, |c| c.brightness),
-                    contrast: current.map_or(1.0, |c| c.contrast),
-                    saturation: current.map_or(1.0, |c| c.saturation),
-                    temperature: current.map_or(0.0, |c| c.temperature),
-                    lut: current.and_then(|c| c.lut.clone()),
-                };
-                match prop {
-                    Prop::Temperature => edit.temperature = value / 100.0,
-                    Prop::Saturation => edit.saturation = 1.0 + value / 100.0,
-                    Prop::Brightness => edit.brightness = value / 100.0,
-                    _ => edit.contrast = 1.0 + value / 100.0,
+            _ if prop.grade_control().is_some() => {
+                let (control, scale, offset) = prop.grade_control().expect("checked");
+                let mut edit = GradeEdit::of(project.materials.color_adjust_of(segment));
+                if control == GradeControl::LutIntensity && edit.lut.is_none() {
+                    return Err("the clip has no LUT".into());
                 }
-                Ok(Change::Color(Some(edit)))
+                control.set(&mut edit, offset + value * scale);
+                Ok(Change::Grade(Some(edit)))
             }
             _ if prop.spec().supported => {
                 Ok(Change::Edit(self.value_command(segment, prop, value)?))
@@ -645,9 +698,9 @@ impl Editor {
         let mut copy = project.clone();
         match change {
             Change::Edit(command) => command.apply(&mut copy)?,
-            Change::Color(color) => {
+            Change::Grade(grade) => {
                 let (material, command) =
-                    inspector_edit::set_color_command(&copy, segment_id, color.clone())?;
+                    inspector_edit::set_grade_command(&copy, segment_id, grade.clone())?;
                 if let Some(material) = material {
                     copy.materials.color_adjusts.push(material);
                 }
@@ -663,8 +716,8 @@ impl Editor {
     fn commit_change(&mut self, segment_id: String, change: Change, cx: &mut Context<Self>) {
         let result = match change {
             Change::Edit(command) => timeline_commands::timeline_apply(&self.state, command),
-            Change::Color(color) => {
-                inspector_commands::inspector_set_color(&self.state, segment_id, color)
+            Change::Grade(grade) => {
+                inspector_commands::inspector_set_grade(&self.state, segment_id, grade)
             }
             Change::Speed(speed) => {
                 inspector_commands::inspector_set_speed(&self.state, segment_id, speed)

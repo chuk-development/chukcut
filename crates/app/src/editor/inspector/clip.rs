@@ -142,10 +142,12 @@ impl Editor {
                 _ => {
                     let names = ["Basic", "HSL", "Curves", "Colour wheels", "Mask"];
                     let current = sub(self, ADJUST, names[0]);
-                    let body = if current == "Basic" {
-                        self.adjust_basic(&segment, window, cx)
-                    } else {
-                        not_yet(current)
+                    let body = match current {
+                        "Basic" => self.adjust_basic(&segment, window, cx),
+                        "HSL" => self.adjust_hsl(&segment, window, cx),
+                        "Curves" => self.adjust_curves(&segment, cx),
+                        "Colour wheels" => self.adjust_wheels(&segment, window, cx),
+                        _ => not_yet(current),
                     };
                     (
                         Some(sub_tabs(ADJUST, &names, current, cx).into_any_element()),
@@ -187,7 +189,7 @@ impl Editor {
             .into_any_element()
     }
 
-    fn collapsed(&self, title: &'static str) -> bool {
+    pub(super) fn collapsed(&self, title: &'static str) -> bool {
         self.inspector.collapsed.contains(title)
     }
 
@@ -564,122 +566,6 @@ impl Editor {
     }
 
     // --- Adjust ---------------------------------------------------------------------------------
-
-    fn adjust_basic(
-        &mut self,
-        segment: &Segment,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let mut sections = Vec::new();
-        for title in ["Auto adjust", "Colour match", "Colour correction"] {
-            sections.push(Section::missing(title, "Not in the engine yet").render(
-                true,
-                Vec::new(),
-                cx,
-            ));
-        }
-
-        let lut = self
-            .project
-            .materials
-            .color_adjust_of(segment)
-            .and_then(|c| c.lut.as_ref())
-            .map(|lut| file_name(&lut.path));
-        sections.push(
-            Section {
-                checkbox: Some(lut.is_some()),
-                enabled: lut.is_some(),
-                ..Section::new("LUT")
-            }
-            .render(
-                self.collapsed("LUT"),
-                vec![label_row(
-                    "Name",
-                    div()
-                        .text_xs()
-                        .text_color(rgb(TEXT_DIM))
-                        .child(lut.unwrap_or_else(|| "None".into())),
-                )],
-                cx,
-            ),
-        );
-
-        let graded = self
-            .project
-            .materials
-            .color_adjust_of(segment)
-            .is_some_and(|c| {
-                c.brightness != 0.0
-                    || c.contrast != 1.0
-                    || c.saturation != 1.0
-                    || c.temperature != 0.0
-            });
-        let mut rows = vec![group_label("Colour")];
-        for prop in [Prop::Temperature, Prop::Tint, Prop::Saturation] {
-            rows.push(self.slider_row(prop, segment, window, cx));
-        }
-        rows.push(group_label("Light"));
-        for prop in [
-            Prop::Brightness,
-            Prop::Contrast,
-            Prop::Highlights,
-            Prop::Shadows,
-            Prop::Whites,
-            Prop::Blacks,
-            Prop::Brilliance,
-        ] {
-            rows.push(self.slider_row(prop, segment, window, cx));
-        }
-        rows.push(group_label("Effects"));
-        for prop in [
-            Prop::Sharpen,
-            Prop::Clarity,
-            Prop::Grain,
-            Prop::Fade,
-            Prop::Vignette,
-        ] {
-            rows.push(self.slider_row(prop, segment, window, cx));
-        }
-        sections.push(
-            Section {
-                checkbox: Some(graded),
-                on_check: graded.then(|| {
-                    Box::new(|this: &mut Editor, _: bool, cx: &mut Context<Editor>| {
-                        this.reset_adjust(cx)
-                    }) as Box<dyn Fn(&mut Editor, bool, &mut Context<Editor>)>
-                }),
-                on_reset: Some(Box::new(|this: &mut Editor, cx| this.reset_adjust(cx))),
-                ..Section::new("Adjust")
-            }
-            .render(self.collapsed("Adjust"), rows, cx),
-        );
-        div()
-            .flex()
-            .flex_col()
-            .children(sections)
-            .into_any_element()
-    }
-
-    /// Every scalar of the grade back to identity, keeping a LUT if there is
-    /// one.
-    fn reset_adjust(&mut self, cx: &mut Context<Self>) {
-        let Some((_, segment)) = self.selected_segment() else {
-            return;
-        };
-        let Some(current) = self.project.materials.color_adjust_of(segment) else {
-            return;
-        };
-        let edit = ColorEdit {
-            brightness: 0.0,
-            contrast: 1.0,
-            saturation: 1.0,
-            temperature: 0.0,
-            lut: current.lut.clone(),
-        };
-        let id = segment.id.clone();
-        self.commit_change(id, Change::Color(Some(edit)), cx);
-    }
 
     fn adjust_footer(&self, segment: &Segment, cx: &mut Context<Self>) -> AnyElement {
         let graded = self.project.materials.color_adjust_of(segment).is_some();

@@ -595,6 +595,27 @@ pub(crate) fn slider_with_track(prop: Prop, slider: &Entity<SliderState>) -> Any
         Prop::Temperature => strip(0x3d6bff, 0xf2d33a),
         Prop::Tint => strip(0x3fc24f, 0xd84ad8),
         Prop::Saturation => strip(0x8a8a8a, 0xe23b3b),
+        // The HSL rows draw the band they act on: its neighbouring hues, its
+        // colour from grey to full, and from dark to light.
+        Prop::HslHue(band) | Prop::HslSaturation(band) | Prop::HslLuminance(band) => {
+            let centre = chukcut_engine::modules::project::grade::HSL_BANDS[(band as usize).min(7)]
+                .1
+                / 360.0;
+            let hue = |h: f32, s: f32, l: f32| gpui::hsla(h.rem_euclid(1.0), s, l, 1.0);
+            let (from, to) = match prop {
+                Prop::HslHue(_) => (
+                    hue(centre - 30.0 / 360.0, 0.8, 0.5),
+                    hue(centre + 30.0 / 360.0, 0.8, 0.5),
+                ),
+                Prop::HslSaturation(_) => (hue(centre, 0.0, 0.5), hue(centre, 0.85, 0.5)),
+                _ => (hue(centre, 0.7, 0.15), hue(centre, 0.7, 0.8)),
+            };
+            gpui::linear_gradient(
+                90.0,
+                gpui::linear_color_stop(from, 0.0),
+                gpui::linear_color_stop(to, 1.0),
+            )
+        }
         _ => rgb(0x555555).into(),
     };
     div()
