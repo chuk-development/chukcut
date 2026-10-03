@@ -316,6 +316,44 @@ pub(crate) fn lift_out_of_gapless(
     Ok(commands)
 }
 
+/// The command that removes the lane `segment_id` sits on, when taking that
+/// clip away leaves it empty — as CapCut tidies up overlay lanes. The main
+/// lane and the last lane of a kind stay. `inserted_at` is the index of a lane
+/// the same batch adds first, which moves everything from there down by one.
+pub(crate) fn drop_emptied_lane(
+    project: &Project,
+    segment_id: &str,
+    inserted_at: Option<usize>,
+) -> Option<EditCommand> {
+    let index = project
+        .tracks
+        .iter()
+        .position(|t| t.segments.iter().any(|s| s.id == segment_id))?;
+    let track = &project.tracks[index];
+    let main = project
+        .tracks
+        .iter()
+        .position(|t| t.kind == chukcut_engine::modules::project::TrackKind::Video);
+    let of_kind = project
+        .tracks
+        .iter()
+        .filter(|t| t.kind == track.kind)
+        .count();
+    if track.segments.len() != 1 || Some(index) == main || of_kind < 2 {
+        return None;
+    }
+    let mut emptied = track.clone();
+    emptied.segments.clear();
+    let index = match inserted_at {
+        Some(at) if at <= index => index + 1,
+        _ => index,
+    };
+    Some(EditCommand::RemoveTrack {
+        track: emptied,
+        index,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -413,6 +451,32 @@ mod tests {
             ]
         );
         assert!(project.tracks[1].segments.is_empty());
+    }
+
+    #[test]
+    fn an_overlay_lane_left_empty_goes_and_comes_back_on_undo() {
+        let (mut project, _) = lane(&[1_000_000]);
+        let lone = clip(0, 1_000_000);
+        let lone_id = lone.id.clone();
+        project.tracks[1].segments.push(lone);
+        let main = project.tracks[0].id.clone();
+
+        let mut commands = drop_into_gapless(&project, &main, &lone_id, 0).expect("commands");
+        commands.extend(drop_emptied_lane(&project, &lone_id, None));
+        let command = compose_edits(&project, "test", commands).expect("composed");
+        let mut history = History::default();
+        history.apply(&mut project, command).expect("applies");
+        assert_eq!(project.tracks.len(), 1);
+
+        history.undo(&mut project).expect("undoes");
+        assert_eq!(project.tracks.len(), 2);
+        assert_eq!(project.tracks[1].segments[0].id, lone_id);
+    }
+
+    #[test]
+    fn the_main_lane_and_the_last_of_a_kind_stay() {
+        let (project, ids) = lane(&[1_000_000]);
+        assert!(drop_emptied_lane(&project, &ids[0], None).is_none());
     }
 
     #[test]

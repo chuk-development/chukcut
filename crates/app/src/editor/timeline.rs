@@ -128,6 +128,9 @@ pub(crate) enum Drag {
         origin_start: Micros,
         track: String,
         start: Micros,
+        /// Held over the free space above the video lanes or below the audio
+        /// lanes: dropping there makes a new lane, as in CapCut.
+        new_lane: bool,
     },
     Trim {
         segment_id: String,
@@ -652,6 +655,7 @@ impl Editor {
                 origin_start: segment.target_range.start,
                 track: track.id.clone(),
                 start: segment.target_range.start,
+                new_lane: false,
             },
         });
         cx.notify();
@@ -709,6 +713,7 @@ impl Editor {
                 origin_start,
                 mut track,
                 mut start,
+                mut new_lane,
             }) => {
                 moved |= (x - down_x).abs() >= DRAG_SLOP;
                 self.timeline.snap = None;
@@ -724,10 +729,21 @@ impl Editor {
                         start = (start + shift).max(0);
                         self.timeline.snap = Some(point);
                     }
-                    if let Some(row) = self.row_at(y) {
-                        let lane = &self.project.tracks[row.track];
-                        if lane.kind == kind && !lane.locked {
-                            track = lane.id.clone();
+                    new_lane = false;
+                    match self.row_at(y) {
+                        Some(row) => {
+                            let lane = &self.project.tracks[row.track];
+                            if lane.kind == kind && !lane.locked {
+                                track = lane.id.clone();
+                            }
+                        }
+                        None => {
+                            if let Some((top, height)) = self.new_lane_row(kind) {
+                                new_lane = match kind {
+                                    TrackKind::Video => y < top + height,
+                                    _ => y >= top,
+                                };
+                            }
                         }
                     }
                 }
@@ -741,6 +757,7 @@ impl Editor {
                     origin_start,
                     track,
                     start,
+                    new_lane,
                 });
             }
             Some(Drag::Trim {
@@ -813,6 +830,18 @@ impl Editor {
         match self.timeline.drag.take() {
             Some(Drag::Clip {
                 segment_id,
+                kind,
+                moved: true,
+                origin_track,
+                start,
+                new_lane: true,
+                ..
+            }) => {
+                let command = self.new_lane_command(&segment_id, &origin_track, kind, start);
+                self.apply(command, cx);
+            }
+            Some(Drag::Clip {
+                segment_id,
                 moved: true,
                 origin_track,
                 origin_start,
@@ -848,6 +877,21 @@ impl Editor {
         to: &str,
         start: Micros,
     ) -> Result<Vec<EditCommand>, String> {
+        let emptied = (from != to)
+            .then(|| ripple::drop_emptied_lane(&self.project, segment_id, None))
+            .flatten();
+        let mut commands = self.lane_move_commands(segment_id, from, to, start)?;
+        commands.extend(emptied);
+        Ok(commands)
+    }
+
+    fn lane_move_commands(
+        &self,
+        segment_id: &str,
+        from: &str,
+        to: &str,
+        start: Micros,
+    ) -> Result<Vec<EditCommand>, String> {
         let magnet = self.timeline.magnet;
         if magnet && self.is_main_track(to) {
             let track = self.project.track(to).ok_or("the lane is gone")?;
@@ -867,6 +911,80 @@ impl Editor {
             return Ok(commands);
         }
         edits::move_to(&self.project, segment_id, to, start).map(|command| vec![command])
+    }
+
+    /// Where a new lane of `kind` would appear: above the topmost video lane,
+    /// or below the last audio lane. Top and height, lanes-local.
+    fn new_lane_row(&self, kind: TrackKind) -> Option<(f32, f32)> {
+        let (rows, _) = self.rows();
+        let height = row_height(kind, false);
+        let of_kind = rows
+            .iter()
+            .filter(|row| self.project.tracks[row.track].kind == kind);
+        match kind {
+            TrackKind::Video => of_kind
+                .map(|row| row.top)
+                .reduce(f32::min)
+                .map(|top| (top - ROW_GAP - height, height)),
+            TrackKind::Audio => of_kind
+                .map(|row| row.top + row.height)
+                .reduce(f32::max)
+                .map(|bottom| (bottom + ROW_GAP, height)),
+            _ => None,
+        }
+    }
+
+    /// A clip dropped where no lane is yet: a new lane for it, and the move,
+    /// as one undo step. Video lanes go on top of the other video lanes, so
+    /// the new one composites over them; audio lanes go last.
+    fn new_lane_command(
+        &self,
+        segment_id: &str,
+        from: &str,
+        kind: TrackKind,
+        start: Micros,
+    ) -> Result<EditCommand, String> {
+        let tracks = &self.project.tracks;
+        let count = tracks.iter().filter(|t| t.kind == kind).count();
+        let name = match kind {
+            TrackKind::Video => format!("Video {}", count + 1),
+            TrackKind::Audio => format!("Audio {}", count + 1),
+            _ => return Err("only video and audio clips make new lanes".into()),
+        };
+        let index = match kind {
+            TrackKind::Video => tracks
+                .iter()
+                .rposition(|t| t.kind == TrackKind::Video)
+                .map(|i| i + 1)
+                .unwrap_or(0),
+            _ => tracks.len(),
+        };
+        let track = Track::new(kind, name);
+        let to = track.id.clone();
+        let emptied = ripple::drop_emptied_lane(&self.project, segment_id, Some(index));
+        let mut commands = vec![EditCommand::AddTrack { track, index }];
+        if self.timeline.magnet && self.is_main_track(from) {
+            commands.extend(ripple::lift_out_of_gapless(
+                &self.project,
+                segment_id,
+                &to,
+                start,
+            )?);
+        } else {
+            let (_, segment) = self.project.segment(segment_id).ok_or("the clip is gone")?;
+            commands.push(EditCommand::MoveSegment {
+                segment_id: segment_id.to_string(),
+                from_track: from.to_string(),
+                to_track: to,
+                from_start: segment.target_range.start,
+                to_start: start.max(0),
+            });
+        }
+        commands.extend(emptied);
+        Ok(EditCommand::Composite {
+            label: "Move clip to a new lane".into(),
+            commands,
+        })
     }
 
     fn apply_many(
@@ -919,7 +1037,10 @@ impl Editor {
                 .project
                 .segment(segment_id)
                 .is_some_and(|(track, _)| self.is_main_track(&track.id));
-        let commands = ripple::remove(&self.project, segment_id, ripple);
+        let commands = ripple::remove(&self.project, segment_id, ripple).map(|mut commands| {
+            commands.extend(ripple::drop_emptied_lane(&self.project, segment_id, None));
+            commands
+        });
         self.apply_many(commands, "Delete clip", cx);
     }
 
@@ -1617,9 +1738,14 @@ impl Editor {
                         moved: true,
                         track: to,
                         start,
+                        new_lane,
                         ..
                     }) if *segment_id == segment.id => {
-                        if let Some(to_row) = self.row_of(to) {
+                        let ghost = new_lane.then(|| self.new_lane_row(track.kind)).flatten();
+                        if let Some((ghost_top, ghost_height)) = ghost {
+                            top = ghost_top;
+                            height = ghost_height;
+                        } else if let Some(to_row) = self.row_of(to) {
                             top = to_row.top;
                             height = to_row.height;
                         }
@@ -1664,10 +1790,26 @@ impl Editor {
             moved: true,
             track,
             start,
+            new_lane,
+            kind,
             ..
         }) = &self.timeline.drag
         {
-            if self.timeline.magnet && self.is_main_track(track) {
+            if let Some((top, height)) = new_lane.then(|| self.new_lane_row(*kind)).flatten() {
+                overlay.insert(
+                    0,
+                    div()
+                        .absolute()
+                        .left(px(0.0))
+                        .top(px(top))
+                        .w_full()
+                        .h(px(height))
+                        .border_1()
+                        .border_color(rgb(ACCENT))
+                        .bg(rgb(ROW_BG))
+                        .into_any_element(),
+                );
+            } else if self.timeline.magnet && self.is_main_track(track) {
                 if let (Some(lane), Some(row)) = (self.project.track(track), self.row_of(track)) {
                     let duration = self
                         .project
