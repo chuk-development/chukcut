@@ -85,7 +85,12 @@ Judge performance from a release build only.
    (`docs/research/GPUI_SPIKE.md`, path (a); needs the engine on GPUI's wgpu).
 3. **Port the UI the webview had:** inspector, export dialog, text,
    transitions, trim handles, thumbnails and waveforms on clips, settings.
-4. **CLI and MCP server** over the command layer (`crates/cli`).
+4. ~~**CLI and MCP server** over the command layer (`crates/cli`).~~ Done
+   2026-10-03 — `chukcut-cli` and `chukcut-cli mcp`, `docs/cli.md`. Export,
+   `render-frame` and `view_frame` need a Vulkan device like the app; a
+   one-shot CLI process pays the compositor's start-up (0.75 s in a debug build) on
+   every render. Markers, crop, curves, layouts, freeze frame, translation and
+   TTS are not exposed yet.
 
 ## What works, verified
 

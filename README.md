@@ -71,6 +71,11 @@ format, hardware H.264/HEVC export on the GPU, and AAC audio.
 - H.264 and HEVC with AAC, range export, presets, frame snapshots
 - Each hardware encoder is test-encoded before the dialog offers it
 
+**Command line and MCP**
+- `chukcut-cli`: every edit from a shell or a script: import, cut, grade, effects, titles, captions, silence cutting, export
+- `chukcut-cli mcp`: the same operations as an MCP server, so an AI agent such as Claude Code can edit a project
+- Batch files with undo, JSON output and exit codes for scripts. Free, not a paid tier: [`docs/cli.md`](docs/cli.md)
+
 **Your own accounts, optional:** Pexels, Pixabay and Freesound stock search,
 fal.ai background removal and upscaling with a price shown before you run it.
 Keys stay on your machine (`secrets.toml`, mode 0600).
@@ -146,6 +151,14 @@ cargo build --release -p chukcut
 ./target/release/chukcut my.chukcut           # open a project
 ```
 
+The command-line tool and MCP server build the same way:
+
+```bash
+cargo build --release -p chukcut-cli
+./target/release/chukcut-cli --help
+claude mcp add chukcut -- "$PWD/target/release/chukcut-cli" mcp   # for Claude Code
+```
+
 The first build compiles wgpu, GPUI and whisper.cpp and takes a while. Use
 `-j 4` on a 32 GB machine; full parallelism can run out of memory.
 
@@ -165,10 +178,11 @@ One process. **The engine owns the machine; the app owns the window.**
 crates/engine/   chukcut-engine: media, timeline, compositor, audio, export.
                  No UI dependency. modules/<name>/commands.rs is its API.
 crates/app/      chukcut: the native app on GPUI (Zed's UI toolkit).
+crates/cli/      chukcut-cli: the same commands from a shell, and an MCP server.
 ```
 
-- **Every capability is a command** in the engine. The app calls it. A CLI and
-  an MCP server will call the same functions.
+- **Every capability is a command** in the engine. The app calls it. The CLI
+  and the MCP server (`crates/cli`) call the same functions.
 - **Every change to the project is an `EditCommand`.** Each one has an exact
   inverse, which is how undo, autosave and validation work.
 - **Time is exact:** `i64` microseconds, never floats or frame numbers.
@@ -186,6 +200,7 @@ picture.
 ## Documentation
 
 - **[`docs/STATUS.md`](docs/STATUS.md)**: what works, what it cost, and the traps. Read this first.
+- [`docs/cli.md`](docs/cli.md): `chukcut-cli` and its MCP server, every command with examples
 - [`CHANGELOG.md`](CHANGELOG.md): what each release contains
 - [`docs/ROADMAP.md`](docs/ROADMAP.md): phases, in order
 - [`docs/decisions/`](docs/decisions/): one file per decision that would be expensive to revisit

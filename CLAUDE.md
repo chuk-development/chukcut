@@ -23,6 +23,8 @@ crates/app/           chukcut — the native app (GPUI window)
   src/editor.rs       the editor view: media, preview, timeline
   src/player.rs       the preview render thread
   src/edits.rs        UI gestures → EditCommand
+crates/cli/           chukcut-cli — the commands from a shell, a batch file,
+                      and an MCP server (docs/cli.md)
 docs/                 STATUS, ROADMAP, architecture/, decisions/, research/
 assets/icons/         app icons
 ```
