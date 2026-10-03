@@ -61,3 +61,5 @@ column current.
 | 4 | packaging | release build, desktop entry, icon, install script, README | merged — tarball 20.8 MB, CI not yet run on GitHub |
 | 5 | cli | `crates/cli`: chukcut-cli subcommands + `chukcut-cli mcp` server over the command layer, docs/cli.md | running (agent/cli) |
 | 5 | library | Fontsource fonts + picker, stickers (Fluent/Noto/Iconify), music & SFX pack, 20–30 own LUT looks | running (agent/library) |
+| 5 | speed | speed curves (time remap) with presets, keyframe easing + graph editor | running (agent/speed) |
+| 5 | analysis | scene detection, stabilisation, beat detection + auto-cut, auto reframe | running (agent/analysis) |
