@@ -71,7 +71,7 @@ column current.
 
 1. **[merged]** **Masks, chroma key, blend modes** — shape masks per clip (rect, ellipse, linear, mirror, heart/star, feather, invert, keyframable), green-screen chroma key with spill suppression, the inspector's blend modes (drawn disabled today). CapCut has all three.
 2. **[merged]** **Audio tools** — voiceover recording (cpal input), EQ / compressor / reverb per clip, auto-ducking music under speech (uses the speech/VAD work), pitch-preserving time stretch (signalsmith-stretch or similar permissive lib) so speed-curved clips keep their sound.
-3. **ML worker process** (docs/research/ml-features.md architecture): `chukcut-ml-worker` on `ort` with CUDA/OpenVINO EPs; first models: YuNet faces (auto-reframe), VitTrack (tracking T2), RVM or BiRefNet-lite person segmentation (local background removal; check licences — GPL is fine for us).
+3. **[stopped by the owner mid-work, 2026-10-03: agent/mlworker has partial, uncommitted work in /home/user/git/chukcut-mlworker]** **ML worker process** (docs/research/ml-features.md architecture): `chukcut-ml-worker` on `ort` with CUDA/OpenVINO EPs; first models: YuNet faces (auto-reframe), VitTrack (tracking T2), RVM or BiRefNet-lite person segmentation (local background removal; check licences — GPL is fine for us).
 4. **[merged]** **Export presets and queue** (+ full CLI/MCP coverage; open: quit guard while the queue runs, queue not persisted) — TikTok/Reels/Shorts/YouTube presets, a queue, remember last settings, fix the size estimate; batch export from the CLI.
 5. **Compound clips / nested sequences**, multi-timeline projects (CapCut "Timeline 01").
 6. **Animated stickers** (Lottie via velato on the shared wgpu device) and Noto animated emoji.
@@ -83,3 +83,4 @@ column current.
 12. **[merged]** **Premultiply in the remaining straight-alpha pipelines** (also `transitions/library/mod.rs`; fx over-draw was latent; open: check `effects/graph.rs:735`'s data-driven blend) — `transitions/render.rs:268` and `fx/render.rs:468` still use `ALPHA_BLENDING`; on NVIDIA an 8-bit sRGB target rounds source alpha to 1/255 before blending (found and fixed for the quad pipeline in d9d86dd: soft mask edges and low opacities were drawn in steps).
 13. **Run GPU tests on both adapters** — `test_context()` takes the default adapter. Agents testing on lavapipe missed the NVIDIA alpha rounding; run engine GPU tests once on the real GPU and once with `VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json`.
 
+**Paused 2026-10-03 by the owner:** all agents and builds stopped because builds filled the SSD (4 GB free). Before restarting: every agent must share one CARGO_TARGET_DIR or delete its target/ after its branch merges; check `df -h /` first.
