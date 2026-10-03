@@ -29,6 +29,7 @@ use gpui::{Entity, Focusable, Subscription};
 
 use super::*;
 
+mod animation;
 mod clip;
 mod controls;
 mod details;
@@ -55,6 +56,8 @@ pub(crate) struct Inspector {
     preview: Option<Preview>,
     /// The project settings form, while it is open.
     settings: Option<SettingsForm>,
+    /// The Animation tab's hover, sliders and drags.
+    animation: animation::AnimationTab,
 }
 
 /// The widgets behind one property: a number box and, for most, a slider.

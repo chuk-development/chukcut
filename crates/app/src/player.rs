@@ -104,6 +104,9 @@ fn material_key(project: &Project) -> Vec<(String, String)> {
         .iter()
         .map(|m| (m.id.clone(), m.path.clone()))
         .chain(pool.images.iter().map(|m| (m.id.clone(), m.path.clone())))
+        // Titles too: the provider snapshots text materials, so a title added
+        // or edited after it was built drew as missing media.
+        .chain(pool.texts.iter().map(|m| (m.id.clone(), format!("{m:?}"))))
         .collect();
     key.sort();
     key
