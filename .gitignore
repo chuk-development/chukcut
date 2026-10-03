@@ -43,3 +43,8 @@ secrets.json
 # Tauri signing keys — these must never reach the repository
 *.tauri-key
 tauri-private.key*
+
+# CapCut screenshots are a local design reference only: they show ByteDance
+# artwork and must never enter the public repository. The spec that matters
+# is written down in docs/reference/capcut/README.md.
+docs/reference/capcut/*.png
