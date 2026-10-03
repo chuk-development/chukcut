@@ -14,7 +14,7 @@ mod ui;
 
 use chukcut_engine::state::AppState;
 use gpui::application;
-use gpui::{px, size, App, AppContext, Bounds, KeyBinding, WindowBounds, WindowOptions};
+use gpui::{px, size, App, AppContext, Bounds, WindowBounds, WindowOptions};
 
 use editor::*;
 
@@ -34,33 +34,9 @@ fn main() {
             // GPUI Component's widgets, then our colours over its dark theme.
             gpui::init(cx);
             theme::apply(cx);
-            // Plain keys stay out of text fields: typing "s" into a number
-            // box must not split the clip.
-            const TYPING_OFF: Option<&str> = Some("!Input");
-            cx.bind_keys([
-                KeyBinding::new("space", PlayPause, TYPING_OFF),
-                KeyBinding::new("s", Split, TYPING_OFF),
-                KeyBinding::new("ctrl-b", Split, None),
-                KeyBinding::new("delete", DeleteSelected, TYPING_OFF),
-                KeyBinding::new("backspace", DeleteSelected, TYPING_OFF),
-                KeyBinding::new("ctrl-z", Undo, None),
-                KeyBinding::new("ctrl-shift-z", Redo, None),
-                KeyBinding::new("ctrl-y", Redo, None),
-                KeyBinding::new("ctrl-i", Import, None),
-                KeyBinding::new("ctrl-o", Open, None),
-                KeyBinding::new("ctrl-s", Save, None),
-                KeyBinding::new("ctrl-e", Export, None),
-                KeyBinding::new("left", StepBack, TYPING_OFF),
-                KeyBinding::new("right", StepForward, TYPING_OFF),
-                KeyBinding::new("home", GoToStart, TYPING_OFF),
-                KeyBinding::new("end", GoToEnd, TYPING_OFF),
-                KeyBinding::new("ctrl-=", ZoomIn, None),
-                KeyBinding::new("ctrl--", ZoomOut, None),
-                KeyBinding::new("ctrl-q", Quit, None),
-            ]);
-            cx.bind_keys(timeline_key_bindings());
-            cx.bind_keys(playback_key_bindings());
-            cx.bind_keys(shortcut_key_bindings());
+            // Every key comes from the shortcut registry, with the user's
+            // own changes (`editor/keymap.rs`, `modules::keymap`).
+            install_keymap(cx);
             // Quit asks about unsaved changes first; so does the close button.
             cx.on_action(|_: &Quit, cx| editor::quit(cx));
             cx.on_window_closed(|cx, _| {
