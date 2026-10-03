@@ -610,7 +610,7 @@ impl Editor {
                 &segment_id,
                 &effect_id,
                 param,
-                value.clone(),
+                value,
                 source,
             )
             .and_then(|(material, command)| {

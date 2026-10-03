@@ -92,7 +92,7 @@ pub fn text_add(
     };
 
     Ok(TextAdded {
-        edit: respond(&state)?,
+        edit: respond(state)?,
         material_id,
         segment_id: placement.segment_id,
         track_id: placement.track_id,
