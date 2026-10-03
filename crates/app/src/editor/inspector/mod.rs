@@ -214,7 +214,12 @@ impl Prop {
         if self != Prop::Speed {
             return position;
         }
-        let p = position.clamp(0.0, 5.0);
+        let mut p = position.clamp(0.0, 5.0);
+        // The marks are sticky, as in CapCut: a drag near "2x" lands on 2x
+        // rather than 2.02x.
+        if (p - p.round()).abs() < 0.04 {
+            p = p.round();
+        }
         let i = (p.floor() as usize).min(4);
         let (a, b) = (SPEED_KNOTS[i], SPEED_KNOTS[i + 1]);
         let v = a + (b - a) * (p - i as f32);

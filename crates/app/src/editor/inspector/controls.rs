@@ -531,7 +531,7 @@ impl Editor {
                     .items_center()
                     .gap_3()
                     .child(div().flex_1().px_1().when_some(slider, |this, slider| {
-                        this.child(Slider::new(&slider).disabled(!spec.supported))
+                        this.child(slider_with_track(prop, &slider))
                     }))
                     .child(number)
                     .child(actions),
@@ -571,6 +571,53 @@ impl Editor {
             .child(actions)
             .into_any_element()
     }
+}
+
+/// The slider of a row. A value that rests in the middle (the colour
+/// adjustments) or does nothing yet gets no fill from the left, which would
+/// read as "some of it is applied"; it gets CapCut's colour strip or a plain
+/// rail drawn under a transparent bar instead.
+pub(crate) fn slider_with_track(prop: Prop, slider: &Entity<SliderState>) -> AnyElement {
+    let spec = prop.spec();
+    let centred = spec.min < 0.0 && prop != Prop::Volume;
+    if spec.supported && !centred {
+        return Slider::new(slider).into_any_element();
+    }
+    let strip = |from: u32, to: u32| {
+        gpui::linear_gradient(
+            90.0,
+            gpui::linear_color_stop(rgb(from), 0.0),
+            gpui::linear_color_stop(rgb(to), 1.0),
+        )
+    };
+    let track: gpui::Background = match prop {
+        _ if !spec.supported => rgb(0x3a3a3a).into(),
+        Prop::Temperature => strip(0x3d6bff, 0xf2d33a),
+        Prop::Tint => strip(0x3fc24f, 0xd84ad8),
+        Prop::Saturation => strip(0x8a8a8a, 0xe23b3b),
+        _ => rgb(0x555555).into(),
+    };
+    div()
+        .relative()
+        .w_full()
+        .flex()
+        .items_center()
+        .child(
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .h(px(3.0))
+                .rounded_full()
+                .bg(track),
+        )
+        .child(
+            Slider::new(slider)
+                .disabled(!spec.supported)
+                .bg(gpui::transparent_black())
+                .text_color(rgb(0xf0f0f0)),
+        )
+        .into_any_element()
 }
 
 /// A label on the left, anything on the right.
