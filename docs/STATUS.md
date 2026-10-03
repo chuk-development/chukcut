@@ -2285,6 +2285,63 @@ wrong picture — which is the redeeming property of this whole approach:
   further reverse engineering. Read-only; drive it with
   `ssh 10.11.12.79 'powershell -NoProfile -Command "..."'`.
 
+## Talking-head tools: silences, fillers, voice cleanup, loudness (2026-10-03)
+
+Engine: `modules/silence`, `modules/voice`, `modules/loudness`. UI: the
+Audio tab's Normalize loudness / Reduce noise / Remove silences sections
+(`editor/inspector/voice.rs`), the review panel (`editor/silence.rs`), and a
+Loudness row in the export dialog (`editor/export/loudness.rs`).
+
+What works, verified:
+
+- **Silence detection** on a 10 ms RMS envelope (threshold, shortest pause,
+  padding; padding only on the side that touches speech). A suggested
+  threshold from the recording's own floor. Optional "voice" mode adds
+  RNNoise's per-frame voice probability. Re-detection runs on the stored
+  envelope, so the sliders are live. `tests/talking_head.rs` finds a 1.5 s
+  pause in a generated take within 20 ms of where it is.
+- **Cutting** (`silence::cut::remove_ranges`): one `Composite` built by
+  running `split_at`, `RemoveSegment` and leftward `MoveSegment`s on a copy.
+  Linked picture and sound are cut at the same instants, each kept pair gets
+  its own link group, fades crossing a cut stay on their piece, speed maps
+  source to timeline time, slivers under one frame go with their cut. One
+  undo restores the take (unit and integration tests).
+- **Voice cleanup**: denoise is rendered through `nnnoiseless` (RNNoise) into
+  `cache/voice/<hash>.wav` with the network's one-frame delay removed
+  (correlation test), normalise is a measured gain capped by true peak. Both
+  sit in one block in `MaterialPool::extras` and both mixers read it through
+  `voice::effective_source`; the integration test checks the preview plan and
+  the export resolver pick the same file. Export re-renders a missing cache.
+  Why RNNoise: `docs/decisions/0012-voice-cleanup-engine.md`.
+- **Loudness target on export** (`ExportOverrides::loudness_target`): EBU R128
+  via the `ebur128` crate, gain, look-ahead true-peak limiter at −1 dBTP, a
+  second measure-and-correct pass. FFmpeg's `ebur128` measured the test
+  exports at **−14.0 and −23.0 LUFS** for targets −14 and −23.
+
+Rough or missing:
+
+- **Only the clip's lane and linked lanes ripple.** Captions, music and
+  overlays on other lanes stay put, so cutting after captions exist leaves
+  them out of step. Cut first, caption second — or teach `remove_ranges` to
+  move caption clips by the same shift.
+- **Filler words need a transcript provider.** `silence::filler::WordTimings`
+  is the seam; nothing registers one yet. The captions branch stores caption
+  words in caption-segment source time and transcripts in timeline time; an
+  adapter maps those into the cut clip's source time and calls
+  `register_word_timings` at startup.
+- Normalize and Reduce noise act on one clip. After a silence cut the pieces
+  share the cleanup block (splitting clones `extras`) but a normalise applied
+  afterwards lands on the selected piece only.
+- Denoise strength is three steps, because every strength is a full render.
+- The mix is clamped by `AudioMixer::finish` *before* the loudness target, so
+  a mix that already clips is normalised clipped.
+- No Silero VAD and no DeepFilterNet; both are documented as upgrade paths.
+
+Trap: while several agents test on one machine, an app instance that dies
+with exit 143/144 and nothing in its log was most likely killed by another
+agent's `pkill chukcut`. Run your copy under another process name
+(`cp target/debug/chukcut _scratch/ccsil; exec -a ccsil ./_scratch/ccsil`).
+
 ## The research
 
 The documents under `docs/research/` were produced by dedicated agents and are
