@@ -1,0 +1,47 @@
+# The fal.ai actions chukcut offers on a selected clip.
+#
+# A short, tested list rather than arbitrary model forms
+# (docs/research/integrations.md §7.3). Adding a model is an entry here: the
+# clip is uploaded and its URL is set as `video_url`; `input` holds the rest
+# of the model's input, as its API page documents it. The price comes from
+# fal's pricing API at run time, never from this file.
+#
+# `result`: "beside" puts the result on a new lane above the clip,
+# "replace" swaps it in for the clip. Either way it is new media in the
+# project; the original is never touched.
+
+[[action]]
+id = "remove_background"
+label = "Remove background"
+description = "Cut the person or subject out of the clip. The result keeps an alpha channel (ProRes 4444), so it sits over whatever is below it."
+endpoint = "fal-ai/birefnet/v2/video"
+extension = "mov"
+result = "beside"
+[action.input]
+model = "General Use (Light)"
+video_output_type = "PRORES4444 (.mov)"
+refine_foreground = true
+
+[[action]]
+id = "upscale"
+label = "Upscale ×2"
+description = "Double the clip's resolution with SeedVR2."
+endpoint = "fal-ai/seedvr/upscale/video"
+extension = "mp4"
+result = "replace"
+[action.input]
+upscale_mode = "factor"
+upscale_factor = 2.0
+output_format = "X264 (.mp4)"
+output_quality = "high"
+
+[[action]]
+id = "interpolate"
+label = "Smooth motion"
+description = "Double the frame rate with RIFE, for a smooth slow motion when the clip is slowed down."
+endpoint = "fal-ai/rife/video"
+extension = "mp4"
+result = "replace"
+[action.input]
+num_frames = 1
+use_calculated_fps = true

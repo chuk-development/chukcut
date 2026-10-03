@@ -355,10 +355,20 @@ pub async fn project_import_media(
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| path.clone());
 
+    // A file the cloud module wrote has its licence record beside it.
+    let origin = crate::modules::cloud::provenance::read_sidecar(std::path::Path::new(&path));
+
     let imported = {
         let mut guard = state.project.write();
         let project = guard.as_mut().ok_or("no project is open")?;
-        import_material(project, &path, &name, &info)?
+        let imported = import_material(project, &path, &name, &info)?;
+        if let Some(origin) = origin {
+            project
+                .materials
+                .origins
+                .insert(imported.id.clone(), origin);
+        }
+        imported
     };
 
     // The material pool is document state like any other, and an import that a
