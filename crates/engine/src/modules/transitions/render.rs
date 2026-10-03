@@ -43,7 +43,9 @@ const ENTRY_POINTS: [&str; KIND_COUNT] =
 
 fn kind_index(kind: TransitionKind) -> usize {
     match kind {
-        TransitionKind::Dissolve => 0,
+        // A library transition whose preset this build does not know falls
+        // back to a dissolve rather than to a cut.
+        TransitionKind::Dissolve | TransitionKind::Library => 0,
         TransitionKind::DipToColor => 1,
         TransitionKind::Wipe => 2,
         TransitionKind::Slide => 3,
@@ -61,10 +63,19 @@ pub struct TransitionParams {
     pub softness: f32,
     pub zoom: f32,
     pub color: [f32; 4],
+    /// A library transition: the preset's index in `library::presets()` and
+    /// its parameter slots. `None` for the built-in kinds, and for a library
+    /// preset this build does not know.
+    pub library: Option<(usize, [[f32; 4]; super::library::SLOTS])>,
 }
 
 impl TransitionParams {
     pub fn new(material: &TransitionMaterial, progress: f32) -> Self {
+        let library = (material.kind == TransitionKind::Library)
+            .then(|| material.preset.as_deref())
+            .flatten()
+            .and_then(super::library::preset)
+            .map(|(index, preset)| (index, super::library::values(preset, &material.params)));
         Self {
             kind: material.kind,
             progress: progress.clamp(0.0, 1.0),
@@ -72,6 +83,7 @@ impl TransitionParams {
             softness: material.softness,
             zoom: material.zoom,
             color: material.color,
+            library,
         }
     }
 }
@@ -118,6 +130,10 @@ impl From<&TransitionParams> for TransitionUniform {
 /// worker and the preview can share it exactly as they share the compositor.
 pub struct TransitionPipeline {
     pipelines: Vec<wgpu::RenderPipeline>,
+    /// The library presets, compiled one by one on first draw. Only the
+    /// layouts exist until then.
+    library: super::library::LibraryPipelines,
+    library_uniforms: Mutex<Scratch>,
     uniform_layout: wgpu::BindGroupLayout,
     texture_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
@@ -267,8 +283,11 @@ impl TransitionPipeline {
         let uniform_stride =
             (std::mem::size_of::<TransitionUniform>() as u64).div_ceil(align) * align;
 
+        let library = super::library::LibraryPipelines::new(ctx, &texture_layout, format);
         Self {
             pipelines,
+            library,
+            library_uniforms: Mutex::new(Scratch::default()),
             uniform_layout,
             texture_layout,
             sampler,
@@ -325,6 +344,10 @@ impl TransitionPipeline {
         params: &TransitionParams,
         layers: &wgpu::BindGroup,
     ) {
+        if let (TransitionKind::Library, Some((index, values))) = (params.kind, params.library) {
+            self.draw_library(ctx, pass, slot, params, index, values, layers);
+            return;
+        }
         let stride = self.uniform_stride as u64;
         let mut scratch = self.uniforms.lock();
         let buffer = scratch.ensure(ctx.device(), stride * (slot as u64 + 1));
@@ -351,6 +374,62 @@ impl TransitionPipeline {
         pass.set_bind_group(0, &uniform_group, &[slot * self.uniform_stride]);
         pass.set_bind_group(1, layers, &[]);
         pass.draw(0..3, 0..1);
+    }
+
+    /// A library preset: its own pipeline and uniform block, the same layers.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_library(
+        &self,
+        ctx: &RenderContext,
+        pass: &mut wgpu::RenderPass<'_>,
+        slot: u32,
+        params: &TransitionParams,
+        index: usize,
+        values: [[f32; 4]; super::library::SLOTS],
+        layers: &wgpu::BindGroup,
+    ) {
+        let pipeline = self.library.pipeline(ctx, index);
+        let stride = self.library.stride as u64;
+        let mut scratch = self.library_uniforms.lock();
+        let buffer = scratch.ensure(ctx.device(), stride * (slot as u64 + 1));
+        let block = super::library::LibraryUniform {
+            // Progress, an unused slot (gl-transitions measure the aspect
+            // from the layers), direction, and full motion blur.
+            state: [
+                params.progress.clamp(0.0, 1.0),
+                0.0,
+                params.direction.shader_index() as f32,
+                1.0,
+            ],
+            params: values,
+        };
+        ctx.queue()
+            .write_buffer(buffer, slot as u64 * stride, bytemuck::bytes_of(&block));
+        let uniform_group = ctx.device().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("chukcut library transition uniform bind group"),
+            layout: self.library.uniform_layout(),
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer,
+                    offset: 0,
+                    size: wgpu::BufferSize::new(
+                        std::mem::size_of::<super::library::LibraryUniform>() as u64,
+                    ),
+                }),
+            }],
+        });
+        drop(scratch);
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &uniform_group, &[slot * self.library.stride]);
+        pass.set_bind_group(1, layers, &[]);
+        pass.draw(0..3, 0..1);
+    }
+
+    /// Compile a library preset's pipeline now rather than on its first
+    /// frame. For tile rendering and for warming a project's presets on load.
+    pub fn prepare_library(&self, ctx: &RenderContext, index: usize) {
+        let _ = self.library.pipeline(ctx, index);
     }
 
     /// Blend two layers into `target` on their own, clearing it first.
@@ -551,6 +630,7 @@ mod tests {
             softness: 0.0,
             zoom: 0.35,
             color: [0.0, 1.0, 0.0, 1.0],
+            library: None,
         }
     }
 

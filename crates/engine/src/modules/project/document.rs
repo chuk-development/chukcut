@@ -625,6 +625,10 @@ pub enum TransitionKind {
     /// The outgoing clip pushes towards the viewer as the incoming one settles
     /// back, crossfaded.
     Zoom,
+    /// One of the library's data-driven transitions — the ported
+    /// gl-transitions and the seamless set — named by
+    /// [`TransitionMaterial::preset`]. See `transitions/library`.
+    Library,
 }
 
 /// Which way a directional transition travels across the frame.
@@ -740,6 +744,14 @@ pub struct TransitionMaterial {
     /// Zoom only: extra scale the push adds. `0.35` reaches 1.35x.
     #[serde(default = "default_zoom")]
     pub zoom: f32,
+    /// Library only: which library transition, `gl:<id>` or `seamless:<id>`.
+    /// A preset this build does not know renders as a dissolve.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<String>,
+    /// Library only: parameter values that differ from the preset's
+    /// defaults, by parameter name, one to four numbers each.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: BTreeMap<String, Vec<f32>>,
 }
 
 fn default_softness() -> f32 {
@@ -762,6 +774,16 @@ impl TransitionMaterial {
             color: opaque_black(),
             softness: default_softness(),
             zoom: default_zoom(),
+            preset: None,
+            params: BTreeMap::new(),
+        }
+    }
+
+    /// A library transition, `preset` at its defaults.
+    pub fn library(preset: impl Into<String>, duration: Micros) -> Self {
+        Self {
+            preset: Some(preset.into()),
+            ..Self::new(TransitionKind::Library, duration)
         }
     }
 }

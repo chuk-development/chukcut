@@ -48,6 +48,19 @@ pub fn transitions_add(
         edit::add_command(project, &segment_id, kind, duration)
     })
 }
+/// Place a library transition — a ported gl-transition or one of the
+/// seamless set — at the head of `segment_id`.
+pub fn transitions_add_preset(
+    state: &Arc<AppState>,
+    segment_id: String,
+    preset: String,
+    duration: Option<Micros>,
+) -> Result<EditResponse, String> {
+    apply(state, |project| {
+        edit::add_preset_command(project, &segment_id, &preset, duration)
+    })
+}
+
 pub fn transitions_remove(
     state: &Arc<AppState>,
     segment_id: String,

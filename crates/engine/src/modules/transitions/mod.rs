@@ -59,6 +59,7 @@
 pub mod catalog;
 pub mod commands;
 pub mod edit;
+pub mod library;
 pub mod render;
 pub mod resolve;
 pub mod validate;

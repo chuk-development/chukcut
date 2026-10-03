@@ -11,6 +11,7 @@
 
 use serde::Serialize;
 
+use super::library::{presets, Family, GlParam};
 use crate::modules::project::document::{Micros, TransitionKind, DEFAULT_TRANSITION_DURATION};
 
 #[derive(Debug, Clone, Serialize)]
@@ -29,6 +30,13 @@ pub struct TransitionDescriptor {
     /// Whether `zoom` does anything for this kind.
     pub has_zoom: bool,
     pub default_duration: Micros,
+    /// Library transitions only: the preset id the material stores, its
+    /// family, its parameters, and who wrote it under which licence.
+    pub preset: Option<&'static str>,
+    pub family: Option<Family>,
+    pub params: &'static [GlParam],
+    pub author: &'static str,
+    pub license: &'static str,
 }
 
 pub fn catalog() -> Vec<TransitionDescriptor> {
@@ -41,8 +49,28 @@ pub fn catalog() -> Vec<TransitionDescriptor> {
         has_softness: false,
         has_zoom: false,
         default_duration: DEFAULT_TRANSITION_DURATION,
+        preset: None,
+        family: None,
+        params: &[],
+        author: "chukcut",
+        license: "GPL-3.0-or-later",
     };
-    vec![
+    let library = presets().iter().map(|p| TransitionDescriptor {
+        kind: TransitionKind::Library,
+        label: p.label,
+        description: match p.family {
+            Family::Seamless => "Moves both clips as one, hidden by motion blur.",
+            Family::Gl => "From the gl-transitions collection.",
+        },
+        directional: p.directional,
+        preset: Some(p.id.as_str()),
+        family: Some(p.family),
+        params: p.params,
+        author: p.author,
+        license: p.license,
+        ..base.clone()
+    });
+    let mut all = vec![
         TransitionDescriptor {
             kind: TransitionKind::Dissolve,
             label: "Cross dissolve",
@@ -76,9 +104,11 @@ pub fn catalog() -> Vec<TransitionDescriptor> {
             label: "Zoom",
             description: "The current clip pushes towards the viewer as the next settles back.",
             has_zoom: true,
-            ..base
+            ..base.clone()
         },
-    ]
+    ];
+    all.extend(library);
+    all
 }
 
 #[cfg(test)]
@@ -96,10 +126,23 @@ mod tests {
             TransitionKind::Slide,
             TransitionKind::Zoom,
         ];
-        let listed: Vec<_> = catalog().into_iter().map(|d| d.kind).collect();
+        let listed: Vec<_> = catalog()
+            .into_iter()
+            .filter(|d| d.preset.is_none())
+            .map(|d| d.kind)
+            .collect();
         assert_eq!(listed.len(), kinds.len());
         for kind in kinds {
             assert_eq!(listed.iter().filter(|k| **k == kind).count(), 1, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn every_library_preset_is_listed_once() {
+        let listed: Vec<_> = catalog().into_iter().filter_map(|d| d.preset).collect();
+        assert_eq!(listed.len(), presets().len());
+        for preset in presets() {
+            assert!(listed.contains(&preset.id.as_str()), "{}", preset.id);
         }
     }
 }

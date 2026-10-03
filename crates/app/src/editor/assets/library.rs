@@ -112,6 +112,13 @@ fn transition_art(kind: TransitionKind) -> AnyElement {
                     .border_color(rgb(0xffffff)),
             )
             .into_any_element(),
+        // Library transitions are drawn by the compositor, not here.
+        TransitionKind::Library => base
+            .bg({
+                let (a, b): (Hsla, Hsla) = (rgb(A).into(), rgb(B).into());
+                linear_gradient(135.0, linear_color_stop(a, 0.3), linear_color_stop(b, 0.7))
+            })
+            .into_any_element(),
         TransitionKind::Zoom => base
             .bg(rgb(B))
             .items_center()
