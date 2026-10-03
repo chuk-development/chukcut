@@ -56,6 +56,7 @@
 //!   [`TextRequest`] carries them with defaults and `TextMaterial` cannot yet
 //!   set them.
 
+pub mod animate;
 mod cache;
 pub mod commands;
 pub mod edit;

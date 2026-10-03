@@ -35,11 +35,17 @@ use super::resolve::TransitionInstant;
 
 /// How many fragment entry points the shader has, and therefore how many
 /// pipelines there are.
-const KIND_COUNT: usize = 5;
+const KIND_COUNT: usize = 6;
 
 /// Entry point per kind, in [`kind_index`] order.
-const ENTRY_POINTS: [&str; KIND_COUNT] =
-    ["fs_dissolve", "fs_dip", "fs_wipe", "fs_slide", "fs_zoom"];
+const ENTRY_POINTS: [&str; KIND_COUNT] = [
+    "fs_dissolve",
+    "fs_dip",
+    "fs_wipe",
+    "fs_slide",
+    "fs_zoom",
+    "fs_blur",
+];
 
 fn kind_index(kind: TransitionKind) -> usize {
     match kind {
@@ -48,6 +54,7 @@ fn kind_index(kind: TransitionKind) -> usize {
         TransitionKind::Wipe => 2,
         TransitionKind::Slide => 3,
         TransitionKind::Zoom => 4,
+        TransitionKind::Blur => 5,
     }
 }
 

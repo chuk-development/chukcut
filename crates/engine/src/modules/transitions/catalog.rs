@@ -76,6 +76,13 @@ pub fn catalog() -> Vec<TransitionDescriptor> {
             label: "Zoom",
             description: "The current clip pushes towards the viewer as the next settles back.",
             has_zoom: true,
+            ..base.clone()
+        },
+        TransitionDescriptor {
+            kind: TransitionKind::Blur,
+            label: "Blur",
+            description: "The current clip blurs away as the next sharpens into view.",
+            has_softness: true,
             ..base
         },
     ]
@@ -95,6 +102,7 @@ mod tests {
             TransitionKind::Wipe,
             TransitionKind::Slide,
             TransitionKind::Zoom,
+            TransitionKind::Blur,
         ];
         let listed: Vec<_> = catalog().into_iter().map(|d| d.kind).collect();
         assert_eq!(listed.len(), kinds.len());

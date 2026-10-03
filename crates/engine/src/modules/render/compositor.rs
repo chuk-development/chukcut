@@ -32,7 +32,9 @@ use super::layout::{self, QuadPlacement};
 use super::nv12::{Nv12Converter, Nv12Frame, Nv12PlaneWriter, READ_FORMAT};
 use super::source::{SourceFrame, SourceProvider, SourceRequest};
 use super::texture_pool::{PooledTexture, TextureKey, TexturePool, DEFAULT_BUDGET_BYTES};
+use crate::modules::motion;
 use crate::modules::project::document::{MaterialKind, MaterialPool, Micros, Project, Segment};
+use crate::modules::project::document::{TransitionDirection, TransitionKind};
 use crate::modules::transitions::{self, TransitionParams, TransitionPipeline};
 
 /// Alignment every `copy_texture_to_buffer` row must satisfy.
@@ -1225,7 +1227,7 @@ impl Compositor {
                 &mut draws,
             )?;
             if let Some(quad) = quad {
-                draws.items.push(Draw::Quad(quad));
+                draws.items.push(blurred(project, segment, time, quad));
             }
         }
 
@@ -1262,7 +1264,18 @@ impl Compositor {
             max_size: size,
         };
 
-        let frame = match sources.frame(&self.ctx, &request) {
+        // A title whose text animator is running is drawn by the motion
+        // module, glyph by glyph; at rest it is the provider's cached raster.
+        let animated_text = (kind == MaterialKind::Text)
+            .then(|| {
+                motion::text::animated_text_frame(&self.ctx, materials, segment, time, size, canvas)
+            })
+            .flatten();
+        let fetched = match animated_text {
+            Some(frame) => Ok(Some(frame)),
+            None => sources.frame(&self.ctx, &request),
+        };
+        let frame = match fetched {
             Ok(Some(frame)) => frame,
             Ok(None) => return Ok(None),
             Err(e) => {
@@ -1283,10 +1296,23 @@ impl Compositor {
             }
         };
 
-        let transform = layout::animated_transform(segment, time);
+        let keyed = layout::animated_transform(segment, time);
+        // Keyframe-free animation, on top of the keyframes. `None` for a clip
+        // without one, which then takes exactly the path it always took.
+        let motion = motion::clip_motion(materials, segment, time, keyed);
+        let transform = motion.map_or(keyed, |m| m.transform);
         let Some(placement) = layout::place_quad(canvas, frame.size(), &transform, segment.crop)
         else {
             return Ok(None);
+        };
+        let placement = match motion {
+            Some(m) if m.reveal != [0.0, 0.0, 1.0, 1.0] => {
+                let Some(revealed) = layout::reveal(placement, m.reveal) else {
+                    return Ok(None);
+                };
+                revealed
+            }
+            _ => placement,
         };
 
         // The clip's colour adjustment, already reduced to what the shader
@@ -1434,6 +1460,34 @@ impl std::fmt::Debug for Compositor {
             .field("config", &self.config)
             .field("pool", &self.pool)
             .finish()
+    }
+}
+
+/// `quad` as it should be drawn: as itself, or — while a blur animation runs —
+/// as the incoming side of a blur transition from nothing.
+///
+/// Through the transition pipeline rather than a blur in the quad shader, so
+/// the blur is frame-space (a small clip blurs as much as a full-frame one)
+/// and the quad pipeline, which the colour grade owns, is untouched.
+fn blurred(project: &Project, segment: &Segment, time: Micros, quad: QuadDraw) -> Draw {
+    let keyed = layout::animated_transform(segment, time);
+    let Some(m) = motion::clip_motion(&project.materials, segment, time, keyed) else {
+        return Draw::Quad(quad);
+    };
+    if m.blur <= 0.0 || m.blur_radius <= 0.0 {
+        return Draw::Quad(quad);
+    }
+    Draw::Transition {
+        params: TransitionParams {
+            kind: TransitionKind::Blur,
+            progress: (1.0 - m.blur).clamp(0.0, 1.0),
+            direction: TransitionDirection::default(),
+            softness: m.blur_radius,
+            zoom: 0.0,
+            color: [0.0; 4],
+        },
+        from: None,
+        to: Some(quad),
     }
 }
 

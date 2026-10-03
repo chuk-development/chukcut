@@ -112,6 +112,13 @@ fn transition_art(kind: TransitionKind) -> AnyElement {
                     .border_color(rgb(0xffffff)),
             )
             .into_any_element(),
+        TransitionKind::Blur => base
+            .bg({
+                let (a, b): (Hsla, Hsla) = (rgb(A).into(), rgb(B).into());
+                linear_gradient(90.0, linear_color_stop(a, 0.0), linear_color_stop(b, 1.0))
+            })
+            .opacity(0.7)
+            .into_any_element(),
         TransitionKind::Zoom => base
             .bg(rgb(B))
             .items_center()

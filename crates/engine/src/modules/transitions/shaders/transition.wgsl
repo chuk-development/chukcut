@@ -203,3 +203,60 @@ fn fs_zoom(in: VertexOutput) -> @location(0) vec4<f32> {
     let to_uv = centre + (in.uv - centre) / to_scale;
     return mix_layers(sample_from(from_uv), sample_to(to_uv), tr.progress);
 }
+
+// ---------------------------------------------------------------------------
+// Blur
+// ---------------------------------------------------------------------------
+
+// Golden-angle spiral taps: an even disc of samples with no grid pattern, so
+// a large radius reads as soft rather than as a ring of copies.
+const BLUR_TAPS: i32 = 32;
+
+// `radius` is a fraction of the layer's width; the vertical step is scaled by
+// the aspect so the disc is round on a 9:16 canvas. `textureSampleLevel`
+// rather than `textureSample`, because the loop makes the sample coordinate
+// non-uniform and level 0 is the only level there is.
+fn blur_from(uv: vec2<f32>, radius: f32) -> vec4<f32> {
+    if (radius <= 0.0005) {
+        return sample_from(uv);
+    }
+    let dims = vec2<f32>(textureDimensions(from_texture));
+    let aspect = vec2<f32>(1.0, dims.x / max(dims.y, 1.0));
+    var acc = vec4<f32>(0.0);
+    for (var i = 0; i < BLUR_TAPS; i = i + 1) {
+        let f = f32(i);
+        let r = radius * sqrt((f + 0.5) / f32(BLUR_TAPS));
+        let a = f * 2.39996323;
+        let offset = vec2<f32>(cos(a), sin(a)) * r * aspect;
+        acc = acc + premultiply(textureSampleLevel(from_texture, layer_sampler, uv + offset, 0.0));
+    }
+    return unpremultiply(acc / f32(BLUR_TAPS));
+}
+
+fn blur_to(uv: vec2<f32>, radius: f32) -> vec4<f32> {
+    if (radius <= 0.0005) {
+        return sample_to(uv);
+    }
+    let dims = vec2<f32>(textureDimensions(to_texture));
+    let aspect = vec2<f32>(1.0, dims.x / max(dims.y, 1.0));
+    var acc = vec4<f32>(0.0);
+    for (var i = 0; i < BLUR_TAPS; i = i + 1) {
+        let f = f32(i);
+        let r = radius * sqrt((f + 0.5) / f32(BLUR_TAPS));
+        let a = f * 2.39996323;
+        let offset = vec2<f32>(cos(a), sin(a)) * r * aspect;
+        acc = acc + premultiply(textureSampleLevel(to_texture, layer_sampler, uv + offset, 0.0));
+    }
+    return unpremultiply(acc / f32(BLUR_TAPS));
+}
+
+@fragment
+fn fs_blur(in: VertexOutput) -> @location(0) vec4<f32> {
+    // The outgoing side blurs up to `softness` as the incoming side comes
+    // down from it, crossfading all the way. With the outgoing side empty this
+    // is a blur-in: the clip sharpens as it appears.
+    let peak = max(tr.softness, 0.0);
+    let from_c = blur_from(in.uv, peak * tr.progress);
+    let to_c = blur_to(in.uv, peak * (1.0 - tr.progress));
+    return mix_layers(from_c, to_c, tr.progress);
+}

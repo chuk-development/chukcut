@@ -340,6 +340,13 @@ pub struct MaterialPool {
     /// payoff [`TransitionMaterial`] records for the same choice.
     #[serde(default)]
     pub color_adjusts: Vec<ColorAdjustMaterial>,
+    /// Keyframe-free animation — In, Out, Combo, text animator, punch-in
+    /// zoom — referenced from the `extras` of the segment it animates. A
+    /// typed category for the reasons `transitions` is one; see
+    /// [`super::animation`]. Kept sorted by id, so adding and removing one
+    /// is exactly invertible.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub animations: Vec<super::animation::AnimationMaterial>,
     /// Every link group id that some segment currently belongs to.
     ///
     /// ## Why linkage is on the segment and this is only a type tag
@@ -436,6 +443,16 @@ impl MaterialPool {
     /// the first, because rendering *a* grade beats rendering none.
     pub fn color_adjust_of(&self, segment: &Segment) -> Option<&ColorAdjustMaterial> {
         segment.extras.iter().find_map(|id| self.color_adjust(id))
+    }
+
+    pub fn animation(&self, id: &str) -> Option<&super::animation::AnimationMaterial> {
+        self.animations.iter().find(|m| m.id == id)
+    }
+
+    /// The animation of `segment`, if it has one. The resolution step for the
+    /// animation category, like [`Self::transition_of`] is for transitions.
+    pub fn animation_of(&self, segment: &Segment) -> Option<&super::animation::AnimationMaterial> {
+        segment.extras.iter().find_map(|id| self.animation(id))
     }
 
     /// The transition `segment` is entered through, if it has one.
@@ -596,6 +613,11 @@ pub enum TransitionKind {
     /// The outgoing clip pushes towards the viewer as the incoming one settles
     /// back, crossfaded.
     Zoom,
+    /// The outgoing clip blurs away while the incoming one sharpens out of a
+    /// blur, crossfaded. `softness` is the peak radius, as a fraction of the
+    /// frame width. Also what the motion module's blur animations draw with,
+    /// one side empty.
+    Blur,
 }
 
 /// Which way a directional transition travels across the frame.
