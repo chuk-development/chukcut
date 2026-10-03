@@ -164,3 +164,41 @@ All four below were fixed by the polish pass; kept for the record.
 - VAAPI decode/encode and QSV: no Intel or AMD GPU in this machine.
 - Cloud providers with real keys (TTS, sound, music, stock, fal.ai, DeepL).
   With a fake ElevenLabs key the voice list fails cleanly with "HTTP 401".
+
+## Showcase pass, 2026-10-04 (`agent/demo`)
+
+Built `_scratch/demo/showcase.chukcut` with `scripts/demo.sh` (CLI only),
+opened it in the release app on Xvfb + lavapipe, exported it with the CLI.
+`docs/demo.md` describes the project and the app.
+
+Fixed on this branch:
+
+- **Shift+wheel did not scroll the timeline's lanes** on X11. GPUI's X11
+  backend turns a shifted wheel into a horizontal delta, and the handler read
+  only the vertical one, so lanes below the panel could not be reached (the
+  showcase's music lane). `on_timeline_scroll` now takes whichever axis moved.
+
+Open (CLI gaps; for the CLI coverage owner):
+
+- **No sticker command.** `library_sticker_index/fetch` exist in the engine,
+  but the CLI and MCP cannot search or add a sticker. Workaround: `import` a
+  PNG and `place` it.
+- **`title add` has no `--track`, and no command adds a lane.** A title that
+  overlaps another title in time is moved to the next gap on the same lane;
+  `move --track` refuses a lane that does not exist. So a headline and a
+  subtitle cannot be on screen together from the CLI.
+- **`title template` and `title style` have no `--duration`**; a `trim`
+  afterwards is needed.
+- **`docs/cli.md`**: the example `effect add … glow --set intensity=0.8` uses
+  the wrong scale (the parameter is 0..100). The grade control list says
+  "saturation 1 is no change" but not that `contrast` also rests at 1
+  (`contrast=0.1` flattens the picture).
+
+Open (app, low):
+
+- With a tracked follower selected, the player draws the track's path also
+  when the playhead is outside the follower's time.
+- The Scene detection section draws "Split at scene changes" as the primary
+  button while the clip says "not analysed".
+- On lavapipe the first preview frame of an opened project takes 15 to 30 s.
+  Not judged on a real GPU.
