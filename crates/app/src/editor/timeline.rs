@@ -139,6 +139,16 @@ fn diamond_y(row: &Row) -> f32 {
     row.top + row.height - DIAMOND_INSET
 }
 
+/// How far a trim moved the clip's edge: for a head trim, where the head
+/// would be had the clip kept its end — the same whether the trim moved the
+/// start or (on the magnetic main lane) kept it and shortened the clip.
+fn edge_shift(edge: Edge, before: TimeRange, after: TimeRange) -> Micros {
+    match edge {
+        Edge::Head => (before.end() - after.duration) - before.start,
+        Edge::Tail => after.end() - before.end(),
+    }
+}
+
 /// A fade length in pixels at `zoom`.
 fn fade_x(length: Micros, zoom: f32) -> f32 {
     length as f32 / 1_000_000.0 * zoom
@@ -1361,10 +1371,6 @@ impl Editor {
                 let Some((_, segment)) = self.project.segment(&segment_id) else {
                     return;
                 };
-                let before = match edge {
-                    Edge::Head => segment.target_range.start,
-                    Edge::Tail => segment.target_range.end(),
-                };
                 let mut exclude: Vec<String> = group.iter().map(|t| t.segment_id.clone()).collect();
                 exclude.push(segment_id.clone());
                 let mut to = time - grab;
@@ -1375,9 +1381,11 @@ impl Editor {
                 let Some((target, source)) = self.live_trim(&segment_id, edge, to, ripple) else {
                     return;
                 };
-                // The rest of the selection follows the edge by the same
-                // distance, each against its own neighbours and material.
-                let delta = to - before;
+                // The rest of the selection follows the edge by the distance
+                // it actually moved (after the clip's own limits), each
+                // against its own neighbours and material. A head trim that
+                // keeps its start moves its edge by what it gave up.
+                let delta = edge_shift(edge, segment.target_range, target);
                 for member in &mut group {
                     let Some((_, other)) = self.project.segment(&member.segment_id) else {
                         continue;
@@ -3811,6 +3819,18 @@ mod tests {
     fn a_fade_handle_never_hangs_off_the_clip() {
         assert_eq!(fade_handle_x(0, 60.0), FADE_HANDLE + 1.0);
         assert_eq!(fade_handle_x(1_000_000, 60.0), 60.0);
+    }
+
+    #[test]
+    fn a_trimmed_edge_moves_as_far_whether_the_start_stays_or_not() {
+        let before = TimeRange::new(2_000_000, 4_000_000);
+        // A free head trim of half a second, and an anchored one.
+        let free = TimeRange::new(2_500_000, 3_500_000);
+        let anchored = TimeRange::new(2_000_000, 3_500_000);
+        assert_eq!(edge_shift(Edge::Head, before, free), 500_000);
+        assert_eq!(edge_shift(Edge::Head, before, anchored), 500_000);
+        let longer = TimeRange::new(2_000_000, 5_000_000);
+        assert_eq!(edge_shift(Edge::Tail, before, longer), 1_000_000);
     }
 
     #[test]
