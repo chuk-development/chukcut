@@ -70,6 +70,19 @@ futures = "0.3.33"
 pollster = "1.0.1"
 parley = { version = "0.11.0", features = ["complex-scripts"] }
 
+# --- talking-head audio tools (modules/silence, loudness, denoise) ----------
+#
+# EBU R128 loudness (integrated, range, true peak). A pure-Rust port of
+# libebur128 by the GStreamer maintainer; MIT. Measuring in-process keeps the
+# loudness target on export one pass over a buffer we already hold, instead of
+# a second FFmpeg run over the encoded file.
+ebur128 = "0.1.10"
+# RNNoise, ported to Rust, with Xiph's model compiled in: BSD-3-Clause, no model
+# file to ship, no ONNX runtime. Speech denoise at 48 kHz, plus a per-frame
+# voice probability we reuse for silence detection. Why this and not
+# DeepFilterNet or FFmpeg's arnndn: docs/decisions/0012-voice-cleanup-engine.md.
+nnnoiseless = { version = "0.5.2", default-features = false }
+
 # --- the effect runtime (modules/effects) ------------------------------------
 #
 # The Lua VM effect scripts run in. `lua54` rather than LuaJIT because the

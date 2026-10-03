@@ -241,9 +241,12 @@ pub fn mix_timeline(
             let source_duration =
                 ((segment.target_range.duration as f64) * speed).round() as Micros;
 
+            // Voice cleanup swaps in a denoised file and adds a normalising
+            // gain; the preview mixer resolves it the same way.
+            let effective = crate::modules::voice::effective_source(project, segment, path);
             let request = AudioRequest {
                 material_id: &segment.material_id,
-                path,
+                path: &effective.path,
                 start: segment.source_range.start,
                 duration: source_duration,
                 sample_rate,
@@ -260,7 +263,7 @@ pub fn mix_timeline(
                 .keyframes
                 .iter()
                 .find(|k| k.property == AnimatableProperty::Volume);
-            let base = finite_or(segment.volume, 1.0) * track_gain;
+            let base = finite_or(segment.volume, 1.0) * track_gain * effective.gain;
 
             mixer.mix_at(&stretched, segment.target_range.start, |frame| {
                 match volume_track {
