@@ -1,0 +1,589 @@
+//! The editor window: media, preview, timeline.
+//!
+//! One entity owns the session. The document lives in the engine's
+//! [`AppState`]; this view keeps an `Arc` snapshot of it for drawing and for
+//! the render thread, and refreshes the snapshot after every edit. Every edit
+//! goes through the engine's command layer (`modules/*/commands.rs`), the same
+//! functions a CLI or an MCP server calls.
+
+use std::cell::Cell;
+use std::path::PathBuf;
+use std::rc::Rc;
+use std::sync::Arc;
+
+use chukcut_engine::modules::audio::AudioEngine;
+use chukcut_engine::modules::export::commands as export_commands;
+use chukcut_engine::modules::export::presets::VideoCodec;
+use chukcut_engine::modules::export::{ExportProgress, ExportRequest, ExportStage};
+use chukcut_engine::modules::preview::clock::{frame_at, PlaybackClock};
+use chukcut_engine::modules::project::commands as project_commands;
+use chukcut_engine::modules::project::{Micros, Project, Track, TrackKind};
+use chukcut_engine::modules::timeline::commands as timeline_commands;
+use chukcut_engine::modules::timeline::ops::EditCommand;
+use chukcut_engine::shell::Channel;
+use chukcut_engine::state::AppState;
+use gpui::prelude::*;
+use gpui::{
+    actions, canvas, div, img, px, rgb, App, Bounds, Context, FocusHandle, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, Point, RenderImage,
+    ScrollWheelEvent, SharedString, Task, Window,
+};
+
+use crate::edits;
+use crate::player::Player;
+
+actions!(
+    chukcut,
+    [
+        PlayPause,
+        Split,
+        DeleteSelected,
+        Undo,
+        Redo,
+        Import,
+        Open,
+        Save,
+        Export,
+        StepBack,
+        StepForward,
+        GoToStart,
+        GoToEnd,
+        ZoomIn,
+        ZoomOut,
+        Quit
+    ]
+);
+
+mod assets;
+mod export;
+mod inspector;
+mod preview;
+mod timeline;
+mod title_bar;
+mod widgets;
+
+use crate::theme::*;
+use widgets::*;
+
+// --- state -------------------------------------------------------------------
+
+enum Drag {
+    Scrub,
+    Clip {
+        segment_id: String,
+        kind: TrackKind,
+        grab: Micros,
+        origin_track: String,
+        origin_start: Micros,
+        track: String,
+        start: Micros,
+    },
+}
+
+pub struct Editor {
+    state: Arc<AppState>,
+    audio: Arc<AudioEngine>,
+    clock: PlaybackClock,
+    player: Player,
+    focus: FocusHandle,
+
+    project: Arc<Project>,
+    /// Bumped on every edit, so the render request after an edit is never
+    /// mistaken for the identical one before it.
+    generation: u64,
+
+    frame: Option<Arc<RenderImage>>,
+    last_request: Option<(i64, (u32, u32), u64)>,
+    scale: f32,
+
+    selected: Option<String>,
+    /// Timeline zoom, in pixels per second.
+    zoom: f32,
+    scroll_x: f32,
+    drag: Option<Drag>,
+    status: Option<SharedString>,
+
+    viewer: Rc<Cell<Bounds<Pixels>>>,
+    timeline: Rc<Cell<Bounds<Pixels>>>,
+    /// The newest progress message of a running export, written from the
+    /// export thread and read by [`Self::tick`].
+    export_progress: Arc<parking_lot::Mutex<Option<ExportProgress>>>,
+    _ticker: Task<()>,
+}
+
+impl Editor {
+    pub fn new(
+        state: Arc<AppState>,
+        startup: Vec<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let project = Arc::new(
+            state
+                .project
+                .read()
+                .clone()
+                .expect("main opens a project before the window"),
+        );
+        let audio = AudioEngine::new();
+        audio.set_project(Arc::clone(&project));
+        let clock =
+            PlaybackClock::with_source(audio.time_source(), project.fps, project.duration());
+
+        let focus = cx.focus_handle();
+        window.focus(&focus, cx);
+
+        let ticker = cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(TICK).await;
+            if this.update(cx, |editor, cx| editor.tick(cx)).is_err() {
+                break;
+            }
+        });
+
+        let mut editor = Self {
+            state,
+            audio,
+            clock,
+            player: Player::new(),
+            focus,
+            project,
+            generation: 0,
+            frame: None,
+            last_request: None,
+            scale: window.scale_factor(),
+            selected: None,
+            zoom: 60.0,
+            scroll_x: 0.0,
+            drag: None,
+            status: None,
+            viewer: Rc::new(Cell::new(Bounds::default())),
+            timeline: Rc::new(Cell::new(Bounds::default())),
+            export_progress: Arc::new(parking_lot::Mutex::new(None)),
+            _ticker: ticker,
+        };
+        // Hardware encoder detection opens each device and encodes a test
+        // frame. Do it now, off the UI thread, so the Export button does not
+        // pay for it.
+        std::thread::spawn(|| {
+            let _ = chukcut_engine::modules::export::hwaccel::detect();
+        });
+        if !startup.is_empty() {
+            editor.import_paths(startup, cx);
+        }
+        editor
+    }
+
+    // --- the clock and the picture --------------------------------------------
+
+    fn tick(&mut self, cx: &mut Context<Self>) {
+        let playing = self.clock.is_playing();
+        if playing && self.clock.is_at_end() {
+            self.pause();
+        }
+        self.request_frame();
+
+        let mut changed = playing;
+        if let Some(progress) = self.export_progress.lock().take() {
+            self.status = Some(export::export_status(&progress).into());
+            changed = true;
+        }
+        if let Some(frame) = self.player.take() {
+            if let Some(old) = self.frame.replace(frame.image) {
+                // A frame is uploaded into the window's atlas when drawn; drop
+                // the old one or every frame of playback stays resident.
+                cx.drop_image(old, None);
+            }
+            let _ = frame.time;
+            changed = true;
+        }
+        if changed {
+            cx.notify();
+        }
+    }
+
+    /// The size to render at: the canvas fitted into the viewer, in device
+    /// pixels, never larger than the canvas itself.
+    fn render_size(&self) -> Option<(u32, u32)> {
+        let bounds = self.viewer.get();
+        let (bw, bh) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
+        if bw < 4.0 || bh < 4.0 {
+            return None;
+        }
+        let (cw, ch) = (
+            self.project.canvas.width as f32,
+            self.project.canvas.height as f32,
+        );
+        let fit = (bw / cw).min(bh / ch) * self.scale;
+        let fit = fit.min(1.0);
+        Some(((cw * fit).round() as u32, (ch * fit).round() as u32))
+    }
+
+    fn request_frame(&mut self) {
+        let Some(size) = self.render_size() else {
+            return;
+        };
+        let time = self.clock.position();
+        let key = (frame_at(time, self.project.fps), size, self.generation);
+        if self.last_request == Some(key) {
+            return;
+        }
+        self.last_request = Some(key);
+        // Just inside the frame, like the export: see `SAMPLE_SLACK`.
+        self.player.request(
+            Arc::clone(&self.project),
+            time + chukcut_engine::modules::project::SAMPLE_SLACK,
+            size,
+        );
+    }
+
+    fn play(&mut self) {
+        if self.project.duration() <= 0 {
+            return;
+        }
+        if self.clock.is_at_end() {
+            self.clock.seek(0);
+        }
+        self.audio.set_project(Arc::clone(&self.project));
+        self.audio.play(self.clock.position());
+        self.clock.play();
+    }
+
+    fn pause(&mut self) {
+        self.clock.pause();
+        self.audio.pause();
+    }
+
+    fn seek(&mut self, to: Micros) {
+        let to = to.clamp(0, self.project.duration().max(0));
+        self.clock.seek(to);
+        if self.clock.is_playing() {
+            self.audio.seek(to);
+        }
+    }
+
+    // --- edits -------------------------------------------------------------------
+
+    /// Take a fresh snapshot of the document after anything changed it.
+    fn refresh(&mut self, cx: &mut Context<Self>) {
+        if let Some(project) = self.state.project.read().clone() {
+            self.project = Arc::new(project);
+        }
+        self.generation += 1;
+        self.audio.set_project(Arc::clone(&self.project));
+        self.clock.retime(self.project.fps, self.project.duration());
+        if let Some(id) = &self.selected {
+            if self.project.segment(id).is_none() {
+                self.selected = None;
+            }
+        }
+        cx.notify();
+    }
+
+    fn report(&mut self, result: Result<(), String>, cx: &mut Context<Self>) {
+        self.status = result.err().map(SharedString::from);
+        cx.notify();
+    }
+
+    fn apply(&mut self, command: Result<EditCommand, String>, cx: &mut Context<Self>) {
+        let result = command
+            .and_then(|command| timeline_commands::timeline_apply(&self.state, command))
+            .map(|_| ());
+        self.refresh(cx);
+        self.report(result, cx);
+    }
+
+    fn import_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        let state = Arc::clone(&self.state);
+        self.status = Some("Importing…".into());
+        cx.spawn(async move |this, cx| {
+            let mut errors = Vec::new();
+            for path in paths {
+                let path = path.to_string_lossy().to_string();
+                match project_commands::project_import_media(&state, path.clone()).await {
+                    Ok(imported) => {
+                        let command = state
+                            .with_project(|project| edits::append(project, &imported.id))
+                            .and_then(|command| command);
+                        if let Err(error) =
+                            command.and_then(|c| timeline_commands::timeline_apply(&state, c))
+                        {
+                            errors.push(error);
+                        }
+                    }
+                    Err(error) => errors.push(format!("{path}: {error}")),
+                }
+            }
+            let _ = this.update(cx, |editor, cx| {
+                editor.refresh(cx);
+                let result = if errors.is_empty() {
+                    Ok(())
+                } else {
+                    Err(errors.join(" · "))
+                };
+                editor.report(result, cx);
+            });
+        })
+        .detach();
+    }
+
+    // --- actions -----------------------------------------------------------------
+
+    fn on_play_pause(&mut self, _: &PlayPause, _: &mut Window, cx: &mut Context<Self>) {
+        if self.clock.is_playing() {
+            self.pause();
+        } else {
+            self.play();
+        }
+        cx.notify();
+    }
+
+    fn on_split(&mut self, _: &Split, _: &mut Window, cx: &mut Context<Self>) {
+        let at = self.clock.position();
+        let result = match self.selected.clone() {
+            Some(id) => timeline_commands::timeline_split(&self.state, id, at),
+            None => timeline_commands::timeline_split_all(&self.state, at),
+        }
+        .map(|_| ());
+        self.refresh(cx);
+        self.report(result, cx);
+    }
+
+    fn on_delete(&mut self, _: &DeleteSelected, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.selected.take() else {
+            return;
+        };
+        let command = edits::remove(&self.project, &id);
+        self.apply(command, cx);
+    }
+
+    fn on_undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
+        let result = timeline_commands::timeline_undo(&self.state).map(|_| ());
+        self.refresh(cx);
+        self.report(result, cx);
+    }
+
+    fn on_redo(&mut self, _: &Redo, _: &mut Window, cx: &mut Context<Self>) {
+        let result = timeline_commands::timeline_redo(&self.state).map(|_| ());
+        self.refresh(cx);
+        self.report(result, cx);
+    }
+
+    fn on_import(&mut self, _: &Import, _: &mut Window, cx: &mut Context<Self>) {
+        let picked = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some("Import".into()),
+        });
+        cx.spawn(async move |this, cx| match picked.await {
+            Ok(Ok(Some(paths))) => {
+                let _ = this.update(cx, |editor, cx| editor.import_paths(paths, cx));
+            }
+            Ok(Err(error)) => {
+                let _ = this.update(cx, |editor, cx| editor.dialog_failed(error, cx));
+            }
+            _ => {}
+        })
+        .detach();
+    }
+
+    fn on_open(&mut self, _: &Open, _: &mut Window, cx: &mut Context<Self>) {
+        let picked = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Open project".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = picked.await else {
+                return;
+            };
+            let Some(path) = paths.into_iter().next() else {
+                return;
+            };
+            let _ = this.update(cx, |editor, cx| {
+                editor.pause();
+                let result = project_commands::project_open(
+                    &editor.state,
+                    path.to_string_lossy().to_string(),
+                )
+                .map(|_| ());
+                editor.selected = None;
+                editor.clock.seek(0);
+                editor.refresh(cx);
+                editor.report(result, cx);
+            });
+        })
+        .detach();
+    }
+
+    fn on_save(&mut self, _: &Save, _: &mut Window, cx: &mut Context<Self>) {
+        if self.state.project_path.read().is_some() {
+            let result = project_commands::project_save(&self.state, None).map(|_| ());
+            self.status = Some(match &result {
+                Ok(()) => "Saved".into(),
+                Err(error) => error.clone().into(),
+            });
+            cx.notify();
+            return;
+        }
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let name = format!("{}.chukcut", self.project.name);
+        let picked = cx.prompt_for_new_path(&home, Some(&name));
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(path))) = picked.await else {
+                return;
+            };
+            let _ = this.update(cx, |editor, cx| {
+                let result = project_commands::project_save(
+                    &editor.state,
+                    Some(path.to_string_lossy().to_string()),
+                );
+                editor.status = Some(match result {
+                    Ok(path) => format!("Saved {path}").into(),
+                    Err(error) => error.into(),
+                });
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// A file dialog that could not be opened — on Linux usually a missing
+    /// or broken xdg-desktop-portal — is said out loud, never swallowed.
+    fn dialog_failed(&mut self, error: anyhow::Error, cx: &mut Context<Self>) {
+        tracing::error!(%error, "the file dialog could not be opened");
+        self.status = Some(format!("File dialog failed: {error}").into());
+        cx.notify();
+    }
+
+    fn step(&mut self, frames: i64) {
+        let interval = (1_000_000.0 / self.project.fps.max(1.0)) as Micros;
+        self.pause();
+        self.seek(self.clock.position() + frames * interval);
+    }
+
+    fn zoom_by(&mut self, factor: f32, cx: &mut Context<Self>) {
+        self.zoom = (self.zoom * factor).clamp(2.0, 2000.0);
+        cx.notify();
+    }
+
+    // --- drawing --------------------------------------------------------------------
+
+    fn material_name(&self, material_id: &str) -> String {
+        let pool = &self.project.materials;
+        let path = pool
+            .videos
+            .iter()
+            .find(|m| m.id == material_id)
+            .map(|m| m.path.as_str())
+            .or_else(|| {
+                pool.images
+                    .iter()
+                    .find(|m| m.id == material_id)
+                    .map(|m| m.path.as_str())
+            })
+            .or_else(|| {
+                pool.audios
+                    .iter()
+                    .find(|m| m.id == material_id)
+                    .map(|m| m.path.as_str())
+            });
+        if let Some(path) = path {
+            return file_name(path);
+        }
+        if let Some(text) = pool.texts.iter().find(|m| m.id == material_id) {
+            return text.content.clone();
+        }
+        "clip".into()
+    }
+
+    fn clip_color(&self, kind: TrackKind, material_id: &str) -> u32 {
+        match kind {
+            TrackKind::Video
+                if self
+                    .project
+                    .materials
+                    .images
+                    .iter()
+                    .any(|m| m.id == material_id) =>
+            {
+                CLIP_IMAGE
+            }
+            TrackKind::Video => CLIP_VIDEO,
+            TrackKind::Audio => CLIP_AUDIO,
+            TrackKind::Text => CLIP_TEXT,
+            _ => CLIP_OTHER,
+        }
+    }
+}
+
+impl Render for Editor {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.scale = window.scale_factor();
+        div()
+            .track_focus(&self.focus)
+            .key_context("Editor")
+            .on_action(cx.listener(Self::on_play_pause))
+            .on_action(cx.listener(Self::on_split))
+            .on_action(cx.listener(Self::on_delete))
+            .on_action(cx.listener(Self::on_undo))
+            .on_action(cx.listener(Self::on_redo))
+            .on_action(cx.listener(Self::on_import))
+            .on_action(cx.listener(Self::on_open))
+            .on_action(cx.listener(Self::on_save))
+            .on_action(cx.listener(Self::on_export))
+            .on_action(cx.listener(|this, _: &StepBack, _, cx| {
+                this.step(-1);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &StepForward, _, cx| {
+                this.step(1);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &GoToStart, _, cx| {
+                this.seek(0);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &GoToEnd, _, cx| {
+                let end = this.project.duration();
+                this.seek(end);
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &ZoomIn, _, cx| this.zoom_by(1.4, cx)))
+            .on_action(cx.listener(|this, _: &ZoomOut, _, cx| this.zoom_by(1.0 / 1.4, cx)))
+            .on_mouse_move(cx.listener(Self::on_mouse_move))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(rgb(BG))
+            .text_color(rgb(TEXT))
+            .font_family("Noto Sans")
+            .child(self.render_toolbar(cx))
+            // CapCut's arrangement: assets | player | inspector over the
+            // timeline, as separate rounded panels on the window colour.
+            .child(
+                div()
+                    .flex_1()
+                    .flex()
+                    .flex_row()
+                    .gap(px(6.0))
+                    .px(px(6.0))
+                    .pt(px(6.0))
+                    .min_h(px(0.0))
+                    .child(self.render_media(cx))
+                    .child(self.render_preview(cx))
+                    .child(self.render_inspector(cx)),
+            )
+            .child(self.render_timeline(cx))
+    }
+}
+
+impl Drop for Editor {
+    fn drop(&mut self) {
+        self.audio.shutdown();
+    }
+}

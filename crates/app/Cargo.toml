@@ -14,12 +14,10 @@ path = "src/main.rs"
 [dependencies]
 chukcut-engine = { path = "../engine" }
 
-# The UI toolkit Zed is built on: retained entities, immediate-style element
-# trees, and a wgpu renderer on Linux. Git-only, so pinned to one commit — the
-# one `docs/research/GPUI_SPIKE.md` verified. Bump deliberately, never by
-# accident: its API moves between commits.
-gpui = { git = "https://github.com/zed-industries/zed", rev = "b1a7ef0cf66dfbf9d7661170c96d97c7df916c68" }
-gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "b1a7ef0cf66dfbf9d7661170c96d97c7df916c68", features = ["wayland", "x11"] }
+# GPUI (Zed's UI toolkit) plus GPUI Component's widgets, themes and the Lucide
+# icon set, as one pinned bundle: `gpui-kit` re-exports the matching `gpui`
+# build, so the widgets and the app always share one set of types.
+gpui = { package = "gpui-kit", version = "0.7.0" }
 
 # `RenderImage` is built from `image::Frame`, so this must be the same major
 # version gpui links.

@@ -9,13 +9,14 @@
 mod editor;
 mod edits;
 mod player;
+mod theme;
 
 use std::path::PathBuf;
 
 use chukcut_engine::modules::project::commands as project_commands;
 use chukcut_engine::state::AppState;
+use gpui::application;
 use gpui::{px, size, App, AppContext, Bounds, KeyBinding, WindowBounds, WindowOptions};
-use gpui_platform::application;
 
 use editor::*;
 
@@ -47,40 +48,48 @@ fn main() {
         }
     }
 
-    application().run(move |cx: &mut App| {
-        cx.bind_keys([
-            KeyBinding::new("space", PlayPause, None),
-            KeyBinding::new("s", Split, None),
-            KeyBinding::new("ctrl-b", Split, None),
-            KeyBinding::new("delete", DeleteSelected, None),
-            KeyBinding::new("backspace", DeleteSelected, None),
-            KeyBinding::new("ctrl-z", Undo, None),
-            KeyBinding::new("ctrl-shift-z", Redo, None),
-            KeyBinding::new("ctrl-y", Redo, None),
-            KeyBinding::new("ctrl-i", Import, None),
-            KeyBinding::new("ctrl-o", Open, None),
-            KeyBinding::new("ctrl-s", Save, None),
-            KeyBinding::new("ctrl-e", Export, None),
-            KeyBinding::new("left", StepBack, None),
-            KeyBinding::new("right", StepForward, None),
-            KeyBinding::new("home", GoToStart, None),
-            KeyBinding::new("end", GoToEnd, None),
-            KeyBinding::new("ctrl-=", ZoomIn, None),
-            KeyBinding::new("ctrl--", ZoomOut, None),
-            KeyBinding::new("ctrl-q", Quit, None),
-        ]);
-        cx.on_action(|_: &Quit, cx| cx.quit());
+    application()
+        .with_assets(gpui::assets::Assets)
+        .run(move |cx: &mut App| {
+            // GPUI Component's widgets, then our colours over its dark theme.
+            gpui::init(cx);
+            theme::apply(cx);
+            cx.bind_keys([
+                KeyBinding::new("space", PlayPause, None),
+                KeyBinding::new("s", Split, None),
+                KeyBinding::new("ctrl-b", Split, None),
+                KeyBinding::new("delete", DeleteSelected, None),
+                KeyBinding::new("backspace", DeleteSelected, None),
+                KeyBinding::new("ctrl-z", Undo, None),
+                KeyBinding::new("ctrl-shift-z", Redo, None),
+                KeyBinding::new("ctrl-y", Redo, None),
+                KeyBinding::new("ctrl-i", Import, None),
+                KeyBinding::new("ctrl-o", Open, None),
+                KeyBinding::new("ctrl-s", Save, None),
+                KeyBinding::new("ctrl-e", Export, None),
+                KeyBinding::new("left", StepBack, None),
+                KeyBinding::new("right", StepForward, None),
+                KeyBinding::new("home", GoToStart, None),
+                KeyBinding::new("end", GoToEnd, None),
+                KeyBinding::new("ctrl-=", ZoomIn, None),
+                KeyBinding::new("ctrl--", ZoomOut, None),
+                KeyBinding::new("ctrl-q", Quit, None),
+            ]);
+            cx.on_action(|_: &Quit, cx| cx.quit());
 
-        let bounds = Bounds::centered(None, size(px(1440.0), px(900.0)), cx);
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                app_id: Some("chukcut".into()),
-                ..Default::default()
-            },
-            |window, cx| cx.new(|cx| Editor::new(state, media, window, cx)),
-        )
-        .expect("open the editor window");
-        cx.activate(true);
-    });
+            let bounds = Bounds::centered(None, size(px(1600.0), px(960.0)), cx);
+            // `gpui::open_window` mounts the component Root, which dialogs,
+            // popovers and notifications draw into.
+            gpui::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    app_id: Some("chukcut".into()),
+                    ..Default::default()
+                },
+                cx,
+                |window, cx| cx.new(|cx| Editor::new(state, media, window, cx)),
+            )
+            .expect("open the editor window");
+            cx.activate(true);
+        });
 }
