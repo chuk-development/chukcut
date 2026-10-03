@@ -591,8 +591,28 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     return out;
 }
 
+// The clip's colour with straight alpha, for a transition layer, which is
+// written through unblended and premultiplied by `transition.wgsl` itself.
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    return shade(in);
+}
+
+// The same colour premultiplied, for the source-over pipeline
+// (`One, OneMinusSrcAlpha`). The sum is the same as straight alpha with
+// `SrcAlpha, OneMinusSrcAlpha`, but the multiply by alpha happens here, in
+// 32-bit float, instead of in the blender. A blender may round its blend
+// factors to the target's precision first: NVIDIA rounds the source alpha
+// of an `Rgba8UnormSrgb` target to 1/255, which turns the faint end of a
+// feathered mask or a low opacity into steps (a coverage of 0.0018 over
+// a bright clip draws black instead of 5/255).
+@fragment
+fn fs_premultiplied(in: VertexOutput) -> @location(0) vec4<f32> {
+    let c = shade(in);
+    return vec4<f32>(c.rgb * c.a, c.a);
+}
+
+fn shade(in: VertexOutput) -> vec4<f32> {
     var texel: vec4<f32>;
     if (quad.planar == 1u) {
         // Two samples, both filtered, both from memory the decoder wrote and
@@ -773,7 +793,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             return vec4<f32>(vec3<f32>(srgb_to_linear(vec3<f32>(texel.a))), 1.0);
         }
     }
-    // Straight alpha: opacity scales coverage, not colour. The pipeline's
-    // blend state does the source-over multiply.
+    // Straight alpha: opacity scales coverage, not colour. `fs_premultiplied`
+    // does the source-over multiply for the blending pipeline.
     return vec4<f32>(texel.rgb, texel.a * quad.opacity);
 }

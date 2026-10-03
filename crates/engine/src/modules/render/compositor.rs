@@ -482,7 +482,7 @@ impl Compositor {
             immediate_size: 0,
         });
 
-        let quad_pipeline = |label: &str, blend: Option<wgpu::BlendState>| {
+        let quad_pipeline = |label: &str, entry: &str, blend: Option<wgpu::BlendState>| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
                 layout: Some(&pipeline_layout),
@@ -519,7 +519,7 @@ impl Compositor {
                 multisample: wgpu::MultisampleState::default(),
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
-                    entry_point: Some("fs_main"),
+                    entry_point: Some(entry),
                     compilation_options: Default::default(),
                     targets: &[Some(wgpu::ColorTargetState {
                         format: config.format,
@@ -532,10 +532,15 @@ impl Compositor {
             })
         };
 
-        // Straight-alpha source-over. Matches what the shader emits.
+        // Source-over. The shader premultiplies (`fs_premultiplied`) rather
+        // than leaving `SrcAlpha` to the blender: the sum is the same, but a
+        // blender may round its factors to the target's 8 bits first, and
+        // NVIDIA does, which steps the faint end of every mask feather and
+        // every low opacity. See `fs_premultiplied` in `quad.wgsl`.
         let pipeline = quad_pipeline(
             "chukcut quad pipeline",
-            Some(wgpu::BlendState::ALPHA_BLENDING),
+            "fs_premultiplied",
+            Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
         );
 
         // The same quad with the blend switched off, for a transition layer.
@@ -549,7 +554,7 @@ impl Compositor {
         // halo creeping in from the edges of anything that does not cover the
         // canvas. Writing the fragment through untouched is what makes the two
         // agree.
-        let layer_pipeline = quad_pipeline("chukcut quad layer pipeline", None);
+        let layer_pipeline = quad_pipeline("chukcut quad layer pipeline", "fs_main", None);
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("chukcut quad sampler"),
