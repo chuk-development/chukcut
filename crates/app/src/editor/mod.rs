@@ -54,6 +54,7 @@ actions!(
 );
 
 mod assets;
+mod captions;
 mod export;
 mod inspector;
 mod preview;
@@ -98,6 +99,8 @@ pub struct Editor {
     assets: assets::AssetPanel,
     /// The player's preview quality.
     preview: preview::PreviewState,
+    /// The Captions tab: transcription, caption editing and styling.
+    captions: captions::CaptionsPanel,
     _ticker: Task<()>,
 }
 
@@ -131,6 +134,7 @@ impl Editor {
         });
 
         let assets = assets::AssetPanel::new(window, cx);
+        let captions = captions::CaptionsPanel::new(window, cx);
         let mut editor = Self {
             state,
             audio,
@@ -151,6 +155,7 @@ impl Editor {
             title: Default::default(),
             assets,
             preview: Default::default(),
+            captions,
             _ticker: ticker,
         };
         // Hardware encoder detection opens each device and encodes a test

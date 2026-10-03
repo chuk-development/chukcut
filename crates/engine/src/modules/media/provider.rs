@@ -311,6 +311,30 @@ impl MediaSourceProvider {
         frame
     }
 
+    /// Bring the titles up to date with `project` without touching the media.
+    ///
+    /// A provider is kept across edits so its decoders stay open, but it holds
+    /// text materials *by value*: without this, a title added or retyped after
+    /// the provider was built is missing (drawn as the offline placeholder) or
+    /// stale in the preview until a file is imported. Changed titles also lose
+    /// their cached upload, which is keyed by id, not by content.
+    pub fn sync_texts(&mut self, project: &Project) {
+        let mut textures = self.textures.lock();
+        for text in &project.materials.texts {
+            let unchanged = matches!(
+                self.sources.get(&text.id),
+                Some(MaterialSource::Text(known)) if known == text
+            );
+            if unchanged {
+                continue;
+            }
+            let prefix = format!("{}\u{1}", text.id);
+            textures.retain(|key, _| key != &text.id && !key.starts_with(&prefix));
+            self.sources
+                .insert(text.id.clone(), MaterialSource::Text(text.clone()));
+        }
+    }
+
     /// Drop every cached decoder and texture. Called when a render session
     /// ends, so a finished export does not pin a gigabyte of GPU memory.
     pub fn clear(&self) {
@@ -919,6 +943,28 @@ fn upload_rgba(ctx: &RenderContext, data: &[u8], width: u32, height: u32) -> Sou
 mod tests {
     use super::*;
     use crate::modules::project::{CanvasConfig, ImageMaterial, VideoMaterial};
+
+    /// A title added or retyped after the provider was built must reach it:
+    /// the preview keeps one provider across edits for its open decoders.
+    #[test]
+    fn titles_added_or_changed_later_are_synced_in() {
+        let mut project = Project::new("t", CanvasConfig::default(), 30.0);
+        let mut provider = MediaSourceProvider::from_project(&project);
+        assert_eq!(provider.len(), 0);
+
+        let mut title = crate::modules::text::edit::default_material(&project, Some("a".into()));
+        project.materials.texts.push(title.clone());
+        provider.sync_texts(&project);
+        assert_eq!(provider.len(), 1);
+
+        title.content = "b".into();
+        project.materials.texts[0] = title.clone();
+        provider.sync_texts(&project);
+        assert!(matches!(
+            provider.sources.get(&title.id),
+            Some(MaterialSource::Text(t)) if t.content == "b"
+        ));
+    }
 
     fn project_with_materials() -> Project {
         let mut project = Project::new("t", CanvasConfig::default(), 30.0);

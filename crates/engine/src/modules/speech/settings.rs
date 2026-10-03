@@ -39,6 +39,8 @@ pub struct SpeechSettings {
     pub auto_emoji: bool,
     /// Delete existing captions before adding new ones.
     pub replace: bool,
+    /// Write an `.srt` next to every exported video.
+    pub sidecar: bool,
 }
 
 impl Default for SpeechSettings {
@@ -52,6 +54,7 @@ impl Default for SpeechSettings {
             mode: CaptionMode::default(),
             auto_emoji: false,
             replace: true,
+            sidecar: false,
         }
     }
 }

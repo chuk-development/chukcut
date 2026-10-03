@@ -22,15 +22,17 @@ pub(crate) enum AssetTab {
     Media,
     Audio,
     Text,
+    Captions,
     Transitions,
     Filters,
 }
 
 impl AssetTab {
-    const ALL: [AssetTab; 5] = [
+    const ALL: [AssetTab; 6] = [
         AssetTab::Media,
         AssetTab::Audio,
         AssetTab::Text,
+        AssetTab::Captions,
         AssetTab::Transitions,
         AssetTab::Filters,
     ];
@@ -40,6 +42,7 @@ impl AssetTab {
             AssetTab::Media => "Media",
             AssetTab::Audio => "Audio",
             AssetTab::Text => "Text",
+            AssetTab::Captions => "Captions",
             AssetTab::Transitions => "Transitions",
             AssetTab::Filters => "Filters",
         }
@@ -50,6 +53,7 @@ impl AssetTab {
             AssetTab::Media => Lucide::Clapperboard,
             AssetTab::Audio => Lucide::Music,
             AssetTab::Text => Lucide::Type,
+            AssetTab::Captions => Lucide::Captions,
             AssetTab::Transitions => Lucide::Blend,
             AssetTab::Filters => Lucide::SlidersHorizontal,
         }
@@ -61,13 +65,14 @@ impl AssetTab {
             AssetTab::Media => &["Import", "Project media"],
             AssetTab::Audio => &["Import", "Project audio"],
             AssetTab::Text => &["Add text"],
+            AssetTab::Captions => super::captions::CATEGORIES,
             AssetTab::Transitions => &["Transitions"],
             AssetTab::Filters => &["Filters"],
         }
     }
 
     fn searchable(self) -> bool {
-        !matches!(self, AssetTab::Text)
+        !matches!(self, AssetTab::Text | AssetTab::Captions)
     }
 }
 
@@ -203,6 +208,7 @@ impl Editor {
             AssetTab::Media => self.render_media_tab(category, cx).into_any_element(),
             AssetTab::Audio => self.render_audio_tab(category, cx).into_any_element(),
             AssetTab::Text => self.render_text_tab(cx).into_any_element(),
+            AssetTab::Captions => self.render_captions_tab(category, cx),
             AssetTab::Transitions => self.render_transitions_tab(cx).into_any_element(),
             AssetTab::Filters => self.render_filters_tab(cx).into_any_element(),
         };

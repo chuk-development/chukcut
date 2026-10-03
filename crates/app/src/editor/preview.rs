@@ -232,7 +232,8 @@ impl Editor {
                             .absolute()
                             .size_full(),
                     )
-                    .child(picture),
+                    .child(picture)
+                    .children(self.caption_overlay((dw, dh), (bw, bh), cx)),
             )
             .child(
                 div()

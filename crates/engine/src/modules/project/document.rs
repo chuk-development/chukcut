@@ -525,7 +525,7 @@ pub struct ImageMaterial {
     pub height: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TextMaterial {
     pub id: Id,
     pub content: String,
@@ -592,7 +592,7 @@ pub enum TextAlign {
     Right,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct TextShadow {
     #[serde(default = "opaque_black")]
     pub color: [f32; 4],
