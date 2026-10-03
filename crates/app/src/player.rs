@@ -97,6 +97,10 @@ impl Drop for Player {
 
 /// Which media a provider was built for. A provider holds open decoders, so
 /// it is rebuilt only when the set of files changes, not on every edit.
+///
+/// Text materials are in the key too, content and style: the provider keeps
+/// its own copy of each, so a text added or edited after it was built would
+/// otherwise draw as missing media, or as its old words.
 fn material_key(project: &Project) -> Vec<(String, String)> {
     let pool = &project.materials;
     let mut key: Vec<(String, String)> = pool
@@ -104,6 +108,9 @@ fn material_key(project: &Project) -> Vec<(String, String)> {
         .iter()
         .map(|m| (m.id.clone(), m.path.clone()))
         .chain(pool.images.iter().map(|m| (m.id.clone(), m.path.clone())))
+        // Titles too: the provider snapshots text materials, so a title added
+        // or edited after it was built drew as missing media.
+        .chain(pool.texts.iter().map(|m| (m.id.clone(), format!("{m:?}"))))
         .collect();
     key.sort();
     key
@@ -138,6 +145,10 @@ fn render_loop(shared: Arc<Shared>) {
             .unwrap_or(true)
         {
             provider = Some((key, MediaSourceProvider::from_project(&request.project)));
+        }
+        // Titles and captions change without the files changing.
+        if let Some((_, sources)) = provider.as_mut() {
+            sources.sync_texts(&request.project);
         }
         let (_, sources) = provider.as_ref().expect("provider was just set");
 

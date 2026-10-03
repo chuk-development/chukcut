@@ -17,6 +17,7 @@ const ANIMATION: &str = "Animation";
 const ADJUST: &str = "Adjust";
 const BASIC: &str = "Basic";
 const VOICE: &str = "Voice changer";
+const TRACKING: &str = "Tracking";
 
 /// Which edge or centre an alignment button snaps the clip to.
 #[derive(Clone, Copy)]
@@ -82,9 +83,9 @@ impl Editor {
                 vec![VIDEO, AUDIO, SPEED, ANIMATION, ADJUST]
             }
             ClipKind::Video => vec![VIDEO, SPEED, ANIMATION, ADJUST],
-            ClipKind::Image => vec![VIDEO, ANIMATION, ADJUST],
+            ClipKind::Image => vec![VIDEO, ANIMATION, ADJUST, TRACKING],
             ClipKind::Audio => vec![BASIC, VOICE, SPEED],
-            ClipKind::Text => vec![VIDEO, ANIMATION],
+            ClipKind::Text => vec![VIDEO, ANIMATION, TRACKING],
         };
         // Effects: on every picture, and all an effect clip has.
         if self.project.materials.is_effect_clip(&segment) {
@@ -120,6 +121,7 @@ impl Editor {
                 effects::EFFECTS => (None, self.effects_tab(&segment, window, cx), None),
                 AUDIO | BASIC => (None, self.audio_basic(window, cx), None),
                 VOICE => (None, not_yet("Voice changer"), None),
+                TRACKING => (None, self.tracking_tab(&segment, window, cx), None),
                 SPEED => {
                     let names = ["Standard", "Curve", "Speed effects"];
                     let current = sub(self, SPEED, names[0]);
@@ -137,15 +139,7 @@ impl Editor {
                         footer,
                     )
                 }
-                ANIMATION => {
-                    let names = ["In", "Out", "Combo"];
-                    let current = sub(self, ANIMATION, names[0]);
-                    (
-                        Some(sub_tabs(ANIMATION, &names, current, cx).into_any_element()),
-                        not_yet(&format!("{current} animations")),
-                        None,
-                    )
-                }
+                ANIMATION => self.animation_tab(&segment, kind, window, cx),
                 _ => {
                     let names = ["Basic", "HSL", "Curves", "Colour wheels", "Mask"];
                     let current = sub(self, ADJUST, names[0]);
@@ -427,18 +421,7 @@ impl Editor {
         }
         .render(self.collapsed("Basic"), rows, cx);
         let mut sections = vec![basic];
-        for title in [
-            "Normalize loudness",
-            "Enhance voice",
-            "Reduce noise",
-            "Isolate voice",
-        ] {
-            sections.push(Section::missing(title, "Not in the engine yet").render(
-                true,
-                Vec::new(),
-                cx,
-            ));
-        }
+        sections.extend(self.voice_sections(&segment, cx));
         div()
             .flex()
             .flex_col()

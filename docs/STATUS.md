@@ -111,6 +111,7 @@ Each of these was measured or checked against an independent tool, not assumed.
 | Hardware decode through the compositor | `examples/hwdecode_pipeline.rs` — the imported surface is composited by the quad shader and matches a software-decoded composite of the same instant to a mean channel difference of **1.1–1.4**, against 9.4 for a deliberately wrong colour matrix. Decode to texture falls from 20–66 ms to 0.8–3.3 ms; a whole preview frame from 39–72 ms to 7.5–16 ms. **On by default** |
 | Media survives the session, and losing it is survivable | The library renders `project.materials` (decision 0009), so a reopened project shows its imports; "Remove from project" is `EditCommand::RemoveMaterial` — exact undo, clips kept, file untouched. An offline clip (material removed, or file gone from disk) draws red with an offline icon on the timeline and the library card, composites as a flat dark-red field (`media::MISSING_MEDIA_RGBA`, served by the provider), is a validate *warning*, and the export refuses it by name ("2 clips reference media that is missing: …"). `tests/missing_media.rs` is the whole scenario, pixel assertion included |
 | Export range and frame snapshots | `tests/export.rs` — a 1 s..3 s range of a 4 s counter timeline yields exactly 60 decodable frames whose first/middle/last are source frames 30/59/89 (rebased to zero), with 2.0 s ± 0.1 of AAC; marks past the end clamp rather than fail; `export_snapshot` writes a decodable canvas-size PNG of the requested frame through the export compositor, never the preview's panel-sized picture. Dialog wiring (range select, long-edge resolutions, estimated size, remember-settings, snapshot button) in `src/modules/export/**.test.*`, 106 vitest |
+| Motion tracking (T1) | `modules/tracking`: pyramidal KLT + RANSAC similarity fit, a colour model (object against its ring) that re-finds the object, and a colour template fallback; pure Rust, 640 px analysis. `tests/tracking.rs` on generated clips (release, loaded machine): a red disc over testsrc2, 1280×720, **90–130 frames/s**, centre error **mean 1.35 px, worst 5.1 px**, no frame lost, rotation drift under 2°; a thrown, motion-blurred ball at ~30 px/frame, **mean 1.25 px, worst 6.2 px**. In the debug app with the UI running: 31–42 frames/s. The follower is drawn where the track says in both the preview and the NV12 export path (`a_follower_is_drawn_on_the_object_in_preview_and_export`); trim, slip, speed, move, scale and split of the tracked clip keep it on the object (`tracking::follow` tests). Decision 0012 |
 
 Two of those deserve emphasis because they are the failure modes that usually
 go unnoticed: the export is **not** truncated (the classic un-flushed-encoder
@@ -1722,7 +1723,7 @@ preview, both export tiers and transition layers get the same pixels.
 Built-in effects, picture in picture and split screens, and 125 library
 transitions. Engine in `modules/fx/` and `modules/transitions/library/`; UI
 in `editor/assets/effects.rs`, the Transitions tab in
-`editor/assets/library.rs`, and `editor/inspector/effects.rs`. Decision 0012
+`editor/assets/library.rs`, and `editor/inspector/effects.rs`. Decision 0016
 has the model.
 
 - **Model.** An effect is an `EffectMaterial` (`project/effects.rs`) in the
@@ -1793,6 +1794,68 @@ has the model.
   easing per effect parameter (linear only), effect presets (saved
   parameter sets), and motion blur that follows a clip's own keyframed
   motion.
+## Captions and auto captions (2026-10-03)
+
+A **Captions** tab in the asset panel, CapCut's "Untertitel": auto captions,
+a caption list, styles, and SRT/VTT in and out. Engine side, three modules:
+
+- **`modules/captions`** — a caption is a text clip on a `Captions` lane whose
+  `TextMaterial` carries `caption: Some(CaptionData)`: the spoken words with
+  times (segment source time, so they follow a move or a head trim) and an
+  optional karaoke colour. SRT and VTT parse and write (tolerant of BOMs, CRLF,
+  markup, VTT notes and cue settings); words group into **word captions** (1–4
+  on screen) or **sentence captions** (characters per line, lines, longest
+  duration; a full stop or a 0.7 s pause always breaks). Place, split, merge,
+  retext, restyle, regroup and clear are pure functions returning
+  `EditCommand`s, so **every caption edit is one undo step**. That needed the
+  long-promised `EditCommand::SetTextMaterial { before, after }` in
+  `timeline/ops.rs` (see "What is not undoable" above: the variant now exists;
+  `text_set` still writes the pool directly and could switch to it).
+- **`modules/cloud`** — the first piece of the provider registry from
+  `docs/research/integrations.md` §7: accounts (`~/.config/chukcut/accounts.toml`)
+  and their keys (`secrets.toml`, created 0600 in a 0700 directory, tightened
+  at load, `CHUKCUT_KEY_<ACCOUNT>` overrides). One kind so far,
+  OpenAI-compatible, with a `Transcribe` capability and a connection test
+  (`GET {base}/models`). `User-Agent: chukcut/<version>` and nothing else about
+  the user; keys never reach a `Debug` print, an error message or a project.
+- **`modules/speech`** — transcribes the **timeline mix** at 16 kHz mono (the
+  playback mixer, so cut material is not captioned and times need no mapping).
+  Cloud: WAV chunks of at most ten minutes (19 MB, under the 25 MB limits),
+  cut at the quietest 50 ms in the last 30 s, sent with `verbose_json` and
+  word + segment granularities; a server that rejects the granularity field is
+  asked again without it, and segment-only or text-only answers are turned
+  into estimated words. Local: whisper.cpp (decision 0012), models downloaded
+  with a pinned SHA-256 and a progress bar.
+
+The karaoke highlight is drawn by the rasteriser: `TextRequest::highlight`
+fills one byte range a second time in its own colour, and
+`media::provider` caches a karaoke caption's upload **per lit word** under its
+own key, so the time-blind text cache does not freeze the first word.
+
+Colour emoji needed nothing new: the rasteriser already paints CBDT bitmap
+strikes (Ubuntu's Noto Color Emoji). The trap is the symbol blocks: ☕ ⭐ ✅ ⏰
+are *text* presentation unless followed by U+FE0F, and then they are drawn
+monochrome from the caption font. Every emoji in `captions/emoji.rs` carries
+the selector where it needs one, and a test checks it.
+
+Measured: `cargo run -p chukcut-engine --features local-whisper --example
+captions -- jfk.wav --local tiny` transcribes the 11 s JFK sample with correct
+word times in 3.7 s in a debug build at load 30.
+
+**The player's provider did not see new titles.** `player.rs` keeps one
+`MediaSourceProvider` while the set of files is unchanged (it holds open
+decoders), but the provider copies text materials by value — so any title or
+caption added after the first frame was drawn as the red offline placeholder,
+and a retyped one kept its old pixels. `MediaSourceProvider::sync_texts` now
+runs before every preview frame and drops the cached upload of a changed title.
+
+Known gaps: the emoji *picker* is drawn by GPUI, which shows some emoji as
+monochrome outlines (the caption itself is colour, drawn by our rasteriser);
+the timeline's own split (S) duplicates a caption's text into both
+halves — the panel's "Split at playhead" divides the words properly; a font
+from an online library has a hook (any family registered with the text
+renderer shows up in the font list) but no library yet; the drag frame on the
+player is a rectangle, not handles.
 
 ## Not built yet
 
@@ -2468,6 +2531,63 @@ wrong picture — which is the redeeming property of this whole approach:
 - `ssh 10.11.12.79` — Windows machine with CapCut 9.0.0.3858 installed, for
   further reverse engineering. Read-only; drive it with
   `ssh 10.11.12.79 'powershell -NoProfile -Command "..."'`.
+
+## Talking-head tools: silences, fillers, voice cleanup, loudness (2026-10-03)
+
+Engine: `modules/silence`, `modules/voice`, `modules/loudness`. UI: the
+Audio tab's Normalize loudness / Reduce noise / Remove silences sections
+(`editor/inspector/voice.rs`), the review panel (`editor/silence.rs`), and a
+Loudness row in the export dialog (`editor/export/loudness.rs`).
+
+What works, verified:
+
+- **Silence detection** on a 10 ms RMS envelope (threshold, shortest pause,
+  padding; padding only on the side that touches speech). A suggested
+  threshold from the recording's own floor. Optional "voice" mode adds
+  RNNoise's per-frame voice probability. Re-detection runs on the stored
+  envelope, so the sliders are live. `tests/talking_head.rs` finds a 1.5 s
+  pause in a generated take within 20 ms of where it is.
+- **Cutting** (`silence::cut::remove_ranges`): one `Composite` built by
+  running `split_at`, `RemoveSegment` and leftward `MoveSegment`s on a copy.
+  Linked picture and sound are cut at the same instants, each kept pair gets
+  its own link group, fades crossing a cut stay on their piece, speed maps
+  source to timeline time, slivers under one frame go with their cut. One
+  undo restores the take (unit and integration tests).
+- **Voice cleanup**: denoise is rendered through `nnnoiseless` (RNNoise) into
+  `cache/voice/<hash>.wav` with the network's one-frame delay removed
+  (correlation test), normalise is a measured gain capped by true peak. Both
+  sit in one block in `MaterialPool::extras` and both mixers read it through
+  `voice::effective_source`; the integration test checks the preview plan and
+  the export resolver pick the same file. Export re-renders a missing cache.
+  Why RNNoise: `docs/decisions/0015-voice-cleanup-engine.md`.
+- **Loudness target on export** (`ExportOverrides::loudness_target`): EBU R128
+  via the `ebur128` crate, gain, look-ahead true-peak limiter at −1 dBTP, a
+  second measure-and-correct pass. FFmpeg's `ebur128` measured the test
+  exports at **−14.0 and −23.0 LUFS** for targets −14 and −23.
+
+Rough or missing:
+
+- **Only the clip's lane and linked lanes ripple.** Captions, music and
+  overlays on other lanes stay put, so cutting after captions exist leaves
+  them out of step. Cut first, caption second — or teach `remove_ranges` to
+  move caption clips by the same shift.
+- **Filler words need a transcript provider.** `silence::filler::WordTimings`
+  is the seam; nothing registers one yet. The captions branch stores caption
+  words in caption-segment source time and transcripts in timeline time; an
+  adapter maps those into the cut clip's source time and calls
+  `register_word_timings` at startup.
+- Normalize and Reduce noise act on one clip. After a silence cut the pieces
+  share the cleanup block (splitting clones `extras`) but a normalise applied
+  afterwards lands on the selected piece only.
+- Denoise strength is three steps, because every strength is a full render.
+- The mix is clamped by `AudioMixer::finish` *before* the loudness target, so
+  a mix that already clips is normalised clipped.
+- No Silero VAD and no DeepFilterNet; both are documented as upgrade paths.
+
+Trap: while several agents test on one machine, an app instance that dies
+with exit 143/144 and nothing in its log was most likely killed by another
+agent's `pkill chukcut`. Run your copy under another process name
+(`cp target/debug/chukcut _scratch/ccsil; exec -a ccsil ./_scratch/ccsil`).
 
 ## The research
 

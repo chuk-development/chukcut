@@ -1,4 +1,4 @@
-# 0012 — Effects live on clips and on effect clips, and both are compositor layers
+# 0016 — Effects live on clips and on effect clips, and both are compositor layers
 
 Date: 2026-10-03. Status: accepted.
 

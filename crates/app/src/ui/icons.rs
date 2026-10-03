@@ -37,6 +37,8 @@ glyphs! {
     AUDIO = r#"<path d="M4.5 10.5v3M8.25 7.5v9M12 4.5v15M15.75 8.5v7M19.5 11v2"/>"#;
     /// Asset rail: a type tool.
     TEXT = r#"<path d="M5.5 7.5V5h13v2.5M12 5v14M9.25 19h5.5"/>"#;
+    /// Asset rail: a caption box with two lines of text.
+    CAPTIONS = r#"<rect x="3.5" y="5.5" width="17" height="13" rx="3"/><path d="M7 11h6M15.5 11h1.5M7 14.5h3M12 14.5h5"/>"#;
     /// Asset rail: two frames sliding over each other.
     TRANSITIONS = r#"<rect x="3.5" y="4.5" width="11" height="11" rx="2.5"/><path d="M17.5 8.5h.5a2.5 2.5 0 0 1 2.5 2.5v6a2.5 2.5 0 0 1-2.5 2.5h-6a2.5 2.5 0 0 1-2.5-2.5v-.5"/>"#;
     /// Asset rail: three overlapping light circles.

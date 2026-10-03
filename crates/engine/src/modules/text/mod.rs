@@ -56,6 +56,7 @@
 //!   [`TextRequest`] carries them with defaults and `TextMaterial` cannot yet
 //!   set them.
 
+pub mod animate;
 mod cache;
 pub mod commands;
 pub mod edit;
@@ -75,7 +76,7 @@ pub use cache::CacheStats;
 pub use edit::{default_material, insert_command, TextPlacement};
 pub use layout::{GlyphRunStyle, LineBox, PositionedGlyph, TextLayout};
 pub use raster::RasteredText;
-pub use request::{RasterOptions, RasterTarget, TextRequest, VerticalAlign};
+pub use request::{RasterOptions, RasterTarget, TextHighlight, TextRequest, VerticalAlign};
 
 use crate::modules::project::document::TextMaterial;
 

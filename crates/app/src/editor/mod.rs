@@ -54,6 +54,7 @@ actions!(
 );
 
 mod assets;
+mod captions;
 mod export;
 mod home;
 mod inspector;
@@ -63,6 +64,7 @@ mod preview;
 mod settings;
 mod shell;
 mod shortcuts;
+mod silence;
 mod timeline;
 pub(crate) use playback::key_bindings as playback_key_bindings;
 pub(crate) use shell::{quit, startup, Shell};
@@ -70,6 +72,7 @@ pub(crate) use shortcuts::key_bindings as shortcut_key_bindings;
 use shortcuts::{NewProject, OpenSettings, ShowShortcuts};
 pub(crate) use timeline::key_bindings as timeline_key_bindings;
 mod title_bar;
+mod tracking;
 mod widgets;
 
 use crate::theme::*;
@@ -111,6 +114,10 @@ pub struct Editor {
     /// Unsaved-changes tracking, settings, transport extras (`lifecycle.rs`,
     /// `playback.rs`).
     shell: lifecycle::ShellState,
+    /// The Captions tab: transcription, caption editing and styling.
+    captions: captions::CaptionsPanel,
+    /// Motion tracking: the box on the player and the running analysis.
+    tracking: tracking::TrackingUi,
     _ticker: Task<()>,
 }
 
@@ -148,6 +155,7 @@ impl Editor {
         let preview = preview::PreviewState {
             quality: settings::quality_for_scale(shell.settings.preview_scale()),
         };
+        let captions = captions::CaptionsPanel::new(window, cx);
         let mut editor = Self {
             state,
             audio,
@@ -169,6 +177,8 @@ impl Editor {
             assets,
             preview,
             shell,
+            captions,
+            tracking: Default::default(),
             _ticker: ticker,
         };
         // Hardware encoder detection opens each device and encodes a test
@@ -198,6 +208,7 @@ impl Editor {
             self.status = Some(export::export_status(&progress).into());
             changed = true;
         }
+        changed |= self.poll_tracking(cx);
         if let Some(frame) = self.player.take() {
             if let Some(old) = self.frame.replace(frame.image) {
                 // A frame is uploaded into the window's atlas when drawn; drop

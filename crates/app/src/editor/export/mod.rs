@@ -2,6 +2,7 @@
 //! the title bar shows while it runs.
 
 mod dialog;
+mod loudness;
 mod settings;
 
 use gpui::component::WindowExt as _;

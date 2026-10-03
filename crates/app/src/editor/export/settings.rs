@@ -217,6 +217,8 @@ pub(crate) struct ExportChoices {
     pub fps: f64,
     pub audio: bool,
     pub audio_bitrate: u32,
+    /// Integrated loudness to bring the mix to, in LUFS; `None` is off.
+    pub loudness_target: Option<f32>,
 }
 
 impl ExportChoices {
@@ -239,6 +241,7 @@ impl ExportChoices {
             fps,
             audio: true,
             audio_bitrate: 192_000,
+            loudness_target: None,
         }
     }
 
@@ -286,6 +289,7 @@ impl ExportChoices {
             audio_bitrate: self.audio.then_some(self.audio_bitrate),
             sample_rate: None,
             container: Some(self.format.container()),
+            loudness_target: self.audio.then_some(self.loudness_target).flatten(),
         }
     }
 

@@ -93,6 +93,7 @@ fn full_document() -> Project {
             blur: 8.0,
         }),
         background: Some([0.0, 0.0, 0.0, 0.25]),
+        caption: None,
     });
     project.materials.extras.insert(
         "effect-0".into(),

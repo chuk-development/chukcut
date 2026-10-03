@@ -30,11 +30,14 @@ use gpui::{Entity, Focusable, Subscription};
 
 use super::*;
 
+mod animation;
 mod clip;
 mod controls;
 mod details;
 mod effects;
 mod grading;
+mod tracking;
+mod voice;
 
 pub(super) use details::SettingsForm;
 
@@ -62,6 +65,8 @@ pub(crate) struct Inspector {
     grading: grading::GradingState,
     /// The Effects tab's sliders and drag.
     effects: effects::EffectsPanel,
+    /// The Animation tab's hover, sliders and drags.
+    animation: animation::AnimationTab,
 }
 
 /// The widgets behind one property: a number box and, for most, a slider.

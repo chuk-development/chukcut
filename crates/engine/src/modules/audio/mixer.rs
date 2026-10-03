@@ -102,13 +102,18 @@ pub fn plan(project: &Project) -> Vec<PlannedSegment> {
             let Some(path) = audio_path(project, segment) else {
                 continue;
             };
+            // Voice cleanup: a denoised file and a normalising gain, resolved
+            // exactly as the export mixer resolves them.
+            let effective = crate::modules::voice::effective_source(project, segment, path);
             planned.push(PlannedSegment {
                 segment_id: segment.id.clone(),
-                path: path.to_string(),
+                path: effective.path,
                 target: segment.target_range,
                 source_start: segment.source_range.start.max(0),
                 speed: sane_speed(segment.speed),
-                gain: finite_or(segment.volume, 1.0) * finite_or(track.volume, 1.0),
+                gain: finite_or(segment.volume, 1.0)
+                    * finite_or(track.volume, 1.0)
+                    * effective.gain,
                 volume: segment
                     .keyframes
                     .iter()

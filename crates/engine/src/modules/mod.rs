@@ -7,17 +7,25 @@
 //! these modules and registered in `lib.rs`.
 
 pub mod audio;
+pub mod captions;
+pub mod cloud;
 pub mod effects;
 pub mod export;
 pub mod fx;
 pub mod gpu;
 pub mod inspector;
+pub mod loudness;
 pub mod media;
+pub mod motion;
 pub mod preview;
 pub mod project;
 pub mod proxy;
 pub mod render;
+pub mod silence;
+pub mod speech;
 pub mod text;
 pub mod timeline;
+pub mod tracking;
 pub mod transitions;
+pub mod voice;
 pub mod workspace;

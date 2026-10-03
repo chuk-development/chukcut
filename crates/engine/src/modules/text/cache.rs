@@ -174,6 +174,17 @@ pub(crate) fn cache_key(request: &TextRequest, options: &RasterOptions) -> u64 {
             }
         }
     }
+    match &request.highlight {
+        None => 0u8.hash(&mut hasher),
+        Some(highlight) => {
+            1u8.hash(&mut hasher);
+            highlight.range.start.hash(&mut hasher);
+            highlight.range.end.hash(&mut hasher);
+            for channel in highlight.color {
+                channel.to_bits().hash(&mut hasher);
+            }
+        }
+    }
 
     match options.target {
         RasterTarget::Canvas { width, height } => {

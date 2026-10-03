@@ -103,6 +103,10 @@ pub struct ExportOverrides {
     pub sample_rate: Option<u32>,
     #[serde(default)]
     pub container: Option<super::presets::Container>,
+    /// Bring the mix to this integrated loudness (LUFS) with true peaks at
+    /// −1 dBTP. Absent leaves the mix at the level it was edited at.
+    #[serde(default)]
+    pub loudness_target: Option<f32>,
 }
 
 /// A resolved, validated export. Everything the job needs and nothing it has to
@@ -123,6 +127,9 @@ pub struct ExportSettings {
     /// shows the timeline at `range_start + fps.frame_time(i)`, while its PTS
     /// stays `i` — which is the rebase to zero.
     pub range_start: Micros,
+    /// Integrated loudness to normalise the mix to, in LUFS; see
+    /// `modules::loudness`.
+    pub loudness_target: Option<f32>,
 }
 
 impl ExportSettings {
@@ -293,6 +300,11 @@ pub fn resolve_settings(project: &Project, request: &ExportRequest) -> Result<Ex
         total_frames,
         duration,
         range_start,
+        loudness_target: request
+            .overrides
+            .as_ref()
+            .and_then(|o| o.loudness_target)
+            .filter(|t| t.is_finite() && (-40.0..=-5.0).contains(t)),
     })
 }
 
@@ -685,6 +697,11 @@ fn encode_all(
     if let Some(spec) = &settings.audio {
         sink.send(tracker.snapshot(ExportStage::MixingAudio, 0, Instant::now()));
         channels = spec.channels.max(1) as usize;
+        // A clip's denoised sound is a cached render; a cleared cache is
+        // rebuilt here, with the settings the document records, rather than
+        // exporting the noisy original the user never heard.
+        crate::modules::voice::denoise::ensure_rendered(&job.project, &job.cancel)
+            .map_err(|error| ExportError::Audio(anyhow::anyhow!(error)))?;
         mixed = audio::mix_timeline(
             &job.project,
             job.audio.as_ref(),
@@ -712,6 +729,23 @@ fn encode_all(
                 spec.sample_rate,
                 settings.range_start,
                 settings.duration,
+            );
+        }
+        if let Some(target) = settings.loudness_target {
+            let report = crate::modules::loudness::normalize_in_place(
+                &mut mixed,
+                channels,
+                spec.sample_rate,
+                target as f64,
+                crate::modules::loudness::TRUE_PEAK_CEILING,
+            )
+            .map_err(|error| ExportError::Audio(anyhow::anyhow!(error)))?;
+            tracing::info!(
+                target,
+                before = ?report.before.integrated,
+                after = ?report.after.integrated,
+                gain_db = report.gain_db,
+                "normalised the mix"
             );
         }
     }

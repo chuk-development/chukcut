@@ -24,16 +24,18 @@ pub(crate) enum AssetTab {
     Media,
     Audio,
     Text,
+    Captions,
     Transitions,
     Filters,
     Effects,
 }
 
 impl AssetTab {
-    const ALL: [AssetTab; 6] = [
+    const ALL: [AssetTab; 7] = [
         AssetTab::Media,
         AssetTab::Audio,
         AssetTab::Text,
+        AssetTab::Captions,
         AssetTab::Effects,
         AssetTab::Transitions,
         AssetTab::Filters,
@@ -44,6 +46,7 @@ impl AssetTab {
             AssetTab::Media => "Media",
             AssetTab::Audio => "Audio",
             AssetTab::Text => "Text",
+            AssetTab::Captions => "Captions",
             AssetTab::Transitions => "Transitions",
             AssetTab::Filters => "Filters",
             AssetTab::Effects => "Effects",
@@ -55,6 +58,7 @@ impl AssetTab {
             AssetTab::Media => icons::MEDIA,
             AssetTab::Audio => icons::AUDIO,
             AssetTab::Text => icons::TEXT,
+            AssetTab::Captions => icons::CAPTIONS,
             AssetTab::Transitions => icons::TRANSITIONS,
             AssetTab::Filters => icons::FILTERS,
             AssetTab::Effects => icons::EFFECTS,
@@ -67,6 +71,7 @@ impl AssetTab {
             AssetTab::Media => &["Import", "Project media"],
             AssetTab::Audio => &["Import", "Project audio"],
             AssetTab::Text => &["Add text"],
+            AssetTab::Captions => super::captions::CATEGORIES,
             AssetTab::Transitions => &library::TRANSITION_CATEGORIES,
             AssetTab::Filters => &["Filters"],
             AssetTab::Effects => &effects::CATEGORIES,
@@ -74,7 +79,7 @@ impl AssetTab {
     }
 
     fn searchable(self) -> bool {
-        !matches!(self, AssetTab::Text)
+        !matches!(self, AssetTab::Text | AssetTab::Captions)
     }
 }
 
@@ -206,6 +211,7 @@ impl Editor {
             AssetTab::Media => self.render_media_tab(category, cx).into_any_element(),
             AssetTab::Audio => self.render_audio_tab(category, cx).into_any_element(),
             AssetTab::Text => self.render_text_tab(cx).into_any_element(),
+            AssetTab::Captions => self.render_captions_tab(category, cx),
             AssetTab::Transitions => self.render_transitions_tab(category, cx).into_any_element(),
             AssetTab::Filters => self.render_filters_tab(cx).into_any_element(),
             AssetTab::Effects => self.render_effects_tab(category, cx).into_any_element(),

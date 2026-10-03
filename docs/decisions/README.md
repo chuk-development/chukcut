@@ -20,7 +20,11 @@ recommend anything is a survey, and surveys are in `../research/`.
 | [0009](0009-missing-media-is-a-state-not-a-deletion.md) | Missing media is a state, not a deletion: removing an import is an undoable edit that leaves clips offline | Decided 2026-07-28 |
 | [0010](0010-open-source-under-gpl.md) | Open source under GPL-3.0, not sold; which settles the FFmpeg linking question 0002 was built around, and does not settle codec patents | Decided 2026-08-05 |
 | [0011](0011-native-ui-on-gpui.md) | The UI is native, on GPUI; the webview is gone; the engine is its own crate with no UI dependency; Linux only, NVIDIA and Intel first | Decided 2026-10-02. **Supersedes the webview split, 0004's React parts and 0006** |
-| [0012](0012-effects-on-clips-and-effect-clips.md) | Built-in effects live on clips (in `extras`) and on effect clips (an effect lane, applying to everything beneath); both render as compositor layers; keyframes in source time | Decided 2026-10-03 |
+| [0012](0012-animation-as-parameters.md) | Animations are parameters relative to the clip (In/Out/Combo, text animator, punch-in zoom), not baked keyframes, so they survive trims and splits | Decided 2026-10-03 |
+| [0013](0013-local-transcription-with-whisper-cpp.md) | Offline captions run whisper.cpp through whisper-rs (feature `local-whisper`, CUDA opt-in), not candle: word timestamps, CPU speed, quantised models | Decided 2026-10-03 |
+| [0014](0014-motion-tracks-are-materials-followed-by-link.md) | Motion tracks are materials; an overlay follows one through a link the compositor resolves via the tracked clip's source time, so trims, slips and speed changes keep it on the object | Decided 2026-10-03 |
+| [0015](0015-voice-cleanup-engine.md) | Voice cleanup runs RNNoise (nnnoiseless, BSD-3) into a cached WAV both mixers read; loudness via ebur128 with a true-peak limiter on export | Decided 2026-10-03 |
+| [0016](0016-effects-on-clips-and-effect-clips.md) | Built-in effects live on clips (in `extras`) and on effect clips (an effect lane, applying to everything beneath); both render as compositor layers; keyframes in source time | Decided 2026-10-03 |
 
 Decisions already recorded elsewhere, because they predate this directory:
 

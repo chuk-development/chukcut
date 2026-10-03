@@ -70,6 +70,19 @@ futures = "0.3.33"
 pollster = "1.0.1"
 parley = { version = "0.11.0", features = ["complex-scripts"] }
 
+# --- talking-head audio tools (modules/silence, loudness, denoise) ----------
+#
+# EBU R128 loudness (integrated, range, true peak). A pure-Rust port of
+# libebur128 by the GStreamer maintainer; MIT. Measuring in-process keeps the
+# loudness target on export one pass over a buffer we already hold, instead of
+# a second FFmpeg run over the encoded file.
+ebur128 = "0.1.10"
+# RNNoise, ported to Rust, with Xiph's model compiled in: BSD-3-Clause, no model
+# file to ship, no ONNX runtime. Speech denoise at 48 kHz, plus a per-frame
+# voice probability we reuse for silence detection. Why this and not
+# DeepFilterNet or FFmpeg's arnndn: docs/decisions/0015-voice-cleanup-engine.md.
+nnnoiseless = { version = "0.5.2", default-features = false }
+
 # --- the effect runtime (modules/effects) ------------------------------------
 #
 # The Lua VM effect scripts run in. `lua54` rather than LuaJIT because the
@@ -107,6 +120,28 @@ serde_yaml_ng = "0.10"
 kurbo = "0.13.1"
 zeno = "0.3.3"
 skrifa = "0.45.1"
+
+# --- cloud accounts and captions (modules/cloud, modules/speech) -------------
+#
+# A blocking HTTP client, because the engine has no async runtime and every
+# request runs on a `shell::spawn_blocking` thread anyway. Rustls with bundled
+# roots, so nothing depends on the system's OpenSSL. See
+# docs/research/integrations.md §7.1.
+ureq = "2.12"
+# Model downloads are verified against a pinned SHA-256.
+sha2 = "0.10"
+# `secrets.toml` and `accounts.toml`.
+toml = "0.8"
+# Local transcription: whisper.cpp, built from source by `whisper-rs-sys` with
+# CMake. Optional because that build costs a few minutes once; the app turns it
+# on. `local-whisper-cuda` adds the CUDA backend and needs `nvcc`. See
+# docs/decisions/0013-local-transcription-with-whisper-cpp.md.
+whisper-rs = { version = "0.16", optional = true }
+
+[features]
+default = []
+local-whisper = ["dep:whisper-rs"]
+local-whisper-cuda = ["local-whisper", "whisper-rs/cuda"]
 
 # The escape hatch under wgpu, for the one thing WebGPU has no concept of:
 # allocating a buffer whose memory can be exported as a DMA-BUF file descriptor,

@@ -1797,7 +1797,7 @@ impl Editor {
     // --- commands ------------------------------------------------------------------
 
     /// Delete a clip; on the main lane with the magnet on, close the hole.
-    fn remove_clip(&mut self, segment_id: &str, cx: &mut Context<Self>) {
+    pub(super) fn remove_clip(&mut self, segment_id: &str, cx: &mut Context<Self>) {
         let ripple = self.timeline.magnet
             && self
                 .project
@@ -3456,6 +3456,20 @@ impl Editor {
             _ => {
                 body = body.child(label(color));
             }
+        }
+
+        // A clip with a keyframe-free animation: an accent dot at the end of
+        // its title strip (motion agent).
+        if self.project.materials.animation_of(segment).is_some() && width > 24.0 {
+            body = body.child(
+                div()
+                    .absolute()
+                    .right(px(5.0))
+                    .top(px((TITLE_H - 6.0) / 2.0))
+                    .size(px(6.0))
+                    .rounded_full()
+                    .bg(rgb(ACCENT)),
+            );
         }
 
         // The edges: a resize cursor where a press trims.

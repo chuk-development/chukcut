@@ -12,7 +12,7 @@
 //!   everything composited *below* it, CapCut's adjustment layer. Further
 //!   effects may stack on it through its own `extras`.
 //!
-//! `docs/decisions/0012-effects-on-clips-and-effect-clips.md` has the
+//! `docs/decisions/0016-effects-on-clips-and-effect-clips.md` has the
 //! reasoning; `modules/fx` has the catalog, the edit builders and the
 //! renderer.
 //!

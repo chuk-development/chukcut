@@ -35,11 +35,17 @@ use super::resolve::TransitionInstant;
 
 /// How many fragment entry points the shader has, and therefore how many
 /// pipelines there are.
-const KIND_COUNT: usize = 5;
+const KIND_COUNT: usize = 6;
 
 /// Entry point per kind, in [`kind_index`] order.
-const ENTRY_POINTS: [&str; KIND_COUNT] =
-    ["fs_dissolve", "fs_dip", "fs_wipe", "fs_slide", "fs_zoom"];
+const ENTRY_POINTS: [&str; KIND_COUNT] = [
+    "fs_dissolve",
+    "fs_dip",
+    "fs_wipe",
+    "fs_slide",
+    "fs_zoom",
+    "fs_blur",
+];
 
 fn kind_index(kind: TransitionKind) -> usize {
     match kind {
@@ -50,6 +56,7 @@ fn kind_index(kind: TransitionKind) -> usize {
         TransitionKind::Wipe => 2,
         TransitionKind::Slide => 3,
         TransitionKind::Zoom => 4,
+        TransitionKind::Blur => 5,
     }
 }
 
@@ -72,7 +79,7 @@ pub struct TransitionParams {
 impl TransitionParams {
     pub fn new(material: &TransitionMaterial, progress: f32) -> Self {
         let library = (material.kind == TransitionKind::Library)
-            .then(|| material.preset.as_deref())
+            .then_some(material.preset.as_deref())
             .flatten()
             .and_then(super::library::preset)
             .map(|(index, preset)| (index, super::library::values(preset, &material.params)));

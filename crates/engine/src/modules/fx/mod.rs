@@ -10,7 +10,7 @@
 //! - The document side is [`EffectMaterial`](crate::modules::project::EffectMaterial)
 //!   in `project/effects.rs`: an effect is a parameter block in the pool,
 //!   referenced from a clip (it sees that clip) or as the material of a clip
-//!   on an effect lane (it sees everything beneath it). Decision 0012.
+//!   on an effect lane (it sees everything beneath it). Decision 0016.
 //! - [`catalog`] — every effect, its parameters, ranges and defaults.
 //! - [`edit`] — the edits, as `EditCommand`s, and the layout builders.
 //! - [`commands`] — the shell-facing API, `fx_<verb>`.
