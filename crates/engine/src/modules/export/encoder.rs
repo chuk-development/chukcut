@@ -1325,7 +1325,7 @@ mod tests {
         // reason `needs_frame_pool` is not "is this hardware".
         let nvenc = spec(HwAccel::Nvenc, "h264_nvenc", Quality::Crf(23));
         assert!(!nvenc.needs_frame_pool());
-        assert_eq!(nvenc.upload_format(), format::Pixel::YUV420P);
+        assert_eq!(nvenc.upload_format(), format::Pixel::NV12);
     }
 
     #[test]

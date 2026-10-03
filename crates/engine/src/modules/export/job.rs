@@ -802,6 +802,10 @@ fn encode_all(
         // Sampled just inside the frame rather than on its first microsecond;
         // see `SAMPLE_SLACK` for the duplicated frame at a cut that prevents.
         let time = settings.range_start + time + crate::modules::project::SAMPLE_SLACK;
+        // Every clip of this frame decoded at once, one thread per clip,
+        // rather than one after another inside the compositor.
+        job.sources
+            .prefetch(job.compositor.context(), &job.project, time, size);
         if let Some(state) = zero_copy.as_mut() {
             match state.frame(job, writer, size, index, time) {
                 Ok(()) => {

@@ -150,32 +150,67 @@ pub fn compose(
     pad: f32,
     units: Option<&[Option<usize>]>,
 ) -> Vec<u8> {
+    let region = compose_region(glyphs, backdrop, backdrop_opacity, poses, pad, units);
     let (w, h) = (glyphs.width as usize, glyphs.height as usize);
-    // Premultiplied while compositing; straight on the way out.
-    let mut out = vec![0f32; w * h * 4];
+    let mut bytes = vec![0u8; w * h * 4];
+    region.paste_into(&mut bytes, w);
+    bytes
+}
 
-    if let Some(back) = backdrop.filter(|b| b.width == glyphs.width && b.height == glyphs.height) {
-        let k = backdrop_opacity.clamp(0.0, 1.0);
-        if k > 0.0 {
-            for (dst, src) in out
-                .as_chunks_mut::<4>()
-                .0
-                .iter_mut()
-                .zip(back.pixels.as_chunks::<4>().0)
-            {
-                let a = src[3] as f32 / 255.0 * k;
-                dst[0] = src[0] as f32 / 255.0 * a;
-                dst[1] = src[1] as f32 / 255.0 * a;
-                dst[2] = src[2] as f32 / 255.0 * a;
-                dst[3] = a;
-            }
+/// The part of a composed title that has anything in it, and where it goes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComposedRegion {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+    /// Straight-alpha RGBA8, `width * height * 4` bytes.
+    pub pixels: Vec<u8>,
+}
+
+impl ComposedRegion {
+    /// Copy into a full image `stride` pixels wide.
+    pub fn paste_into(&self, image: &mut [u8], stride: usize) {
+        let row = self.width as usize * 4;
+        for y in 0..self.height as usize {
+            let to = ((self.y as usize + y) * stride + self.x as usize) * 4;
+            image[to..to + row].copy_from_slice(&self.pixels[y * row..(y + 1) * row]);
         }
     }
+}
 
+/// [`compose`], touching only the pixels the glyphs and the backdrop can reach.
+///
+/// The text animator runs this every frame, and a title is a strip of a frame:
+/// composing it over the whole frame cost a frame-sized `f32` buffer (133 MB
+/// at 4K) zeroed and walked twice per frame — 127 ms of the 4K preview frame,
+/// measured. The region is the union of every posed glyph's destination box
+/// and the backdrop's ink, so the result is identical.
+pub fn compose_region(
+    glyphs: &RasteredText,
+    backdrop: Option<&RasteredText>,
+    backdrop_opacity: f32,
+    poses: &[GlyphPose],
+    pad: f32,
+    units: Option<&[Option<usize>]>,
+) -> ComposedRegion {
+    let (w, h) = (glyphs.width as usize, glyphs.height as usize);
     let owners = Ownership::new(glyphs, pad);
     let pivots = pivots(glyphs, units);
+
+    // Where each visible glyph is drawn: the pose, its pivot and the
+    // destination box, clamped to the image.
+    struct Placed {
+        glyph: usize,
+        rect: [usize; 4],
+        pose: GlyphPose,
+        opacity: f32,
+        centre: (f32, f32),
+        dest: [usize; 4],
+    }
+    let mut placed = Vec::new();
     for (i, rect) in owners.rects.iter().enumerate() {
-        let Some(rect) = rect else {
+        let Some(rect) = *rect else {
             continue;
         };
         let pose = poses.get(i).copied().unwrap_or(GlyphPose::REST);
@@ -189,45 +224,111 @@ pub fn compose(
             (rect[0] + rect[2]) as f32 * 0.5,
             (rect[1] + rect[3]) as f32 * 0.5,
         ));
+        let dest = if pose.moves() {
+            // Forward-map the rectangle's corners for the destination bounds.
+            let (sin, cos) = pose.rotation.to_radians().sin_cos();
+            let forward = |x: f32, y: f32| {
+                let (lx, ly) = ((x - centre.0) * pose.scale, (y - centre.1) * pose.scale);
+                (
+                    centre.0 + pose.dx + lx * cos - ly * sin,
+                    centre.1 + pose.dy + lx * sin + ly * cos,
+                )
+            };
+            let corners = [
+                forward(rect[0] as f32, rect[1] as f32),
+                forward(rect[2] as f32, rect[1] as f32),
+                forward(rect[0] as f32, rect[3] as f32),
+                forward(rect[2] as f32, rect[3] as f32),
+            ];
+            let min_x = corners.iter().map(|c| c.0).fold(f32::MAX, f32::min).floor();
+            let max_x = corners.iter().map(|c| c.0).fold(f32::MIN, f32::max).ceil();
+            let min_y = corners.iter().map(|c| c.1).fold(f32::MAX, f32::min).floor();
+            let max_y = corners.iter().map(|c| c.1).fold(f32::MIN, f32::max).ceil();
+            [
+                (min_x.max(0.0) as usize).min(w),
+                (min_y.max(0.0) as usize).min(h),
+                (max_x.max(0.0) as usize).min(w),
+                (max_y.max(0.0) as usize).min(h),
+            ]
+        } else {
+            rect
+        };
+        placed.push(Placed {
+            glyph: i,
+            rect,
+            pose,
+            opacity,
+            centre,
+            dest,
+        });
+    }
+
+    let back = backdrop
+        .filter(|b| b.width == glyphs.width && b.height == glyphs.height)
+        .filter(|_| backdrop_opacity > 0.0);
+    let back_box = back.and_then(ink_box);
+
+    let union = placed
+        .iter()
+        .map(|p| p.dest)
+        .chain(back_box)
+        .filter(|r| r[2] > r[0] && r[3] > r[1])
+        .reduce(|a, r| {
+            [
+                a[0].min(r[0]),
+                a[1].min(r[1]),
+                a[2].max(r[2]),
+                a[3].max(r[3]),
+            ]
+        });
+    let Some([x0, y0, x1, y1]) = union else {
+        return ComposedRegion {
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+            pixels: Vec::new(),
+        };
+    };
+    let (rw, rh) = (x1 - x0, y1 - y0);
+    // Premultiplied while compositing; straight on the way out. Indexed in
+    // region coordinates.
+    let mut out = vec![0f32; rw * rh * 4];
+    let at = |x: usize, y: usize| ((y - y0) * rw + (x - x0)) * 4;
+
+    if let (Some(back), Some(b)) = (back, back_box) {
+        let k = backdrop_opacity.clamp(0.0, 1.0);
+        for y in b[1]..b[3] {
+            for x in b[0]..b[2] {
+                let src = &back.pixels[(y * w + x) * 4..(y * w + x) * 4 + 4];
+                let a = src[3] as f32 / 255.0 * k;
+                let i = at(x, y);
+                out[i] = src[0] as f32 / 255.0 * a;
+                out[i + 1] = src[1] as f32 / 255.0 * a;
+                out[i + 2] = src[2] as f32 / 255.0 * a;
+                out[i + 3] = a;
+            }
+        }
+    }
+
+    for p in &placed {
+        let (i, rect, pose, opacity, centre) = (p.glyph, p.rect, p.pose, p.opacity, p.centre);
         if !pose.moves() {
             // At rest: a straight copy of the pixels this glyph owns.
             for y in rect[1]..rect[3] {
                 for x in rect[0]..rect[2] {
                     if owners.owner(x, y) == Some(i) {
-                        over(&mut out, w, x, y, texel(glyphs, x, y), opacity);
+                        over(&mut out, at(x, y), texel(glyphs, x, y), opacity);
                     }
                 }
             }
             continue;
         }
-
-        // Forward-map the rectangle's corners for the destination bounds,
-        // then inverse-map every destination pixel back into the glyph.
+        // Inverse-map every destination pixel back into the glyph.
         let (sin, cos) = pose.rotation.to_radians().sin_cos();
-        let forward = |x: f32, y: f32| {
-            let (lx, ly) = ((x - centre.0) * pose.scale, (y - centre.1) * pose.scale);
-            (
-                centre.0 + pose.dx + lx * cos - ly * sin,
-                centre.1 + pose.dy + lx * sin + ly * cos,
-            )
-        };
-        let corners = [
-            forward(rect[0] as f32, rect[1] as f32),
-            forward(rect[2] as f32, rect[1] as f32),
-            forward(rect[0] as f32, rect[3] as f32),
-            forward(rect[2] as f32, rect[3] as f32),
-        ];
-        let min_x = corners.iter().map(|c| c.0).fold(f32::MAX, f32::min).floor();
-        let max_x = corners.iter().map(|c| c.0).fold(f32::MIN, f32::max).ceil();
-        let min_y = corners.iter().map(|c| c.1).fold(f32::MAX, f32::min).floor();
-        let max_y = corners.iter().map(|c| c.1).fold(f32::MIN, f32::max).ceil();
-        let x0 = (min_x.max(0.0) as usize).min(w);
-        let x1 = (max_x.max(0.0) as usize).min(w);
-        let y0 = (min_y.max(0.0) as usize).min(h);
-        let y1 = (max_y.max(0.0) as usize).min(h);
         let inv = 1.0 / pose.scale;
-        for y in y0..y1 {
-            for x in x0..x1 {
+        for y in p.dest[1]..p.dest[3] {
+            for x in p.dest[0]..p.dest[2] {
                 // Pixel centres, so a pose at rest samples exactly on texels.
                 let (px, py) = (
                     x as f32 + 0.5 - centre.0 - pose.dx,
@@ -236,13 +337,13 @@ pub fn compose(
                 let sx = (px * cos + py * sin) * inv + centre.0 - 0.5;
                 let sy = (-px * sin + py * cos) * inv + centre.1 - 0.5;
                 if let Some(c) = sample(glyphs, &owners, i, sx, sy) {
-                    over(&mut out, w, x, y, c, opacity);
+                    over(&mut out, at(x, y), c, opacity);
                 }
             }
         }
     }
 
-    let mut bytes = vec![0u8; w * h * 4];
+    let mut bytes = vec![0u8; rw * rh * 4];
     for (dst, src) in bytes
         .as_chunks_mut::<4>()
         .0
@@ -258,7 +359,36 @@ pub fn compose(
         dst[2] = ((src[2] / a).clamp(0.0, 1.0) * 255.0).round() as u8;
         dst[3] = (a.clamp(0.0, 1.0) * 255.0).round() as u8;
     }
-    bytes
+    ComposedRegion {
+        x: x0 as u32,
+        y: y0 as u32,
+        width: rw as u32,
+        height: rh as u32,
+        pixels: bytes,
+    }
+}
+
+/// The box around every pixel of `image` with any alpha, `[x0, y0, x1, y1)`.
+fn ink_box(image: &RasteredText) -> Option<[usize; 4]> {
+    let w = image.width as usize;
+    let mut found: Option<[usize; 4]> = None;
+    for (y, row) in image.pixels.chunks_exact(w * 4).enumerate() {
+        let first = row.as_chunks::<4>().0.iter().position(|p| p[3] != 0);
+        let Some(first) = first else {
+            continue;
+        };
+        let last = row
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .rposition(|p| p[3] != 0)
+            .unwrap_or(first);
+        found = Some(match found {
+            None => [first, y, last + 1, y + 1],
+            Some(b) => [b[0].min(first), b[1], b[2].max(last + 1), y + 1],
+        });
+    }
+    found
 }
 
 /// The point each glyph is posed about: the centre of the ink of every glyph
@@ -347,8 +477,7 @@ fn sample(
 }
 
 /// Source-over of premultiplied `c` scaled by `opacity` onto pixel `(x, y)`.
-fn over(out: &mut [f32], width: usize, x: usize, y: usize, c: [f32; 4], opacity: f32) {
-    let i = (y * width + x) * 4;
+fn over(out: &mut [f32], i: usize, c: [f32; 4], opacity: f32) {
     let a = c[3] * opacity;
     if a <= 0.0 {
         return;

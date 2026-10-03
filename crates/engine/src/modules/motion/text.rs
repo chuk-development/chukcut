@@ -219,8 +219,8 @@ pub fn animated_text_frame(
     }
     let size = (size.0.max(1), size.1.max(1));
     let scale = size.0 as f32 / canvas.0.max(1) as f32;
-    let (pixels, width, height) = render(text, animation, rel, duration, size, scale)?;
-    Some(upload(ctx, &pixels, width, height))
+    let (region, width, height) = render_region(text, animation, rel, duration, size, scale)?;
+    Some(upload_region(ctx, &region, width, height))
 }
 
 /// The pixels of [`animated_text_frame`], without a GPU. Public for tests and
@@ -233,6 +233,22 @@ pub fn render(
     size: (u32, u32),
     scale: f32,
 ) -> Option<(Vec<u8>, u32, u32)> {
+    let (region, width, height) = render_region(text, animation, rel, duration, size, scale)?;
+    let mut pixels = vec![0u8; width as usize * height as usize * 4];
+    region.paste_into(&mut pixels, width as usize);
+    Some((pixels, width, height))
+}
+
+/// [`render`] without the empty part of the frame: the composed region, and
+/// the size of the frame it sits in.
+fn render_region(
+    text: &TextMaterial,
+    animation: &AnimationMaterial,
+    rel: Micros,
+    duration: Micros,
+    size: (u32, u32),
+    scale: f32,
+) -> Option<(animate::ComposedRegion, u32, u32)> {
     let renderer = TextRenderer::shared();
     let options = RasterOptions::canvas(size.0, size.1).with_scale(scale);
 
@@ -252,7 +268,7 @@ pub fn render(
     let em = text.font_size * scale;
     let (poses, backdrop_opacity, units) =
         glyph_poses(animation, &text.content, &glyphs.layout, rel, duration, em)?;
-    let pixels = animate::compose(
+    let region = animate::compose_region(
         &glyphs,
         backdrop.as_deref(),
         backdrop_opacity,
@@ -260,12 +276,20 @@ pub fn render(
         pad,
         Some(&units),
     );
-    Some((pixels, glyphs.width, glyphs.height))
+    Some((region, glyphs.width, glyphs.height))
 }
 
-/// Upload straight-alpha RGBA8 as an sRGB texture — what `media` does for a
-/// still title, repeated here because that helper is private to `media`.
-fn upload(ctx: &RenderContext, data: &[u8], width: u32, height: u32) -> SourceFrame {
+/// Upload a composed region into a transparent frame-sized sRGB texture.
+///
+/// The texture is frame-sized because the compositor fits a source to the
+/// canvas; only the region is written. wgpu zero-initialises a new texture on
+/// the GPU, so the rest is transparent without a byte crossing the bus.
+fn upload_region(
+    ctx: &RenderContext,
+    region: &animate::ComposedRegion,
+    width: u32,
+    height: u32,
+) -> SourceFrame {
     let extent = wgpu::Extent3d {
         width,
         height,
@@ -281,21 +305,31 @@ fn upload(ctx: &RenderContext, data: &[u8], width: u32, height: u32) -> SourceFr
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
-    ctx.queue().write_texture(
-        wgpu::TexelCopyTextureInfo {
-            texture: &texture,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        data,
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(4 * width),
-            rows_per_image: Some(height),
-        },
-        extent,
-    );
+    if region.width > 0 && region.height > 0 {
+        ctx.queue().write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: region.x,
+                    y: region.y,
+                    z: 0,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            &region.pixels,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * region.width),
+                rows_per_image: Some(region.height),
+            },
+            wgpu::Extent3d {
+                width: region.width,
+                height: region.height,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
     SourceFrame::from_texture(Arc::new(texture))
 }
 
