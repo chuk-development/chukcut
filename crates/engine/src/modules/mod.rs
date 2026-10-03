@@ -20,6 +20,7 @@ pub mod inspector;
 pub mod library;
 pub mod loudness;
 pub mod media;
+pub mod ml;
 pub mod motion;
 pub mod preview;
 pub mod project;

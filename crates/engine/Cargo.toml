@@ -157,6 +157,19 @@ base64 = "0.22"
 # docs/decisions/0013-local-transcription-with-whisper-cpp.md.
 whisper-rs = { version = "0.16", optional = true }
 
+# --- the ML worker (modules/ml) ----------------------------------------------
+#
+# The protocol and the model registry only: `default-features = false` leaves
+# out the `runtime` feature, so the editor never links ONNX Runtime. Models run
+# in the separate `chukcut-ml-worker` process; see
+# docs/decisions/0022-ml-worker-process.md.
+chukcut-ml-worker = { path = "../ml-worker", default-features = false }
+# ONNX Runtime arrives as Microsoft's `.tgz`; it is unpacked while it
+# downloads, so the archive (424 MB for the CUDA build) never sits on disk.
+# flate2 is already in the tree through the image crates.
+flate2 = "1"
+tar = { version = "0.4", default-features = false }
+
 [features]
 default = []
 local-whisper = ["dep:whisper-rs"]

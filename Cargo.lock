@@ -1063,9 +1063,11 @@ dependencies = [
  "ash",
  "base64",
  "bytemuck",
+ "chukcut-ml-worker",
  "cpal",
  "ebur128",
  "ffmpeg-next",
+ "flate2",
  "futures",
  "glam",
  "http",
@@ -1090,6 +1092,7 @@ dependencies = [
  "signalsmith-stretch",
  "skrifa 0.45.1",
  "spirv-webgpu-transform",
+ "tar",
  "thiserror 2.0.19",
  "toml 0.8.23",
  "tracing",
@@ -7812,6 +7815,16 @@ dependencies = [
  "core-foundation-sys",
  "libc",
  "objc",
+]
+
+[[package]]
+name = "tar"
+version = "0.4.46"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840"
+dependencies = [
+ "filetime",
+ "libc",
 ]
 
 [[package]]
