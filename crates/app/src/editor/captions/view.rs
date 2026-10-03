@@ -1132,7 +1132,7 @@ impl Editor {
                     .child(label(if words {
                         "Karaoke: the word being said lights up in this colour."
                     } else {
-                        "Needs word timing: generate captions rather than importing an .srt."
+                        "Needs word timing: generate captions, or import the subtitles again (word times are then estimated)."
                     })),
             ))
             .child(section("Position", position))

@@ -574,7 +574,14 @@ pub fn project_close(state: &Arc<AppState>, exiting: bool) {
 /// Called once at launch, before any project is opened: set a crashed
 /// session's working copy aside and answer what can be restored.
 pub fn project_recovery_claim() -> Option<super::recovery::RecoveryInfo> {
-    super::recovery::claim_at(&super::autosave::file())
+    let info = super::recovery::claim_at(&super::autosave::file())?;
+    // An empty timeline is nothing to restore: a crash right after "New
+    // project" would otherwise ask about an "Untitled" with no clips.
+    if info.clips == 0 {
+        project_recovery_discard();
+        return None;
+    }
+    Some(info)
 }
 
 /// What can be restored, without claiming anything.

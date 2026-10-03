@@ -80,16 +80,12 @@ impl Editor {
             .small()
             .dropdown_caret(true)
             .dropdown_menu(move |menu, _, _| {
-                let new_project = editor.clone();
                 let save_as = editor.clone();
                 menu.action_context(focus.clone())
                     .min_w(px(220.0))
-                    .item(
-                        PopupMenuItem::new("New project").on_click(move |_, window, cx| {
-                            let _ = new_project
-                                .update(cx, |editor, cx| editor.on_new_project(window, cx));
-                        }),
-                    )
+                    // As an action, so the menu shows its Ctrl+N; the shell
+                    // handles it by way of the unsaved-changes guard.
+                    .menu("New project", Box::new(NewProject))
                     .menu("Open…", Box::new(Open))
                     .separator()
                     .menu("Save", Box::new(Save))
@@ -209,12 +205,6 @@ impl Editor {
                     .child(status)
             }))
             .child(export)
-    }
-
-    /// Menu → New project: back to the start screen, which asks for the
-    /// canvas — after the unsaved-changes guard.
-    pub(super) fn on_new_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.request_home(window, cx);
     }
 
     /// Menu → Save as: always asks for a path, even for a saved project.

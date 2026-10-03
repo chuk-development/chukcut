@@ -163,11 +163,15 @@ impl Shell {
             _events: None,
             closing: false,
         };
+        // Only on the start screen: a launch that opened a project or media
+        // asked for that, not for a question about another session. The
+        // work stays offered on the start screen and at the next launch.
+        let prompt = recovery.is_some() && matches!(startup, Startup::Home);
         match startup {
             Startup::Home => shell.show_home(window, cx),
             Startup::Editor { media } => shell.show_editor(media, false, window, cx),
         }
-        if recovery.is_some() {
+        if prompt {
             let this = cx.weak_entity();
             // After the window's root exists: dialogs draw into it.
             window.defer(cx, move |window, cx| {

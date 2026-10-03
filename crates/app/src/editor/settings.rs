@@ -89,6 +89,22 @@ pub(crate) fn bytes_label(bytes: u64) -> String {
     }
 }
 
+/// Whether decoded frames really reach the GPU without a copy: the adapter
+/// must import DMA-BUFs *and* a VAAPI decoder must work, since only VAAPI
+/// hands frames over as DMA-BUFs (NVDEC frames are downloaded). The import
+/// flag alone said "Yes" on NVIDIA machines where nothing used it.
+pub(crate) fn zero_copy_label(report: &HardwareReport) -> &'static str {
+    let vaapi = report
+        .decoders
+        .iter()
+        .any(|d| d.usable && d.accel == "vaapi");
+    match (report.can_import_dmabuf, vaapi) {
+        (true, true) => "Yes",
+        (true, false) => "No (no VAAPI decoder works here)",
+        (false, _) => "No",
+    }
+}
+
 /// Open the dialog. `editor` receives every change that applies live.
 pub(crate) fn open(editor: Option<WeakEntity<Editor>>, window: &mut Window, cx: &mut App) {
     let dialog = cx.new(|cx| SettingsDialog::new(editor, cx));
@@ -441,11 +457,7 @@ impl SettingsDialog {
             row(
                 "Zero-copy decode",
                 Some("Decoded frames become textures without a trip through memory."),
-                dim(if report.can_import_dmabuf {
-                    "Yes"
-                } else {
-                    "No"
-                }),
+                dim(zero_copy_label(report)),
             ),
         ];
         rows.push(codec_list("Hardware decoding", &report.decoders, true));
@@ -627,6 +639,37 @@ fn codec_list(title: &str, codecs: &[HardwareCodec], with_accel: bool) -> AnyEle
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn report(dmabuf: bool, decoders: &[(&str, bool)]) -> HardwareReport {
+        HardwareReport {
+            gpu: None,
+            backend: None,
+            device_type: None,
+            can_import_dmabuf: dmabuf,
+            encoders: Vec::new(),
+            decoders: decoders
+                .iter()
+                .map(|(accel, usable)| HardwareCodec {
+                    id: "h264".into(),
+                    label: "H.264".into(),
+                    accel: accel.to_string(),
+                    available: true,
+                    usable: *usable,
+                    note: None,
+                })
+                .collect(),
+            partial: false,
+        }
+    }
+
+    #[test]
+    fn zero_copy_needs_a_working_vaapi_decoder() {
+        assert_eq!(zero_copy_label(&report(true, &[("vaapi", true)])), "Yes");
+        // An NVIDIA card: the adapter imports DMA-BUFs, NVDEC does not export.
+        let nvidia = report(true, &[("nvdec", true), ("vaapi", false)]);
+        assert!(zero_copy_label(&nvidia).starts_with("No"));
+        assert_eq!(zero_copy_label(&report(false, &[("vaapi", true)])), "No");
+    }
 
     #[test]
     fn the_preview_scale_maps_onto_the_players_steps() {

@@ -106,6 +106,9 @@ pub struct Editor {
 
     selected: Option<String>,
     status: Option<SharedString>,
+    /// The status line as last seen by the tick, and since when; see
+    /// `expire_status`.
+    status_since: Option<(SharedString, std::time::Instant)>,
 
     viewer: Rc<Cell<Bounds<Pixels>>>,
     timeline: timeline::TimelineState,
@@ -179,6 +182,7 @@ impl Editor {
             scale: window.scale_factor(),
             selected: None,
             status: None,
+            status_since: None,
             viewer: Rc::new(Cell::new(Bounds::default())),
             timeline: timeline::TimelineState::new(cx),
             export_progress: Arc::new(parking_lot::Mutex::new(None)),
@@ -249,6 +253,7 @@ impl Editor {
             self.status = Some(export::export_status(&progress).into());
             changed = true;
         }
+        changed |= self.expire_status();
         changed |= self.poll_tracking(cx);
         changed |= self.poll_analysis(cx);
         if let Some(frame) = self.player.take(self.clock.position()) {
@@ -360,6 +365,33 @@ impl Editor {
             }
         }
         cx.notify();
+    }
+
+    /// Let a finished message go after a while, so an old error ("cannot
+    /// open …") does not sit in the title bar until something else is said.
+    /// A message of work in progress ("Importing…", "Exporting 40 %") stays
+    /// until the work replaces it. Answers whether the line changed.
+    fn expire_status(&mut self) -> bool {
+        const SHOWN_FOR: std::time::Duration = std::time::Duration::from_secs(8);
+        let Some(status) = self.status.clone() else {
+            self.status_since = None;
+            return false;
+        };
+        match &self.status_since {
+            Some((seen, since)) if *seen == status => {
+                let ongoing = status.ends_with('\u{2026}') || status.starts_with("Exporting");
+                if !ongoing && since.elapsed() >= SHOWN_FOR {
+                    self.status = None;
+                    self.status_since = None;
+                    return true;
+                }
+                false
+            }
+            _ => {
+                self.status_since = Some((status, std::time::Instant::now()));
+                false
+            }
+        }
     }
 
     fn report(&mut self, result: Result<(), String>, cx: &mut Context<Self>) {
