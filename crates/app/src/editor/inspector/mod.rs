@@ -1076,6 +1076,7 @@ impl Editor {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         self.inspector.text.begin_frame();
+        self.inspector.effects.begin_frame();
         let body = match self.selected_segment().map(|(_, s)| self.clip_kind(s)) {
             Some(kind) => self
                 .render_inspector_clip(kind, window, cx)

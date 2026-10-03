@@ -16,19 +16,14 @@ use gpui::assets::IconName;
 use gpui::component::slider::{Slider, SliderEvent, SliderState};
 use gpui::{AnyElement, Subscription};
 
-use crate::ui::{EmptyState, IconButton};
+use crate::ui::color::{linear_to_srgb, srgb_to_linear};
+use crate::ui::{self, ColorEvent, ColorPicker, EmptyState, IconButton};
 
 use super::controls::*;
 use super::*;
 
 /// The tab's label in the inspector's top row.
 pub(super) const EFFECTS: &str = "Effects";
-
-/// Swatches a colour parameter offers, as sRGB hex. These are values the
-/// user picks for the effect, not chrome, so they are not theme tokens.
-const SWATCHES: [u32; 9] = [
-    0xffffff, 0x000000, 0xff3b30, 0xff9500, 0xffcc00, 0x34c759, 0x32d6ff, 0x3478f6, 0xaf52de,
-];
 
 /// What a header button does.
 type Action = Box<dyn Fn(&mut Editor, &mut Context<Editor>)>;
@@ -52,23 +47,39 @@ pub(crate) struct EffectsPanel {
     /// By position in the stack and parameter id. Positions, not effect ids,
     /// because every edit mints a new id for the effect it changes.
     sliders: HashMap<(usize, &'static str), ParamSlider>,
+    /// The colour pickers of colour parameters, keyed the same way.
+    colours: HashMap<(usize, &'static str), (Entity<ColorPicker>, Subscription)>,
     drag: Option<Drag>,
+    /// Whether the tab was drawn this frame and the one before; see
+    /// `text_style::TextTab`, which has the same problem with popovers.
+    shown: bool,
+    was_shown: bool,
 }
 
-fn srgb_to_linear(hex: u32) -> [f32; 4] {
-    let channel = |shift: u32| {
-        let e = ((hex >> shift) & 0xff) as f32 / 255.0;
-        if e <= 0.04045 {
-            e / 12.92
-        } else {
-            ((e + 0.055) / 1.055).powf(2.4)
-        }
-    };
-    [channel(16), channel(8), channel(0), 1.0]
+impl EffectsPanel {
+    /// Called once per inspector frame, before the tabs are drawn.
+    pub(super) fn begin_frame(&mut self) {
+        self.was_shown = std::mem::take(&mut self.shown);
+    }
 }
 
-fn close_colour(a: [f32; 4], b: [f32; 4]) -> bool {
-    a.iter().zip(b).all(|(x, y)| (x - y).abs() < 0.01)
+/// An effect colour is linear light; the picker speaks sRGB.
+fn to_linear(c: [f32; 4]) -> [f32; 4] {
+    [
+        srgb_to_linear(c[0]),
+        srgb_to_linear(c[1]),
+        srgb_to_linear(c[2]),
+        c[3],
+    ]
+}
+
+fn to_srgb(c: [f32; 4]) -> [f32; 4] {
+    [
+        linear_to_srgb(c[0]),
+        linear_to_srgb(c[1]),
+        linear_to_srgb(c[2]),
+        c[3],
+    ]
 }
 
 impl Editor {
@@ -90,6 +101,12 @@ impl Editor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        if !self.inspector.effects.was_shown {
+            for (picker, _) in self.inspector.effects.colours.values() {
+                picker.update(cx, |picker, _| picker.open = false);
+            }
+        }
+        self.inspector.effects.shown = true;
         let stack: Vec<EffectMaterial> = self
             .project
             .materials
@@ -440,39 +457,18 @@ impl Editor {
                     .into_any_element()
             }
             ParamKind::Color { default } => {
-                let current = effect.color(spec.id, default);
-                let swatches = SWATCHES.iter().map(|&hex| {
-                    let (s, e) = (segment_id.clone(), effect_id.clone());
-                    let param = spec.id;
-                    let colour = srgb_to_linear(hex);
-                    let selected = close_colour(current, colour);
-                    div()
-                        .id(SharedString::from(format!(
-                            "fx-colour-{index}-{param}-{hex:06x}"
-                        )))
-                        .size(px(18.0))
-                        .rounded(px(R_XS))
-                        .bg(rgb(hex))
-                        .border_2()
-                        .border_color(rgb(if selected { ACCENT } else { BORDER }))
-                        .cursor_pointer()
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            let result = fx_commands::fx_set_param(
-                                &this.state,
-                                s.clone(),
-                                e.clone(),
-                                param.to_string(),
-                                EffectValue::Color(colour),
-                                None,
-                            )
-                            .map(|_| ());
-                            this.refresh(cx);
-                            this.report(result, cx);
-                        }))
-                });
+                let current = to_srgb(effect.color(spec.id, default));
+                let picker = self.effect_colour_picker(index, spec.id, window, cx);
+                picker.update(cx, |picker, _| picker.sync(current));
                 label_row(
                     spec.label,
-                    div().flex().flex_row().gap(px(4.0)).children(swatches),
+                    ui::color_button(
+                        format!("fx-colour-{index}-{}", spec.id),
+                        &picker,
+                        None,
+                        true,
+                        cx,
+                    ),
                 )
             }
         }
@@ -508,11 +504,15 @@ impl Editor {
                 &state,
                 window,
                 move |this: &mut Editor, _, event: &SliderEvent, _, cx| match event {
-                    SliderEvent::Change(v) => {
-                        this.drag_effect_param(index, param, v.end(), false, cx)
-                    }
+                    SliderEvent::Change(v) => this.drag_effect_param(
+                        index,
+                        param,
+                        EffectValue::Number(v.end()),
+                        false,
+                        cx,
+                    ),
                     SliderEvent::Release(v) => {
-                        this.drag_effect_param(index, param, v.end(), true, cx)
+                        this.drag_effect_param(index, param, EffectValue::Number(v.end()), true, cx)
                     }
                 },
             );
@@ -534,12 +534,46 @@ impl Editor {
         state
     }
 
-    /// A slider moved (`commit` false) or was let go (`commit` true).
+    /// The colour picker of one colour parameter, made on first use.
+    fn effect_colour_picker(
+        &mut self,
+        index: usize,
+        param: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<ColorPicker> {
+        let key = (index, param);
+        if let Some((picker, _)) = self.inspector.effects.colours.get(&key) {
+            return picker.clone();
+        }
+        let picker = cx.new(|cx| ColorPicker::new(window, cx));
+        let subscription = cx.subscribe(&picker, move |this: &mut Editor, _, event, cx| {
+            let (color, commit) = match *event {
+                ColorEvent::Preview(color) => (color, false),
+                ColorEvent::Commit(color) => (color, true),
+            };
+            this.drag_effect_param(
+                index,
+                param,
+                EffectValue::Color(to_linear(color)),
+                commit,
+                cx,
+            );
+        });
+        self.inspector
+            .effects
+            .colours
+            .insert(key, (picker.clone(), subscription));
+        picker
+    }
+
+    /// A slider or colour moved (`commit` false) or was let go (`commit`
+    /// true): shown on a copy while it moves, written once when it settles.
     fn drag_effect_param(
         &mut self,
         index: usize,
         param: &'static str,
-        value: f32,
+        value: EffectValue,
         commit: bool,
         cx: &mut Context<Self>,
     ) {
@@ -576,7 +610,7 @@ impl Editor {
                 &segment_id,
                 &effect_id,
                 param,
-                EffectValue::Number(value),
+                value.clone(),
                 source,
             )
             .and_then(|(material, command)| {
@@ -602,7 +636,7 @@ impl Editor {
             segment_id,
             effect_id,
             param.to_string(),
-            EffectValue::Number(value),
+            value,
             Some(playhead),
         )
         .map(|_| ());

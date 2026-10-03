@@ -304,7 +304,7 @@ impl Editor {
     ) -> AnyElement {
         let picker = self.text_picker(slot, window, cx);
         let color = slot.get(material);
-        picker.update(cx, |picker, cx| picker.sync(color, window, cx));
+        picker.update(cx, |picker, _| picker.sync(color));
         label_row(
             label,
             ui::color_button(format!("text-colour-{slot:?}"), &picker, None, true, cx),

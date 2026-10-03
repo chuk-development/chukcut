@@ -282,13 +282,14 @@ impl ColorPicker {
         self.color
     }
 
-    /// Show `color`, unless the user is dragging or typing in the picker.
-    pub(crate) fn sync(&mut self, color: [f32; 4], window: &mut Window, cx: &mut Context<Self>) {
+    /// Show `color`, unless the user is dragging in the picker. The hex
+    /// field follows the next time the picker is drawn, unless it is being
+    /// typed in.
+    pub(crate) fn sync(&mut self, color: [f32; 4]) {
         if self.drag.is_some() || same(color, self.color) {
             return;
         }
         self.set(color);
-        self.show_hex(window, cx);
     }
 
     fn set(&mut self, color: [f32; 4]) {
