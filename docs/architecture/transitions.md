@@ -411,3 +411,43 @@ because a wipe, a slide and a zoom are defined against the frame rather than
 against the clip: performed in the local space of a clip that has been scaled
 and rotated, a wipe is not a wipe. Doing it in canvas space is what makes the
 five shaders mean what their names say.
+
+---
+
+## The library: gl-transitions and the seamless set
+
+Beyond the five built-in kinds, `TransitionKind::Library` names a preset in
+`transitions/library/` through `TransitionMaterial::preset` (`gl:<id>` or
+`seamless:<id>`), with `params` holding only values that differ from the
+preset's defaults. A preset this build does not know draws as a dissolve.
+
+- **gl-transitions** (120 of 125; MIT, two BSD) are translated to WGSL by
+  naga through the harness in `port.py`. The output is committed, so a build
+  needs neither the network nor naga-cli. The harness turns each `uniform`
+  into a private global set from a slot of one uniform block (so a function
+  argument with a parameter's name still means what it meant), hands the
+  shader premultiplied samples and unpremultiplies its result (straight
+  alpha layers, the reason given above), flips GL's bottom-left texture
+  origin, measures `ratio` from the layer textures, and clamps alpha before
+  unpremultiplying (some transitions add to it). Each file keeps its header;
+  `LICENSE-gl-transitions.md` lists authors and licences and why five are
+  left out.
+- **Seamless** (`seamless.wgsl`, ours): zoom in, zoom out, spin, whip pan
+  and push. Both clips move as one camera move; the outgoing clip carries
+  the first half and the incoming one the second, so the cut lands at peak
+  speed. Motion blur is a sixteen-tap shutter whose width follows an
+  ease-in-out speed curve, so the first and last frames are sharp.
+  Off-frame samples mirror back in. Whip and push use the material's
+  `direction`.
+
+Every preset shares one uniform layout (`state` = progress, unused,
+direction, blur; twelve `vec4` parameter slots) and the transition
+pipeline's own layer bind group layout, so the compositor's transition path
+is unchanged: `TransitionPipeline::draw` dispatches to a per-preset pipeline,
+compiled the first time that preset is drawn. `library/gpu_tests.rs` checks
+every preset compiles, starts on the outgoing layer and ends on the incoming
+one; `fx/render_tests.rs` checks a library transition through the compositor
+against the export.
+
+A transition side also carries its clip's built-in effects
+(`modules/fx`): each side's layer has them applied before the blend.
