@@ -206,6 +206,11 @@ fn default_shadow(m: &TextMaterial) -> TextShadow {
 }
 
 impl Editor {
+    /// Show the Text tab, after a title was added.
+    pub(crate) fn inspector_show_text(&mut self) {
+        self.inspector.tab = Some(TEXT_TAB);
+    }
+
     /// The selected title's material, as drawn now.
     fn selected_title(&self) -> Option<TextMaterial> {
         let (_, segment) = self.selected_segment()?;

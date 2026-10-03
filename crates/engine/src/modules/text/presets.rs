@@ -949,11 +949,7 @@ mod tiles {
             let size = request.max_size;
             let size = (size.0.max(1), size.1.max(1));
             let scale = size.0 as f32 / self.0.canvas.width.max(1) as f32;
-            // A small inset, so a left-aligned style does not touch the
-            // tile's edge.
-            let options = RasterOptions::canvas(size.0, size.1)
-                .with_scale(scale)
-                .with_margin(self.0.canvas.width as f32 * 0.06);
+            let options = RasterOptions::canvas(size.0, size.1).with_scale(scale);
             let rastered = TextRenderer::shared()
                 .rasterize(&crate::modules::text::TextRequest::from(material), &options);
             Ok(Some(upload(
@@ -995,7 +991,12 @@ mod tiles {
             ..a.clone()
         });
 
-        let style_key = format!("{material:?}{animation:?}{time}");
+        let inset = match material.align {
+            crate::modules::project::document::TextAlign::Left => 0.12,
+            crate::modules::project::document::TextAlign::Right => -0.12,
+            crate::modules::project::document::TextAlign::Center => 0.0,
+        };
+        let style_key = format!("{material:?}{animation:?}{time}{inset}");
         let key = hash(&[
             include_str!("raster.rs"),
             include_str!("../motion/text.rs"),
@@ -1012,7 +1013,12 @@ mod tiles {
                 render_index: 0,
                 speed: 1.0,
                 volume: 1.0,
-                transform: Transform::default(),
+                // A paragraph aligned to an edge is moved in from it, as the
+                // position grid does on a real canvas.
+                transform: Transform {
+                    position: [inset, 0.0],
+                    ..Transform::default()
+                },
                 crop: None,
                 extras: Vec::new(),
                 keyframes: Vec::new(),

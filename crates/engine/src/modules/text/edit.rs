@@ -272,7 +272,7 @@ pub fn template_command(
         Err(error) => return Err(error),
     }
     if commands.is_empty() {
-        return Err(format!("the title already is a {}", template.name));
+        return Err(format!("the title already has the {} look", template.name));
     }
     Ok(EditCommand::Composite {
         label: format!("Apply {}", template.name),

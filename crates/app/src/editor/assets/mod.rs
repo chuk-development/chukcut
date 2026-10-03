@@ -12,6 +12,7 @@ mod library_panel;
 mod looks;
 mod media;
 mod stickers;
+mod titles;
 pub(crate) use media::{drop_command, MediaDrag};
 
 use std::collections::HashMap;
@@ -94,7 +95,7 @@ impl AssetTab {
                 super::cloud::AUDIO_CATEGORIES[1],
                 super::cloud::AUDIO_CATEGORIES[2],
             ],
-            AssetTab::Text => &["Add text"],
+            AssetTab::Text => &titles::CATEGORIES,
             AssetTab::Captions => super::captions::CATEGORIES,
             AssetTab::Transitions => &library::TRANSITION_CATEGORIES,
             AssetTab::Filters => &looks::FILTER_CATEGORIES,
@@ -106,7 +107,7 @@ impl AssetTab {
 
     fn searchable(self, category: usize) -> bool {
         match self {
-            AssetTab::Text | AssetTab::Captions | AssetTab::Stock => false,
+            AssetTab::Captions | AssetTab::Stock => false,
             // The cloud categories have fields of their own; the library's
             // music and sounds use the shared one.
             AssetTab::Media => category < 2,
@@ -253,7 +254,7 @@ impl Editor {
             AssetTab::Audio if category >= 4 => self.render_cloud_audio(category - 4, cx),
             AssetTab::Audio if category >= 2 => self.render_audio_library(category - 2, cx),
             AssetTab::Audio => self.render_audio_tab(category, cx).into_any_element(),
-            AssetTab::Text => self.render_text_tab(cx).into_any_element(),
+            AssetTab::Text => self.render_text_tab(category, cx).into_any_element(),
             AssetTab::Captions => self.render_captions_tab(category, cx),
             AssetTab::Transitions => self.render_transitions_tab(category, cx).into_any_element(),
             AssetTab::Filters if category == 0 => self.render_looks_tab(cx),

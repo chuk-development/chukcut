@@ -1,10 +1,9 @@
-//! The Text, Transitions and Filters tabs. Their tiles are our own drawings,
+//! The Transitions and Filters tabs. Their tiles are our own drawings,
 //! not previews of real footage: they say what the effect does at a glance.
 
 use chukcut_engine::modules::inspector::commands as inspector_commands;
 use chukcut_engine::modules::inspector::edit::ColorEdit;
 use chukcut_engine::modules::project::TransitionKind;
-use chukcut_engine::modules::text::commands as text_commands;
 use chukcut_engine::modules::transitions::commands as transition_commands;
 use gpui::{linear_color_stop, linear_gradient, Hsla};
 
@@ -101,50 +100,6 @@ impl Editor {
             .pt(px(2.0))
             .pl(px(2.0))
             .children(tiles)
-    }
-
-    pub(super) fn render_text_tab(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let picture = div()
-            .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(gradient(0x2a2c32, 0x1a1b1f))
-            .text_size(px(TEXT_DISPLAY + 3.0))
-            .font_weight(gpui::FontWeight::BOLD)
-            .text_color(rgb(TEXT))
-            .child("Aa")
-            .into_any_element();
-        let editor = cx.entity().downgrade();
-        let tile = Self::tile(
-            "text-default".into(),
-            picture,
-            "Default text".into(),
-            false,
-            move |_, _, cx| {
-                let _ = editor.update(cx, |this, cx| this.add_text(cx));
-            },
-        )
-        .on_click(cx.listener(|this, _, _, cx| this.add_text(cx)));
-
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(10.0))
-            .child(Self::hint("Adds a title at the playhead."))
-            .child(Self::tile_grid([tile]))
-    }
-
-    fn add_text(&mut self, cx: &mut Context<Self>) {
-        let at = self.clock.position();
-        match text_commands::text_add(&self.state, at, None, None) {
-            Ok(added) => {
-                self.refresh(cx);
-                self.selected = Some(added.segment_id);
-                self.report(Ok(()), cx);
-            }
-            Err(error) => self.report(Err(error), cx),
-        }
     }
 
     pub(super) fn render_transitions_tab(
