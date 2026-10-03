@@ -12,9 +12,10 @@ use chukcut_engine::modules::inspector::edit::{ClipAttributes, ColorEdit, GradeE
 use chukcut_engine::modules::library::commands as library_commands;
 use chukcut_engine::modules::library::fonts::FontCategory;
 use chukcut_engine::modules::project::document::LutRef;
-use chukcut_engine::modules::project::{Easing, TransitionDirection};
+use chukcut_engine::modules::project::{Easing, Track, TrackKind, TransitionDirection};
 use chukcut_engine::modules::text::commands as text_commands;
 use chukcut_engine::modules::timeline::commands as timeline_commands;
+use chukcut_engine::modules::timeline::ops::EditCommand;
 use chukcut_engine::modules::transitions::commands as transition_commands;
 use clap::{Args, Subcommand};
 use schemars::JsonSchema;
@@ -584,6 +585,58 @@ impl Operation for MaskMoveArgs {
 }
 
 // ---------------------------------------------------------------------------
+// Lanes
+// ---------------------------------------------------------------------------
+
+const LANE_KINDS: &[&str] = &["video", "audio", "text", "sticker", "effect"];
+
+/// Add an empty lane, directly above the last lane of its kind (a new text
+/// lane goes on top of the others). Clips can then be moved onto it, and
+/// `title add --track` puts a title on it, so two titles show at once.
+#[derive(Debug, Clone, Default, Args, Deserialize, JsonSchema)]
+pub struct LaneAddArgs {
+    /// video, audio, text, sticker or effect.
+    #[arg(long)]
+    pub kind: String,
+    /// The lane's name. Defaults to "Text 2" and the like.
+    #[arg(long)]
+    pub name: Option<String>,
+}
+
+impl Operation for LaneAddArgs {
+    const NAME: &'static str = "lane_add";
+    fn run(self, session: &mut Session, _: &Ctx) -> CliResult<Outcome> {
+        let kind: TrackKind = enum_named("lane kind", &self.kind, LANE_KINDS)?;
+        let (index, count) = session.with(|p| {
+            let index = p
+                .tracks
+                .iter()
+                .rposition(|t| t.kind == kind)
+                .map_or(p.tracks.len(), |i| i + 1);
+            (index, p.tracks.iter().filter(|t| t.kind == kind).count())
+        });
+        let name = self
+            .name
+            .clone()
+            .filter(|n| !n.trim().is_empty())
+            .unwrap_or_else(|| {
+                let mut label = self.kind.trim().to_ascii_lowercase();
+                if let Some(first) = label.get_mut(0..1) {
+                    first.make_ascii_uppercase();
+                }
+                format!("{label} {}", count + 1)
+            });
+        let track = Track::new(kind, name.clone());
+        let id = track.id.clone();
+        timeline_commands::timeline_apply(&session.state, EditCommand::AddTrack { track, index })?;
+        Ok(Outcome::changed(
+            format!("added lane {index}, {name:?}"),
+            json!({"track": {"id": id, "index": index, "name": name}}),
+        ))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The command line
 // ---------------------------------------------------------------------------
 
@@ -604,6 +657,8 @@ pub enum ClipCommand {
     Look(On<LookArgs>),
     /// Move one of a clip's masks in its order.
     MaskMove(On<MaskMoveArgs>),
+    /// Add an empty lane of a kind.
+    LaneAdd(On<LaneAddArgs>),
 }
 
 impl ClipCommand {
@@ -616,6 +671,7 @@ impl ClipCommand {
             Self::GradeToAll(o) => crate::on(o, dry, ctx),
             Self::Look(o) => crate::on(o, dry, ctx),
             Self::MaskMove(o) => crate::on(o, dry, ctx),
+            Self::LaneAdd(o) => crate::on(o, dry, ctx),
         }
     }
 }

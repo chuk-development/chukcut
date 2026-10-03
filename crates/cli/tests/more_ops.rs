@@ -317,3 +317,66 @@ fn library_lists_stickers_and_cloud_refusals() {
     );
     assert_eq!(run(&dir, &["catalog", "voices"]).code, 1);
 }
+
+#[test]
+fn two_titles_at_once_on_two_lanes_and_styled_lengths() {
+    require_ffmpeg!();
+    let (dir, project) = with_media("laneops");
+    let p = project.to_str().unwrap();
+
+    let head = ok(
+        &dir,
+        &["title", "add", p, "Day 1", "--at", "0.5", "--duration", "4"],
+    );
+    let lane = ok(&dir, &["lane-add", p, "--kind", "text"]);
+    assert_eq!(lane["track"]["name"], "Text 2");
+    let sub = ok(
+        &dir,
+        &[
+            "title",
+            "add",
+            p,
+            "Lisbon",
+            "--at",
+            "0.5",
+            "--duration",
+            "4",
+            "--track",
+            "Text 2",
+        ],
+    );
+    assert_eq!(sub["clip"]["start"], 0.5, "not moved to the next gap");
+    assert_ne!(
+        head["clip"]["ref"].as_str().unwrap().split(':').next(),
+        sub["clip"]["ref"].as_str().unwrap().split(':').next(),
+        "two lanes"
+    );
+    // A lane a title may not go on is refused, not silently replaced.
+    assert_eq!(run(&dir, &["title", "add", p, "x", "--track", "0"]).code, 2);
+
+    let styles = ok(&dir, &["catalog", "title_styles"]);
+    let style = styles[0]["id"].as_str().unwrap();
+    let styled = ok(
+        &dir,
+        &["title", "style", p, style, "--at", "6", "--duration", "5.5"],
+    );
+    assert_eq!(styled["clip"]["duration"], 5.5);
+    let templates = ok(&dir, &["catalog", "title_templates"]);
+    let template = templates[0]["id"].as_str().unwrap();
+    let templated = ok(
+        &dir,
+        &[
+            "title",
+            "template",
+            p,
+            template,
+            "--at",
+            "13",
+            "--duration",
+            "1.5",
+            "--track",
+            "Text 2",
+        ],
+    );
+    assert_eq!(templated["clip"]["duration"], 1.5);
+}

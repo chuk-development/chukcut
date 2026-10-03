@@ -270,6 +270,7 @@ operations!(
     clip::TitleTextArgs,
     clip::TitleFontArgs,
     clip::MaskMoveArgs,
+    clip::LaneAddArgs,
     library::StickerArgs,
     library::MusicArgs,
     library::SfxArgs,

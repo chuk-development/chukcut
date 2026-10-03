@@ -334,6 +334,18 @@ name. An empty name (`""`) clears it.
 `link` makes two or more clips move, trim and delete as one (as a picture and
 its sound do after import). `unlink` breaks the link of a clip.
 
+#### `lane-add PROJECT --kind KIND [--name NAME]`
+
+Adds an empty lane of `video`, `audio`, `text`, `sticker` or `effect`, directly
+above the last lane of that kind. The result gives its `id` and `index`. A
+headline and a subtitle at the same time:
+
+```bash
+chukcut-cli title add reel.chukcut "Day 1" --at 0.5 --duration 4
+chukcut-cli lane-add reel.chukcut --kind text
+chukcut-cli title add reel.chukcut "Lisbon" --at 0.5 --duration 4 --track "Text 2" --y -0.6
+```
+
 #### `paste-attributes PROJECT --from CLIP CLIP...`
 
 Copies the position, scale, rotation, opacity, speed, volume, crop and grade
@@ -420,7 +432,9 @@ Control names: `brightness`, `contrast`, `saturation`, `temperature`,
 `orange`, `yellow`, `green`, `aqua`, `blue`, `purple`, `magenta`), and
 `wheel_x:WHEEL`, `wheel_y:WHEEL`, `wheel_luma:WHEEL` (wheels: `lift`, `gamma`,
 `gain`, `offset`). `catalog grade` lists them with their resting values.
-Values are in document units: exposure in stops, saturation 1 is no change.
+Values are in document units: exposure in stops; `saturation` and
+`contrast` rest at 1 (1 is no change, `contrast=0.1` makes the picture almost
+flat); the others rest at 0.
 All changes in one command are one undo step.
 
 ```bash
@@ -507,10 +521,12 @@ Adds an effect (`catalog effects`): `gaussian_blur`, `zoom_blur`, `glow`,
   `--track` place it.
 
 `--set NAME=VALUE` sets parameters. The CLI checks each value against the
-catalog: a number in its range, a colour, or a choice by name or index.
+catalog: a number in its range, a colour, or a choice by name or index. Read
+the range in `catalog effects`: many effects count from 0 to 100 (glow's
+`intensity` 60 is a strong glow), not from 0 to 1.
 
 ```bash
-chukcut-cli effect add reel.chukcut glow --clip 0:1 --set intensity=0.8
+chukcut-cli effect add reel.chukcut glow --clip 0:1 --set intensity=60
 chukcut-cli effect add reel.chukcut shake --at 5 --duration 0.4
 ```
 
@@ -590,6 +606,9 @@ chukcut-cli keyframe reel.chukcut 2:0 --property opacity --at 0.5 --value 1 --ea
 
 Puts a title on the title lane. `--at` (default 0) and `--duration` (default
 3 s). When the time is not free, the title moves to the next gap.
+`--track LANE` puts it on another text lane, where it can show at the same
+time as a title on the first one. `lane-add PROJECT --kind text` makes that
+lane.
 
 Style options (also for `title set`): `--font`, `--size` (canvas pixels),
 `--color`, `--bold true|false`, `--italic true|false`,
@@ -625,8 +644,8 @@ lists the styles.
 - With `--clip CLIP`, the title gets the style. It keeps its words, its size
   and its position.
 - Without `--clip`, the CLI adds a new title. `--at` (default 0) and
-  `--track` place it, and `--text` gives its words (default: the style's
-  sample). The title goes where the style puts it, for example low and left
+  `--track` place it, `--duration` gives its length (default 3 s), and
+  `--text` gives its words (default: the style's sample). The title goes where the style puts it, for example low and left
   for a lower third.
 
 One undo step.
