@@ -418,18 +418,7 @@ impl Editor {
         }
         .render(self.collapsed("Basic"), rows, cx);
         let mut sections = vec![basic];
-        for title in [
-            "Normalize loudness",
-            "Enhance voice",
-            "Reduce noise",
-            "Isolate voice",
-        ] {
-            sections.push(Section::missing(title, "Not in the engine yet").render(
-                true,
-                Vec::new(),
-                cx,
-            ));
-        }
+        sections.extend(self.voice_sections(&segment, cx));
         div()
             .flex()
             .flex_col()
