@@ -13,10 +13,10 @@ column current.
 
 - **Do not use the Agent tool's `isolation: worktree`** — it creates the
   worktree from the session's directory (`~/git/x`), which is the wrong repo.
-  Each agent creates its own: `git -C /home/user/git/chukcut worktree add
-  /home/user/git/chukcut-<name> -b agent/<name> master` and works only there.
+  Each agent creates its own: `git -C /mnt/data/git/chukcut worktree add
+  /mnt/data/git/chukcut-<name> -b agent/<name> master` and works only there.
 - Read `CLAUDE.md`, `docs/reference/capcut/README.md`, this file.
-- Screenshots of CapCut: `/home/user/git/chukcut/docs/reference/capcut/*.png`
+- Screenshots of CapCut: `/mnt/data/git/chukcut/docs/reference/capcut/*.png`
   (local only, gitignored — never commit them).
 - Test visually only on a private display:
   `Xvfb :NN -screen 0 1920x1080x24 &` and
@@ -71,7 +71,7 @@ column current.
 
 1. **[merged]** **Masks, chroma key, blend modes** — shape masks per clip (rect, ellipse, linear, mirror, heart/star, feather, invert, keyframable), green-screen chroma key with spill suppression, the inspector's blend modes (drawn disabled today). CapCut has all three.
 2. **[merged]** **Audio tools** — voiceover recording (cpal input), EQ / compressor / reverb per clip, auto-ducking music under speech (uses the speech/VAD work), pitch-preserving time stretch (signalsmith-stretch or similar permissive lib) so speed-curved clips keep their sound.
-3. **[stopped by the owner mid-work, 2026-10-03: agent/mlworker has partial, uncommitted work in /home/user/git/chukcut-mlworker]** **ML worker process** (docs/research/ml-features.md architecture): `chukcut-ml-worker` on `ort` with CUDA/OpenVINO EPs; first models: YuNet faces (auto-reframe), VitTrack (tracking T2), RVM or BiRefNet-lite person segmentation (local background removal; check licences — GPL is fine for us).
+3. **[stopped by the owner mid-work, 2026-10-03: agent/mlworker has partial, uncommitted work in /mnt/data/git/chukcut-mlworker]** **ML worker process** (docs/research/ml-features.md architecture): `chukcut-ml-worker` on `ort` with CUDA/OpenVINO EPs; first models: YuNet faces (auto-reframe), VitTrack (tracking T2), RVM or BiRefNet-lite person segmentation (local background removal; check licences — GPL is fine for us).
 4. **[merged]** **Export presets and queue** (+ full CLI/MCP coverage; open: quit guard while the queue runs, queue not persisted) — TikTok/Reels/Shorts/YouTube presets, a queue, remember last settings, fix the size estimate; batch export from the CLI.
 5. **Compound clips / nested sequences**, multi-timeline projects (CapCut "Timeline 01").
 6. **Animated stickers** (Lottie via velato on the shared wgpu device) and Noto animated emoji.
@@ -87,8 +87,8 @@ column current.
 
 ## Open for the next session (2026-10-03)
 
-- **Restart rule:** agents share one `CARGO_TARGET_DIR` (or delete their `target/` right after their branch merges); check `df -h /` before launching.
-- **ML worker** (backlog 3): partial, uncommitted work in `/home/user/git/chukcut-mlworker` (branch agent/mlworker) — review it, commit or redo.
+- **Moved to the data disk (2026-10-04):** the repository, its worktrees, `~/.cargo` and `~/.rustup` now live on `/mnt/data` (1.8 TB, separate from the system disk); the old paths are symlinks. Worktrees go to `/mnt/data/git/chukcut-<name>`. Each keeps its own `target/`; the lead deletes the worktree after its branch merges. Check `df -h /mnt/data` before launching.
+- **ML worker** (backlog 3): partial, uncommitted work in `/mnt/data/git/chukcut-mlworker` (branch agent/mlworker) — review it, commit or redo.
 - **Release build is stale:** rebuild `cargo build --release -p chukcut`; the running binary predates the alpha fixes (d9d86dd, agent/alpha merge).
 - **CI:** green after the font fix (runs 37142894595, 37144217430 passed on 2026-10-03).
 - **Dependabot PRs** (rust-minor group, ffmpeg-next 9.0) are unreviewed; ffmpeg-next 9 needs a build + full test run before merging.
