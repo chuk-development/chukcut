@@ -56,6 +56,10 @@ pub(crate) struct CaptionsPanel {
     job: Option<Job>,
     /// The caption whose words are in `text`.
     editing: Option<String>,
+    /// What `text` was last filled with. A caption can change elsewhere (the
+    /// timeline's inline editor) while the field still shows its old words;
+    /// a commit of untouched words must not write those back.
+    shown: String,
     /// Style edits go to every caption, or only to the selected one.
     style_all: bool,
     emoji_open: bool,
@@ -139,6 +143,7 @@ impl CaptionsPanel {
             testing: false,
             job: None,
             editing: None,
+            shown: String::new(),
             style_all: true,
             emoji_open: false,
             emoji_category: 0,
@@ -466,6 +471,7 @@ impl Editor {
             .text(&segment.material_id)
             .map(|m| m.content.replace('\n', " "))
             .unwrap_or_default();
+        self.captions.shown = text.clone();
         self.captions
             .text
             .update(cx, |s, cx| s.set_value(text, window, cx));
@@ -490,12 +496,18 @@ impl Editor {
             return;
         };
         let typed = self.captions.text.read(cx).value().to_string();
+        if typed == self.captions.shown {
+            return;
+        }
         let lines = material.content.lines().count().max(1);
         let text = rewrap(&typed, lines);
         if text.trim().is_empty() || text == material.content {
             return;
         }
         let result = caption_commands::captions_set_text(&self.state, &id, &text).map(|_| ());
+        if result.is_ok() {
+            self.captions.shown = typed;
+        }
         self.refresh(cx);
         self.report(result, cx);
     }
@@ -528,9 +540,11 @@ impl Editor {
         let result = caption_commands::captions_set_text(&self.state, &id, &text).map(|_| ());
         self.refresh(cx);
         if self.captions.editing.as_deref() == Some(id.as_str()) {
+            self.captions.shown = text.replace('\n', " ");
+            let shown = self.captions.shown.clone();
             self.captions
                 .text
-                .update(cx, |s, cx| s.set_value(text.replace('\n', " "), window, cx));
+                .update(cx, |s, cx| s.set_value(shown, window, cx));
         }
         self.report(result, cx);
     }
