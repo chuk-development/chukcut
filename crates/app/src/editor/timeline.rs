@@ -2741,40 +2741,44 @@ impl Editor {
             }),
             _ => None,
         };
-        // A dragged clip's link partners go along in time on their own lanes,
-        // as the drop will move them.
-        let partner_shift: Option<(Vec<String>, Micros)> = match &self.timeline.drag {
+        // Where a dragged selection, and the clips linked to a dragged clip,
+        // will land: the drop's own arithmetic, so the ghost is the result.
+        let ghosts: Vec<batch::Place> = match &self.timeline.drag {
             Some(Drag::Clip {
                 segment_id,
                 moved: true,
-                start,
+                origin_track,
                 origin_start,
+                track,
+                start,
                 group,
+                new_lane: false,
                 ..
             }) => {
-                let mut moving = group.clone();
-                moving.push(segment_id.clone());
-                let groups: Vec<&String> = moving
-                    .iter()
-                    .filter_map(|id| self.project.link_group_of(id))
-                    .collect();
-                let partners: Vec<String> = self
-                    .project
-                    .tracks
-                    .iter()
-                    .flat_map(|t| t.segments.iter())
-                    .filter(|s| !moving.contains(&s.id))
-                    .filter(|s| {
-                        self.project
-                            .materials
-                            .link_of(s)
-                            .is_some_and(|g| groups.contains(&g))
-                    })
-                    .map(|s| s.id.clone())
-                    .collect();
-                (!partners.is_empty()).then_some((partners, start - origin_start))
+                let places = if group.is_empty() {
+                    vec![batch::Place::new(segment_id, track, *start)]
+                } else {
+                    let mut ids = vec![segment_id.clone()];
+                    ids.extend(group.iter().cloned());
+                    let to_lane = (track != origin_track).then_some(track.as_str());
+                    let magnet = self.magnet_lane();
+                    batch::group_places(
+                        &self.project,
+                        &ids,
+                        start - origin_start,
+                        to_lane,
+                        magnet.as_deref(),
+                    )
+                    .unwrap_or_default()
+                };
+                let mut all = batch::with_partners(&self.project, &places);
+                // A single clip draws itself where the pointer has it.
+                if group.is_empty() {
+                    all.retain(|p| p.segment_id != *segment_id);
+                }
+                all
             }
-            _ => None,
+            _ => Vec::new(),
         };
         for row in rows {
             let track = &project.tracks[row.track];
@@ -2801,7 +2805,9 @@ impl Editor {
                         start,
                         new_lane,
                         ..
-                    }) if *segment_id == segment.id => {
+                    }) if *segment_id == segment.id
+                        && !ghosts.iter().any(|g| g.segment_id == segment.id) =>
+                    {
                         let ghost = new_lane.then(|| self.new_lane_row(track.kind)).flatten();
                         if let Some((ghost_top, ghost_height)) = ghost {
                             top = ghost_top;
@@ -2813,23 +2819,19 @@ impl Editor {
                         target.start = *start;
                         dragged = true;
                     }
-                    Some(Drag::Clip {
-                        moved: true,
-                        track: to,
-                        start,
-                        origin_track,
-                        origin_start,
-                        group,
-                        ..
-                    }) if group.contains(&segment.id) => {
-                        if to != origin_track {
-                            if let Some(to_row) = self.row_of(to) {
-                                top = to_row.top;
-                                height = to_row.height;
+                    Some(Drag::Clip { .. })
+                        if ghosts.iter().any(|g| g.segment_id == segment.id) =>
+                    {
+                        if let Some(ghost) = ghosts.iter().find(|g| g.segment_id == segment.id) {
+                            if ghost.track_id != track.id {
+                                if let Some(to_row) = self.row_of(&ghost.track_id) {
+                                    top = to_row.top;
+                                    height = to_row.height;
+                                }
                             }
+                            target.start = ghost.start;
+                            dragged = true;
                         }
-                        target.start = (target.start + start - origin_start).max(0);
-                        dragged = true;
                     }
                     Some(Drag::Trim {
                         segment_id,
@@ -2839,16 +2841,6 @@ impl Editor {
                     }) if *segment_id == segment.id => {
                         target = *live_target;
                         source = *live_source;
-                    }
-                    Some(Drag::Clip { .. })
-                        if partner_shift
-                            .as_ref()
-                            .is_some_and(|(ids, _)| ids.contains(&segment.id)) =>
-                    {
-                        if let Some((_, shift)) = &partner_shift {
-                            target.start = (target.start + shift).max(0);
-                            dragged = true;
-                        }
                     }
                     Some(Drag::Trim { group, .. })
                         if group.iter().any(|m| m.segment_id == segment.id) =>
@@ -2889,6 +2881,7 @@ impl Editor {
             start,
             new_lane,
             kind,
+            group,
             ..
         }) = &self.timeline.drag
         {
@@ -2906,7 +2899,7 @@ impl Editor {
                         .bg(rgb(ROW_BG))
                         .into_any_element(),
                 );
-            } else if self.timeline.magnet && self.is_main_track(track) {
+            } else if self.timeline.magnet && self.is_main_track(track) && group.is_empty() {
                 if let (Some(lane), Some(row)) = (self.project.track(track), self.row_of(track)) {
                     let duration = self
                         .project

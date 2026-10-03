@@ -212,6 +212,20 @@ pub(crate) fn group_move(
     to_lane: Option<&str>,
     magnet: Option<&str>,
 ) -> Result<Vec<EditCommand>, String> {
+    let places = group_places(project, ids, delta, to_lane, magnet)?;
+    arrange(project, &places, &BTreeSet::new(), &[])
+}
+
+/// Where [`group_move`] puts every clip it moves itself — what the timeline
+/// draws while the selection is dragged. Link partners it leaves to
+/// `arrange` are not in it; [`with_partners`] adds them.
+pub(crate) fn group_places(
+    project: &Project,
+    ids: &[String],
+    delta: Micros,
+    to_lane: Option<&str>,
+    magnet: Option<&str>,
+) -> Result<Vec<Place>, String> {
     let earliest = ids
         .iter()
         .filter_map(|id| project.segment(id))
@@ -245,7 +259,32 @@ pub(crate) fn group_move(
         });
         places = repack_main(project, main, places, &[], &[]);
     }
-    arrange(project, &places, &BTreeSet::new(), &[])
+    Ok(places)
+}
+
+/// `places` and the link partners `arrange` would carry along with them,
+/// each by its clip's distance, on its own lane.
+pub(crate) fn with_partners(project: &Project, places: &[Place]) -> Vec<Place> {
+    let mut out = places.to_vec();
+    for place in places {
+        let Some((_, segment)) = project.segment(&place.segment_id) else {
+            continue;
+        };
+        let delta = place.start - segment.target_range.start;
+        let Some(group) = project.link_group_of(&place.segment_id) else {
+            continue;
+        };
+        for (track, _, partner) in project.link_members(group) {
+            if delta != 0 && !out.iter().any(|p| p.segment_id == partner.id) {
+                out.push(Place::new(
+                    &partner.id,
+                    &track.id,
+                    partner.target_range.start + delta,
+                ));
+            }
+        }
+    }
+    out
 }
 
 /// Put the main lane back together after a batch: every clip that ends up on
@@ -613,6 +652,18 @@ pub(crate) mod tests {
             project.segment(&sound).unwrap().1.target_range.start,
             picture
         );
+    }
+
+    #[test]
+    fn the_ghost_of_a_drag_carries_the_partners() {
+        let (mut project, ids) = project(&[1_000_000, 1_000_000]);
+        let sound = with_sound(&mut project, &ids[0]);
+        let main = project.tracks[0].id.clone();
+        let places = vec![Place::new(&ids[0], &main, 1_500_000)];
+        let ghosts = with_partners(&project, &places);
+        let audio = project.tracks[2].id.clone();
+        assert!(ghosts.contains(&Place::new(&sound, &audio, 1_500_000)));
+        assert_eq!(ghosts.len(), 2);
     }
 
     #[test]
