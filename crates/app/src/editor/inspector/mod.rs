@@ -158,8 +158,8 @@ impl Prop {
             Prop::Speed => spec("Speed", 0.1, 100.0, 0.1, 1.0, 2, "x", true),
             Prop::Duration => spec("Duration", 0.01, 36000.0, 0.1, 0.0, 1, "s", false),
             Prop::Volume => spec("Volume", MIN_DB, 12.0, 0.1, 0.0, 1, "dB", true),
-            Prop::FadeIn => missing(spec("Fade in", 0.0, 10.0, 0.1, 0.0, 1, "s", true)),
-            Prop::FadeOut => missing(spec("Fade out", 0.0, 10.0, 0.1, 0.0, 1, "s", true)),
+            Prop::FadeIn => spec("Fade in", 0.0, 10.0, 0.1, 0.0, 1, "s", true),
+            Prop::FadeOut => spec("Fade out", 0.0, 10.0, 0.1, 0.0, 1, "s", true),
             Prop::Temperature => colour("Temperature", -100.0),
             Prop::Tint => missing(colour("Tint", -100.0)),
             Prop::Saturation => colour("Saturation", -100.0),
@@ -189,7 +189,9 @@ impl Prop {
             Prop::PosY => &[A::PositionY],
             Prop::Rotation => &[A::Rotation],
             Prop::Opacity => &[A::Opacity],
-            Prop::Volume => &[A::Volume],
+            // No diamond on volume: the `Volume` keyframe track is the fade
+            // envelope (it multiplies the clip volume), owned by the fade rows
+            // and the timeline's fade handles.
             _ => &[],
         }
     }
@@ -261,6 +263,96 @@ enum Change {
 enum Phase {
     Preview,
     Commit,
+}
+
+/// The fade-in and fade-out lengths a clip's `Volume` envelope describes, read
+/// by pattern: a fade-in is a first keyframe at 0 with value 0 followed by a
+/// 1, a fade-out the mirror at the end. Anything else is no fade.
+fn fades(segment: &Segment) -> (Micros, Micros) {
+    let Some(track) = segment
+        .keyframes
+        .iter()
+        .find(|t| t.property == AnimatableProperty::Volume)
+    else {
+        return (0, 0);
+    };
+    let k = track.keyframes.as_slice();
+    let len = segment.target_range.duration;
+    let near = |a: f32, b: f32| (a - b).abs() < 1e-3;
+    let fade_in = match k {
+        [first, second, ..]
+            if first.time == 0 && near(first.value, 0.0) && near(second.value, 1.0) =>
+        {
+            second.time
+        }
+        _ => 0,
+    };
+    let fade_out = match k {
+        [.., before, last]
+            if last.time == len && near(last.value, 0.0) && near(before.value, 1.0) =>
+        {
+            len - before.time
+        }
+        _ => 0,
+    };
+    (fade_in, fade_out)
+}
+
+/// Rewrite the `Volume` envelope as the two fades: every keyframe on it goes
+/// and the ramps are put back, as one undo step. The panel owns the envelope;
+/// the UI has no other volume automation.
+fn fade_command(
+    segment: &Segment,
+    fade_in: Micros,
+    fade_out: Micros,
+) -> Result<EditCommand, String> {
+    use AnimatableProperty as A;
+    let len = segment.target_range.duration;
+    let fade_in = fade_in.clamp(0, len);
+    let fade_out = fade_out.clamp(0, len - fade_in);
+    let mut commands: Vec<EditCommand> = segment
+        .keyframes
+        .iter()
+        .filter(|t| t.property == A::Volume)
+        .flat_map(|t| t.keyframes.iter())
+        .map(|&keyframe| EditCommand::RemoveKeyframe {
+            segment_id: segment.id.clone(),
+            property: A::Volume,
+            keyframe,
+        })
+        .collect();
+    let mut points: Vec<(Micros, f32)> = Vec::new();
+    if fade_in > 0 {
+        points.push((0, 0.0));
+        points.push((fade_in, 1.0));
+    }
+    if fade_out > 0 {
+        let apex = len - fade_out;
+        if points.last().map(|p| p.0) != Some(apex) {
+            points.push((apex, 1.0));
+        }
+        points.push((len, 0.0));
+    }
+    commands.extend(
+        points
+            .into_iter()
+            .map(|(time, value)| EditCommand::AddKeyframe {
+                segment_id: segment.id.clone(),
+                property: A::Volume,
+                keyframe: Keyframe {
+                    time,
+                    value,
+                    easing: Easing::Linear,
+                },
+            }),
+    );
+    if commands.is_empty() {
+        return Err("the clip has no fade to remove".into());
+    }
+    Ok(EditCommand::Composite {
+        label: "Change fade".into(),
+        commands,
+    })
 }
 
 fn db_to_gain(db: f32) -> f32 {
@@ -359,7 +451,9 @@ impl Editor {
             Prop::Opacity => anim(A::Opacity, t.opacity) * 100.0,
             Prop::Speed => segment.speed,
             Prop::Duration => segment.target_range.duration as f32 / 1_000_000.0,
-            Prop::Volume => gain_to_db(anim(A::Volume, segment.volume)),
+            Prop::Volume => gain_to_db(segment.volume),
+            Prop::FadeIn => fades(segment).0 as f32 / 1_000_000.0,
+            Prop::FadeOut => fades(segment).1 as f32 / 1_000_000.0,
             Prop::Temperature => colour.map_or(0.0, |c| c.temperature * 100.0),
             Prop::Saturation => colour.map_or(0.0, |c| (c.saturation - 1.0) * 100.0),
             Prop::Brightness => colour.map_or(0.0, |c| c.brightness * 100.0),
@@ -424,6 +518,21 @@ impl Editor {
                 }
                 let speed = segment.source_range.duration as f64 / duration;
                 Ok(Change::Speed(speed as f32))
+            }
+            Prop::Volume => Ok(Change::Edit(EditCommand::SetVolume {
+                segment_id: segment.id.clone(),
+                before: segment.volume,
+                after: db_to_gain(value).clamp(0.0, 4.0),
+            })),
+            Prop::FadeIn | Prop::FadeOut => {
+                let (fade_in, fade_out) = fades(segment);
+                let wanted = (value as f64 * 1_000_000.0).round() as Micros;
+                let (fade_in, fade_out) = if prop == Prop::FadeIn {
+                    (wanted, fade_out)
+                } else {
+                    (fade_in, wanted)
+                };
+                Ok(Change::Edit(fade_command(segment, fade_in, fade_out)?))
             }
             Prop::Temperature | Prop::Saturation | Prop::Brightness | Prop::Contrast => {
                 let current = project.materials.color_adjust_of(segment);

@@ -408,11 +408,6 @@ impl Editor {
             self.slider_row(Prop::Volume, &segment, window, cx),
             self.slider_row(Prop::FadeIn, &segment, window, cx),
             self.slider_row(Prop::FadeOut, &segment, window, cx),
-            div()
-                .text_xs()
-                .text_color(rgb(DISABLED))
-                .child("Fades are not in the engine yet.")
-                .into_any_element(),
         ];
         let basic = Section {
             checkbox: Some(true),
