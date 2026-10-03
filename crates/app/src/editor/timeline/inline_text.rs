@@ -18,6 +18,7 @@ use chukcut_engine::modules::captions::edit as caption_edit;
 use chukcut_engine::modules::project::{Project, TrackKind};
 use chukcut_engine::modules::text::commands as text_commands;
 use gpui::component::input::{Escape, InputEvent, Textarea, TextareaState};
+use gpui::component::Sizable as _;
 use gpui::{Entity, Subscription};
 
 use super::*;
