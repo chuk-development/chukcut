@@ -108,6 +108,10 @@ pub fn project_save(state: &Arc<AppState>, path: Option<String>) -> Result<Strin
     let project = state.project.read().clone().ok_or("no project is open")?;
     write_project(&target, &project)?;
     *state.project_path.write() = Some(target.clone());
+    // Freeze-frame stills this session made and nothing reaches any more —
+    // not this document, not undo or redo, not a file saved earlier.
+    crate::modules::timeline::freeze::note_saved(&target);
+    crate::modules::timeline::freeze::sweep_unused(Some(&project), Some(&state.history.read()));
     // The working copy follows the save, so that a restart after "Save as"
     // restores the session pointing at the new file rather than the old one.
     super::autosave::schedule(&project, Some(target.clone()));
@@ -536,6 +540,9 @@ pub fn project_path(state: &Arc<AppState>) -> Option<String> {
 /// The working copy surviving a session is how the next launch knows the
 /// session crashed, so every clean way out must come through here.
 pub fn project_close(state: &Arc<AppState>, exiting: bool) {
+    // The document and its history go now; a still is kept only if a saved
+    // project file still names it.
+    crate::modules::timeline::freeze::sweep_unused(None, None);
     *state.project.write() = None;
     *state.project_path.write() = None;
     state.history.write().clear();

@@ -221,6 +221,21 @@ impl DocumentHistory {
         self.redo_stack.last().map(DocumentCommand::label)
     }
 
+    /// Whether a timeline edit on either stack contains `needle` in its JSON
+    /// form — how the freeze-frame sweep asks "could redo still need this
+    /// file?". Linear in the history; called on save and close only.
+    pub fn mentions(&self, needle: &str) -> bool {
+        self.undo_stack
+            .iter()
+            .chain(self.redo_stack.iter())
+            .any(|command| match command {
+                DocumentCommand::Edit(edit) => serde_json::to_string(edit)
+                    .map(|json| json.contains(needle))
+                    .unwrap_or(true),
+                _ => false,
+            })
+    }
+
     /// Drop all history. Called when a different project is opened.
     pub fn clear(&mut self) {
         self.undo_stack.clear();

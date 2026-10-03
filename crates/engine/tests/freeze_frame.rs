@@ -54,3 +54,72 @@ fn the_still_is_the_frame_under_the_playhead() {
     history.undo(&mut project).unwrap();
     assert_eq!(serde_json::to_string(&project).unwrap(), before);
 }
+
+#[test]
+fn a_still_gets_a_name_the_library_can_show() {
+    use chukcut_engine::modules::timeline::freeze::{freeze_output_path_for, FreezeSource};
+    let path = freeze_output_path_for(&FreezeSource {
+        path: "/footage/beach take.mp4".into(),
+        source_time: 62_150_000,
+    });
+    let name = path.file_name().unwrap().to_string_lossy().into_owned();
+    assert!(
+        name.starts_with("beach take frame 1m02.150s "),
+        "named {name}"
+    );
+    assert!(name.ends_with(".png"));
+    let again = freeze_output_path_for(&FreezeSource {
+        path: "/footage/beach take.mp4".into(),
+        source_time: 62_150_000,
+    });
+    assert_ne!(path, again, "two freezes of one frame are two files");
+}
+
+#[test]
+fn unused_stills_are_deleted_and_reachable_ones_kept() {
+    use chukcut_engine::modules::project::document::ImageMaterial;
+    use chukcut_engine::modules::timeline::freeze::{note_created, note_saved, sweep_unused};
+
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("freeze_sweep");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = |name: &str| {
+        let path = dir.join(name);
+        std::fs::write(&path, b"png").unwrap();
+        note_created(&path);
+        path
+    };
+    let in_document = file("in document.png");
+    let in_saved = file("in saved.png");
+    let orphan = file("orphan.png");
+
+    let mut project =
+        chukcut_engine::modules::project::document::Project::new("sweep", Default::default(), 30.0);
+    project.materials.images.push(ImageMaterial {
+        id: "still".into(),
+        path: in_document.to_string_lossy().into_owned(),
+        width: 1,
+        height: 1,
+    });
+    // A project saved earlier in the session that still names the second.
+    let saved = dir.join("earlier.chukcut");
+    std::fs::write(
+        &saved,
+        format!(
+            "{{\"path\": {}}}",
+            serde_json::to_string(&in_saved.to_string_lossy()).unwrap()
+        ),
+    )
+    .unwrap();
+    note_saved(&saved);
+
+    sweep_unused(Some(&project), None);
+    assert!(in_document.exists(), "the open document uses it");
+    assert!(in_saved.exists(), "a saved project uses it");
+    assert!(!orphan.exists(), "nothing reaches it");
+
+    // On close the document is gone: only the saved file keeps its still.
+    sweep_unused(None, None);
+    assert!(!in_document.exists());
+    assert!(in_saved.exists());
+}

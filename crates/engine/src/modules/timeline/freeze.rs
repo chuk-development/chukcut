@@ -108,6 +108,111 @@ pub fn freeze_output_path() -> PathBuf {
     crate::modules::workspace::paths::freeze_frames_dir().join(format!("{}.png", new_id()))
 }
 
+/// Where the freeze frame of `source` goes, under a name the media library
+/// can show: the source file's name and the frame's time, then a short
+/// unique tail so two freezes of one frame never share a file.
+/// `take frame 0m02.150s 1a2b3c4d.png`.
+pub fn freeze_output_path_for(source: &FreezeSource) -> PathBuf {
+    let stem = Path::new(&source.path)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "clip".into());
+    // A file name, not a path: no separators, and not so long that the
+    // library has nothing but the stem to show.
+    let stem: String = stem
+        .chars()
+        .map(|c| if c == '/' || c == '\\' { '_' } else { c })
+        .take(60)
+        .collect();
+    let millis = source.source_time.max(0) / 1_000;
+    let (minutes, millis) = (millis / 60_000, millis % 60_000);
+    let id = new_id();
+    let tail: String = id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .take(8)
+        .collect();
+    crate::modules::workspace::paths::freeze_frames_dir().join(format!(
+        "{stem} frame {minutes}m{:02}.{:03}s {tail}.png",
+        millis / 1_000,
+        millis % 1_000
+    ))
+}
+
+/// The stills "Freeze frame" wrote in this process. Only these are ever
+/// deleted by [`sweep_unused`]: the directory is shared by every project, and
+/// a still made in an earlier session may belong to a project that is not
+/// open.
+fn created() -> &'static parking_lot::Mutex<std::collections::BTreeSet<PathBuf>> {
+    static CREATED: std::sync::OnceLock<parking_lot::Mutex<std::collections::BTreeSet<PathBuf>>> =
+        std::sync::OnceLock::new();
+    CREATED.get_or_init(Default::default)
+}
+
+/// Project files saved in this process. A still is kept while any of them
+/// names it, so "Save as" to a second file cannot strand the first one.
+fn saved_files() -> &'static parking_lot::Mutex<std::collections::BTreeSet<PathBuf>> {
+    static SAVED: std::sync::OnceLock<parking_lot::Mutex<std::collections::BTreeSet<PathBuf>>> =
+        std::sync::OnceLock::new();
+    SAVED.get_or_init(Default::default)
+}
+
+/// Record a still this process wrote.
+pub fn note_created(path: &Path) {
+    created().lock().insert(path.to_path_buf());
+}
+
+/// Record a project file this process wrote.
+pub fn note_saved(path: &Path) {
+    saved_files().lock().insert(path.to_path_buf());
+}
+
+/// Delete the stills this process made that nothing can reach any more: not
+/// the open `document`, not a command in `history` (redo still needs a still
+/// that undo took out), and not a project file saved in this process.
+/// Returns how many files went. Called on save and on close.
+pub fn sweep_unused(
+    document: Option<&Project>,
+    history: Option<&crate::state::DocumentHistory>,
+) -> usize {
+    let candidates: Vec<PathBuf> = created().lock().iter().cloned().collect();
+    if candidates.is_empty() {
+        return 0;
+    }
+    let saved: Vec<String> = saved_files()
+        .lock()
+        .iter()
+        .filter_map(|p| std::fs::read_to_string(p).ok())
+        .collect();
+    let mut removed = 0;
+    for path in candidates {
+        let text = path.to_string_lossy();
+        // How the path appears inside JSON, for the saved files and the
+        // history, which are searched as text.
+        let quoted = serde_json::to_string(text.as_ref()).unwrap_or_default();
+        let in_document =
+            document.is_some_and(|p| p.materials.images.iter().any(|m| m.path == text));
+        let in_history = history.is_some_and(|h| h.mentions(&quoted));
+        let in_saved = saved.iter().any(|s| s.contains(&quoted));
+        if in_document || in_history || in_saved {
+            continue;
+        }
+        match std::fs::remove_file(&path) {
+            Ok(()) => removed += 1,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                tracing::warn!(path = %path.display(), "cannot delete an unused freeze frame: {e}");
+                continue;
+            }
+        }
+        created().lock().remove(&path);
+    }
+    if removed > 0 {
+        tracing::info!(removed, "deleted unused freeze frames");
+    }
+    removed
+}
+
 /// The one edit that freezes `segment_id` at `at` for `duration`, showing
 /// `image` in the gap.
 ///

@@ -164,7 +164,9 @@ pub fn timeline_freeze_frame(
         let project = guard.as_ref().ok_or("no project is open")?;
         super::freeze::freeze_source(project, &segment_id, at)?
     };
-    let image = super::freeze::extract_frame(&source, &super::freeze::freeze_output_path())?;
+    let output = super::freeze::freeze_output_path_for(&source);
+    let image = super::freeze::extract_frame(&source, &output)?;
+    super::freeze::note_created(&output);
     {
         let mut project_guard = state.project.write();
         let project = project_guard.as_mut().ok_or("no project is open")?;
