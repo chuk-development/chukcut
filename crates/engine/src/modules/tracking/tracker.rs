@@ -249,7 +249,13 @@ impl Tracker {
                 cy: position.1,
                 w: ease(prior.w, w0 * size),
                 h: ease(prior.h, h0 * size),
-                angle: flow.map_or(prior.angle, |(p, _)| p.angle),
+                // Only a confident fit turns the box: on a flat-coloured
+                // object the flow's rotation is noise around a round edge,
+                // and noise added up frame after frame becomes a spin.
+                angle: match flow {
+                    Some((p, quality)) if quality >= 0.5 => p.angle,
+                    _ => prior.angle,
+                },
             };
             Some((pose, 0.3 * quality + 0.7 * confidence))
         } else {

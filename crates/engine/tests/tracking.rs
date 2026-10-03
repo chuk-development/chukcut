@@ -270,6 +270,15 @@ fn a_moving_disc_is_tracked_through_a_real_clip() {
     assert_eq!(lost, 0);
     assert!(mean < 3.0, "mean error {mean} px");
     assert!(worst < 8.0, "worst error {worst} px");
+    // A disc does not turn: whatever the flow makes of its round edge must
+    // not add up to a visible rotation.
+    let turned = outcome
+        .samples
+        .iter()
+        .map(|s| s.a.abs())
+        .fold(0.0f32, f32::max);
+    eprintln!("largest rotation {turned:.2}°");
+    assert!(turned < 5.0, "the disc turned by {turned}°");
     // A disc does not grow: the scale stays put.
     let first = outcome.samples[0];
     for s in &outcome.samples {
