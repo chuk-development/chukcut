@@ -1245,3 +1245,90 @@ fn a_transition_carries_each_side_s_effects_into_its_layer() {
         }
     }
 }
+
+#[test]
+fn a_library_transition_renders_through_the_compositor_and_the_export_agrees() {
+    use crate::modules::project::document::TransitionMaterial;
+    let c = gpu!();
+    let mut p = one_clip(64, 48);
+    add_video(&mut p, "b", 64, 48);
+    p.tracks[0].segments[0].target_range = TimeRange::new(0, 2_000_000);
+    p.tracks[0].segments[0].source_range = TimeRange::new(0, 2_000_000);
+    let mut right = segment("r", "b", 2_000_000, 2_000_000);
+    for preset in ["seamless:zoom_in", "gl:cube", "gl:wipeleft"] {
+        right.extras.clear();
+        p.materials.transitions.clear();
+        let t = TransitionMaterial::library(preset, 1_000_000);
+        right.extras.push(t.id.clone());
+        p.materials.transitions.push(t);
+        if p.tracks[0].segments.len() == 1 {
+            p.tracks[0].segments.push(right.clone());
+        } else {
+            p.tracks[0].segments[1] = right.clone();
+        }
+        let provider = Provider::default()
+            .with("clip", flat(64, 48, [220, 60, 40, 255]))
+            .with("b", flat(64, 48, [30, 90, 220, 255]));
+        let at = 2_000_000;
+        let preview = c.render(&p, at, (64, 48), &provider).expect("preview");
+        let Ok(export) = c.render_nv12(&p, at, (64, 48), &provider) else {
+            eprintln!("skipping: no RGBA to NV12 compute pass on this device");
+            return;
+        };
+        // Mid-window, neither clip alone fills the frame.
+        let mut saw = [false, false];
+        for px in preview.data.chunks(4) {
+            saw[0] |= px[0] > 150;
+            saw[1] |= px[2] > 150;
+        }
+        assert!(saw[0] || saw[1], "{preset}: a blank frame");
+        for (x, y) in [(2u32, 2u32), (32, 24), (60, 44)] {
+            let pp = preview.pixel(x, y);
+            let (cb, cr) = export.chroma(x, y);
+            let yy = (export.luma(x, y) as f32 - 16.0) * (255.0 / 219.0);
+            let cb = (cb as f32 - 128.0) * (255.0 / 224.0);
+            let cr = (cr as f32 - 128.0) * (255.0 / 224.0);
+            let rgb = [
+                yy + 1.402 * cr,
+                yy - 0.344_136 * cb - 0.714_136 * cr,
+                yy + 1.772 * cb,
+            ];
+            for ch in 0..3 {
+                assert!(
+                    (pp[ch] as f32 - rgb[ch].clamp(0.0, 255.0)).abs() <= 12.0,
+                    "{preset} at ({x},{y}): preview {pp:?} export {rgb:?}"
+                );
+            }
+        }
+    }
+}
+
+/// What a frame costs with effects on it, for STATUS. Not a gate: run with
+/// `--ignored --nocapture` on a quiet machine.
+#[test]
+#[ignore]
+fn measure_effect_cost_per_frame() {
+    let c = gpu!();
+    let (w, h) = (1080u32, 1920u32);
+    let provider = Provider::default().with("clip", gradient(w, h));
+    let time = |p: &Project| {
+        for _ in 0..3 {
+            render(&c, p, 500_000, &provider);
+        }
+        let started = std::time::Instant::now();
+        for i in 0..20 {
+            render(&c, p, 500_000 + i * 33_333, &provider);
+        }
+        started.elapsed().as_secs_f64() * 1000.0 / 20.0
+    };
+    let base = time(&one_clip(w, h));
+    println!("1080x1920, no effect: {base:.1} ms/frame (render + readback)");
+    for kind in catalog::catalog().iter().map(|d| d.id) {
+        let mut p = one_clip(w, h);
+        attach(&mut p, "s", effect(kind, &[], 1));
+        if FxInstance::resolve(&p.materials.effects[0], 0, None).is_none() {
+            continue;
+        }
+        println!("  + {kind}: {:.1} ms/frame", time(&p) - base);
+    }
+}
