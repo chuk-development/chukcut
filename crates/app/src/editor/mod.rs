@@ -341,10 +341,8 @@ impl Editor {
     }
 
     fn on_delete(&mut self, _: &DeleteSelected, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(id) = self.selected.take() else {
-            return;
-        };
-        self.remove_clip(&id, cx);
+        // The timeline owns what is selected: clips, a keyframe, a transition.
+        self.delete_selection(cx);
     }
 
     fn on_undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {

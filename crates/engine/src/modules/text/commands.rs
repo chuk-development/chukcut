@@ -133,6 +133,29 @@ pub fn text_set(state: &Arc<AppState>, material: TextMaterial) -> Result<EditRes
     respond(&state)
 }
 
+/// Copy a title's material under a fresh id and return that id.
+///
+/// What a pasted or duplicated title needs: two clips naming one material
+/// would make editing one title's words edit the other's. The material goes
+/// into the pool directly, for the reason [`text_add`] gives — a material
+/// nothing references is inert — and the clip that names it is inserted
+/// through `History::apply` by the caller, so the paste itself undoes.
+pub fn text_duplicate(state: &Arc<AppState>, material_id: String) -> Result<String, String> {
+    let mut guard = state.project.write();
+    let project = guard.as_mut().ok_or("no project is open")?;
+    let mut copy = project
+        .materials
+        .texts
+        .iter()
+        .find(|m| m.id == material_id)
+        .cloned()
+        .ok_or_else(|| format!("no title with the id {material_id}"))?;
+    copy.id = crate::modules::project::new_id();
+    let id = copy.id.clone();
+    project.materials.texts.push(copy);
+    Ok(id)
+}
+
 /// The reply to an edit, with the working copy written on the way out.
 ///
 /// A copy of `timeline::commands::respond`, which is private to that module.
