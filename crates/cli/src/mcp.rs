@@ -75,6 +75,13 @@ const OPEN_WORLD: &[&str] = &[
     "stock_kinds",
     "stock_search",
     "stock_download",
+    "sound",
+    "fal",
+    "sticker",
+    "music",
+    "sfx",
+    "title_font",
+    "catalog",
 ];
 
 type Out = Arc<Mutex<std::io::Stdout>>;
