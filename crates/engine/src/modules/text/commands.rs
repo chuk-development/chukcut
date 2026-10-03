@@ -182,6 +182,28 @@ mod tests {
     use super::*;
     use crate::modules::project::document::{CanvasConfig, Project};
 
+    /// A duplicated title is a second, equal material under its own id, so a
+    /// pasted title can be edited without editing the one it came from.
+    #[test]
+    fn duplicating_a_title_mints_an_equal_material_under_a_new_id() {
+        let state = AppState::new();
+        let mut project = Project::new("t", CanvasConfig::default(), 30.0);
+        let mut original = super::edit::default_material(&project, Some("Hello".into()));
+        original.font_size = 77.0;
+        let id = original.id.clone();
+        project.materials.texts.push(original);
+        *state.project.write() = Some(project);
+
+        let copy = text_duplicate(&state, id.clone()).expect("duplicated");
+        assert_ne!(copy, id);
+        let texts = state.with_project(|p| p.materials.texts.clone()).unwrap();
+        assert_eq!(texts.len(), 2);
+        let made = texts.iter().find(|m| m.id == copy).expect("in the pool");
+        assert_eq!(made.content, "Hello");
+        assert_eq!(made.font_size, 77.0);
+        assert!(text_duplicate(&state, "nope".into()).is_err());
+    }
+
     /// `TextAdded` is flattened, and the frontend's type says so.
     ///
     /// `src/modules/text/lib/api.ts` declares `interface TextAdded extends
