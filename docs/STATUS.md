@@ -2173,6 +2173,14 @@ nothing else in the system would say so.
   mouse down in the capture phase, so a click outside a field restores the
   shortcuts; a field under the pointer refocuses itself afterwards.
 
+- **A field focused from a mouse-down handler loses focus again** unless the
+  handler calls `window.prevent_default()`: the editor root tracks focus and
+  takes it in the bubble phase, after the handler. The timeline's inline text
+  box (double-click a title or caption, `timeline/inline_text.rs`) does this.
+  Its "click elsewhere commits" uses `on_mouse_down_out`, because the field's
+  `InputEvent::Blur` did not arrive for a click on the lanes (Xvfb,
+  2026-10-03).
+
 - **Do not drive the app on the shared desktop.** Other sessions run their own
   `chukcut` windows there, and one of them on top of yours swallows the
   clicks — `xdotool mousemove --window` moves the real pointer, so the click
