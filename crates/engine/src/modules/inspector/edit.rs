@@ -34,8 +34,8 @@
 //! pool.
 
 use crate::modules::project::document::{
-    new_id, source_duration_for, ColorAdjustMaterial, Crop, LutRef, Project, Segment, TimeRange,
-    Transform,
+    new_id, source_duration_for, ColorAdjustMaterial, Crop, LutRef, Micros, Project, Segment,
+    TimeRange, TrackKind, Transform,
 };
 use crate::modules::timeline::ops::EditCommand;
 
@@ -465,6 +465,216 @@ fn clip_name_entry<'a>(project: &'a Project, id: &str) -> Option<&'a str> {
         .get(id)
         .and_then(|value| value.get("clip_name"))
         .and_then(|name| name.as_str())
+}
+
+// ---------------------------------------------------------------------------
+// Apply a grade to every clip
+// ---------------------------------------------------------------------------
+
+/// The Adjust tab's "Apply to all": every other picture clip takes the
+/// selected clip's grade, as one undo step.
+///
+/// No material is minted. Colour materials are immutable — every change mints
+/// a fresh one and swaps the reference (see the module docs) — so the other
+/// clips can point at the selected clip's own material, and a later change to
+/// any one of them swings only that clip away from it. A selected clip with no
+/// grade clears everyone's.
+pub fn apply_color_to_all_command(
+    project: &Project,
+    segment_id: &str,
+) -> Result<EditCommand, String> {
+    let (_, source) = project
+        .segment(segment_id)
+        .ok_or_else(|| format!("unknown segment {segment_id}"))?;
+    let grade = project
+        .materials
+        .color_adjust_of(source)
+        .map(|m| m.id.clone());
+
+    let pool = &project.materials;
+    let is_picture = |segment: &Segment| {
+        pool.videos.iter().any(|m| m.id == segment.material_id)
+            || pool.images.iter().any(|m| m.id == segment.material_id)
+    };
+    let mut commands = Vec::new();
+    for track in &project.tracks {
+        for segment in &track.segments {
+            // Only picture lanes: an imported clip's sound sits on an audio
+            // lane as a segment of the same *video* material.
+            if track.kind != TrackKind::Video || segment.id == segment_id || !is_picture(segment) {
+                continue;
+            }
+            let current = pool.color_adjust_of(segment).map(|m| &m.id);
+            if current == grade.as_ref() {
+                continue;
+            }
+            let grade = grade.clone();
+            commands.push(replace_segment(
+                project,
+                &segment.id,
+                "Apply grade to all",
+                move |segment| {
+                    segment.extras.retain(|id| pool.color_adjust(id).is_none());
+                    if let Some(id) = grade {
+                        segment.extras.push(id);
+                    }
+                },
+            )?);
+        }
+    }
+    if commands.is_empty() {
+        return Err("every clip already has this grade".into());
+    }
+    Ok(EditCommand::Composite {
+        label: "Apply grade to all".into(),
+        commands,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Speed
+// ---------------------------------------------------------------------------
+
+/// The speed edit the inspector's Speed tab makes: the clip keeps the part of
+/// its file it shows and becomes shorter or longer on the timeline.
+///
+/// `EditCommand::SetSpeed` alone does the other thing — it keeps the clip's
+/// place and length and reads more or less of the file — which is right for
+/// "paste attributes" but not for a speed slider, where 2x is expected to halve
+/// the clip and 0.5x to double it. So this is a `Composite`:
+///
+/// - every clip linked to the selected one gets the same speed, because a
+///   picture at 2x over its own sound at 1x is out of sync from the first
+///   frame. `History::apply` mirrors moves and trims onto link partners but
+///   not speed, and it does not look inside a `Composite`, so the partners are
+///   named here explicitly;
+/// - each of those clips is `SetSpeed` and then a `TrimSegment` back to its
+///   original source range, which is the new timeline length;
+/// - every later clip on each touched lane moves by the change in length, so a
+///   gap or a butt cut after the clip stays what it was. Growing moves the
+///   later clips first (right to left) so the longer clip has room; shrinking
+///   trims first and then pulls the later clips in (left to right).
+///
+/// One undo step, exactly invertible, built only from existing primitives.
+pub fn set_speed_command(
+    project: &Project,
+    segment_id: &str,
+    speed: f32,
+) -> Result<EditCommand, String> {
+    if !speed.is_finite() || speed <= 0.0 {
+        return Err("speed must be a positive number".into());
+    }
+    let (_, primary) = project
+        .segment(segment_id)
+        .ok_or_else(|| format!("unknown segment {segment_id}"))?;
+
+    let members: Vec<(&crate::modules::project::document::Track, &Segment)> =
+        match project.link_group_of(segment_id) {
+            Some(group) => project
+                .link_members(group)
+                .into_iter()
+                .map(|(track, _, segment)| (track, segment))
+                .collect(),
+            None => vec![project.segment(segment_id).expect("found above")],
+        };
+    if members.iter().all(|(_, segment)| segment.speed == speed) {
+        return Err("the clip already plays at that speed".into());
+    }
+
+    let new_duration = |segment: &Segment| -> Micros {
+        ((segment.source_range.duration as f64 / speed as f64).round() as Micros).max(1)
+    };
+    let delta = new_duration(primary) - primary.target_range.duration;
+
+    let member_ids: std::collections::BTreeSet<&str> =
+        members.iter().map(|(_, s)| s.id.as_str()).collect();
+    let mut moved: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    let mut moves: Vec<EditCommand> = Vec::new();
+    if delta != 0 {
+        let mut push_move = |track: &crate::modules::project::document::Track,
+                             segment: &Segment| {
+            moves.push(EditCommand::MoveSegment {
+                segment_id: segment.id.clone(),
+                from_track: track.id.clone(),
+                to_track: track.id.clone(),
+                from_start: segment.target_range.start,
+                to_start: segment.target_range.start + delta,
+            });
+        };
+        let mut later: Vec<(&crate::modules::project::document::Track, &Segment)> = Vec::new();
+        for (track, member) in &members {
+            let end = member.target_range.end();
+            for segment in &track.segments {
+                if member_ids.contains(segment.id.as_str()) || segment.target_range.start < end {
+                    continue;
+                }
+                if moved.insert(segment.id.as_str()) {
+                    later.push((track, segment));
+                }
+            }
+        }
+        // A later clip's own sound may sit on a lane this edit does not
+        // otherwise touch; it travels with its picture.
+        let mut partners = Vec::new();
+        for (_, segment) in &later {
+            if let Some(group) = project.link_group_of(&segment.id) {
+                for (track, _, partner) in project.link_members(group) {
+                    if !member_ids.contains(partner.id.as_str())
+                        && moved.insert(partner.id.as_str())
+                    {
+                        partners.push((track, partner));
+                    }
+                }
+            }
+        }
+        later.extend(partners);
+        for (track, segment) in later {
+            push_move(track, segment);
+        }
+        let start_of = |command: &EditCommand| match command {
+            EditCommand::MoveSegment { from_start, .. } => *from_start,
+            _ => 0,
+        };
+        if delta > 0 {
+            moves.sort_by_key(|c| std::cmp::Reverse(start_of(c)));
+        } else {
+            moves.sort_by_key(start_of);
+        }
+    }
+
+    let mut retime = Vec::with_capacity(members.len() * 2);
+    for (_, segment) in &members {
+        let after_target = TimeRange::new(segment.target_range.start, new_duration(segment));
+        // What `SetSpeed` leaves behind, which is what the trim starts from.
+        let mid_source = TimeRange::new(
+            segment.source_range.start,
+            source_duration_for(segment.target_range.duration, speed),
+        );
+        retime.push(EditCommand::SetSpeed {
+            segment_id: segment.id.clone(),
+            before: segment.speed,
+            after: speed,
+        });
+        if after_target != segment.target_range {
+            retime.push(EditCommand::TrimSegment {
+                segment_id: segment.id.clone(),
+                before_target: segment.target_range,
+                before_source: mid_source,
+                after_target,
+                after_source: segment.source_range,
+            });
+        }
+    }
+
+    let commands = if delta > 0 {
+        moves.into_iter().chain(retime).collect()
+    } else {
+        retime.into_iter().chain(moves).collect()
+    };
+    Ok(EditCommand::Composite {
+        label: "Change speed".into(),
+        commands,
+    })
 }
 
 #[cfg(test)]
@@ -1079,5 +1289,178 @@ mod tests {
             serde_json::to_string(&project.tracks).unwrap(),
             pristine_tracks
         );
+    }
+}
+
+#[cfg(test)]
+mod speed_tests {
+    use super::*;
+    use crate::modules::project::document::{CanvasConfig, Track, TrackKind};
+    use crate::modules::timeline::History;
+
+    fn clip(material: &str, start: Micros, duration: Micros) -> Segment {
+        Segment {
+            id: new_id(),
+            material_id: material.into(),
+            target_range: TimeRange::new(start, duration),
+            source_range: TimeRange::new(0, duration),
+            render_index: 0,
+            speed: 1.0,
+            volume: 1.0,
+            transform: Transform::default(),
+            crop: None,
+            extras: Vec::new(),
+            keyframes: Vec::new(),
+        }
+    }
+
+    /// Two clips back to back on one video lane, each with its sound linked
+    /// on an audio lane.
+    fn two_linked_clips() -> (Project, [String; 4]) {
+        let mut project = Project::new("t", CanvasConfig::default(), 30.0);
+        let mut video = Track::new(TrackKind::Video, "V1");
+        let mut audio = Track::new(TrackKind::Audio, "A1");
+        let mut ids = Vec::new();
+        for start in [0, 4_000_000] {
+            let group = new_id();
+            project.materials.links.insert(group.clone());
+            let mut v = clip("m", start, 4_000_000);
+            let mut a = clip("m", start, 4_000_000);
+            // What the engine derives from track order on every edit.
+            a.render_index = 1;
+            v.extras.push(group.clone());
+            a.extras.push(group);
+            ids.push(v.id.clone());
+            ids.push(a.id.clone());
+            video.segments.push(v);
+            audio.segments.push(a);
+        }
+        project.tracks.push(video);
+        project.tracks.push(audio);
+        let [v1, a1, v2, a2]: [String; 4] = ids.try_into().expect("four clips");
+        (project, [v1, a1, v2, a2])
+    }
+
+    fn range(project: &Project, id: &str) -> TimeRange {
+        project.segment(id).unwrap().1.target_range
+    }
+
+    #[test]
+    fn slowing_down_lengthens_the_clip_its_sound_and_pushes_what_follows() {
+        let (mut project, [v1, a1, v2, a2]) = two_linked_clips();
+        let pristine = serde_json::to_string(&project.tracks).unwrap();
+        let mut history = History::new();
+
+        let command = set_speed_command(&project, &v1, 0.5).unwrap();
+        history.apply(&mut project, command).unwrap();
+
+        for id in [&v1, &a1] {
+            let (_, segment) = project.segment(id).unwrap();
+            assert_eq!(segment.speed, 0.5);
+            assert_eq!(segment.target_range, TimeRange::new(0, 8_000_000));
+            assert_eq!(segment.source_range, TimeRange::new(0, 4_000_000));
+        }
+        assert_eq!(range(&project, &v2).start, 8_000_000);
+        assert_eq!(range(&project, &a2).start, 8_000_000);
+
+        history.undo(&mut project).unwrap();
+        assert_eq!(serde_json::to_string(&project.tracks).unwrap(), pristine);
+    }
+
+    #[test]
+    fn speeding_up_shortens_the_clip_and_pulls_what_follows() {
+        let (mut project, [v1, a1, v2, a2]) = two_linked_clips();
+        let pristine = serde_json::to_string(&project.tracks).unwrap();
+        let mut history = History::new();
+
+        let command = set_speed_command(&project, &a1, 2.0).unwrap();
+        history.apply(&mut project, command).unwrap();
+
+        assert_eq!(range(&project, &v1), TimeRange::new(0, 2_000_000));
+        assert_eq!(range(&project, &a1), TimeRange::new(0, 2_000_000));
+        assert_eq!(range(&project, &v2).start, 2_000_000);
+        assert_eq!(range(&project, &a2).start, 2_000_000);
+        assert!(project.segment(&v1).unwrap().1.speed_invariant_holds());
+
+        history.undo(&mut project).unwrap();
+        assert_eq!(serde_json::to_string(&project.tracks).unwrap(), pristine);
+    }
+
+    #[test]
+    fn awkward_speeds_keep_the_ranges_consistent_and_undo_exactly() {
+        let (mut project, [v1, ..]) = two_linked_clips();
+        let pristine = serde_json::to_string(&project.tracks).unwrap();
+        let mut history = History::new();
+        for speed in [3.7_f32, 0.13, 100.0, 0.1] {
+            let command = set_speed_command(&project, &v1, speed).unwrap();
+            history.apply(&mut project, command).unwrap();
+            assert!(project.segment(&v1).unwrap().1.speed_invariant_holds());
+        }
+        while history.can_undo() {
+            history.undo(&mut project).unwrap();
+        }
+        assert_eq!(serde_json::to_string(&project.tracks).unwrap(), pristine);
+    }
+
+    #[test]
+    fn the_same_speed_and_nonsense_are_refused() {
+        let (project, [v1, ..]) = two_linked_clips();
+        assert!(set_speed_command(&project, &v1, 1.0).is_err());
+        assert!(set_speed_command(&project, &v1, 0.0).is_err());
+        assert!(set_speed_command(&project, &v1, f32::NAN).is_err());
+        assert!(set_speed_command(&project, "nope", 2.0).is_err());
+    }
+
+    #[test]
+    fn a_grade_applied_to_all_is_shared_and_undoes_exactly() {
+        let (mut project, [v1, a1, v2, _]) = two_linked_clips();
+        project
+            .materials
+            .videos
+            .push(crate::modules::project::document::VideoMaterial {
+                id: "m".into(),
+                path: "/nonexistent/m.mp4".into(),
+                width: 640,
+                height: 480,
+                duration: 10_000_000,
+                fps: 30.0,
+                has_audio: true,
+                rotation: 0,
+            });
+        let mut history = History::new();
+        let (material, command) = set_color_command(
+            &project,
+            &v1,
+            Some(ColorEdit {
+                brightness: 0.2,
+                contrast: 1.0,
+                saturation: 1.0,
+                temperature: 0.0,
+                lut: None,
+            }),
+        )
+        .unwrap();
+        let grade = material.unwrap();
+        project.materials.color_adjusts.push(grade.clone());
+        history.apply(&mut project, command).unwrap();
+        let graded = serde_json::to_string(&project.tracks).unwrap();
+
+        let command = apply_color_to_all_command(&project, &v1).unwrap();
+        history.apply(&mut project, command).unwrap();
+        let of = |project: &Project, id: &str| {
+            let (_, segment) = project.segment(id).unwrap();
+            project
+                .materials
+                .color_adjust_of(segment)
+                .map(|m| m.id.clone())
+        };
+        assert_eq!(of(&project, &v2), Some(grade.id.clone()));
+        // The sound of a clip is a segment of the same video material on an
+        // audio lane; it has no picture and is left alone.
+        assert_eq!(of(&project, &a1), None);
+        assert!(apply_color_to_all_command(&project, &v1).is_err());
+
+        history.undo(&mut project).unwrap();
+        assert_eq!(serde_json::to_string(&project.tracks).unwrap(), graded);
     }
 }

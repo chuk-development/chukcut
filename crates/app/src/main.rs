@@ -56,12 +56,15 @@ fn main() {
             // GPUI Component's widgets, then our colours over its dark theme.
             gpui::init(cx);
             theme::apply(cx);
+            // Plain keys stay out of text fields: typing "s" into a number
+            // box must not split the clip.
+            const TYPING_OFF: Option<&str> = Some("!Input");
             cx.bind_keys([
-                KeyBinding::new("space", PlayPause, None),
-                KeyBinding::new("s", Split, None),
+                KeyBinding::new("space", PlayPause, TYPING_OFF),
+                KeyBinding::new("s", Split, TYPING_OFF),
                 KeyBinding::new("ctrl-b", Split, None),
-                KeyBinding::new("delete", DeleteSelected, None),
-                KeyBinding::new("backspace", DeleteSelected, None),
+                KeyBinding::new("delete", DeleteSelected, TYPING_OFF),
+                KeyBinding::new("backspace", DeleteSelected, TYPING_OFF),
                 KeyBinding::new("ctrl-z", Undo, None),
                 KeyBinding::new("ctrl-shift-z", Redo, None),
                 KeyBinding::new("ctrl-y", Redo, None),
@@ -69,10 +72,10 @@ fn main() {
                 KeyBinding::new("ctrl-o", Open, None),
                 KeyBinding::new("ctrl-s", Save, None),
                 KeyBinding::new("ctrl-e", Export, None),
-                KeyBinding::new("left", StepBack, None),
-                KeyBinding::new("right", StepForward, None),
-                KeyBinding::new("home", GoToStart, None),
-                KeyBinding::new("end", GoToEnd, None),
+                KeyBinding::new("left", StepBack, TYPING_OFF),
+                KeyBinding::new("right", StepForward, TYPING_OFF),
+                KeyBinding::new("home", GoToStart, TYPING_OFF),
+                KeyBinding::new("end", GoToEnd, TYPING_OFF),
                 KeyBinding::new("ctrl-=", ZoomIn, None),
                 KeyBinding::new("ctrl--", ZoomOut, None),
                 KeyBinding::new("ctrl-q", Quit, None),

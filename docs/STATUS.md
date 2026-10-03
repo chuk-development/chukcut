@@ -1597,6 +1597,39 @@ not touched. What the next person needs to know:
   that means editing a preview-owned file), the tool letters to
   `Timeline.tsx`, and J/K/L had no owner before this.
 
+## The native inspector (GPUI, 2026-10-03)
+
+`crates/app/src/editor/inspector/` is CapCut's right-hand panel: Details with
+a "Change" form (`project_configure`), and per clip the tabs Video (Basic:
+transform, alignment, blend opacity) · Audio · Speed · Animation · Adjust, or
+Basic · Voice changer · Speed for sound. Every edit is an engine command.
+
+- **A slider drag is one undo step.** While the thumb moves, the command is
+  built against the snapshot from before the drag and applied to a *copy*,
+  which becomes the editor's drawing snapshot. On release the copy is dropped
+  and the same command goes through the command layer once. No history
+  coalescing was needed (`inspector/mod.rs`, `Preview`).
+- **Speed is `inspector_set_speed`, not `SetSpeed`.** The primitive keeps the
+  timeline length and does not mirror onto link partners, so a sped-up picture
+  drifts from its sound. The new command keeps the source, retimes the clip
+  and its partners and ripples the later clips on their lanes, as one step.
+- **The `Volume` keyframe track is the fade envelope** — it multiplies the
+  clip volume. The volume row therefore has no keyframe diamond; the fade rows
+  read the envelope by pattern and rewrite it whole.
+- **Keyframe diamonds** on scale, position, rotation and opacity use
+  `AddKeyframe`/`RemoveKeyframe`. Once a property has keyframes, a value change
+  edits the keyframe at the playhead (or adds one), because the static value
+  is no longer what is shown.
+- **Plain-key shortcuts carry the context `!Input`** (`main.rs`). Without it,
+  typing "s" into any text field split the clip and Backspace deleted it.
+- Not in the engine, drawn disabled: blend modes, tint, highlights, shadows,
+  whites, blacks, brilliance, sharpen, clarity, grain, fade, vignette, LUT
+  picking (a LUT already on a clip is shown), pitch, animations, masks, HSL,
+  curves, colour wheels, voice changer, stabilise and the other AI sections.
+- Driving the window with `xdotool`: compute the window id into a variable
+  and check it. A helper that also printed a path made `--window` garbage, and
+  a drag then silently did nothing, which looked like a GPUI drag bug.
+
 ## Not built yet
 
 Both keyframe editing and audio waveforms landed overnight and this line was
