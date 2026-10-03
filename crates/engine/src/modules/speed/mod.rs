@@ -17,7 +17,7 @@
 //! through the curve with Signalsmith Stretch, keeping the pitch (or, with
 //! "Change audio pitch" on, resampling it like a tape). The export renders it
 //! inline; the preview plays the cached render and stays silent on the clip
-//! until that has landed, usually well under a second. Decision 0020.
+//! until that has landed, usually well under a second. Decision 0021.
 
 pub mod commands;
 pub mod edit;

@@ -116,6 +116,8 @@ pub struct Editor {
     /// The newest progress message of a running export, written from the
     /// export thread and read by [`Self::tick`].
     export_progress: Arc<parking_lot::Mutex<Option<ExportProgress>>>,
+    /// The export queue's events, for the status line and notifications.
+    export_queue: export::QueueWatch,
     inspector: inspector::Inspector,
     /// The title bar's save state.
     title: title_bar::TitleState,
@@ -189,6 +191,7 @@ impl Editor {
             viewer: Rc::new(Cell::new(Bounds::default())),
             timeline: timeline::TimelineState::new(cx),
             export_progress: Arc::new(parking_lot::Mutex::new(None)),
+            export_queue: export::QueueWatch::default(),
             inspector: inspector::Inspector::default(),
             title: Default::default(),
             assets,
@@ -257,6 +260,7 @@ impl Editor {
             self.status = Some(export::export_status(&progress).into());
             changed = true;
         }
+        changed |= self.poll_export_queue();
         changed |= self.expire_status();
         changed |= self.poll_tracking(cx);
         changed |= self.poll_analysis(cx);

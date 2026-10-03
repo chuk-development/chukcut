@@ -23,7 +23,7 @@
 //! sound different from the export — the one thing an editor must not do.
 //! Rendering a clip front to back is the same samples every time, which is
 //! the argument `voice::denoise` made for RNNoise and the reason the shape is
-//! the same. Decision 0020.
+//! the same. Decision 0021.
 
 pub mod cache;
 pub mod catalog;

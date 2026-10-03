@@ -53,12 +53,12 @@ const PROGRESS_INTERVAL: Duration = Duration::from_millis(200);
 // ---------------------------------------------------------------------------
 
 /// What the frontend asks for.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExportRequest {
     /// Where to write. The extension is corrected to match the container.
     pub output_path: String,
-    /// A preset id from `export_presets`. Absent or `"custom"` means "the
-    /// project's own canvas and frame rate".
+    /// A preset id from `export_presets`, built in or saved by the user.
+    /// Absent or `"custom"` means "the project's own canvas and frame rate".
     #[serde(default)]
     pub preset_id: Option<String>,
     #[serde(default)]
@@ -83,7 +83,7 @@ fn yes() -> bool {
 
 /// Per-field changes on top of a preset. Everything optional; anything absent
 /// keeps the preset's value.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ExportOverrides {
     #[serde(default)]
     pub width: Option<u32>,
@@ -104,9 +104,14 @@ pub struct ExportOverrides {
     #[serde(default)]
     pub container: Option<super::presets::Container>,
     /// Bring the mix to this integrated loudness (LUFS) with true peaks at
-    /// −1 dBTP. Absent leaves the mix at the level it was edited at.
+    /// −1 dBTP. Absent keeps the preset's target; most platform presets have
+    /// one, `custom` has none.
     #[serde(default)]
     pub loudness_target: Option<f32>,
+    /// Leave the mix at the level it was edited at, even when the preset has
+    /// a loudness target.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub loudness_off: bool,
 }
 
 /// A resolved, validated export. Everything the job needs and nothing it has to
@@ -130,6 +135,12 @@ pub struct ExportSettings {
     /// Integrated loudness to normalise the mix to, in LUFS; see
     /// `modules::loudness`.
     pub loudness_target: Option<f32>,
+    /// A sound-only file: no picture is rendered or encoded, and `video` is
+    /// only the frame grid progress is counted in.
+    pub audio_only: bool,
+    /// What the user should know about this export, e.g. a canvas the
+    /// platform will show with bars. From [`ExportPreset::warnings`].
+    pub warnings: Vec<String>,
 }
 
 impl ExportSettings {
@@ -152,8 +163,10 @@ pub struct ExportOptions {
 }
 
 pub fn export_options() -> ExportOptions {
+    let mut presets = ExportPreset::all();
+    presets.extend(super::store::user_presets());
     ExportOptions {
-        presets: ExportPreset::all(),
+        presets,
         hardware: hwaccel::detect(),
         default_preset_id: CUSTOM_PRESET_ID.to_string(),
     }
@@ -164,10 +177,17 @@ pub fn export_options() -> ExportOptions {
 pub fn resolve_settings(project: &Project, request: &ExportRequest) -> Result<ExportSettings> {
     let mut preset = match request.preset_id.as_deref() {
         None | Some(CUSTOM_PRESET_ID) => ExportPreset::custom_for(project),
-        Some(id) => ExportPreset::by_id(id).ok_or_else(|| {
-            ExportError::Settings(format!("there is no export preset called {id}"))
-        })?,
+        Some(id) => find_preset(id)
+            .ok_or_else(|| {
+                ExportError::Settings(format!(
+                    "there is no export preset called {id}; the presets are: {}",
+                    preset_ids().join(", ")
+                ))
+            })?
+            .for_project(project),
     };
+    let warnings = preset.warnings(project);
+    let mut loudness_target = preset.loudness_target;
 
     if let Some(overrides) = &request.overrides {
         if let Some(width) = overrides.width {
@@ -197,6 +217,17 @@ pub fn resolve_settings(project: &Project, request: &ExportRequest) -> Result<Ex
         if let Some(container) = overrides.container {
             preset.container = container;
         }
+        if let Some(target) = overrides.loudness_target {
+            loudness_target = Some(target);
+        }
+        if overrides.loudness_off {
+            loudness_target = None;
+        }
+    }
+    let audio_only = preset.container.is_audio_only();
+    // A GIF cannot carry sound, so "include audio" means nothing there.
+    if preset.container == super::presets::Container::Gif {
+        preset.audio_codec = AudioCodec::None;
     }
 
     // Choosing "H.265 (NVENC)" is choosing a codec as much as an encoder, so
@@ -204,6 +235,10 @@ pub fn resolve_settings(project: &Project, request: &ExportRequest) -> Result<Ex
     // conflicting with it.
     let hardware = match request.hardware.as_deref() {
         None => None,
+        // A sound-only file has no picture to encode on the GPU, and ProRes
+        // and GIF have no hardware encoder: the request is ignored rather
+        // than refused, so "use the GPU when it can" stays one setting.
+        Some(_) if audio_only || !preset.video_codec.uses_quality() => None,
         Some(id) => {
             let found = hwaccel::find(id).ok_or_else(|| {
                 ExportError::Settings(format!(
@@ -278,7 +313,9 @@ pub fn resolve_settings(project: &Project, request: &ExportRequest) -> Result<Ex
         options: Vec::new(),
     };
 
-    let audio = match (request.include_audio, preset.audio_codec.encoder_name()) {
+    // A sound-only file is sound whatever `include_audio` says.
+    let include_audio = request.include_audio || audio_only;
+    let audio = match (include_audio, preset.audio_codec.encoder_name()) {
         (true, Some(name)) => Some(AudioStreamSpec {
             encoder_name: name.to_string(),
             sample_rate: preset.sample_rate,
@@ -300,12 +337,26 @@ pub fn resolve_settings(project: &Project, request: &ExportRequest) -> Result<Ex
         total_frames,
         duration,
         range_start,
-        loudness_target: request
-            .overrides
-            .as_ref()
-            .and_then(|o| o.loudness_target)
-            .filter(|t| t.is_finite() && (-40.0..=-5.0).contains(t)),
+        loudness_target: loudness_target.filter(|t| t.is_finite() && (-40.0..=-5.0).contains(t)),
+        audio_only,
+        warnings,
     })
+}
+
+/// A preset by id: built in first, then the user's own.
+pub fn find_preset(id: &str) -> Option<ExportPreset> {
+    ExportPreset::by_id(id).or_else(|| {
+        super::store::user_presets()
+            .into_iter()
+            .find(|preset| preset.id == id)
+    })
+}
+
+/// Every preset id a request may name, for an error message.
+fn preset_ids() -> Vec<String> {
+    let mut ids: Vec<String> = ExportPreset::all().into_iter().map(|p| p.id).collect();
+    ids.extend(super::store::user_presets().into_iter().map(|p| p.id));
+    ids
 }
 
 /// Force the file extension to match the container.
@@ -602,11 +653,15 @@ pub fn run_export(job: &ExportJob, sink: &dyn ProgressSink) -> Result<ExportOutc
     // Open the file first: a codec that is not in this build, a directory that
     // does not exist or a path that is not writable all fail here, in
     // milliseconds, instead of after the audio mix.
-    let mut writer = match MediaWriter::create(
-        &settings.output_path,
-        &settings.video,
-        settings.audio.as_ref(),
-    ) {
+    let opened = match (settings.audio_only, settings.audio.as_ref()) {
+        (true, Some(audio)) => MediaWriter::create_audio_only(&settings.output_path, audio),
+        _ => MediaWriter::create(
+            &settings.output_path,
+            &settings.video,
+            settings.audio.as_ref(),
+        ),
+    };
+    let mut writer = match opened {
         Ok(writer) => writer,
         Err(error) => {
             // Before the start block exists, so this is the only record that
@@ -624,16 +679,18 @@ pub fn run_export(job: &ExportJob, sink: &dyn ProgressSink) -> Result<ExportOutc
         }
     };
 
-    let result = encode_all(job, &mut writer, &mut tracker, sink);
+    let result = if settings.audio_only {
+        encode_audio_only(job, &mut writer, &mut tracker, sink)
+    } else {
+        encode_all(job, &mut writer, &mut tracker, sink)
+    };
 
     match result {
         Ok(frames) => {
             sink.send(tracker.snapshot(ExportStage::Finalizing, frames, Instant::now()));
             // `finish` is what flushes the encoders; the last second of video
             // is still inside libavcodec until it runs.
-            // Read before `finish`, which consumes the writer.
-            let writer_stats = writer.stats();
-            writer.finish()?;
+            let writer_stats = writer.finish()?;
             let elapsed = tracker.elapsed(Instant::now());
             let mut done = tracker.snapshot(ExportStage::Done, frames, Instant::now());
             done.fraction = 1.0;
@@ -678,20 +735,18 @@ pub fn run_export(job: &ExportJob, sink: &dyn ProgressSink) -> Result<ExportOutc
     }
 }
 
-fn encode_all(
+/// The finished stereo bed for this export: mixed, cut to the range and
+/// brought to the loudness target. Empty when the export has no sound.
+fn prepare_mix(
     job: &ExportJob,
-    writer: &mut MediaWriter,
     tracker: &mut ProgressTracker,
     sink: &dyn ProgressSink,
-) -> Result<u64> {
-    let settings = &job.settings;
-    let fps = settings.fps();
-    let size = settings.size();
-
+) -> Result<(Vec<f32>, usize)> {
     // The whole mix up front. Interleaving decode with encode would bound the
     // memory, but the mix is also what tells us the audio is decodable at all,
     // and finding that out after ten minutes of video is worse than a second of
     // waiting and a buffer.
+    let settings = &job.settings;
     let mut mixed: Vec<f32> = Vec::new();
     let mut channels = 0usize;
     if let Some(spec) = &settings.audio {
@@ -750,6 +805,52 @@ fn encode_all(
         }
     }
 
+    Ok((mixed, channels))
+}
+
+/// A sound-only export: the mix, written in steps of one frame of the
+/// settings' rate so progress and cancellation work as they do for video.
+fn encode_audio_only(
+    job: &ExportJob,
+    writer: &mut MediaWriter,
+    tracker: &mut ProgressTracker,
+    sink: &dyn ProgressSink,
+) -> Result<u64> {
+    let settings = &job.settings;
+    let fps = settings.fps();
+    let (mixed, channels) = prepare_mix(job, tracker, sink)?;
+    let rate = settings.audio.as_ref().map(|a| a.sample_rate).unwrap_or(0);
+    let mut cursor = 0usize;
+    walk_frames(fps, settings.total_frames, &job.cancel, |index, _| {
+        on_frame_written(writer, &mixed, channels, rate, fps, index, &mut cursor)?;
+        let now = Instant::now();
+        if tracker.should_emit(index, now) {
+            sink.send(tracker.snapshot(ExportStage::Encoding, index + 1, now));
+        }
+        Ok(())
+    })?;
+    if !mixed.is_empty() && cursor * channels < mixed.len() {
+        writer.write_audio(&mixed[cursor * channels..])?;
+    }
+    tracing::info!(
+        output = %settings.output_path.display(),
+        seconds = settings.duration as f64 / 1e6,
+        "sound-only export written"
+    );
+    Ok(settings.total_frames)
+}
+
+fn encode_all(
+    job: &ExportJob,
+    writer: &mut MediaWriter,
+    tracker: &mut ProgressTracker,
+    sink: &dyn ProgressSink,
+) -> Result<u64> {
+    let settings = &job.settings;
+    let fps = settings.fps();
+    let size = settings.size();
+
+    let (mixed, channels) = prepare_mix(job, tracker, sink)?;
     let audio_rate = settings.audio.as_ref().map(|a| a.sample_rate).unwrap_or(0);
     let mut audio_cursor = 0usize;
 
@@ -1487,13 +1588,75 @@ mod tests {
     }
 
     #[test]
-    fn a_preset_overrides_the_canvas() {
+    fn a_preset_keeps_the_canvas_shape_at_its_own_resolution() {
+        // The canvas is 1080x1920; "YouTube 1080p" of it is 1080p vertical,
+        // not a landscape frame with the picture boxed into it.
         let project = project(MICROS_PER_SECOND);
         let mut req = request("/tmp/out.mp4");
         req.preset_id = Some("youtube_1080p".into());
         let settings = resolve_settings(&project, &req).unwrap();
-        assert_eq!(settings.size(), (1920, 1080));
+        assert_eq!(settings.size(), (1080, 1920));
         assert_eq!(settings.preset.quality, Quality::Crf(20));
+        assert_eq!(settings.loudness_target, Some(-14.0));
+        assert_eq!(settings.warnings.len(), 1, "{:?}", settings.warnings);
+        req.preset_id = Some("youtube_4k".into());
+        let settings = resolve_settings(&project, &req).unwrap();
+        assert_eq!(settings.size(), (2160, 3840));
+    }
+
+    #[test]
+    fn the_loudness_target_comes_from_the_preset_unless_overridden() {
+        let project = project(MICROS_PER_SECOND);
+        let mut req = request("/tmp/out.mp4");
+        req.preset_id = Some("tiktok".into());
+        assert_eq!(
+            resolve_settings(&project, &req).unwrap().loudness_target,
+            Some(-14.0)
+        );
+        req.overrides = Some(ExportOverrides {
+            loudness_target: Some(-16.0),
+            ..Default::default()
+        });
+        assert_eq!(
+            resolve_settings(&project, &req).unwrap().loudness_target,
+            Some(-16.0)
+        );
+        req.overrides = Some(ExportOverrides {
+            loudness_off: true,
+            ..Default::default()
+        });
+        assert_eq!(
+            resolve_settings(&project, &req).unwrap().loudness_target,
+            None
+        );
+    }
+
+    #[test]
+    fn a_sound_only_preset_has_sound_and_no_hardware_encoder() {
+        let project = project(MICROS_PER_SECOND);
+        let mut req = request("/x/out.mp4");
+        req.preset_id = Some("audio_wav".into());
+        req.include_audio = false;
+        req.hardware = Some("nvenc_h264".into());
+        let settings = resolve_settings(&project, &req).unwrap();
+        assert!(settings.audio_only);
+        assert!(settings.audio.is_some(), "sound only means sound");
+        assert_eq!(settings.output_path, PathBuf::from("/x/out.wav"));
+        assert_eq!(settings.video.encoder_name, "libx264");
+    }
+
+    #[test]
+    fn a_gif_drops_the_sound_and_an_unknown_preset_lists_the_real_ones() {
+        let project = project(MICROS_PER_SECOND);
+        let mut req = request("/x/out.mp4");
+        req.preset_id = Some("gif".into());
+        let settings = resolve_settings(&project, &req).unwrap();
+        assert!(settings.audio.is_none());
+        assert_eq!(settings.video.encoder_name, "gif");
+        assert_eq!(settings.output_path, PathBuf::from("/x/out.gif"));
+        req.preset_id = Some("vimeo_8k".into());
+        let error = resolve_settings(&project, &req).unwrap_err().to_string();
+        assert!(error.contains("tiktok"), "{error}");
     }
 
     #[test]
@@ -1668,6 +1831,12 @@ mod tests {
         let project = project(2 * MICROS_PER_SECOND);
         let mut req = request("/tmp/out.mp4");
         req.preset_id = Some("youtube_1080p".into());
+        // The canvas is vertical; the strides below are for a landscape frame.
+        req.overrides = Some(ExportOverrides {
+            width: Some(1920),
+            height: Some(1080),
+            ..Default::default()
+        });
         let settings = resolve_settings(&project, &req).unwrap();
 
         let chosen = FramePathChoice::of(true, true, true, true, true, "h264_vaapi");

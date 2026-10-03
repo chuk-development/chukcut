@@ -1,6 +1,6 @@
 //! Rendering: the export, and single frames.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
 use chukcut_engine::modules::captions::commands as caption_commands;
@@ -21,66 +21,86 @@ use crate::error::{CliError, CliResult};
 use crate::session::{absolute, Session};
 use crate::values::{seconds, Time};
 
-/// Render the timeline to a video file. Blocks until it is written; progress
-/// goes to stderr. Software encoding unless `hardware` names an encoder
-/// (`catalog hardware`), or "auto" picks the first usable one.
+/// The export options every delivery operation shares: a preset, overrides
+/// on top of it, the encoder, and a range. `export`, `estimate`,
+/// `preset_save` and `export_queue` all take these.
 #[derive(Debug, Clone, Default, Args, Deserialize, JsonSchema)]
-pub struct ExportArgs {
-    /// The video file to write. Its extension is corrected to the container.
-    pub output: PathBuf,
-    /// youtube_1080p, youtube_4k, vertical_1080x1920, instagram_square or
-    /// custom (the project's own canvas and rate; the default).
+pub struct ExportSettingsArgs {
+    /// A preset id: tiktok, instagram_reels, youtube_shorts, instagram_square,
+    /// x_twitter, youtube_1080p, youtube_4k, master_prores, master_h264,
+    /// master_hevc, audio_aac, audio_mp3, audio_wav, gif, custom (the
+    /// project's own canvas and rate; the default), or one of your own
+    /// (`presets` lists them). A preset follows the canvas's shape and sets
+    /// size, frame rate, codec, quality, sound and loudness.
     #[arg(long)]
+    #[serde(default)]
     pub preset: Option<String>,
     /// A hardware encoder id such as nvenc_h264 or vaapi_h265, or "auto".
     #[arg(long)]
+    #[serde(default)]
     pub hardware: Option<String>,
     /// Output width in pixels, overriding the preset.
     #[arg(long)]
+    #[serde(default)]
     pub width: Option<u32>,
     /// Output height in pixels, overriding the preset.
     #[arg(long)]
+    #[serde(default)]
     pub height: Option<u32>,
     /// Output frame rate, overriding the preset.
     #[arg(long)]
+    #[serde(default)]
     pub fps: Option<f64>,
-    /// h264, h265, vp9 or av1.
+    /// h264, h265, vp9, av1, prores or gif.
     #[arg(long)]
+    #[serde(default)]
     pub codec: Option<String>,
     /// Constant quality in the codec's scale (lower is better; 18-23 for h264).
     #[arg(long, conflicts_with = "bitrate")]
+    #[serde(default)]
     pub crf: Option<u8>,
     /// Average video bitrate in bits per second.
     #[arg(long)]
+    #[serde(default)]
     pub bitrate: Option<u64>,
-    /// mp4, mov, mkv or webm.
+    /// mp4, mov, mkv, webm, gif, or for sound only m4a, mp3, wav.
     #[arg(long)]
+    #[serde(default)]
     pub container: Option<String>,
-    /// aac, opus or none.
+    /// aac, opus, mp3, pcm or none.
     #[arg(long)]
+    #[serde(default)]
     pub audio_codec: Option<String>,
+    /// Audio bitrate in bits per second.
+    #[arg(long)]
+    #[serde(default)]
+    pub audio_bitrate: Option<u32>,
     /// Leave the audio out.
     #[arg(long)]
     #[serde(default)]
     pub no_audio: bool,
     /// Bring the mix to this integrated loudness in LUFS (-14 for most
-    /// platforms), with true peaks at -1 dBTP.
-    #[arg(long, allow_hyphen_values = true)]
+    /// platforms), with true peaks at -1 dBTP. Overrides the preset's target.
+    #[arg(long, allow_hyphen_values = true, conflicts_with = "no_loudness")]
+    #[serde(default)]
     pub loudness: Option<f32>,
+    /// Keep the mix as edited, even when the preset has a loudness target.
+    #[arg(long)]
+    #[serde(default)]
+    pub no_loudness: bool,
     /// Export only from this time...
     #[arg(long)]
+    #[serde(default)]
     pub from: Option<Time>,
     /// ...to this time.
     #[arg(long)]
+    #[serde(default)]
     pub to: Option<Time>,
-    /// Also write the captions next to the video as .srt (or .vtt).
-    #[arg(long)]
-    pub sidecar: Option<String>,
 }
 
-impl Operation for ExportArgs {
-    const NAME: &'static str = "export";
-    fn run(self, session: &mut Session, ctx: &Ctx) -> CliResult<Outcome> {
+impl ExportSettingsArgs {
+    /// The engine request for writing `output` from `session`'s project.
+    pub fn request(&self, session: &Session, output: &Path) -> CliResult<ExportRequest> {
         let fps = session.fps();
         let hardware = match self.hardware.as_deref() {
             None => None,
@@ -101,7 +121,11 @@ impl Operation for ExportArgs {
                 .codec
                 .as_deref()
                 .map(|c| {
-                    enum_named::<VideoCodec>("video codec", c, &["h264", "h265", "vp9", "av1"])
+                    enum_named::<VideoCodec>(
+                        "video codec",
+                        c,
+                        &["h264", "h265", "vp9", "av1", "prores", "gif"],
+                    )
                 })
                 .transpose()?,
             quality: match (self.crf, self.bitrate) {
@@ -112,14 +136,28 @@ impl Operation for ExportArgs {
             audio_codec: self
                 .audio_codec
                 .as_deref()
-                .map(|c| enum_named::<AudioCodec>("audio codec", c, &["aac", "opus", "none"]))
+                .map(|c| {
+                    enum_named::<AudioCodec>(
+                        "audio codec",
+                        c,
+                        &["aac", "opus", "mp3", "pcm", "none"],
+                    )
+                })
                 .transpose()?,
+            audio_bitrate: self.audio_bitrate,
             container: self
                 .container
                 .as_deref()
-                .map(|c| enum_named::<Container>("container", c, &["mp4", "mov", "mkv", "webm"]))
+                .map(|c| {
+                    enum_named::<Container>(
+                        "container",
+                        c,
+                        &["mp4", "mov", "mkv", "webm", "gif", "m4a", "mp3", "wav"],
+                    )
+                })
                 .transpose()?,
             loudness_target: self.loudness,
+            loudness_off: self.no_loudness,
             ..Default::default()
         };
         if let Some(l) = self.loudness {
@@ -137,19 +175,45 @@ impl Operation for ExportArgs {
                 b.map_or(duration, |t| t.resolve(fps)),
             )),
         };
+        Ok(ExportRequest {
+            output_path: output.to_string_lossy().into_owned(),
+            preset_id: self.preset.clone(),
+            overrides: Some(overrides),
+            hardware,
+            include_audio: !self.no_audio,
+            range,
+        })
+    }
+}
+
+/// Render the timeline to a file. Blocks until it is written; progress
+/// goes to stderr. Software encoding unless `hardware` names an encoder
+/// (`catalog hardware`), or "auto" picks the first usable one.
+#[derive(Debug, Clone, Default, Args, Deserialize, JsonSchema)]
+pub struct ExportArgs {
+    /// The file to write. Its extension is corrected to the container.
+    pub output: PathBuf,
+    #[command(flatten)]
+    #[serde(flatten)]
+    pub settings: ExportSettingsArgs,
+    /// Also write the captions next to the video as .srt (or .vtt).
+    #[arg(long)]
+    #[serde(default)]
+    pub sidecar: Option<String>,
+}
+
+impl Operation for ExportArgs {
+    const NAME: &'static str = "export";
+    fn run(self, session: &mut Session, ctx: &Ctx) -> CliResult<Outcome> {
         let output = absolute(&self.output);
         if let Some(dir) = output.parent() {
             std::fs::create_dir_all(dir)
                 .map_err(|e| CliError::render(format!("cannot create {}: {e}", dir.display())))?;
         }
-        let request = ExportRequest {
-            output_path: output.to_string_lossy().into_owned(),
-            preset_id: self.preset.clone(),
-            overrides: Some(overrides),
-            hardware: hardware.clone(),
-            include_audio: !self.no_audio,
-            range,
-        };
+        let request = self.settings.request(session, &output)?;
+        let hardware = request.hardware.clone();
+        let plan =
+            export_commands::export_plan(&session.state, &request).map_err(CliError::render)?;
 
         let (tx, rx) = mpsc::channel::<ExportProgress>();
         let channel = Channel::new(move |p| tx.send(p).is_ok());
@@ -198,6 +262,10 @@ impl Operation for ExportArgs {
             "seconds": finished.elapsed_seconds,
             "encode_fps": finished.fps,
             "hardware": hardware,
+            "width": plan.width,
+            "height": plan.height,
+            "loudness_target": plan.loudness_target,
+            "warnings": plan.warnings,
         });
         if let Some(format) = &self.sidecar {
             let format: SubtitleFormat = enum_named("subtitle format", format, &["srt", "vtt"])?;

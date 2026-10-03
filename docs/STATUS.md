@@ -143,6 +143,7 @@ Each of these was measured or checked against an independent tool, not assumed.
 | Hardware decode through the compositor | `examples/hwdecode_pipeline.rs` — the imported surface is composited by the quad shader and matches a software-decoded composite of the same instant to a mean channel difference of **1.1–1.4**, against 9.4 for a deliberately wrong colour matrix. Decode to texture falls from 20–66 ms to 0.8–3.3 ms; a whole preview frame from 39–72 ms to 7.5–16 ms. **On by default** |
 | Media survives the session, and losing it is survivable | The library renders `project.materials` (decision 0009), so a reopened project shows its imports; "Remove from project" is `EditCommand::RemoveMaterial` — exact undo, clips kept, file untouched. An offline clip (material removed, or file gone from disk) draws red with an offline icon on the timeline and the library card, composites as a flat dark-red field (`media::MISSING_MEDIA_RGBA`, served by the provider), is a validate *warning*, and the export refuses it by name ("2 clips reference media that is missing: …"). `tests/missing_media.rs` is the whole scenario, pixel assertion included |
 | Export range and frame snapshots | `tests/export.rs` — a 1 s..3 s range of a 4 s counter timeline yields exactly 60 decodable frames whose first/middle/last are source frames 30/59/89 (rebased to zero), with 2.0 s ± 0.1 of AAC; marks past the end clamp rather than fail; `export_snapshot` writes a decodable canvas-size PNG of the requested frame through the export compositor, never the preview's panel-sized picture. Dialog wiring (range select, long-edge resolutions, estimated size, remember-settings, snapshot button) in `src/modules/export/**.test.*`, 106 vitest |
+| Export presets, size estimate, queue | `modules/export/{presets,estimate,queue,store}.rs`, `tests/export_presets.rs` (ffprobe-checked). 14 built-in presets (TikTok, Reels, Shorts, Instagram square, X, YouTube 1080p/4K, ProRes/H.264/HEVC masters, AAC/MP3/WAV sound only, GIF) that keep the canvas's shape at their own short side and carry a loudness target (−14 LUFS social, −16 sound only); the TikTok preset measured −14.0 ± 1 LU. ProRes is `prores_ks` HQ, yuv422p10le, PCM in .mov; GIF is a fixed 252-colour palette with Bayer dither (swscale cannot write PAL8). Size estimate against real exports of a 12 s three-part fixture: sampled H.264 CRF 20/28 and HEVC −0.0/−1.5/+0.4 %, ProRes +0.1 %, GIF +0.1 %, bitrate −2.5 %, AAC/MP3/WAV within 0.5 %. User presets and the dialog's last settings (per project and overall) in `<config>/export-presets.json` and `export-memory.json`. The queue runs exports one at a time on its own thread and outlives the dialog |
 | Motion tracking (T1) | `modules/tracking`: pyramidal KLT + RANSAC similarity fit, a colour model (object against its ring) that re-finds the object, and a colour template fallback; pure Rust, 640 px analysis. `tests/tracking.rs` on generated clips (release, loaded machine): a red disc over testsrc2, 1280×720, **90–130 frames/s**, centre error **mean 1.35 px, worst 5.1 px**, no frame lost, rotation drift under 2°; a thrown, motion-blurred ball at ~30 px/frame, **mean 1.25 px, worst 6.2 px**. In the debug app with the UI running: 31–42 frames/s. The follower is drawn where the track says in both the preview and the NV12 export path (`a_follower_is_drawn_on_the_object_in_preview_and_export`); trim, slip, speed, move, scale and split of the tracked clip keep it on the object (`tracking::follow` tests). Decision 0012 |
 
 Two of those deserve emphasis because they are the failure modes that usually
@@ -1210,6 +1211,14 @@ Two things about the hardware path that are not obvious and cost time to find:
   produce 16-235 by default. The result is a valid file with grey blacks that
   reads as the editor having washed out the footage. It scores 27 dB against the
   software encoder instead of 37.
+
+## A trap in the export writer (2026-10-03)
+
+`MediaWriter::stats()` read before `finish()` misses every packet the flush
+produces. x264 and x265 hold up to ~40 frames of lookahead, so for a
+two-second sample window that was most of the bytes, and the first sampled
+size estimate came out 61 % low. `finish()` now returns the final
+`WriterStats`; take byte counts from it, never from `stats()` before it.
 
 ## Known defects, found but not yet fixed
 
@@ -2981,7 +2990,7 @@ agent's `pkill chukcut`. Run your copy under another process name
 
 ## Audio tools: time stretch, effects, ducking, voiceover (2026-10-03)
 
-Engine: `modules/audiofx` (decision 0020). UI: the Audio tab's Equalizer,
+Engine: `modules/audiofx` (decision 0021). UI: the Audio tab's Equalizer,
 Parametric EQ, Compressor, Reverb, Echo and Pitch sections and the Voice
 changer (`editor/inspector/audio_fx.rs`), "Duck under speech" in a sound
 clip's menu and the record button in the timeline toolbar

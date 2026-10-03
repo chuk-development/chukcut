@@ -2,7 +2,7 @@
 //!
 //! The whole buffer goes through `exact`, which feeds the stretcher with the
 //! buffer's own head as pre-roll and drops the latency at both ends, so the
-//! output lines up with the input sample for sample. Decision 0020.
+//! output lines up with the input sample for sample. Decision 0021.
 
 use signalsmith_stretch::Stretch;
 

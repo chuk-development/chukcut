@@ -392,7 +392,7 @@ mod throughput {
     use crate::modules::audiofx::dsp::test_signals::sine;
 
     /// How much faster than real time a render runs. Not a gate: the number
-    /// quoted in decision 0020. `cargo test -- --ignored throughput --nocapture`.
+    /// quoted in decision 0021. `cargo test -- --ignored throughput --nocapture`.
     #[test]
     #[ignore]
     fn throughput() {

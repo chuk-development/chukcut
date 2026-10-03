@@ -420,6 +420,8 @@ fn codec_slug(codec: VideoCodec) -> &'static str {
         VideoCodec::H265 => "h265",
         VideoCodec::Vp9 => "vp9",
         VideoCodec::Av1 => "av1",
+        VideoCodec::ProRes => "prores",
+        VideoCodec::Gif => "gif",
     }
 }
 

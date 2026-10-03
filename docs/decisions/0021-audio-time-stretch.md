@@ -1,4 +1,4 @@
-# 0020 — Audio time stretch and effects: Signalsmith Stretch, rendered per clip
+# 0021 — Audio time stretch and effects: Signalsmith Stretch, rendered per clip
 
 Status: accepted (2026-10-03, audio-tools agent)
 

@@ -226,11 +226,16 @@ Lists what you can use. Does not need a project.
 | `transitions` | the built-in kinds and the library presets |
 | `animations` | clip presets (which slot each one fits), text presets, easings |
 | `grade` | every grade control name and its resting value |
-| `presets` | export presets |
+| `presets` | export presets, built in and your own (`presets PROJECT` also shows how each fits a project) |
 | `hardware` | hardware encoders, and which ones work on this machine |
 | `models` | local transcription models, and which ones are downloaded |
 | `luts` | `.cube` files in the LUT library |
 | `fonts` | font families that the text renderer can draw |
+| `title_styles` | title styles for `title style` (id, name, category, sample words) |
+| `title_templates` | text templates for `title template` (a style and an animation) |
+| `layouts` | split-screen layouts and picture-in-picture corners |
+| `speed_presets` | speed-ramp presets for `speed-curve`, with their shapes |
+| `accounts` | the cloud accounts that the app has, and what each one can do; never a key |
 
 ### Timeline
 
@@ -297,6 +302,67 @@ chukcut-cli trim reel.chukcut 0:0 --head 0.4 --tail 3.2 --ripple
 one undo step. Speed keeps the part of the file that the clip shows: speed 2
 halves the clip's length and pulls the later clips in.
 
+#### `freeze PROJECT CLIP --at TIME`
+
+Holds the frame of a video clip. The CLI cuts the clip at `--at`, puts a still
+of that frame between the two parts, and moves the later clips on the lane and
+on its linked lanes to the right. `--duration` is the length of the still
+(default 3 s). One undo step. The result gives the still as `still`.
+
+```bash
+chukcut-cli freeze reel.chukcut 0:0 --at 2.4 --duration 1.5
+```
+
+#### `speed-curve PROJECT CLIP`
+
+Gives a clip a speed ramp, changes it, or removes it. Use one of:
+
+| Option | |
+|---|---|
+| `--preset NAME` | `montage`, `hero`, `bullet`, `jump_cut`, `flash_in` or `flash_out` (`catalog speed_presets`) |
+| `--point TIME=SPEED` | a point of your own; can repeat. TIME is the time in the clip's media from its in point, at normal speed. SPEED is from 0.1 to 10 |
+| `--remove` | go back to the clip's constant speed |
+
+The clip's length follows the curve. The later clips on its lanes move with
+its end. A clip on a speed curve plays no sound (the engine has no
+pitch-correct time stretch). One undo step. For a constant speed, use
+`set --speed`.
+
+```bash
+chukcut-cli speed-curve reel.chukcut 0:2 --preset hero
+chukcut-cli speed-curve reel.chukcut 0:2 --point 0=1 --point 1.2s=0.3 --point 2.5s=1
+```
+
+### Markers
+
+A marker is a named time on the ruler. It does not belong to a clip. Name a
+marker by its id, a unique prefix of 4 or more characters, or its index in
+time order (`0` is the first marker).
+
+#### `marker add PROJECT --at TIME`
+
+`--label TEXT` and `--color` (`blue`, the default, `green`, `yellow`,
+`orange`, `red` or `purple`).
+
+#### `marker set PROJECT MARKER`
+
+`--at TIME` moves the marker. `--label` changes the label; an empty label
+removes it. `--color` changes the colour. One undo step.
+
+#### `marker remove PROJECT MARKER...`
+
+Removes one or more markers as one undo step.
+
+#### `marker list PROJECT`
+
+Lists the markers in time order: index, id, time, colour, label. It does not
+change the project.
+
+```bash
+chukcut-cli marker add reel.chukcut --at 12.5 --label "Drop" --color red
+chukcut-cli marker set reel.chukcut 0 --at 13
+```
+
 ### Look
 
 #### `grade PROJECT CLIP`
@@ -322,6 +388,57 @@ All changes in one command are one undo step.
 ```bash
 chukcut-cli grade reel.chukcut 0:0 --set exposure=0.3 --set saturation=1.15 \
   --set hsl_saturation:orange=-0.2 --lut ~/luts/film.cube --lut-intensity 0.6
+```
+
+#### `curve PROJECT CLIP --point X,Y...`
+
+Sets one tone curve of the clip's grade. Each `--point` is an input level and
+an output level, both from 0 to 1. Give two or more points. The engine joins
+the points with a smooth curve that never overshoots. `--channel` is `master`
+(the default, all colours), `red`, `green` or `blue`. `--reset` makes the
+curve a straight line again. The other grade values stay. One undo step.
+
+```bash
+# A soft S-curve on the master channel.
+chukcut-cli curve reel.chukcut 0:0 --point 0,0 --point 0.25,0.2 --point 0.75,0.8 --point 1,1
+```
+
+In JSON, `points` is a list of `[x, y]` pairs or `"x,y"` strings.
+
+#### `crop PROJECT CLIP`
+
+Crops the clip's picture. `--left`, `--top`, `--right` and `--bottom` are
+fractions of the source frame: left and top from 0, right and bottom up
+to 1. An edge that you do not give keeps its value. `--clear` removes the
+crop. One undo step.
+
+```bash
+chukcut-cli crop reel.chukcut 0:0 --left 0.1 --right 0.9
+```
+
+#### `layout pip PROJECT CLIP`
+
+Makes the clip a picture in picture: one third of the canvas wide, in a
+corner with a margin, with a `frame` effect (round corners, a thin border, a
+soft shadow). `--corner` is `top_left`, `top_right`, `bottom_left` or
+`bottom_right` (the default). Put the clip on a lane above the main picture.
+One undo step.
+
+#### `layout split PROJECT CLIP...`
+
+Puts clips into a split screen. Each clip fills one cell, in the order that
+you give them. `--layout`:
+
+| Layout | Clips |
+|---|---|
+| `two_rows` (default) | 2, one above the other (the 9:16 reaction layout) |
+| `two_columns` | 2, side by side |
+| `three_rows` | 3 |
+| `three_columns` | 3 |
+| `grid` | 4, two by two |
+
+```bash
+chukcut-cli layout split reel.chukcut 0:0 1:0 --layout two_rows
 ```
 
 #### `effect add PROJECT KIND`
@@ -423,6 +540,44 @@ chukcut-cli title add reel.chukcut "Day 1" --at 0.5 --size 140 --color "#ffcc00"
 `--text` changes the words. The style options change the look. All changes are
 one undo step.
 
+#### `title style PROJECT STYLE`
+
+Adds a title in a style, or gives a title a new style. `catalog title_styles`
+lists the styles.
+
+- With `--clip CLIP`, the title gets the style. It keeps its words, its size
+  and its position.
+- Without `--clip`, the CLI adds a new title. `--at` (default 0) and
+  `--track` place it, and `--text` gives its words (default: the style's
+  sample). The title goes where the style puts it, for example low and left
+  for a lower third.
+
+One undo step.
+
+#### `title template PROJECT TEMPLATE`
+
+The same as `title style`, with a template from `catalog title_templates`. A
+template is a style and an animation. With `--clip`, the title gets the
+style and the animation of the template.
+
+```bash
+chukcut-cli title template reel.chukcut neon-sign --at 1 --text "Day 1"
+```
+
+#### `title position PROJECT CLIP --position CELL`
+
+Moves a title to a cell of a 3 x 3 grid and aligns its text to match. Cells:
+`top_left`, `top`, `top_right`, `left`, `centre`, `right`, `bottom_left`,
+`bottom`, `bottom_right`. One undo step.
+
+#### `title duplicate PROJECT CLIP`
+
+Copies a title: its words, style, transform, keyframes and animation. The copy
+gets its own text material, so a change to one title does not change the
+other. The copy starts at the end of the original, on the same lane. `--at`
+gives another start. When the time is not free, the copy moves to the next
+gap. One undo step.
+
 #### `transition add PROJECT CLIP`
 
 Puts a transition on the cut at the start of the clip (the incoming clip).
@@ -446,6 +601,141 @@ The command waits for the analysis to finish. The result is one undo step.
 
 ```bash
 chukcut-cli track reel.chukcut 0:0 --at 1.2 --rect 0.52,0.4,0.15,0.2 --overlay 2:0
+```
+
+### Analysis
+
+The analysis commands look at the pictures or the sound of a clip. The
+command waits until the analysis is done and shows progress on stderr. Then
+the result goes into the project as one undo step.
+
+#### `scenes detect PROJECT CLIP`
+
+Finds the shot changes in a video clip and marks them on the clip.
+`--sensitivity` from 0 to 1 (default 0.5: hard cuts, not fast motion).
+`--split` also cuts the clip at each change, in the same undo step. The result
+lists the changes in timeline seconds.
+
+#### `scenes split PROJECT CLIP`
+
+Cuts the clip at the scene changes that `scenes detect` found. One undo step.
+
+#### `scenes clear PROJECT CLIP`
+
+Removes the scene marks from the clip.
+
+#### `stabilise apply PROJECT CLIP`
+
+Measures the camera shake of a video clip and stabilises it. `--strength` from
+0 to 1 (light 0.35, medium 0.6 (the default), strong 0.85, tripod 1).
+`--crop` is how much of the picture is cut off to hide the moving edges:
+`auto` (the default, the least that hides them) or a fraction up to 0.3. The
+engine keeps the measured camera path, so a second run on the same clip is
+fast.
+
+#### `stabilise set PROJECT CLIP`
+
+Changes a stabilised clip: `--enabled true|false`, `--strength`, `--crop`.
+The clip must have a stabilisation from `stabilise apply`.
+
+#### `stabilise remove PROJECT CLIP`
+
+#### `beats detect PROJECT CLIP`
+
+Finds the beats in the sound of a clip: a music clip, or the linked sound of a
+video clip. The marks go on the clip that plays the sound. The result gives
+the tempo (`bpm`) and the beat times.
+
+#### `beats clear PROJECT CLIP`
+
+#### `beats cut PROJECT [CLIP...]`
+
+Cuts video clips on the beats that `beats detect` found. `--every N` keeps
+every N-th beat (default 1). Without clips, it cuts every clip on the video
+lanes. One undo step.
+
+#### `beats snap PROJECT [CLIP...]`
+
+Moves each cut between the clips to the nearest beat. It rolls the cut: the
+clip before the cut gets longer by the time that the clip after it loses, so
+nothing else moves. `--tolerance TIME` is the farthest a cut can move
+(default: half a beat at the slowest tempo, or 250 ms). Without clips, it
+uses every clip on the video lanes. One undo step.
+
+```bash
+chukcut-cli beats detect reel.chukcut 1:0
+chukcut-cli beats cut reel.chukcut 0:0 --every 2
+```
+
+#### `reframe PROJECT [CLIP...]`
+
+Finds the subject of each clip and moves a window of the canvas's shape with
+it, as position keyframes. `--ratio W:H` (for example `9:16`, `1:1`, `4:5`)
+also changes the project to that shape, in the same undo step. Without clips,
+the CLI uses each clip that fills its frame on a visible video lane.
+
+```bash
+chukcut-cli reframe reel.chukcut --ratio 9:16
+```
+
+#### `analysis PROJECT CLIP`
+
+Shows what a clip has from the commands above: the scene changes and the
+beats in timeline seconds, the tempo, and the stabilisation. It does not
+change the project.
+
+### Cloud
+
+These commands use the cloud accounts that you set up in the app (Settings,
+Accounts). `catalog accounts` lists them. The CLI cannot add an account or a
+key. Each command takes `--account ID`. Without it, the CLI uses the first
+account that can do the job. When there is no such account, the command
+fails with exit code 1 and changes nothing.
+
+#### `cloud translate PROJECT --to LANG`
+
+Translates the first caption lane into the language `LANG` (ISO 639-1, for
+example `de`). The translation goes on a new caption lane, a little above the
+original. `--from LANG` gives the captions' language (default: detected).
+`--model` is the chat model for an OpenAI-compatible account. Needs a DeepL
+or an OpenAI-compatible account. One undo step.
+
+#### `cloud tts PROJECT TEXT --voice VOICE`
+
+Speaks the text with a cloud voice (ElevenLabs or OpenAI-compatible) and
+imports the sound file into the project. `--at TIME` also puts it on an audio
+lane at that time. `--model`, `--speed` (1 is normal) and `--instructions`
+(OpenAI: tone, accent, emotion in plain words) change the voice. The file goes
+to `~/.local/share/chukcut/generated`, with a record of its source and
+licence.
+
+```bash
+chukcut-cli cloud tts reel.chukcut "Three tips for better sleep" --voice nova --at 0
+```
+
+#### `cloud stock-kinds PROJECT`
+
+Lists the kinds of stock (`video`, `photo`, `sound`) that the account's
+library has.
+
+#### `cloud stock-search PROJECT QUERY`
+
+Searches a stock library (Pexels, Pixabay or Freesound). `--kind
+video|photo|sound` (default `video`), `--page` (from 1), `--per-page`
+(default 24), `--non-commercial` (also show sounds that do not allow
+commercial use). The result lists each hit's id, title, creator, size,
+licence and credit line. The CLI keeps search results for one day. It does not
+change the project.
+
+#### `cloud stock-download PROJECT QUERY --id ID`
+
+Downloads one result of a search and imports it into the project. Give the
+same query, `--kind` and `--page` as the search; the CLI finds the result by
+its `--id`. `--at TIME` also puts the file on the timeline at that time.
+
+```bash
+chukcut-cli cloud stock-search reel.chukcut "ocean waves" --kind video --json | jq '.data.hits[].id'
+chukcut-cli cloud stock-download reel.chukcut "ocean waves" --kind video --id 1234567 --at 4
 ```
 
 ### Captions
@@ -584,33 +874,133 @@ optional count-in, which is not kept) and puts it on a new audio lane at
 
 #### `export PROJECT OUTPUT`
 
-Renders the timeline to a video file. The command waits until the file is
+Renders the timeline to a file. The command waits until the file is
 complete and shows progress on stderr.
 
 | Option | |
 |---|---|
-| `--preset` | `youtube_1080p`, `youtube_4k`, `vertical_1080x1920`, `instagram_square`, or `custom` (the project's canvas and frame rate; the default) |
+| `--preset ID` | a preset from `presets` (see below), or `custom` (the project's canvas and frame rate; the default) |
 | `--hardware ID` | a hardware encoder from `catalog hardware` (`nvenc_h264`, `vaapi_h265`, …), `auto` for the first one that works, or `software` |
 | `--width`, `--height`, `--fps` | override the preset |
-| `--codec` | `h264`, `h265`, `vp9`, `av1` |
+| `--codec` | `h264`, `h265`, `vp9`, `av1`, `prores`, `gif` |
 | `--crf N` or `--bitrate BPS` | quality |
-| `--container` | `mp4`, `mov`, `mkv`, `webm`; the file extension follows the container |
-| `--audio-codec` | `aac`, `opus`, `none` |
+| `--container` | `mp4`, `mov`, `mkv`, `webm`, `gif`; sound only: `m4a`, `mp3`, `wav`. The file extension follows the container |
+| `--audio-codec` | `aac`, `opus`, `mp3`, `pcm`, `none` |
+| `--audio-bitrate BPS` | |
 | `--no-audio` | |
-| `--loudness LUFS` | bring the mix to this loudness, true peak at -1 dBTP |
+| `--loudness LUFS` | bring the mix to this loudness, true peak at -1 dBTP; overrides the preset's target |
+| `--no-loudness` | keep the mix as edited, also when the preset has a target |
 | `--from TIME`, `--to TIME` | export only this range |
 | `--sidecar srt\|vtt` | also write the captions next to the video |
 
+The built-in presets:
+
+| Preset | Size | Rate | Picture | Sound | Loudness |
+|---|---|---|---|---|---|
+| `tiktok` | 1080p, canvas shape | 30 | H.264 CRF 20 | AAC 192k | -14 LUFS |
+| `instagram_reels` | 1080p, canvas shape | 30 | H.264 CRF 21 | AAC 192k | -14 LUFS |
+| `youtube_shorts` | 1080p, canvas shape | 30 | H.264 CRF 20 | AAC 256k | -14 LUFS |
+| `instagram_square` | 1080×1080 | 30 | H.264 CRF 21 | AAC 192k | -14 LUFS |
+| `x_twitter` | 1080p, canvas shape | 30 | H.264 8 Mbit/s | AAC 128k | -14 LUFS |
+| `youtube_1080p` | 1080p, canvas shape | project | H.264 CRF 20 | AAC 384k | -14 LUFS |
+| `youtube_4k` | 2160p, canvas shape | project | H.265 CRF 22 | AAC 384k | -14 LUFS |
+| `master_prores` | canvas | project | ProRes 422 HQ 10-bit, .mov | PCM 16-bit | as edited |
+| `master_h264` | canvas | project | H.264 CRF 14 | AAC 320k | as edited |
+| `master_hevc` | canvas | project | H.265 CRF 16 | AAC 320k | as edited |
+| `audio_aac` | — | — | — | AAC 256k .m4a | -16 LUFS |
+| `audio_mp3` | — | — | — | MP3 320k | -16 LUFS |
+| `audio_wav` | — | — | — | PCM 16-bit .wav | as edited |
+| `gif` | 480p, canvas shape | 15 | GIF, 252 colours | — | — |
+
+"1080p, canvas shape" means: the shorter side is 1080 and the aspect ratio
+is the canvas's. A 9:16 canvas gives 1080×1920, a 16:9 canvas 1920×1080. The
+composition is never boxed into another shape. When the canvas does not
+have the shape that the platform shows full screen, or the timeline is
+longer than the platform accepts, the result has a `warnings` list. The old
+id `vertical_1080x1920` still works and means `tiktok`.
+
 The software encoder is the default. A hardware encoder is a choice, because
-the engine trial-encodes each one before it uses it.
+the engine trial-encodes each one before it uses it. ProRes, GIF and sound
+only always use the software encoder.
 
 The result gives the path, the size in bytes, the frame count, the time it
-took and the encode speed.
+took, the encode speed, the output size, the loudness target and the
+warnings.
 
 ```bash
-chukcut-cli export reel.chukcut out/reel.mp4 --preset vertical_1080x1920 \
-  --hardware auto --loudness -14 --sidecar srt --json
+chukcut-cli export reel.chukcut out/reel.mp4 --preset tiktok \
+  --hardware auto --sidecar srt --json
+chukcut-cli export reel.chukcut out/voice.mp3 --preset audio_mp3
 ```
+
+#### `presets PROJECT`
+
+Lists every preset as it fits this project: the size and frame rate it
+exports at on this canvas, the container, the loudness target, the warnings
+and an instant size estimate. Your own presets come last, with `user: true`.
+
+#### `preset save PROJECT NAME [export options]`
+
+Saves export settings as a preset of your own. Start from a preset and add
+overrides; every export option except the output is allowed. The preset
+keeps the resolution class, so a "1080p" preset also exports 1080p on a
+canvas of another shape. The id is `user_` and the name in lower case.
+Saving the same name again replaces the preset. Presets are stored in
+`<config>/chukcut/export-presets.json`; the app and the CLI share them.
+
+```bash
+chukcut-cli preset save reel.chukcut "Reel HQ" --preset instagram_reels --crf 18
+chukcut-cli export reel.chukcut out/reel.mp4 --preset user_reel_hq
+```
+
+#### `preset remove PROJECT ID`
+
+Deletes one of your own presets. A built-in preset cannot be deleted.
+
+#### `estimate PROJECT [export options] [--sample]`
+
+Tells what an export will produce and how big it will be, without writing
+it. The size of a CRF export depends on the picture. Without `--sample`,
+the size of a CRF export is a rough guess from a table
+(`estimate.method: "table"`). With `--sample`, the engine encodes three
+two-second windows of the timeline (the whole timeline when it is 8 s or
+shorter) with the real settings and measures the size
+(`method: "sampled"`). A bitrate export and a sound-only export are
+calculated, not sampled (`method: "bitrate"`, `"exact"` for WAV). The
+estimate includes the audio and the container overhead. In the tests the
+sampled and calculated estimates are within 2 % of the real files.
+
+#### `export-queue PROJECT [--presets ID,ID…] [--out-dir DIR] [--jobs FILE]`
+
+Queues several exports and runs them one after another. The command waits
+until all files are written. Progress shows the item and its percentage.
+
+- `--presets ID,ID,…` (a list, or the flag repeated) exports this project
+  once per preset, to
+  `<out-dir>/<project>-<preset>.<ext>`. The other export options (for
+  example `--from`/`--to`, `--hardware`) apply to each of these. Without
+  `--out-dir`, the files go next to the project. `--preset ID` alone queues
+  one export.
+- `--jobs FILE` (or `-` for stdin) is a JSON list of jobs. A job is an
+  object with `output` and the export options (`preset`, `from`, `to`,
+  `crf`, `container`, …). A job can name another project file in `project`
+  and a name for the progress lines in `label`.
+
+Every job is checked before the first one starts, so a wrong preset name in
+the third job stops the command at once. When an export fails, the others
+still run; then the command fails with exit code 5 and names the failed
+jobs.
+
+```bash
+chukcut-cli export-queue reel.chukcut --presets tiktok,youtube_shorts,audio_mp3 \
+  --out-dir out/
+echo '[{"output":"out/intro.mp4","preset":"x_twitter","from":0,"to":10},
+      {"output":"out/other.mp4","project":"other.chukcut","preset":"youtube_1080p"}]' \
+  | chukcut-cli export-queue reel.chukcut --jobs -
+```
+
+In the app, the export dialog has the same queue: "Add to queue" puts the
+export in the queue and the queue keeps running when the dialog is closed.
 
 #### `render-frame PROJECT --at TIME OUTPUT`
 
@@ -661,10 +1051,18 @@ The operation names are the MCP tool names: `info`, `validate`, `configure`,
 `transition_add`, `transition_remove`, `track`, `captions_transcribe`,
 `captions_import`, `captions_export`, `captions_style`, `captions_list`,
 `silence_detect`, `silence_remove`, `normalize`, `denoise`, `loudness`,
-`audio_effect_add`, `audio_effect_set`, `audio_effect_remove`,
-`audio_effects`, `voice`, `audio_pitch`, `duck`, `record`, `export`,
-`render_frame`. The arguments are the command's options and
-positional arguments without the project. `chukcut-cli mcp` lists each one's
+`marker_add`, `marker_set`, `marker_remove`, `marker_list`, `crop`, `curve`,
+`freeze`, `speed_curve`, `layout_pip`, `layout_split`, `title_style`,
+`title_template`, `title_position`, `title_duplicate`, `scenes_detect`,
+`scenes_split`, `scenes_clear`, `stabilise`, `stabilise_set`,
+`stabilise_remove`, `beats_detect`, `beats_clear`, `beats_cut`, `beats_snap`,
+`reframe`, `analysis`, `translate_captions`, `tts`, `stock_kinds`,
+`stock_search`, `stock_download`, `audio_effect_add`, `audio_effect_set`,
+`audio_effect_remove`, `audio_effects`, `voice`, `audio_pitch`, `duck`,
+`record`, `export`, `presets`, `preset_save`,
+`preset_remove`, `estimate`, `export_queue`, `render_frame`. The arguments
+are the command's options and positional arguments without the project.
+In `export_queue`, the jobs are a `jobs` list rather than a file. `chukcut-cli mcp` lists each one's
 JSON Schema (see below).
 
 ## The MCP server
@@ -711,7 +1109,12 @@ refused edit is a tool result with `isError: true` and the engine's message;
 an unknown tool or a malformed request is a JSON-RPC error.
 
 Read-only tools have `readOnlyHint`: `info`, `validate`, `captions_list`,
-`silence_detect`, `loudness`, `catalog`, `view_frame`.
+`silence_detect`, `loudness`, `catalog`, `view_frame`, `marker_list`,
+`analysis`, `stock_kinds`, `stock_search`, `presets`, `estimate`.
+
+Tools that send data to a service outside this machine have
+`openWorldHint`: `captions_transcribe`, `translate_captions`, `tts`,
+`stock_kinds`, `stock_search`, `stock_download`.
 
 ### Resources
 
@@ -736,8 +1139,9 @@ Read-only tools have `readOnlyHint`: `info`, `validate`, `captions_list`,
   again.
 - The server does one request at a time. A long export blocks the connection
   until it is done. When the request has a `progressToken`, the server sends
-  `notifications/progress` during the export, the transcription, the tracking
-  and the sound analysis.
+  `notifications/progress` during the export, the transcription, the tracking,
+  the sound analysis, the picture analysis (scenes, stabilise, reframe), the
+  beat detection and a stock download.
 
 ### Example session
 
@@ -795,15 +1199,15 @@ ffprobe -v error -count_frames -show_entries stream=nb_read_frames out.mp4
   Vulkan driver, `export`, `render-frame` and `view_frame` fail with exit
   code 5.
 - **No cancel.** Ctrl+C stops the process; an export that stops early leaves
-  a partial file.
+  a partial file. The same is true for `export-queue`: the queue lives in
+  the process, so the exports not yet run are not run.
 - **Undo history lives only in one session** (one command, one batch, one MCP
   connection). The project file does not store it.
 - **Cloud features need an account** that you set up in the app. The CLI
-  cannot add accounts or keys.
-- **Not covered yet:** markers, crop, curves (point lists), picture in
-  picture and split-screen layouts, freeze frame, caption translation,
-  text-to-speech, stock media search. The engine has commands for them; each
-  is a small operation struct in `crates/cli/src/ops/`.
+  cannot add accounts or keys. Without an account, a cloud command fails with
+  exit code 1.
+- **The stock commands take a project** (as every operation does), but they
+  do not change it, except `cloud stock-download`.
 
 ## For developers
 
@@ -817,4 +1221,7 @@ ffprobe -v error -count_frames -show_entries stream=nb_read_frames out.mp4
   `modules/timeline/gesture.rs`. It does not change a `Project` directly.
 - Tests: `cargo test -p chukcut-cli`. `tests/flow.rs` runs the binary on
   generated media and checks the export with ffprobe. `tests/mcp.rs` drives a
-  full MCP session over a pipe.
+  full MCP session over a pipe. `tests/coverage.rs` checks the later
+  operations (markers to cloud) in the saved project file. Its cloud test
+  uses an OpenAI-compatible stand-in server on 127.0.0.1, so no request leaves
+  the machine.
