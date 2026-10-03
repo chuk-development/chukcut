@@ -8,7 +8,10 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # A run takes over 20 minutes and master is pushed more often than that;
+  # cancelling there meant no master run ever finished. Pull requests still
+  # cancel superseded runs.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always

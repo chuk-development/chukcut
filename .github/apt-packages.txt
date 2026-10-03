@@ -32,3 +32,9 @@ build-essential
 pkg-config
 # bindgen, used by ffmpeg-sys-next and whisper-rs-sys, loads libclang.
 libclang-dev
+# Fonts the text tests lay out with: a default sans with wide coverage, and
+# CJK. Without them the runner has almost no fonts, the CJK test sees
+# notdef boxes and line breaking at 400 px no longer gives two lines.
+fonts-dejavu-core
+fonts-noto-core
+fonts-noto-cjk
