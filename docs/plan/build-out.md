@@ -65,3 +65,18 @@ column current.
 | 5 | analysis | scene detection, stabilisation, beat detection + auto-cut, auto reframe | merged — no face detector (needs ML worker); maps time via legacy source_time_at, wrong on speed-curved clips |
 | 6 | titles | full title styling on the kit, colour picker, 20–30 title presets, 10 text templates | running (agent/titles) |
 | 6 | polish | in-app file browser fallback, explicit canvas choice kept, frame-snapped ruler, prune unused materials, analysis on TimeMap, QA lows | done on agent/polish — export resolution/loudness not remembered, size estimate untouched, stale tooltip text left |
+
+## Backlog for the next waves (lead picks from the top)
+
+1. **Masks, chroma key, blend modes** — shape masks per clip (rect, ellipse, linear, mirror, heart/star, feather, invert, keyframable), green-screen chroma key with spill suppression, the inspector's blend modes (drawn disabled today). CapCut has all three.
+2. **Audio tools** — voiceover recording (cpal input), EQ / compressor / reverb per clip, auto-ducking music under speech (uses the speech/VAD work), pitch-preserving time stretch (signalsmith-stretch or similar permissive lib) so speed-curved clips keep their sound.
+3. **ML worker process** (docs/research/ml-features.md architecture): `chukcut-ml-worker` on `ort` with CUDA/OpenVINO EPs; first models: YuNet faces (auto-reframe), VitTrack (tracking T2), RVM or BiRefNet-lite person segmentation (local background removal; check licences — GPL is fine for us).
+4. **Export presets and queue** — TikTok/Reels/Shorts/YouTube presets, a queue, remember last settings, fix the size estimate; batch export from the CLI.
+5. **Compound clips / nested sequences**, multi-timeline projects (CapCut "Timeline 01").
+6. **Animated stickers** (Lottie via velato on the shared wgpu device) and Noto animated emoji.
+7. **Shared GPU texture with GPUI** — patch gpui-pre per docs/research/gpui-shared-texture.md.
+8. **Frame blending / motion blur** for slow sections and speed ramps (two-frame cache in the provider).
+9. **Keyboard shortcut editor** and presets (CapCut / Premiere layouts).
+10. **Project templates** (CapCut-style templates: placeholders for media + preset text/animations).
+11. **Intel/VAAPI verification** on the owner's laptop: run `tests/every_card.rs` and the player bench there.
+
