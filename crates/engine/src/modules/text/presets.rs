@@ -168,6 +168,10 @@ fn glow(m: &mut TextMaterial, color: [f32; 4], s: f32) {
     m.shadow = shadow(color, [0.0, 0.0], 0.55, s);
 }
 
+/// How far a title placed at an edge stays from it, as a fraction of the
+/// canvas: the action-safe margin short-form apps keep clear.
+pub const EDGE: f32 = 0.06;
+
 /// A new title lands at the bottom of the frame at this height.
 const LOW: f32 = -0.68;
 /// And at the top here.
@@ -841,13 +845,37 @@ impl TextPosition {
         }
     }
 
-    /// The segment position, in half-canvas units, y up. The layer is the
-    /// size of the canvas with the paragraph in its middle, aligned to its
-    /// edge; so a side column only insets from the edge, and a row moves the
-    /// whole layer up or down.
-    pub fn position(self) -> [f32; 2] {
+    /// The segment position, in half-canvas units, y up, for a paragraph
+    /// `height` tall as a fraction of the canvas height (what it measures,
+    /// box included, at the clip's scale).
+    ///
+    /// The layer is the size of the canvas with the paragraph in its middle,
+    /// aligned to its edge; so a side column only insets from the edge, and
+    /// a row moves the layer until the paragraph's edge is [`EDGE`] in from
+    /// the canvas's. A paragraph too tall for that stays in the middle.
+    pub fn position(self, height: f32) -> [f32; 2] {
         let (column, row) = self.cell();
-        [-(column as f32) * 0.08, -(row as f32) * 0.72]
+        let travel = (1.0 - 2.0 * EDGE - height.max(0.0)).max(0.0);
+        [-(column as f32) * 2.0 * EDGE, -(row as f32) * travel]
+    }
+
+    /// Which cell a title at `position` with alignment `align` is in: the
+    /// column from the alignment, the row from which side of the middle it
+    /// sits.
+    pub fn of(position: [f32; 2], align: TextAlign) -> TextPosition {
+        let column = match align {
+            TextAlign::Left => 0,
+            TextAlign::Center => 1,
+            TextAlign::Right => 2,
+        };
+        let row = if position[1] > 0.02 {
+            0
+        } else if position[1] < -0.02 {
+            2
+        } else {
+            1
+        };
+        Self::ALL[row * 3 + column]
     }
 }
 
@@ -1146,18 +1174,27 @@ mod tests {
 
     #[test]
     fn the_position_grid_insets_columns_and_moves_rows() {
-        assert_eq!(TextPosition::Centre.position(), [0.0, 0.0]);
+        assert_eq!(TextPosition::Centre.position(0.1), [0.0, 0.0]);
         assert_eq!(TextPosition::TopLeft.align(), TextAlign::Left);
         assert_eq!(TextPosition::BottomRight.align(), TextAlign::Right);
-        let top = TextPosition::Top.position();
-        let bottom = TextPosition::Bottom.position();
+        let top = TextPosition::Top.position(0.1);
+        let bottom = TextPosition::Bottom.position(0.1);
         assert!(
             top[1] > 0.5 && bottom[1] < -0.5,
             "y is up: {top:?} {bottom:?}"
         );
+        // A paragraph a tenth of the canvas tall, 6% in from the bottom:
+        // its centre is 0.11 of the height above the bottom edge.
+        assert!((bottom[1] + 0.78).abs() < 1e-5, "{bottom:?}");
+        // Taller text moves less, and text taller than the safe area stays.
+        assert!(TextPosition::Bottom.position(0.5)[1] > bottom[1]);
+        assert_eq!(TextPosition::Bottom.position(0.95)[1], 0.0);
         assert!(
-            TextPosition::Left.position()[0] > 0.0,
+            TextPosition::Left.position(0.1)[0] > 0.0,
             "a left column is inset"
         );
+        for p in TextPosition::ALL {
+            assert_eq!(TextPosition::of(p.position(0.2), p.align()), p);
+        }
     }
 }

@@ -65,7 +65,7 @@ pub struct TextHighlight {
 }
 
 impl TextRequest {
-    pub(crate) fn background_padding_px(&self) -> f32 {
+    pub fn background_padding_px(&self) -> f32 {
         self.background_padding
             .unwrap_or(self.font_size * 0.2)
             .max(0.0)

@@ -76,6 +76,8 @@ pub(crate) struct Inspector {
     speed: speed::SpeedTab,
     /// The keyframe easing graph.
     easing: easing::EasingState,
+    /// The Text tab's words field and colour pickers.
+    text: text_style::TextTab,
 }
 
 /// The widgets behind one property: a number box and, for most, a slider.
@@ -143,6 +145,22 @@ pub(crate) enum Prop {
     SpeedCurve,
     /// A handle of the keyframe easing graph being dragged.
     Easing,
+    // --- a title's material (`text_style.rs`) ---
+    TextSize,
+    LetterSpacing,
+    LineSpacing,
+    TextOpacity,
+    StrokeWidth,
+    ShadowX,
+    ShadowY,
+    ShadowBlur,
+    BoxPadding,
+    BoxRadius,
+    /// Not rows: a colour drag, the words being typed, and the toggles, so
+    /// each previews and commits through the same machinery.
+    TextColor(text_style::ColorSlot),
+    TextContent,
+    TextFlags,
 }
 
 /// The fixed facts about a [`Prop`].
@@ -222,6 +240,19 @@ impl Prop {
             Prop::WheelPuck(_) => spec("Wheel", 0.0, 1.0, 0.01, 0.0, 2, "", false),
             Prop::SpeedCurve => spec("Speed curve", 0.0, 1.0, 0.01, 0.0, 2, "", false),
             Prop::Easing => spec("Easing", 0.0, 1.0, 0.01, 0.0, 2, "", false),
+            Prop::TextSize => spec("Size", 4.0, 400.0, 1.0, 96.0, 0, "", true),
+            Prop::LetterSpacing => spec("Letter spacing", -50.0, 200.0, 1.0, 0.0, 0, "", true),
+            Prop::LineSpacing => spec("Line spacing", 50.0, 300.0, 1.0, 120.0, 0, "%", true),
+            Prop::TextOpacity => spec("Opacity", 0.0, 100.0, 1.0, 100.0, 0, "%", true),
+            Prop::StrokeWidth => spec("Width", 0.0, 100.0, 1.0, 4.0, 0, "", true),
+            Prop::ShadowX => spec("X", -500.0, 500.0, 1.0, 0.0, 0, "", false),
+            Prop::ShadowY => spec("Y", -500.0, 500.0, 1.0, 0.0, 0, "", false),
+            Prop::ShadowBlur => spec("Blur", 0.0, 200.0, 1.0, 0.0, 0, "", true),
+            Prop::BoxPadding => spec("Padding", 0.0, 300.0, 1.0, 0.0, 0, "", true),
+            Prop::BoxRadius => spec("Corner radius", 0.0, 300.0, 1.0, 0.0, 0, "", true),
+            Prop::TextColor(_) | Prop::TextContent | Prop::TextFlags => {
+                spec("Text", 0.0, 1.0, 0.01, 0.0, 2, "", false)
+            }
         }
     }
 
@@ -537,6 +568,11 @@ impl Editor {
             Prop::Volume => gain_to_db(segment.volume),
             Prop::FadeIn => fades(segment).0 as f32 / 1_000_000.0,
             Prop::FadeOut => fades(segment).1 as f32 / 1_000_000.0,
+            _ if prop.is_text() => self
+                .project
+                .materials
+                .text(&segment.material_id)
+                .map_or(prop.spec().default, |m| prop.text_value(m)),
             _ => match prop.grade_control() {
                 Some((control, scale, offset)) => {
                     (control.get(&GradeEdit::of(colour)) - offset) / scale
@@ -617,6 +653,15 @@ impl Editor {
                     (fade_in, wanted)
                 };
                 Ok(Change::Edit(fade_command(segment, fade_in, fade_out)?))
+            }
+            _ if prop.is_text() => {
+                let before = project
+                    .materials
+                    .text(&segment.material_id)
+                    .ok_or("the clip is not a title")?
+                    .clone();
+                let after = prop.with_text_value(&before, value);
+                Ok(Change::Edit(EditCommand::SetTextMaterial { before, after }))
             }
             _ if prop.grade_control().is_some() => {
                 let (control, scale, offset) = prop.grade_control().expect("checked");
@@ -820,6 +865,9 @@ impl Editor {
     }
 
     pub(crate) fn reset_prop(&mut self, prop: Prop, cx: &mut Context<Self>) {
+        if self.reset_text_prop(prop, cx) {
+            return;
+        }
         self.set_prop(prop, prop.spec().default, Phase::Commit, cx);
     }
 
@@ -1027,6 +1075,7 @@ impl Editor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        self.inspector.text.begin_frame();
         let body = match self.selected_segment().map(|(_, s)| self.clip_kind(s)) {
             Some(kind) => self
                 .render_inspector_clip(kind, window, cx)

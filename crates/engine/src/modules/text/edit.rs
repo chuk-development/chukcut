@@ -280,6 +280,20 @@ pub fn template_command(
     })
 }
 
+/// How tall `material`'s paragraph is on `project`'s canvas, box included,
+/// as a fraction of the canvas height.
+pub fn block_height(material: &TextMaterial, project: &Project) -> f32 {
+    let (w, h) = (project.canvas.width.max(1), project.canvas.height.max(1));
+    let request = super::TextRequest::from(material);
+    let layout =
+        super::TextRenderer::shared().layout(&request, &super::RasterOptions::canvas(w, h));
+    let padding = match material.background {
+        Some(_) => 2.0 * request.background_padding_px(),
+        None => 0.0,
+    };
+    (layout.height + padding) / h as f32
+}
+
 /// The edit that moves the title on `segment_id` to a cell of the position
 /// grid: its segment's position and its paragraph's alignment.
 pub fn position_command(
@@ -294,6 +308,7 @@ pub fn position_command(
     let mut commands = Vec::new();
     let mut after_text = before_text.clone();
     after_text.align = position.align();
+    let height = block_height(&after_text, project) * segment.transform.scale[1].abs();
     if after_text != before_text {
         commands.push(EditCommand::SetTextMaterial {
             before: before_text,
@@ -301,7 +316,7 @@ pub fn position_command(
         });
     }
     let mut transform = segment.transform;
-    transform.position = position.position();
+    transform.position = position.position(height);
     if transform.position != segment.transform.position {
         commands.push(EditCommand::SetTransform {
             segment_id: segment_id.to_string(),
