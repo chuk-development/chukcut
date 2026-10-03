@@ -17,6 +17,17 @@
 // so the bug shows up as a dark halo creeping in from the edges. Every blend
 // here therefore premultiplies, mixes, and unpremultiplies.
 //
+// ## Premultiplied out
+//
+// Each entry point returns its colour premultiplied, for a pipeline that
+// blends with `One, OneMinusSrcAlpha`. The sum is the same as straight alpha
+// with `SrcAlpha, OneMinusSrcAlpha`, but the multiply by alpha happens here,
+// in 32-bit float, instead of in the blender. A blender may round its blend
+// factors to the target's precision first: NVIDIA rounds the source alpha of
+// an `Rgba8UnormSrgb` target to 1/255, which drew a dissolve from nothing at
+// a progress of 0.0018 as black and put every faint step of it on the 1/255
+// grid. The quad shader's `fs_premultiplied` does the same for clips.
+//
 // ## Colour space
 //
 // The layer textures are `Rgba8UnormSrgb`, so sampling decodes to linear light
@@ -120,7 +131,7 @@ fn travel() -> vec2<f32> {
 
 @fragment
 fn fs_dissolve(in: VertexOutput) -> @location(0) vec4<f32> {
-    return mix_layers(sample_from(in.uv), sample_to(in.uv), tr.progress);
+    return premultiply(mix_layers(sample_from(in.uv), sample_to(in.uv), tr.progress));
 }
 
 // ---------------------------------------------------------------------------
@@ -140,7 +151,7 @@ fn fs_dip(in: VertexOutput) -> @location(0) vec4<f32> {
     let dip = 1.0 - abs(2.0 * tr.progress - 1.0);
     let base = select(sample_from(in.uv), sample_to(in.uv), tr.progress >= 0.5);
     let veil = vec4<f32>(tr.color.rgb, tr.color.a * dip);
-    return over(veil, base);
+    return premultiply(over(veil, base));
 }
 
 // ---------------------------------------------------------------------------
@@ -160,7 +171,7 @@ fn fs_wipe(in: VertexOutput) -> @location(0) vec4<f32> {
     // progress 0 and never quite finish at progress 1.
     let edge = tr.progress * (1.0 + soft) - soft;
     let k = 1.0 - smoothstep(edge, edge + soft, along);
-    return mix_layers(sample_from(in.uv), sample_to(in.uv), k);
+    return premultiply(mix_layers(sample_from(in.uv), sample_to(in.uv), k));
 }
 
 // ---------------------------------------------------------------------------
@@ -183,7 +194,7 @@ fn fs_slide(in: VertexOutput) -> @location(0) vec4<f32> {
     let t = select(vec4<f32>(0.0, 0.0, 0.0, 0.0), sample_to(to_uv), to_visible);
     // They never overlap — one layer occupies exactly the frame the other has
     // vacated — so this is a selection, not a blend.
-    return select(f, t, to_visible);
+    return premultiply(select(f, t, to_visible));
 }
 
 // ---------------------------------------------------------------------------
@@ -201,7 +212,7 @@ fn fs_zoom(in: VertexOutput) -> @location(0) vec4<f32> {
     let to_scale = 1.0 + amount * (1.0 - tr.progress);
     let from_uv = centre + (in.uv - centre) / from_scale;
     let to_uv = centre + (in.uv - centre) / to_scale;
-    return mix_layers(sample_from(from_uv), sample_to(to_uv), tr.progress);
+    return premultiply(mix_layers(sample_from(from_uv), sample_to(to_uv), tr.progress));
 }
 
 // ---------------------------------------------------------------------------
@@ -258,5 +269,5 @@ fn fs_blur(in: VertexOutput) -> @location(0) vec4<f32> {
     let peak = max(tr.softness, 0.0);
     let from_c = blur_from(in.uv, peak * tr.progress);
     let to_c = blur_to(in.uv, peak * (1.0 - tr.progress));
-    return mix_layers(from_c, to_c, tr.progress);
+    return premultiply(mix_layers(from_c, to_c, tr.progress));
 }

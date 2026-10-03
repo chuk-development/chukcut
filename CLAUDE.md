@@ -129,6 +129,11 @@ directory:
 git worktree add ../chukcut-<task> -b agent/<task>
 ```
 
+The repository lives on the data disk, `/mnt/data/git/chukcut` (`~/git/chukcut`
+is a symlink), so worktrees land in `/mnt/data/git/`. The system disk filled up
+twice from parallel `target/` directories; keep builds off it. Remove a
+worktree once its branch is merged.
+
 A night of twelve agents in one checkout cost real time: shared test profiles
 broken by someone else's file, a patch written against a struct another agent
 changed (it rendered hardware-decoded clips as their luma plane), diagnoses made

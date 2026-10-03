@@ -13,10 +13,10 @@ column current.
 
 - **Do not use the Agent tool's `isolation: worktree`** — it creates the
   worktree from the session's directory (`~/git/x`), which is the wrong repo.
-  Each agent creates its own: `git -C /home/user/git/chukcut worktree add
-  /home/user/git/chukcut-<name> -b agent/<name> master` and works only there.
+  Each agent creates its own: `git -C /mnt/data/git/chukcut worktree add
+  /mnt/data/git/chukcut-<name> -b agent/<name> master` and works only there.
 - Read `CLAUDE.md`, `docs/reference/capcut/README.md`, this file.
-- Screenshots of CapCut: `/home/user/git/chukcut/docs/reference/capcut/*.png`
+- Screenshots of CapCut: `/mnt/data/git/chukcut/docs/reference/capcut/*.png`
   (local only, gitignored — never commit them).
 - Test visually only on a private display:
   `Xvfb :NN -screen 0 1920x1080x24 &` and
@@ -66,12 +66,17 @@ column current.
 | 5 | analysis | scene detection, stabilisation, beat detection + auto-cut, auto reframe | merged — no face detector (needs ML worker); maps time via legacy source_time_at, wrong on speed-curved clips |
 | 6 | titles | full title styling on the kit, colour picker, 20–30 title presets, 10 text templates | merged — new text commands not in CLI/MCP yet |
 | 6 | polish | in-app file browser fallback, explicit canvas choice kept, frame-snapped ruler, prune unused materials, analysis on TimeMap, QA lows | done on agent/polish — export resolution/loudness not remembered, size estimate untouched, stale tooltip text left |
+| 7 | mlworker | finish VitTrack (T2), person segmentation / background removal through the ML worker | running (agent/mlworker) |
+| 7 | demo | release build, showcase project via CLI (`scripts/demo.sh`), `docs/demo.md` feature tour | running (agent/demo) |
+| 7 | compound | compound clips, nested sequences, several timelines per project (backlog 5) | running (agent/compound) |
+| 7 | templates | project templates + shortcut editor (backlog 9, 10) | running (agent/templates) |
+| 7 | upkeep | full CLI/MCP coverage, Dependabot bumps, `effects/graph.rs:735` alpha check, GPU tests on both adapters (backlog 13) | running (agent/upkeep) |
 
 ## Backlog for the next waves (lead picks from the top)
 
 1. **[merged]** **Masks, chroma key, blend modes** — shape masks per clip (rect, ellipse, linear, mirror, heart/star, feather, invert, keyframable), green-screen chroma key with spill suppression, the inspector's blend modes (drawn disabled today). CapCut has all three.
 2. **[merged]** **Audio tools** — voiceover recording (cpal input), EQ / compressor / reverb per clip, auto-ducking music under speech (uses the speech/VAD work), pitch-preserving time stretch (signalsmith-stretch or similar permissive lib) so speed-curved clips keep their sound.
-3. **ML worker process** (docs/research/ml-features.md architecture): `chukcut-ml-worker` on `ort` with CUDA/OpenVINO EPs; first models: YuNet faces (auto-reframe), VitTrack (tracking T2), RVM or BiRefNet-lite person segmentation (local background removal; check licences — GPL is fine for us).
+3. **[stopped by the owner mid-work, 2026-10-03: agent/mlworker has partial, uncommitted work in /mnt/data/git/chukcut-mlworker]** **ML worker process** (docs/research/ml-features.md architecture): `chukcut-ml-worker` on `ort` with CUDA/OpenVINO EPs; first models: YuNet faces (auto-reframe), VitTrack (tracking T2), RVM or BiRefNet-lite person segmentation (local background removal; check licences — GPL is fine for us).
 4. **[merged]** **Export presets and queue** (+ full CLI/MCP coverage; open: quit guard while the queue runs, queue not persisted) — TikTok/Reels/Shorts/YouTube presets, a queue, remember last settings, fix the size estimate; batch export from the CLI.
 5. **Compound clips / nested sequences**, multi-timeline projects (CapCut "Timeline 01").
 6. **Animated stickers** (Lottie via velato on the shared wgpu device) and Noto animated emoji.
@@ -80,6 +85,17 @@ column current.
 9. **Keyboard shortcut editor** and presets (CapCut / Premiere layouts).
 10. **Project templates** (CapCut-style templates: placeholders for media + preset text/animations).
 11. **Intel/VAAPI verification** on the owner's laptop: run `tests/every_card.rs` and the player bench there.
-12. **Premultiply in the remaining straight-alpha pipelines** — `transitions/render.rs:268` and `fx/render.rs:468` still use `ALPHA_BLENDING`; on NVIDIA an 8-bit sRGB target rounds source alpha to 1/255 before blending (found and fixed for the quad pipeline in d9d86dd: soft mask edges and low opacities were drawn in steps).
+12. **[merged]** **Premultiply in the remaining straight-alpha pipelines** (also `transitions/library/mod.rs`; fx over-draw was latent; open: check `effects/graph.rs:735`'s data-driven blend) — `transitions/render.rs:268` and `fx/render.rs:468` still use `ALPHA_BLENDING`; on NVIDIA an 8-bit sRGB target rounds source alpha to 1/255 before blending (found and fixed for the quad pipeline in d9d86dd: soft mask edges and low opacities were drawn in steps).
 13. **Run GPU tests on both adapters** — `test_context()` takes the default adapter. Agents testing on lavapipe missed the NVIDIA alpha rounding; run engine GPU tests once on the real GPU and once with `VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json`.
 
+**Paused 2026-10-03 by the owner:** all agents and builds stopped because builds filled the SSD (4 GB free). Before restarting: every agent must share one CARGO_TARGET_DIR or delete its target/ after its branch merges; check `df -h /` first.
+
+## Open for the next session (2026-10-03)
+
+- **Moved to the data disk (2026-10-04):** the repository, its worktrees, `~/.cargo` and `~/.rustup` now live on `/mnt/data` (1.8 TB, separate from the system disk); the old paths are symlinks. Worktrees go to `/mnt/data/git/chukcut-<name>`. Each keeps its own `target/`; the lead deletes the worktree after its branch merges. Check `df -h /mnt/data` before launching.
+- **ML worker** (backlog 3): partial, uncommitted work in `/mnt/data/git/chukcut-mlworker` (branch agent/mlworker) — review it, commit or redo.
+- **Release build is stale:** rebuild `cargo build --release -p chukcut`; the running binary predates the alpha fixes (d9d86dd, agent/alpha merge).
+- **CI:** green after the font fix (runs 37142894595, 37144217430 passed on 2026-10-03).
+- **Dependabot PRs** (rust-minor group, ffmpeg-next 9.0) are unreviewed; ffmpeg-next 9 needs a build + full test run before merging.
+- **Owner decisions pending:** (1) a project identity (URL + project e-mail, not the owner's) for Wikimedia/Musopen User-Agent — until then those sources stay off; (2) delete the fork `chukfinley/filmcraft` (needs `gh auth refresh -h github.com -s delete_repo`).
+- **Follow-up:** check `effects/graph.rs:735` (data-driven blend state) for the NVIDIA alpha rounding.

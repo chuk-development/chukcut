@@ -262,10 +262,13 @@ impl TransitionPipeline {
                         compilation_options: Default::default(),
                         targets: &[Some(wgpu::ColorTargetState {
                             format,
-                            // Straight-alpha source-over, the same state the
-                            // quad pipeline uses, so a transition composites
-                            // onto the tracks beneath it like any other layer.
-                            blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                            // Source-over, the same state the quad pipeline
+                            // uses, so a transition composites onto the tracks
+                            // beneath it like any other layer. Premultiplied:
+                            // every entry point multiplies by alpha itself, so
+                            // an 8-bit blender cannot round the alpha first
+                            // (see the top of `transition.wgsl`).
+                            blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
                             write_mask: wgpu::ColorWrites::ALL,
                         })],
                     }),
@@ -501,6 +504,14 @@ mod tests {
     /// went in, and an assertion failure means the blend is wrong rather than
     /// that a colour space is.
     fn solid(ctx: &RenderContext, color: [u8; 4]) -> (Arc<wgpu::Texture>, wgpu::TextureView) {
+        solid_in(ctx, FORMAT, color)
+    }
+
+    fn solid_in(
+        ctx: &RenderContext,
+        format: wgpu::TextureFormat,
+        color: [u8; 4],
+    ) -> (Arc<wgpu::Texture>, wgpu::TextureView) {
         let texture = ctx.device().create_texture(&wgpu::TextureDescriptor {
             label: Some("transition test layer"),
             size: wgpu::Extent3d {
@@ -511,7 +522,7 @@ mod tests {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: FORMAT,
+            format,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
@@ -542,6 +553,13 @@ mod tests {
     }
 
     fn target(ctx: &RenderContext) -> (wgpu::Texture, wgpu::TextureView) {
+        target_in(ctx, FORMAT)
+    }
+
+    fn target_in(
+        ctx: &RenderContext,
+        format: wgpu::TextureFormat,
+    ) -> (wgpu::Texture, wgpu::TextureView) {
         let texture = ctx.device().create_texture(&wgpu::TextureDescriptor {
             label: Some("transition test target"),
             size: wgpu::Extent3d {
@@ -552,7 +570,7 @@ mod tests {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: FORMAT,
+            format,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
@@ -818,5 +836,71 @@ mod tests {
         // The second draw is fully opaque incoming-clip blue, so it covers the
         // first. If both had read slot 0 the answer would be red.
         assert_eq!(read(&ctx, &texture)[0], [0, 0, 255, 255]);
+    }
+
+    fn decode(e: u8) -> f32 {
+        let e = e as f32 / 255.0;
+        if e <= 0.04045 {
+            e / 12.92
+        } else {
+            ((e + 0.055) / 1.055).powf(2.4)
+        }
+    }
+
+    fn encode(l: f32) -> u8 {
+        let l = l.clamp(0.0, 1.0);
+        let e = if l <= 0.003_130_8 {
+            l * 12.92
+        } else {
+            1.055 * l.powf(1.0 / 2.4) - 0.055
+        };
+        (e * 255.0).round() as u8
+    }
+
+    /// A clip faded in from nothing, at faint progress values, on the
+    /// compositor's own format (`Rgba8UnormSrgb` layers and target), against
+    /// arithmetic done here: the clip's light times the progress, encoded.
+    ///
+    /// The faint end is where an 8-bit blender is wrong. Asked for
+    /// `SrcAlpha, OneMinusSrcAlpha`, NVIDIA rounds the source alpha to 1/255
+    /// before the multiply, so a progress of 1.4/255 drew the clip at 1/255
+    /// and 0.0018 drew black. Progress values between the 1/255 steps catch
+    /// that; the built-in dissolve and a library preset (`gl:fade`, through
+    /// its own pipeline) both go through the test.
+    #[test]
+    fn a_faint_fade_from_nothing_matches_the_cpu_reference_on_an_srgb_target() {
+        let ctx = gpu!();
+        const SRGB: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let pipeline = TransitionPipeline::new(&ctx, SRGB);
+        let (_e, empty) = solid_in(&ctx, SRGB, [0, 0, 0, 0]);
+        let (texture, view) = target_in(&ctx, SRGB);
+        let fade = TransitionMaterial::library("gl:fade", 1_000_000);
+        let mut failures = Vec::new();
+        for colour in [[255u8, 255, 255], [230, 180, 40]] {
+            let (_c, clip) = solid_in(&ctx, SRGB, [colour[0], colour[1], colour[2], 255]);
+            for progress in [0.0018f32, 1.4 / 255.0, 2.6 / 255.0, 4.45 / 255.0, 0.03, 0.1] {
+                let cases = [
+                    ("dissolve", params(TransitionKind::Dissolve, progress)),
+                    ("gl:fade", TransitionParams::new(&fade, progress)),
+                ];
+                for (name, params) in cases {
+                    pipeline.blend_to_texture(&ctx, &params, &empty, &clip, &view);
+                    let got = read(&ctx, &texture)[0];
+                    let want = [
+                        encode(decode(colour[0]) * progress),
+                        encode(decode(colour[1]) * progress),
+                        encode(decode(colour[2]) * progress),
+                        (progress * 255.0).round() as u8,
+                    ];
+                    if (0..4).any(|i| (got[i] as i32 - want[i] as i32).abs() > 1) {
+                        failures.push(format!(
+                            "{name} of {colour:?} at {:.2}/255: got {got:?}, want {want:?}",
+                            progress * 255.0
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 }
