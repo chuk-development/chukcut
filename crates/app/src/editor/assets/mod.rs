@@ -278,7 +278,7 @@ impl Editor {
         div().id(id).flex_1().min_h(px(0.0)).overflow_y_scroll()
     }
 
-    /// A tile with a picture area, a caption, and a "+" that appears on
+    /// A tile with a picture area, a caption (none when empty), and a "+" that appears on
     /// hover. `picture` fills the picture area; `on_add` runs for the "+".
     fn tile(
         id: SharedString,
@@ -337,16 +337,18 @@ impl Editor {
                             .child(Icon::new(Lucide::Plus).size(px(14.0))),
                     ),
             )
-            .child(
-                div()
-                    .w(px(TILE_W))
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .text_xs()
-                    .text_color(rgb(TEXT_DIM))
-                    .child(caption),
-            )
+            .when(!caption.is_empty(), |tile| {
+                tile.child(
+                    div()
+                        .w(px(TILE_W))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_xs()
+                        .text_color(rgb(TEXT_DIM))
+                        .child(caption),
+                )
+            })
     }
 
     /// CapCut's empty state: a large box that opens the file picker and

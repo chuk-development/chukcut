@@ -52,6 +52,8 @@ pub(crate) struct ExportDialog {
     /// Hardware encoders, once detection has answered.
     encoders: Option<Vec<HwEncoder>>,
     phase: Phase,
+    /// One line above the settings, e.g. after a cancelled export.
+    notice: Option<SharedString>,
     /// Progress for this dialog, written by the export thread.
     progress: Slot,
     /// The editor's progress slot, so the title bar keeps reporting when the
@@ -124,6 +126,7 @@ impl ExportDialog {
             custom_bitrate,
             encoders: None,
             phase: Phase::Settings,
+            notice: None,
             progress: Arc::new(parking_lot::Mutex::new(None)),
             editor_progress,
             _subscriptions: subscriptions,
@@ -160,6 +163,7 @@ impl ExportDialog {
             return;
         }
         self.phase = Phase::Starting;
+        self.notice = None;
         cx.notify();
         cx.spawn(async move |this, cx| {
             // Normally instant: the answer is cached.
@@ -240,6 +244,7 @@ impl ExportDialog {
             }
             ExportStage::Cancelled => {
                 self.phase = Phase::Settings;
+                self.notice = Some("Export cancelled. Nothing was written.".into());
                 false
             }
             _ => {
@@ -523,6 +528,11 @@ impl ExportDialog {
             .flex()
             .flex_col()
             .gap_2()
+            .children(
+                self.notice
+                    .clone()
+                    .map(|notice| div().text_sm().text_color(rgb(0xe0a84a)).child(notice)),
+            )
             .child(Self::row("Name", Input::new(&self.name).small()))
             .child(Self::row("Export to", folder))
             .when(exists, |column| {
@@ -639,7 +649,11 @@ impl ExportDialog {
                         .flex()
                         .flex_col()
                         .gap_2()
-                        .child(Progress::new("export-progress").value(fraction * 100.0))
+                        .child(
+                            Progress::new("export-progress")
+                                .color(rgb(ACCENT))
+                                .value(fraction * 100.0),
+                        )
                         .child(div().text_sm().text_color(rgb(TEXT)).child(detail))
                         .child(
                             div()

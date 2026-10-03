@@ -572,6 +572,12 @@ impl Render for Editor {
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_drop(cx.listener(Self::on_media_drop))
+            // A click anywhere gives the keyboard back to the editor; a text
+            // field under the pointer takes it again in its own handler,
+            // which runs after this capture-phase one.
+            .capture_any_mouse_down(cx.listener(|this, _, window, cx| {
+                window.focus(&this.focus, cx);
+            }))
             .size_full()
             .flex()
             .flex_col()

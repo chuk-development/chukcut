@@ -149,7 +149,7 @@ impl Editor {
         let tile = Self::tile(
             "text-default".into(),
             picture,
-            "Default text".into(),
+            String::new(),
             false,
             move |_, _, cx| {
                 let _ = editor.update(cx, |this, cx| this.add_text(cx));
