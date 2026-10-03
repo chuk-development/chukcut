@@ -24,6 +24,7 @@
 //! never land out of order.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
 use parking_lot::{Condvar, Mutex};
@@ -176,8 +177,36 @@ fn writer() -> &'static Writer {
 
 /// Persist `project` in the background, replacing any write that has not
 /// started yet.
+///
+/// Does nothing once [`disable_for_process`] has been called.
 pub fn schedule(project: &Project, origin: Option<PathBuf>) {
+    if DISABLED.load(Ordering::Relaxed) {
+        return;
+    }
     schedule_to(file(), project, origin);
+}
+
+/// Set by [`disable_for_process`]; never cleared.
+static DISABLED: AtomicBool = AtomicBool::new(false);
+
+/// Turn the working copy off for the rest of this process.
+///
+/// For headless shells — `chukcut-cli` and its MCP server. They edit a
+/// project file the caller named and save it explicitly, so a crash-recovery
+/// copy has nothing to recover. Worse, the working copy is one file per user,
+/// shared with the app: a CLI run that wrote it would make the next app
+/// launch "restore" the CLI's document, or report a crash that never
+/// happened. Every command still calls [`schedule`]; this makes it a no-op
+/// instead of making each call site know which shell it runs under.
+///
+/// One way only. A process that is headless does not become an app.
+pub fn disable_for_process() {
+    DISABLED.store(true, Ordering::Relaxed);
+}
+
+/// Whether [`schedule`] writes the working copy in this process.
+pub fn is_enabled() -> bool {
+    !DISABLED.load(Ordering::Relaxed)
 }
 
 /// [`schedule`], to a path of the caller's choosing.
