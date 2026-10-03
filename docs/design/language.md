@@ -154,9 +154,22 @@ except a busy spinner.
 - `crate::theme` holds every value above; `crate::ui` holds the kit
   (`Panel`, `PanelHeader`, `IconButton`, `SegmentedTabs`, `RailTab`,
   `SectionHeader`, `Section`, `PropertyRow`, `KeyframeSlot`, `NumberField`,
-  `Badge`, `EmptyState`) and our glyphs (`ui::icons`). Title bar, asset
-  panel, player and export dialog use them; the timeline and the inspector
-  still draw their own and should move over.
+  `Badge`, `EmptyState`) and our glyphs (`ui::icons`). Every panel uses
+  them. The inspector's helpers in `editor/inspector/controls.rs`
+  (`Section`, `number_box`, `slider_row`, `field_row`, `sub_tabs`,
+  `top_tabs`, `panel_button`, `panel_footer`) keep their signatures and
+  render the kit, so a new tab built with them is already in the language.
+- Clip colours come from the media kind: the body token, and its title
+  strip from `theme::clip_title(body)`.
+- **Side panels give way on narrow windows.** `theme::side_widths` keeps
+  the asset panel and the inspector at 640 and 590 while the player has
+  510 px, and shrinks them below that (inspector never under 432, the
+  width of a row with two number fields). Check new inspector rows at
+  1366 × 768.
+- **GPUI Component menus keep 14 px text.** `PopupMenu` items and tooltips
+  hard-code `text_sm` (one rem's 0.875); the theme can only set their
+  colours. The menu hover is `colors.accent`, set to `BORDER` so it is a
+  step above `OVERLAY`.
 - **The window's rem stays 16 px.** GPUI Component makes `Theme::font_size`
   the rem, and every `p_2` or `text_sm` in the app is in rems; shrinking it
   shrinks the whole layout. The kit sets text sizes in pixels instead.
