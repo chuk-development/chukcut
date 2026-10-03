@@ -71,9 +71,15 @@ refresh_caches() {
     if command -v update-mime-database >/dev/null && [ -d "$datadir/mime" ]; then
         update-mime-database "$datadir/mime" >/dev/null 2>&1 || true
     fi
-    if command -v gtk-update-icon-cache >/dev/null && [ -d "$datadir/icons/hicolor" ]; then
-        # -t: the user's hicolor directory has no index.theme of its own.
-        gtk-update-icon-cache -q -t -f "$datadir/icons/hicolor" 2>/dev/null || true
+    if [ -d "$datadir/icons/hicolor" ]; then
+        # Refresh an icon cache only where one exists already: creating one
+        # in the user's directory would hide icons other programs add later
+        # without updating it. Touching the directory is what makes desktops
+        # rescan it.
+        touch "$datadir/icons/hicolor"
+        if [ -f "$datadir/icons/hicolor/icon-theme.cache" ] && command -v gtk-update-icon-cache >/dev/null; then
+            gtk-update-icon-cache -q -t -f "$datadir/icons/hicolor" 2>/dev/null || true
+        fi
     fi
 }
 
