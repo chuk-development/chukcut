@@ -8,6 +8,7 @@ use chukcut_engine::modules::project::{new_id, Segment, TimeRange, Transform};
 use gpui::{img, ObjectFit};
 
 use super::*;
+use crate::ui::{Badge, Tone};
 
 /// What a tile carries while it is dragged towards the timeline.
 #[derive(Clone)]
@@ -19,13 +20,14 @@ pub(crate) struct MediaDrag {
 impl Render for MediaDrag {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div()
-            .px_2()
-            .py_1()
-            .rounded_md()
-            .bg(rgb(PANEL_RAISED))
+            .px(px(8.0))
+            .py(px(4.0))
+            .rounded(px(R_SM))
+            .bg(rgb(OVERLAY))
             .border_1()
             .border_color(rgb(ACCENT))
-            .text_xs()
+            .shadow_md()
+            .text_size(px(TEXT_LABEL))
             .text_color(rgb(TEXT))
             .child(self.name.clone())
     }
@@ -94,30 +96,29 @@ impl Editor {
     /// The picture of a tile. A video's poster frame is decoded once, in
     /// the background, through the engine's thumbnail cache.
     fn tile_picture(&mut self, item: &Item, cx: &mut Context<Self>) -> AnyElement {
-        let placeholder = |icon: Lucide, background: u32| {
+        let placeholder = |icon: IconSrc, background: u32, tint: u32| {
             div()
                 .size_full()
                 .flex()
                 .items_center()
                 .justify_center()
                 .bg(rgb(background))
-                .text_color(rgb(TEXT_DIM))
-                .child(Icon::new(icon).size(px(22.0)))
+                .child(icon.svg(22.0, rgb(tint)))
                 .into_any_element()
         };
+        let film = || placeholder(icons::MEDIA.into(), PANEL_RAISED, TEXT_MUTED);
         match item.kind {
             Kind::Image => img(PathBuf::from(&item.path))
                 .size_full()
                 .object_fit(ObjectFit::Cover)
                 .into_any_element(),
-            Kind::Audio => placeholder(Lucide::AudioLines, CLIP_AUDIO),
+            Kind::Audio => placeholder(icons::AUDIO.into(), CLIP_AUDIO, CLIP_AUDIO_WAVE),
             Kind::Video => match self.assets.thumbs.get(&item.id) {
                 Some(Thumb::Ready(path)) => img(path.clone())
                     .size_full()
                     .object_fit(ObjectFit::Cover)
                     .into_any_element(),
-                Some(Thumb::Failed) => placeholder(Lucide::Film, PANEL_RAISED),
-                Some(Thumb::Loading) => placeholder(Lucide::Film, PANEL_RAISED),
+                Some(Thumb::Failed) | Some(Thumb::Loading) => film(),
                 None => {
                     self.assets.thumbs.insert(item.id.clone(), Thumb::Loading);
                     let (id, path) = (item.id.clone(), item.path.clone());
@@ -142,7 +143,7 @@ impl Editor {
                         });
                     })
                     .detach();
-                    placeholder(Lucide::Film, PANEL_RAISED)
+                    film()
                 }
             },
         }
@@ -152,33 +153,19 @@ impl Editor {
         let picture = self.tile_picture(&item, cx);
         let picked = self.assets.picked.as_deref() == Some(item.id.as_str());
         let badge = (item.duration > 0).then(|| {
-            div()
-                .absolute()
-                .top(px(4.0))
-                .right(px(4.0))
-                .px_1()
-                .rounded_sm()
-                .bg(gpui::hsla(0.0, 0.0, 0.0, 0.6))
-                .text_xs()
-                .text_color(rgb(TEXT))
-                .child(badge_time(item.duration))
+            div().absolute().left(px(5.0)).bottom(px(5.0)).child(
+                Badge::new(badge_time(item.duration))
+                    .tone(Tone::OnMedia)
+                    .mono(),
+            )
         });
-        // CapCut marks a file that is already on the timeline.
+        // A file that is already on the timeline says so.
         let added = used.then(|| {
             div()
                 .absolute()
-                .top(px(4.0))
-                .left(px(4.0))
-                .px_1()
-                .flex()
-                .items_center()
-                .gap_0p5()
-                .rounded_sm()
-                .bg(gpui::hsla(0.0, 0.0, 0.0, 0.6))
-                .text_xs()
-                .text_color(rgb(ACCENT))
-                .child(Icon::new(Lucide::Check).size(px(11.0)))
-                .child("Added")
+                .top(px(5.0))
+                .left(px(5.0))
+                .child(Badge::new("Added").tone(Tone::OnMedia).icon(icons::CHECK))
         });
         let picture = div()
             .size_full()
@@ -239,16 +226,16 @@ impl Editor {
             .filter(|item| matches(&item.name, &query))
             .collect();
         if items.is_empty() {
-            let hint = if category == 1 {
-                "Nothing from the library is on the timeline yet."
+            let (title, hint) = if category == 1 {
+                (
+                    "Nothing in use yet",
+                    "Media you put on the timeline shows up here.",
+                )
             } else {
-                "No media matches the search."
+                ("No matches", "No media matches the search.")
             };
-            return div()
-                .pt_4()
-                .text_xs()
-                .text_color(rgb(TEXT_DIM))
-                .child(hint)
+            return EmptyState::new("media-empty", Lucide::Search, title)
+                .hint(hint)
                 .into_any_element();
         }
 
@@ -261,7 +248,17 @@ impl Editor {
             tiles.push(self.media_tile(item, on_timeline, cx));
         }
         Self::tile_area("media-grid")
-            .child(div().flex().flex_row().flex_wrap().gap_2().children(tiles))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .gap_x(px(TILE_GAP))
+                    .gap_y(px(12.0))
+                    .pt(px(2.0))
+                    .pl(px(2.0))
+                    .children(tiles),
+            )
             .into_any_element()
     }
 
@@ -275,17 +272,29 @@ impl Editor {
             .flex_col()
             .items_center()
             .justify_center()
-            .gap_1()
-            .rounded_md()
+            .gap(px(6.0))
+            .rounded(px(R_SM))
+            .bg(rgb(WELL))
             .border_1()
             .border_color(rgb(BORDER))
-            .text_color(rgb(TEXT_DIM))
             .cursor_pointer()
-            .hover(|style| style.border_color(rgb(ACCENT)).text_color(rgb(TEXT)))
-            .drag_over::<ExternalPaths>(|style, _, _, _| style.border_color(rgb(ACCENT)))
+            .group("media-import-tile")
+            .hover(|style| style.border_color(rgb(ACCENT)).bg(accent_drop()))
+            .drag_over::<ExternalPaths>(|style, _, _, _| {
+                style.border_color(rgb(ACCENT)).bg(accent_drop())
+            })
             .on_click(cx.listener(|this, _, window, cx| this.on_import(&Import, window, cx)))
-            .child(Icon::new(Lucide::Import).size(px(18.0)))
-            .child(div().text_xs().child("Import"))
+            .child(
+                icons::glyph(icons::IMPORT, 18.0, rgb(TEXT_DIM))
+                    .group_hover("media-import-tile", |style| style.text_color(rgb(ACCENT))),
+            )
+            .child(
+                div()
+                    .text_size(px(TEXT_CAPTION))
+                    .text_color(rgb(TEXT_DIM))
+                    .group_hover("media-import-tile", |style| style.text_color(rgb(TEXT)))
+                    .child("Import"),
+            )
             .into_any_element()
     }
 
@@ -314,19 +323,20 @@ impl Editor {
             .map(|item| self.audio_row(item, &used, cx))
             .collect();
         if rows.is_empty() {
-            return div()
-                .pt_4()
-                .text_xs()
-                .text_color(rgb(TEXT_DIM))
-                .child(if category == 1 {
-                    "No audio from the library is on the timeline yet."
-                } else {
-                    "No audio matches the search."
-                })
+            let (title, hint) = if category == 1 {
+                (
+                    "Nothing in use yet",
+                    "Audio you put on the timeline shows up here.",
+                )
+            } else {
+                ("No matches", "No audio matches the search.")
+            };
+            return EmptyState::new("audio-empty", icons::AUDIO, title)
+                .hint(hint)
                 .into_any_element();
         }
         Self::tile_area("audio-list")
-            .child(div().flex().flex_col().gap_1p5().children(rows))
+            .child(div().flex().flex_col().gap(px(6.0)).children(rows))
             .into_any_element()
     }
 
@@ -334,11 +344,8 @@ impl Editor {
         let id = item.id.clone();
         let picked = self.assets.picked.as_deref() == Some(item.id.as_str());
         let pick_id = item.id.clone();
-        let detail = if used.contains(&item.id) {
-            format!("{} · on the timeline", badge_time(item.duration))
-        } else {
-            badge_time(item.duration)
-        };
+        let on_timeline = used.contains(&item.id);
+        let duration = badge_time(item.duration);
         div()
             .id(SharedString::from(format!("audio-{}", item.id)))
             .h(px(52.0))
@@ -346,13 +353,17 @@ impl Editor {
             .flex()
             .flex_row()
             .items_center()
-            .gap_2()
-            .px_2()
-            .rounded_md()
-            .bg(rgb(PANEL_RAISED))
+            .gap(px(10.0))
+            .px(px(8.0))
+            .rounded(px(R_SM))
+            .bg(if picked {
+                accent_soft()
+            } else {
+                hsla(PANEL_RAISED)
+            })
             .border_1()
-            .border_color(rgb(if picked { ACCENT } else { PANEL_RAISED }))
-            .hover(|style| style.border_color(rgb(if picked { ACCENT } else { BORDER })))
+            .border_color(rgb(if picked { ACCENT } else { HAIRLINE }))
+            .hover(|style| style.border_color(rgb(if picked { ACCENT } else { BORDER_STRONG })))
             .cursor_pointer()
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.assets.picked = Some(pick_id.clone());
@@ -369,13 +380,12 @@ impl Editor {
                 div()
                     .size(px(36.0))
                     .flex_none()
-                    .rounded_md()
+                    .rounded(px(R_SM))
                     .bg(rgb(CLIP_AUDIO))
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_color(rgb(CLIP_AUDIO_WAVE))
-                    .child(Icon::new(Lucide::Music).size(px(18.0))),
+                    .child(icons::glyph(icons::AUDIO, 18.0, rgb(CLIP_AUDIO_WAVE))),
             )
             .child(
                 div()
@@ -383,33 +393,47 @@ impl Editor {
                     .min_w(px(0.0))
                     .flex()
                     .flex_col()
+                    .gap(px(2.0))
                     .child(
                         div()
                             .overflow_hidden()
                             .whitespace_nowrap()
                             .text_ellipsis()
-                            .text_sm()
+                            .text_size(px(TEXT_BODY))
                             .text_color(rgb(TEXT))
                             .child(item.name.clone()),
                     )
-                    .child(div().text_xs().text_color(rgb(TEXT_DIM)).child(detail)),
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap(px(6.0))
+                            .text_size(px(TEXT_CAPTION))
+                            .text_color(rgb(TEXT_MUTED))
+                            .child(div().font_family(FONT_MONO).child(duration))
+                            .when(on_timeline, |this| this.child("·").child("on the timeline")),
+                    ),
             )
             .child(
                 div()
                     .id(SharedString::from(format!("audio-add-{}", item.id)))
+                    .group(SharedString::from(format!("audio-add-group-{}", item.id)))
                     .size(px(26.0))
                     .flex_none()
                     .rounded_full()
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_color(rgb(TEXT))
-                    .hover(|style| style.bg(rgb(ACCENT)).text_color(rgb(0x0b1214)))
+                    .bg(rgb(OVERLAY))
+                    .hover(|style| style.bg(rgb(ACCENT)))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
                         this.add_material(&id, cx);
                     }))
-                    .child(Icon::new(Lucide::Plus).size(px(16.0))),
+                    .child(icons::glyph(icons::PLUS, 15.0, rgb(TEXT)).group_hover(
+                        SharedString::from(format!("audio-add-group-{}", item.id)),
+                        |style| style.text_color(rgb(ON_ACCENT)),
+                    )),
             )
             .into_any_element()
     }

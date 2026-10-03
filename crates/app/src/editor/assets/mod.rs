@@ -12,10 +12,11 @@ use std::collections::HashMap;
 
 use gpui::assets::IconName as Lucide;
 use gpui::component::input::{Input, InputEvent, InputState};
-use gpui::component::{Icon, Sizable as _};
+use gpui::component::Sizable as _;
 use gpui::{AnyElement, Entity, ExternalPaths, Subscription};
 
 use super::*;
+use crate::ui::{icons, EmptyState, Glyph, IconSrc, Panel, RailTab};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AssetTab {
@@ -45,13 +46,13 @@ impl AssetTab {
         }
     }
 
-    fn icon(self) -> Lucide {
+    fn icon(self) -> Glyph {
         match self {
-            AssetTab::Media => Lucide::Clapperboard,
-            AssetTab::Audio => Lucide::Music,
-            AssetTab::Text => Lucide::Type,
-            AssetTab::Transitions => Lucide::Blend,
-            AssetTab::Filters => Lucide::SlidersHorizontal,
+            AssetTab::Media => icons::MEDIA,
+            AssetTab::Audio => icons::AUDIO,
+            AssetTab::Text => icons::TEXT,
+            AssetTab::Transitions => icons::TRANSITIONS,
+            AssetTab::Filters => icons::FILTERS,
         }
     }
 
@@ -134,8 +135,10 @@ fn badge_time(duration: Micros) -> String {
     format!("{:02}:{:02}", seconds / 60, seconds % 60)
 }
 
-pub(super) const TILE_W: f32 = 116.0;
-pub(super) const TILE_H: f32 = 72.0;
+/// Four tiles to a row in the asset panel's content column.
+pub(super) const TILE_W: f32 = 112.0;
+pub(super) const TILE_H: f32 = 70.0;
+pub(super) const TILE_GAP: f32 = 12.0;
 
 impl Editor {
     pub(super) fn render_media(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -145,27 +148,16 @@ impl Editor {
         let tabs = AssetTab::ALL
             .into_iter()
             .map(|each| {
-                let active = each == tab;
-                let color = if active { ACCENT } else { TEXT_DIM };
-                div()
-                    .id(SharedString::from(format!("asset-tab-{}", each.label())))
-                    .min_w(px(52.0))
-                    .px_1()
-                    .py_1()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .gap(px(3.0))
-                    .rounded_md()
-                    .cursor_pointer()
-                    .text_color(rgb(color))
-                    .hover(|style| style.text_color(rgb(if active { ACCENT } else { TEXT })))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.assets.tab = each;
-                        cx.notify();
-                    }))
-                    .child(Icon::new(each.icon()).size(px(18.0)))
-                    .child(div().text_xs().child(each.label()))
+                RailTab::new(
+                    format!("asset-tab-{}", each.label()),
+                    each.icon(),
+                    each.label(),
+                )
+                .selected(each == tab)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.assets.tab = each;
+                    cx.notify();
+                }))
             })
             .collect::<Vec<_>>();
 
@@ -177,19 +169,24 @@ impl Editor {
                 let active = index == category;
                 div()
                     .id(SharedString::from(format!("asset-category-{name}")))
-                    .h(px(28.0))
-                    .px_2()
+                    .h(px(30.0))
+                    .px(px(10.0))
                     .flex()
                     .items_center()
-                    .rounded_md()
+                    .rounded(px(R_SM))
                     .cursor_pointer()
-                    .text_xs()
+                    .text_size(px(TEXT_LABEL))
+                    .whitespace_nowrap()
+                    .overflow_hidden()
+                    .text_ellipsis()
                     .when(active, |pill| {
-                        pill.bg(rgb(PANEL_RAISED)).text_color(rgb(ACCENT))
+                        pill.bg(rgb(PANEL_RAISED))
+                            .text_color(rgb(TEXT))
+                            .font_weight(gpui::FontWeight::MEDIUM)
                     })
                     .when(!active, |pill| {
-                        pill.text_color(rgb(TEXT))
-                            .hover(|style| style.bg(rgb(PANEL_RAISED)))
+                        pill.text_color(rgb(TEXT_DIM))
+                            .hover(|style| style.bg(rgb(PANEL_RAISED)).text_color(rgb(TEXT)))
                     })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.assets.category.insert(this.assets.tab.label(), index);
@@ -207,49 +204,45 @@ impl Editor {
             AssetTab::Filters => self.render_filters_tab(cx).into_any_element(),
         };
 
-        div()
-            .id("asset-panel")
+        Panel::new("asset-panel")
             .w(px(MEDIA_W))
             .flex_none()
-            .flex()
-            .flex_col()
-            .rounded_md()
-            .overflow_hidden()
-            .bg(rgb(PANEL))
-            // Files dragged in from the desktop land in the library, wherever
-            // on the panel they are dropped.
-            .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
-                this.import_to_library(paths.paths().to_vec(), cx);
-            }))
-            .child(
+            // The rail stands in for a header: CapCut's icon tabs, our glyphs.
+            .header(
                 div()
                     .flex_none()
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap_1()
-                    .px_2()
-                    .py_1()
+                    .gap(px(2.0))
+                    .px(px(GUTTER))
+                    .py(px(GUTTER))
                     .border_b_1()
-                    .border_color(rgb(BG))
+                    .border_color(rgb(HAIRLINE))
                     .children(tabs),
             )
             .child(
                 div()
+                    .id("asset-body")
                     .flex_1()
                     .min_h(px(0.0))
                     .flex()
                     .flex_row()
+                    // Files dragged in from the desktop land in the library,
+                    // wherever on the panel they are dropped.
+                    .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
+                        this.import_to_library(paths.paths().to_vec(), cx);
+                    }))
                     .child(
                         div()
-                            .w(px(116.0))
+                            .w(px(124.0))
                             .flex_none()
                             .flex()
                             .flex_col()
-                            .gap_1()
-                            .p_2()
+                            .gap(px(2.0))
+                            .p(px(8.0))
                             .border_r_1()
-                            .border_color(rgb(BG))
+                            .border_color(rgb(HAIRLINE))
                             .children(categories),
                     )
                     .child(
@@ -258,14 +251,20 @@ impl Editor {
                             .min_w(px(0.0))
                             .flex()
                             .flex_col()
-                            .gap_2()
-                            .p_2()
+                            .gap(px(10.0))
+                            .p(px(PAD))
                             .when(tab.searchable(), |column| {
                                 column.child(
                                     Input::new(&self.assets.search)
                                         .small()
                                         .cleanable(true)
-                                        .prefix(Icon::new(Lucide::Search).size(px(14.0))),
+                                        .text_size(px(TEXT_BODY))
+                                        .bg(rgb(WELL))
+                                        .border_color(rgb(BORDER))
+                                        .prefix(
+                                            IconSrc::from(Lucide::Search)
+                                                .svg(14.0, rgb(TEXT_MUTED)),
+                                        ),
                                 )
                             })
                             .child(content),
@@ -294,47 +293,56 @@ impl Editor {
             .w(px(TILE_W))
             .flex()
             .flex_col()
-            .gap_1()
+            .gap(px(6.0))
             .cursor_pointer()
             .child(
+                // The ring sits outside the picture, so a picked tile does
+                // not crop its own picture.
                 div()
-                    .relative()
-                    .w(px(TILE_W))
-                    .h(px(TILE_H))
-                    .rounded_md()
-                    .overflow_hidden()
-                    .bg(rgb(PANEL_RAISED))
+                    .p(px(2.0))
+                    .m(px(-2.0))
+                    .rounded(px(R_SM + 2.0))
                     .border_1()
                     .border_color(if picked {
                         rgb(ACCENT)
                     } else {
-                        rgb(PANEL_RAISED)
+                        gpui::transparent_black().into()
                     })
-                    .group_hover(group.clone(), |style| {
-                        style.border_color(rgb(if picked { ACCENT } else { TEXT_DIM }))
-                    })
-                    .child(picture)
                     .child(
                         div()
-                            .id(SharedString::from(format!("{id}-add")))
-                            .absolute()
-                            .right(px(4.0))
-                            .bottom(px(4.0))
-                            .size(px(22.0))
-                            .rounded_full()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .bg(rgb(ACCENT))
-                            .text_color(rgb(0x0b1214))
-                            .invisible()
-                            .group_hover(group, |style| style.visible())
-                            .hover(|style| style.bg(rgb(ACCENT_HOVER)))
-                            .on_click(move |event, window, cx| {
-                                cx.stop_propagation();
-                                on_add(event, window, cx);
+                            .relative()
+                            .w(px(TILE_W))
+                            .h(px(TILE_H))
+                            .rounded(px(R_SM))
+                            .overflow_hidden()
+                            .bg(rgb(PANEL_RAISED))
+                            .border_1()
+                            .border_color(rgb(HAIRLINE))
+                            .group_hover(group.clone(), |style| {
+                                style.border_color(rgb(BORDER_STRONG))
                             })
-                            .child(Icon::new(Lucide::Plus).size(px(14.0))),
+                            .child(picture)
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("{id}-add")))
+                                    .absolute()
+                                    .right(px(5.0))
+                                    .bottom(px(5.0))
+                                    .size(px(22.0))
+                                    .rounded_full()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .bg(rgb(ACCENT))
+                                    .invisible()
+                                    .group_hover(group.clone(), |style| style.visible())
+                                    .hover(|style| style.bg(rgb(ACCENT_HOVER)))
+                                    .on_click(move |event, window, cx| {
+                                        cx.stop_propagation();
+                                        on_add(event, window, cx);
+                                    })
+                                    .child(icons::glyph(icons::PLUS, 14.0, rgb(ON_ACCENT))),
+                            ),
                     ),
             )
             .when(!caption.is_empty(), |tile| {
@@ -344,15 +352,16 @@ impl Editor {
                         .overflow_hidden()
                         .whitespace_nowrap()
                         .text_ellipsis()
-                        .text_xs()
-                        .text_color(rgb(TEXT_DIM))
+                        .text_size(px(TEXT_CAPTION))
+                        .text_color(rgb(if picked { TEXT } else { TEXT_DIM }))
+                        .group_hover(group, |style| style.text_color(rgb(TEXT)))
                         .child(caption),
                 )
             })
     }
 
-    /// CapCut's empty state: a large box that opens the file picker and
-    /// accepts files dragged in from the desktop.
+    /// The empty library: a well that opens the file picker and accepts
+    /// files dragged in from the desktop.
     fn drop_zone(
         &self,
         id: &'static str,
@@ -360,42 +369,8 @@ impl Editor {
         hint: &'static str,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        div()
-            .id(id)
-            .flex_1()
-            .min_h(px(160.0))
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .gap_2()
-            .rounded_lg()
-            .bg(rgb(PANEL_RAISED))
-            .border_1()
-            .border_color(rgb(PANEL_RAISED))
-            .cursor_pointer()
-            .hover(|style| style.border_color(rgb(BORDER)))
-            .drag_over::<ExternalPaths>(|style, _, _, _| style.border_color(rgb(ACCENT)))
-            .on_click(cx.listener(|this, _, window, cx| this.on_import(&Import, window, cx)))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .size(px(22.0))
-                            .rounded_full()
-                            .bg(rgb(ACCENT))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .text_color(rgb(0x0b1214))
-                            .child(Icon::new(Lucide::Plus).size(px(14.0))),
-                    )
-                    .child(div().text_color(rgb(TEXT)).child(title)),
-            )
-            .child(div().text_xs().text_color(rgb(TEXT_DIM)).child(hint))
+        EmptyState::new(id, icons::IMPORT, title)
+            .hint(hint)
+            .drop_zone(cx.listener(|this, _, window, cx| this.on_import(&Import, window, cx)))
     }
 }

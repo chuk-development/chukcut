@@ -10,6 +10,7 @@ use gpui::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui::component::{Icon, Sizable as _};
 
 use super::*;
+use crate::ui::{icons, Badge, IconSrc};
 
 /// What the title bar remembers between frames: enough to say whether the
 /// document on screen is the one on disk.
@@ -36,6 +37,15 @@ impl TitleState {
             self.seen_generation = generation;
             self.last_edit = Some(Instant::now());
         }
+    }
+}
+
+/// "30", "29.97", "23.976": whole rates without decimals.
+fn fps_label(fps: f64) -> String {
+    if (fps - fps.round()).abs() < 0.005 {
+        format!("{}", fps.round() as i64)
+    } else {
+        format!("{fps:.2}").trim_end_matches('0').to_string()
     }
 }
 
@@ -78,7 +88,7 @@ impl Editor {
                 let new_project = editor.clone();
                 let save_as = editor.clone();
                 menu.action_context(focus.clone())
-                    .min_w(px(200.0))
+                    .min_w(px(220.0))
                     .item(
                         PopupMenuItem::new("New project").on_click(move |_, window, cx| {
                             let _ = new_project
@@ -98,29 +108,28 @@ impl Editor {
                     .menu("Quit", Box::new(Quit))
             });
 
+        // Our mark on a raised tile, then the word mark.
         let logo = div()
             .flex()
             .flex_row()
             .items_center()
-            .gap_1p5()
+            .gap(px(8.0))
             .child(
                 div()
-                    .size(px(20.0))
-                    .rounded(px(5.0))
-                    .bg(rgb(ACCENT))
+                    .size(px(24.0))
+                    .rounded(px(R_SM + 1.0))
+                    .bg(rgb(PANEL_RAISED))
+                    .border_1()
+                    .border_color(rgb(BORDER))
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(
-                        Icon::new(Lucide::Scissors)
-                            .size(px(13.0))
-                            .text_color(rgb(0x0b1214)),
-                    ),
+                    .child(icons::glyph(icons::LOGO, 16.0, rgb(ACCENT))),
             )
             .child(
                 div()
-                    .text_sm()
-                    .font_weight(gpui::FontWeight::BOLD)
+                    .text_size(px(TEXT_BODY + 1.0))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(rgb(TEXT))
                     .child("chukcut"),
             );
@@ -129,30 +138,43 @@ impl Editor {
             .flex()
             .flex_row()
             .items_center()
-            .gap_1()
-            .text_xs()
-            .text_color(rgb(TEXT_DIM))
-            .children(saved_icon.map(|icon| Icon::new(icon).size(px(13.0)).text_color(rgb(ACCENT))))
+            .gap(px(6.0))
+            .text_size(px(TEXT_CAPTION + 1.0))
+            .text_color(rgb(TEXT_MUTED))
+            .children(saved_icon.map(|icon| IconSrc::from(icon).svg(13.0, rgb(SUCCESS))))
             .child(saved_label);
+
+        let divider = || div().w(px(1.0)).h(px(16.0)).bg(rgb(BORDER));
+
+        let canvas = &self.project.canvas;
+        let format = format!(
+            "{}×{} · {} fps",
+            canvas.width,
+            canvas.height,
+            fps_label(self.project.fps)
+        );
 
         let export = Button::new("export")
             .primary()
             .small()
-            .icon(Lucide::Upload)
+            .icon(Icon::default().data(icons::EXPORT.0))
             .label("Export")
+            .tooltip_with_action("Export the timeline", &Export, Some("Editor"))
             .on_click(cx.listener(|this, _, window, cx| this.on_export(&Export, window, cx)));
 
         div()
-            .h(px(38.0))
+            .h(px(TITLE_BAR_H))
             .flex_none()
             .relative()
             .flex()
             .flex_row()
             .items_center()
-            .gap_3()
-            .px_3()
+            .gap(px(10.0))
+            .pl(px(PAD))
+            .pr(px(GUTTER + 2.0))
             .bg(rgb(BG))
             .child(logo)
+            .child(divider())
             .child(menu)
             .child(save_state)
             // The project name sits on its own layer so it stays centred on
@@ -164,11 +186,18 @@ impl Editor {
                     .left_0()
                     .size_full()
                     .flex()
+                    .flex_row()
                     .items_center()
                     .justify_center()
-                    .text_sm()
-                    .text_color(rgb(TEXT))
-                    .child(name),
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .text_size(px(TEXT_BODY))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(rgb(TEXT))
+                            .child(name),
+                    )
+                    .child(Badge::new(format).mono()),
             )
             .child(div().flex_1())
             .children(self.status.clone().map(|status| {
@@ -177,7 +206,7 @@ impl Editor {
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_ellipsis()
-                    .text_xs()
+                    .text_size(px(TEXT_CAPTION + 1.0))
                     .text_color(rgb(TEXT_DIM))
                     .child(status)
             }))

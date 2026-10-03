@@ -9,6 +9,7 @@ use gpui::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui::component::Sizable as _;
 
 use super::*;
+use crate::ui::{icons, IconButton, Panel, PanelHeader};
 
 /// How many pixels the preview renders, relative to what fits the viewer.
 /// Lower is cheaper; playback of heavy timelines stays smooth.
@@ -108,18 +109,17 @@ impl Editor {
 
         let picture = match (&self.frame, self.player.failure()) {
             (_, Some(failure)) => div()
-                .text_color(rgb(TEXT_DIM))
+                .max_w(px(360.0))
+                .text_center()
+                .text_size(px(TEXT_LABEL))
+                .text_color(rgb(DANGER))
                 .child(failure)
                 .into_any_element(),
             (Some(frame), None) => img(Arc::clone(frame))
                 .w(px(dw))
                 .h(px(dh))
                 .into_any_element(),
-            (None, None) => div()
-                .w(px(dw))
-                .h(px(dh))
-                .bg(rgb(0x000000))
-                .into_any_element(),
+            (None, None) => div().w(px(dw)).h(px(dh)).bg(rgb(VIEWER)).into_any_element(),
         };
 
         let playing = self.clock.is_playing();
@@ -128,13 +128,11 @@ impl Editor {
         let quality = self.preview.quality;
 
         let editor = cx.entity().downgrade();
-        let header_menu = Button::new("player-menu")
-            .icon(Lucide::Menu)
-            .ghost()
-            .xsmall()
+        let header_menu = IconButton::new("player-menu", Lucide::Ellipsis)
+            .tooltip("Player options")
             .dropdown_menu_with_anchor(gpui::Anchor::TopRight, move |menu, _, _| {
                 let snapshot = editor.clone();
-                menu.min_w(px(180.0))
+                menu.min_w(px(200.0))
                     .item(
                         PopupMenuItem::new("Save frame as image…").on_click(move |_, _, cx| {
                             let _ = snapshot.update(cx, |editor, cx| editor.save_frame(cx));
@@ -147,6 +145,7 @@ impl Editor {
             .label(quality.label())
             .ghost()
             .xsmall()
+            .dropdown_caret(true)
             .tooltip("Preview quality")
             .dropdown_menu_with_anchor(gpui::Anchor::BottomRight, move |menu, _, _| {
                 PreviewQuality::ALL.into_iter().fold(menu, |menu, each| {
@@ -168,10 +167,7 @@ impl Editor {
 
         let editor = cx.entity().downgrade();
         let (canvas_w, canvas_h) = (self.project.canvas.width, self.project.canvas.height);
-        let ratio_menu = Button::new("player-ratio")
-            .label("Ratio")
-            .ghost()
-            .xsmall()
+        let ratio_menu = IconButton::new("player-ratio", icons::RATIO)
             .tooltip("Canvas aspect ratio")
             .dropdown_menu_with_anchor(gpui::Anchor::BottomRight, move |menu, _, _| {
                 RATIOS.into_iter().fold(menu, |menu, (label, w, h)| {
@@ -187,36 +183,65 @@ impl Editor {
                 })
             });
 
-        let transport_icon = |id: &'static str, icon: Lucide, tooltip: &'static str| {
-            Button::new(id).icon(icon).ghost().xsmall().tooltip(tooltip)
-        };
-
-        div()
-            .flex_1()
-            .min_w(px(0.0))
+        let timecode = div()
+            .flex_none()
             .flex()
-            .flex_col()
-            .rounded_md()
-            .overflow_hidden()
-            .bg(rgb(PANEL))
+            .flex_row()
+            .items_center()
+            .gap(px(6.0))
+            .font_family(FONT_MONO)
+            .text_size(px(TEXT_LABEL))
             .child(
                 div()
-                    .h(px(36.0))
-                    .flex_none()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .px_3()
-                    .border_b_1()
-                    .border_color(rgb(BG))
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(rgb(TEXT))
-                            .child("Player – Timeline 01"),
-                    )
-                    .child(header_menu),
+                    .text_color(rgb(TEXT))
+                    .child(long_timecode(position, fps)),
+            )
+            .child(div().text_color(rgb(TEXT_DISABLED)).child("/"))
+            .child(
+                div()
+                    .text_color(rgb(TEXT_MUTED))
+                    .child(long_timecode(self.project.duration(), fps)),
+            );
+
+        let transport = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(6.0))
+            .child(
+                IconButton::new("player-step-back", icons::STEP_BACK)
+                    .tooltip("Previous frame")
+                    .shortcut("left")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.step(-1);
+                        cx.notify();
+                    })),
+            )
+            .child(
+                IconButton::new("play", if playing { icons::PAUSE } else { icons::PLAY })
+                    .large()
+                    .tint(TEXT)
+                    .tooltip(if playing { "Pause" } else { "Play" })
+                    .shortcut("space")
+                    .on_click(cx.listener(|this, _, w, cx| this.on_play_pause(&PlayPause, w, cx))),
+            )
+            .child(
+                IconButton::new("player-step-forward", icons::STEP_FORWARD)
+                    .tooltip("Next frame")
+                    .shortcut("right")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.step(1);
+                        cx.notify();
+                    })),
+            );
+
+        Panel::new("player")
+            .flex_1()
+            .header(
+                PanelHeader::new()
+                    .title("Player")
+                    .detail("Timeline 01")
+                    .action(header_menu),
             )
             .child(
                 div()
@@ -226,94 +251,66 @@ impl Editor {
                     .items_center()
                     .justify_center()
                     .overflow_hidden()
-                    .m_2()
+                    .m(px(PAD))
                     .child(
                         canvas(move |bounds, _, _| viewer.set(bounds), |_, _, _, _| {})
                             .absolute()
                             .size_full(),
                     )
-                    .child(picture),
+                    .child(
+                        // A hairline frame so a black picture still shows
+                        // where the canvas ends.
+                        div().border_1().border_color(rgb(HAIRLINE)).child(picture),
+                    ),
             )
             .child(
                 div()
-                    .h(px(40.0))
+                    .h(px(48.0))
                     .flex_none()
-                    .relative()
                     .flex()
                     .flex_row()
                     .items_center()
-                    .px_3()
+                    .px(px(PAD))
+                    .border_t_1()
+                    .border_color(rgb(HAIRLINE))
+                    // Equal flexible sides keep the transport centred on the
+                    // bar while there is room, and let it push the sides
+                    // (which clip) rather than overlap them when there is not.
+                    .gap(px(8.0))
                     .child(
                         div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .overflow_hidden()
+                            .child(timecode),
+                    )
+                    .child(transport)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .overflow_hidden()
                             .flex()
                             .flex_row()
                             .items_center()
-                            .gap_1()
-                            .text_xs()
-                            .child(
-                                div()
-                                    .text_color(rgb(ACCENT))
-                                    .child(long_timecode(position, fps)),
-                            )
-                            .child(div().text_color(rgb(TEXT_DIM)).child("/"))
-                            .child(
-                                div()
-                                    .text_color(rgb(TEXT_DIM))
-                                    .child(long_timecode(self.project.duration(), fps)),
-                            ),
-                    )
-                    // The play button is centred on the bar, not between
-                    // the groups either side of it.
-                    .child(
-                        div()
-                            .absolute()
-                            .top_0()
-                            .left_0()
-                            .size_full()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(
-                                Button::new("play")
-                                    .icon(if playing { Lucide::Pause } else { Lucide::Play })
-                                    .ghost()
-                                    .small()
-                                    .tooltip(if playing {
-                                        "Pause (Space)"
-                                    } else {
-                                        "Play (Space)"
-                                    })
-                                    .on_click(cx.listener(|this, _, w, cx| {
-                                        this.on_play_pause(&PlayPause, w, cx)
-                                    })),
-                            ),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap_1()
+                            .justify_end()
+                            .gap(px(2.0))
                             .child(quality_menu)
                             .child(
-                                transport_icon("player-fit", Lucide::Scan, "Zoom to fit").on_click(
-                                    cx.listener(|this, _, _, cx| {
+                                IconButton::new("player-fit", icons::FIT)
+                                    .tooltip("Zoom to fit")
+                                    .on_click(cx.listener(|this, _, _, cx| {
                                         // The canvas always fits the viewer;
                                         // re-render at the current size.
                                         this.last_request = None;
                                         cx.notify();
-                                    }),
-                                ),
+                                    })),
                             )
                             .child(ratio_menu)
                             .child(
-                                transport_icon(
-                                    "player-fullscreen",
-                                    Lucide::Maximize,
-                                    "Full screen",
-                                )
-                                .on_click(|_, window, _| window.toggle_fullscreen()),
+                                IconButton::new("player-fullscreen", icons::FULLSCREEN)
+                                    .tooltip("Full screen")
+                                    .on_click(|_, window, _| window.toggle_fullscreen()),
                             ),
                     ),
             )

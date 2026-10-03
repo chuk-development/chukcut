@@ -30,6 +30,8 @@ impl Editor {
             surface
                 .w(px(880.0))
                 .p_0()
+                .bg(rgb(PANEL))
+                .border_color(rgb(BORDER))
                 .close_button(!busy)
                 .overlay_closable(!busy)
                 .keyboard(!busy)

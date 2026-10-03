@@ -132,7 +132,28 @@ fn transition_art(kind: TransitionKind) -> AnyElement {
 impl Editor {
     /// One dim line above a tab's tiles.
     fn hint(text: impl Into<SharedString>) -> impl IntoElement {
-        div().text_xs().text_color(rgb(TEXT_DIM)).child(text.into())
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(6.0))
+            .text_size(px(TEXT_CAPTION + 1.0))
+            .text_color(rgb(TEXT_MUTED))
+            .child(IconSrc::from(Lucide::Info).svg(13.0, rgb(TEXT_MUTED)))
+            .child(text.into())
+    }
+
+    /// The wrapping grid of a tab's tiles.
+    fn tile_grid(tiles: impl IntoIterator<Item = impl IntoElement>) -> gpui::Div {
+        div()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .gap_x(px(TILE_GAP))
+            .gap_y(px(12.0))
+            .pt(px(2.0))
+            .pl(px(2.0))
+            .children(tiles)
     }
 
     pub(super) fn render_text_tab(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -141,15 +162,17 @@ impl Editor {
             .flex()
             .items_center()
             .justify_center()
-            .text_sm()
+            .bg(gradient(0x2a2c32, 0x1a1b1f))
+            .text_size(px(TEXT_DISPLAY + 3.0))
+            .font_weight(gpui::FontWeight::BOLD)
             .text_color(rgb(TEXT))
-            .child("Default text")
+            .child("Aa")
             .into_any_element();
         let editor = cx.entity().downgrade();
         let tile = Self::tile(
             "text-default".into(),
             picture,
-            String::new(),
+            "Default text".into(),
             false,
             move |_, _, cx| {
                 let _ = editor.update(cx, |this, cx| this.add_text(cx));
@@ -160,9 +183,9 @@ impl Editor {
         div()
             .flex()
             .flex_col()
-            .gap_2()
+            .gap(px(10.0))
             .child(Self::hint("Adds a title at the playhead."))
-            .child(div().flex().flex_row().flex_wrap().gap_2().child(tile))
+            .child(Self::tile_grid([tile]))
     }
 
     fn add_text(&mut self, cx: &mut Context<Self>) {
@@ -212,12 +235,9 @@ impl Editor {
             .min_h(px(0.0))
             .flex()
             .flex_col()
-            .gap_2()
+            .gap(px(10.0))
             .child(Self::hint(hint))
-            .child(
-                Self::tile_area("transition-grid")
-                    .child(div().flex().flex_row().flex_wrap().gap_2().children(tiles)),
-            )
+            .child(Self::tile_area("transition-grid").child(Self::tile_grid(tiles)))
     }
 
     /// Put a transition at the end of the selected clip, which is where
@@ -304,12 +324,9 @@ impl Editor {
             .min_h(px(0.0))
             .flex()
             .flex_col()
-            .gap_2()
+            .gap(px(10.0))
             .child(Self::hint(hint))
-            .child(
-                Self::tile_area("filter-grid")
-                    .child(div().flex().flex_row().flex_wrap().gap_2().children(tiles)),
-            )
+            .child(Self::tile_area("filter-grid").child(Self::tile_grid(tiles)))
     }
 
     fn apply_filter(&mut self, index: usize, cx: &mut Context<Self>) {
