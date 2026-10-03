@@ -800,6 +800,7 @@ impl Scenario {
             shadow: None,
             background: None,
             caption: None,
+            ..Default::default()
         };
         let scale = h as f32 / 1080.0;
         project

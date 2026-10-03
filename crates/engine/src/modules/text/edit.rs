@@ -13,6 +13,7 @@
 //! an occupied instant are four pieces of policy. Policy in the webview is
 //! policy in two places, and the second copy is the one that goes stale.
 
+use crate::modules::project::animation::AnimationMaterial;
 use crate::modules::project::document::{
     new_id, Micros, Project, Segment, TextAlign, TextMaterial, TextShadow, TimeRange, Track,
     TrackKind, Transform, MICROS_PER_SECOND,
@@ -88,6 +89,7 @@ pub fn default_material(project: &Project, content: Option<String>) -> TextMater
         }),
         background: None,
         caption: None,
+        ..Default::default()
     }
 }
 
@@ -121,12 +123,30 @@ pub fn insert_command(
     at: Micros,
     duration: Micros,
 ) -> Result<TextPlacement, String> {
+    insert_command_on(project, material_id, at, duration, None)
+}
+
+/// [`insert_command`], on `lane` when that is a lane a title may go on (a
+/// title dragged onto a text lane lands there), and otherwise wherever
+/// [`insert_command`] would put it.
+pub fn insert_command_on(
+    project: &Project,
+    material_id: &str,
+    at: Micros,
+    duration: Micros,
+    lane: Option<&str>,
+) -> Result<TextPlacement, String> {
     if duration <= 0 {
         return Err(format!("a title cannot be {duration} µs long"));
     }
     let wanted = at.max(0);
 
-    let existing = title_lane(project);
+    let aimed = lane.and_then(|id| project.track(id)).filter(|t| {
+        t.kind == TrackKind::Text
+            && !t.locked
+            && !crate::modules::captions::edit::is_caption_track(project, t)
+    });
+    let existing = aimed.or_else(|| title_lane(project));
     let lane = match existing {
         Some(track) => track.clone(),
         None => Track::new(TrackKind::Text, title_lane_name(project)),
@@ -163,6 +183,138 @@ pub fn insert_command(
         track_id,
         start,
         segment_id,
+    })
+}
+
+/// Give a placement's new segment a transform and an animation, as part of
+/// the same undo step. `label` renames the step ("Add Neon sign").
+pub fn dress_placement(
+    placement: &mut TextPlacement,
+    transform: Transform,
+    animation: Option<AnimationMaterial>,
+    label: Option<&str>,
+) {
+    let EditCommand::Composite {
+        label: step,
+        commands,
+    } = &mut placement.command
+    else {
+        return;
+    };
+    for command in commands.iter_mut() {
+        if let EditCommand::InsertSegment { segment, .. } = command {
+            segment.transform = transform;
+        }
+    }
+    if let Some(animation) = animation.filter(|a| !a.is_empty()) {
+        commands.push(EditCommand::SetAnimation {
+            segment_id: placement.segment_id.clone(),
+            before: None,
+            after: Some(animation),
+            slot: None,
+        });
+    }
+    if let Some(label) = label {
+        *step = format!("Add {label}");
+    }
+}
+
+/// The title material a segment shows.
+fn title_of<'a>(project: &'a Project, segment_id: &str) -> Result<&'a TextMaterial, String> {
+    let (_, segment) = project
+        .segment(segment_id)
+        .ok_or("the title is no longer on the timeline")?;
+    project
+        .materials
+        .text(&segment.material_id)
+        .ok_or_else(|| "the clip is not a title".to_string())
+}
+
+/// The edit that restyles the title on `segment_id`.
+pub fn restyle_command(
+    project: &Project,
+    segment_id: &str,
+    style: &super::presets::TitleStyle,
+) -> Result<EditCommand, String> {
+    let before = title_of(project, segment_id)?.clone();
+    let mut after = before.clone();
+    style.apply(&mut after);
+    if after == before {
+        return Err(format!("the title is already in the {} style", style.name));
+    }
+    Ok(EditCommand::SetTextMaterial { before, after })
+}
+
+/// The edit that gives the title on `segment_id` a template's style and
+/// animation. The animation replaces the clip's In, Out, Combo and text
+/// animations; a zoom is kept.
+pub fn template_command(
+    project: &Project,
+    segment_id: &str,
+    template: &super::presets::TextTemplate,
+) -> Result<EditCommand, String> {
+    let mut commands = Vec::new();
+    match restyle_command(project, segment_id, &template.title_style()) {
+        Ok(command) => commands.push(command),
+        Err(_) if title_of(project, segment_id).is_ok() => {}
+        Err(error) => return Err(error),
+    }
+    let wanted = template.animation();
+    match crate::modules::motion::edit::edit_command(project, segment_id, |m| {
+        m.intro = wanted.intro;
+        m.outro = wanted.outro;
+        m.combo = wanted.combo;
+        m.text_in = wanted.text_in;
+        m.text_out = wanted.text_out;
+    }) {
+        Ok(command) => commands.push(command),
+        Err(error) if error == "nothing to change" => {}
+        Err(error) => return Err(error),
+    }
+    if commands.is_empty() {
+        return Err(format!("the title already is a {}", template.name));
+    }
+    Ok(EditCommand::Composite {
+        label: format!("Apply {}", template.name),
+        commands,
+    })
+}
+
+/// The edit that moves the title on `segment_id` to a cell of the position
+/// grid: its segment's position and its paragraph's alignment.
+pub fn position_command(
+    project: &Project,
+    segment_id: &str,
+    position: super::presets::TextPosition,
+) -> Result<EditCommand, String> {
+    let before_text = title_of(project, segment_id)?.clone();
+    let (_, segment) = project
+        .segment(segment_id)
+        .ok_or("the title is no longer on the timeline")?;
+    let mut commands = Vec::new();
+    let mut after_text = before_text.clone();
+    after_text.align = position.align();
+    if after_text != before_text {
+        commands.push(EditCommand::SetTextMaterial {
+            before: before_text,
+            after: after_text,
+        });
+    }
+    let mut transform = segment.transform;
+    transform.position = position.position();
+    if transform.position != segment.transform.position {
+        commands.push(EditCommand::SetTransform {
+            segment_id: segment_id.to_string(),
+            before: segment.transform,
+            after: transform,
+        });
+    }
+    if commands.is_empty() {
+        return Err("the title is already there".into());
+    }
+    Ok(EditCommand::Composite {
+        label: format!("Move title to {}", position.label().to_lowercase()),
+        commands,
     })
 }
 
@@ -278,6 +430,29 @@ pub fn check_material(material: &TextMaterial) -> Result<(), String> {
         if !finite(&background) {
             return Err("the background colour is not a finite number".to_string());
         }
+    }
+    if !material.letter_spacing.is_finite() {
+        return Err("letter spacing is not a finite number".to_string());
+    }
+    if let Some(line_height) = material.line_height {
+        if !line_height.is_finite() || line_height <= 0.0 {
+            return Err(format!(
+                "line spacing must be a positive number, not {line_height}"
+            ));
+        }
+    }
+    if let Some(padding) = material.background_padding {
+        if !padding.is_finite() || padding < 0.0 {
+            return Err(format!(
+                "the box's padding must be zero or more, not {padding}"
+            ));
+        }
+    }
+    if !material.background_radius.is_finite() || material.background_radius < 0.0 {
+        return Err(format!(
+            "the box's corner radius must be zero or more, not {}",
+            material.background_radius
+        ));
     }
     Ok(())
 }

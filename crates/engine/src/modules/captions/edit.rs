@@ -175,6 +175,7 @@ pub fn material_for(cue: &Cue, style: &CaptionStyle, auto_emoji: bool) -> TextMa
                 .collect(),
             highlight: None,
         }),
+        ..Default::default()
     };
     style.apply_to(&mut material);
     material

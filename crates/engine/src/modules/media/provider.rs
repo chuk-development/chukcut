@@ -1153,6 +1153,7 @@ mod tests {
             shadow: None,
             background: None,
             caption: None,
+            ..Default::default()
         });
         let provider = MediaSourceProvider::from_project(&project);
 

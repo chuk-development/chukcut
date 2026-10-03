@@ -25,7 +25,7 @@ use crate::modules::render::{
 use crate::modules::transitions::library;
 
 /// The compositor every tile is drawn with, built on first use.
-fn compositor() -> Result<&'static Compositor, String> {
+pub(crate) fn compositor() -> Result<&'static Compositor, String> {
     static COMPOSITOR: OnceLock<Option<Compositor>> = OnceLock::new();
     COMPOSITOR
         .get_or_init(|| {
@@ -46,7 +46,7 @@ fn compositor() -> Result<&'static Compositor, String> {
 }
 
 /// FNV-1a, 64 bits: the cache key of a tile.
-fn hash(parts: &[&str]) -> u64 {
+pub(crate) fn hash(parts: &[&str]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for part in parts {
         for byte in part.bytes().chain([0xff]) {
@@ -57,12 +57,12 @@ fn hash(parts: &[&str]) -> u64 {
     h
 }
 
-fn tiles_dir() -> PathBuf {
+pub(crate) fn tiles_dir() -> PathBuf {
     crate::modules::workspace::paths::cache_root().join("fx-tiles")
 }
 
 /// The tile at `path`, drawn by `draw` if it is not on disk yet.
-fn cached(
+pub(crate) fn cached(
     path: PathBuf,
     draw: impl FnOnce() -> Result<image::RgbaImage, String>,
 ) -> Result<PathBuf, String> {
@@ -183,43 +183,47 @@ impl SourceProvider for Samples {
         let night = request.material_id.ends_with("night");
         let (w, h) = (SAMPLE_W, SAMPLE_H);
         let bytes = sample_picture(w, h, night);
-        let texture = ctx.device().create_texture(&wgpu::TextureDescriptor {
-            label: Some("chukcut tile sample"),
-            size: wgpu::Extent3d {
-                width: w,
-                height: h,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        ctx.queue().write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &bytes,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(w * 4),
-                rows_per_image: Some(h),
-            },
-            wgpu::Extent3d {
-                width: w,
-                height: h,
-                depth_or_array_layers: 1,
-            },
-        );
-        Ok(Some(SourceFrame::from_texture(std::sync::Arc::new(
-            texture,
-        ))))
+        Ok(Some(upload(ctx, &bytes, w, h)))
     }
+}
+
+/// Straight sRGB RGBA8 bytes as a texture the compositor samples. Shared with
+/// the title tiles in `text::presets`.
+pub(crate) fn upload(ctx: &RenderContext, bytes: &[u8], w: u32, h: u32) -> SourceFrame {
+    let texture = ctx.device().create_texture(&wgpu::TextureDescriptor {
+        label: Some("chukcut tile sample"),
+        size: wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    ctx.queue().write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        bytes,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(w * 4),
+            rows_per_image: Some(h),
+        },
+        wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
+    );
+    SourceFrame::from_texture(std::sync::Arc::new(texture))
 }
 
 /// The sample pictures' own size: 16:10, like the tiles.

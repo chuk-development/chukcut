@@ -211,6 +211,7 @@ fn a_typewriter_draws_less_of_the_title_while_it_types() {
         shadow: None,
         background: None,
         caption: None,
+        ..Default::default()
     });
     let mut track = Track::new(TrackKind::Text, "T1");
     track.segments.push(Segment {

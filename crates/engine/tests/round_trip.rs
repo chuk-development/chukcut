@@ -94,6 +94,7 @@ fn full_document() -> Project {
         }),
         background: Some([0.0, 0.0, 0.0, 0.25]),
         caption: None,
+        ..Default::default()
     });
     project.materials.extras.insert(
         "effect-0".into(),

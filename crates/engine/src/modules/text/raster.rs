@@ -512,6 +512,28 @@ impl Canvas {
     }
 }
 
+/// The font's own underline, made bold enough to read in a video.
+///
+/// Fonts draw a line for body text, about a twentieth of the size; on a
+/// title over footage that is a hairline. It is kept at least a fifteenth of
+/// the size, and a font without the metric gets that at a tenth below the
+/// baseline.
+fn underline_metrics(font: &FontRef<'_>, style: &GlyphRunStyle) -> (f32, f32) {
+    let size = style.font_size.max(1.0);
+    let coords: Vec<NormalizedCoord> = style
+        .coords
+        .iter()
+        .map(|bits| NormalizedCoord::from_bits(*bits))
+        .collect();
+    let metrics = font.metrics(Size::new(size), LocationRef::new(&coords));
+    let (offset, thickness) = metrics
+        .underline
+        .map(|d| (-d.offset, d.thickness))
+        .unwrap_or((size * 0.1, size / 15.0));
+    let thickness = thickness.max(size / 15.0).max(1.0);
+    (offset.max(0.0), thickness)
+}
+
 /// A colour bitmap glyph, already decoded and positioned.
 struct BitmapDraw {
     /// Straight-alpha RGBA8 source.
@@ -649,6 +671,52 @@ pub(crate) fn rasterize(
             lit_commands.extend(commands.iter().copied());
         }
         fill_commands.extend(commands);
+    }
+
+    // --- underline ------------------------------------------------------
+    //
+    // Part of the fill geometry, so it is outlined and casts a shadow like
+    // the letters it sits under. Each glyph's rectangle grows down over the
+    // stretch of line under its advance, so a per-letter animation carries
+    // its piece of the line with it instead of dropping it.
+    if request.underline {
+        let mut path = BezPath::new();
+        for line in &layout.lines {
+            let glyphs = &layout.glyphs[line.glyphs.clone()];
+            let Some((offset, thickness)) = glyphs
+                .iter()
+                .filter_map(|g| fonts.get(g.run))
+                .map(RunFont::underline)
+                .max_by(|a, b| a.1.total_cmp(&b.1))
+            else {
+                continue;
+            };
+            if line.width <= 0.0 {
+                continue;
+            }
+            let top = origin.1 + line.baseline + offset;
+            let bottom = top + thickness;
+            let left = origin.0 + line.x;
+            let right = left + line.width;
+            path.extend(
+                kurbo::Rect::new(left as f64, top as f64, right as f64, bottom as f64)
+                    .path_elements(0.1),
+            );
+            let grow = stroke_width;
+            for (index, glyph) in layout.glyphs[line.glyphs.clone()].iter().enumerate() {
+                let rect = &mut glyph_rects[line.glyphs.start + index];
+                let x0 = (origin.0 + glyph.x).max(left);
+                let x1 = (origin.0 + glyph.x + glyph.advance).min(right);
+                if x1 <= x0 {
+                    continue;
+                }
+                rect[0] = rect[0].min(x0 - grow);
+                rect[1] = rect[1].min(top - grow);
+                rect[2] = rect[2].max(x1 + grow);
+                rect[3] = rect[3].max(bottom + grow);
+            }
+        }
+        fill_commands.extend(bez_to_commands(&path));
     }
     timing.outlines = timing.mark();
 
@@ -811,6 +879,9 @@ struct RunFont<'a> {
     embolden: bool,
     /// `tan` of the faux-italic angle, applied as a shear in y-up glyph space.
     shear: f32,
+    /// Where the underline goes: the distance from the baseline down to its
+    /// top edge, and its thickness, in device pixels.
+    underline: (f32, f32),
 }
 
 impl<'a> RunFonts<'a> {
@@ -845,7 +916,12 @@ impl<'a> RunFont<'a> {
             units_per_em,
             embolden: style.embolden,
             shear: style.skew.to_radians().tan(),
+            underline: underline_metrics(&font, style),
         })
+    }
+
+    fn underline(&self) -> (f32, f32) {
+        self.underline
     }
 
     /// The glyph's outline, already in image space (y down, pen at `pen`).

@@ -1,39 +1,29 @@
 //! Commands for titles.
 //!
-//! Three of them, and between them they are the whole of "add a title to a
-//! video" as far as Rust is concerned: list the fonts this machine can actually
-//! draw, put a title on the timeline, and change one that is already there.
+//! List the fonts this machine can draw, put a title on the timeline (plain,
+//! in a style, or from a template), and change one that is already there.
 //!
-//! ## The one place this deviates from "every mutation is an `EditCommand`"
+//! ## Undo
 //!
-//! [`text_add`] obeys the rule for the part that matters: the segment is
-//! inserted through `History::apply`, so a title appears and disappears with
-//! Ctrl+Z like any other clip. The *material* is pushed into the pool directly,
-//! exactly as `project_import_media` does and for the same stated reason — a
-//! material nothing references is inert, and putting library additions in the
-//! undo stack means Ctrl+Z after a cut silently empties the panel.
+//! Every change to a title is one `EditCommand`, so it undoes like any other
+//! edit: [`text_set`] and [`text_set_content`] are one
+//! `EditCommand::SetTextMaterial` each, and a style, a template or a position
+//! preset is one `Composite`. The inspector previews a slider drag on a copy
+//! of the document and sends one of these on release, so a drag is one step
+//! and not forty.
 //!
-//! [`text_set`] is the deviation, and it is worth naming rather than hiding.
-//! There is no `EditCommand` variant that carries a `TextMaterial`, so changing
-//! the words in a title is not undoable. Two things about that:
-//!
-//! - It is not obviously wrong. The inspector debounces typing, but even so a
-//!   sentence typed one character at a time would be forty undo steps, and no
-//!   editor makes Ctrl+Z walk backwards through a title letter by letter.
-//! - It is still a gap, and the fix is small and known: an
-//!   `EditCommand::SetTextMaterial { id, before, after }`, mirroring
-//!   `SetTransition` exactly — which is the variant `transitions` already has
-//!   for precisely this shape of edit. It is not here because
-//!   `timeline/ops.rs` was owned by other work when this landed.
-//!
-//! [`text_set_content`] is the undoable path for the words alone: one
-//! `EditCommand::SetTextMaterial` per finished edit.
+//! [`text_add`] puts the *material* into the pool directly, exactly as
+//! `project_import_media` does and for the same reason — a material nothing
+//! references is inert, and putting library additions in the undo stack
+//! means Ctrl+Z after a cut silently empties the panel. The segment that
+//! names it is inserted through `History::apply`, so the title itself
+//! appears and disappears with Ctrl+Z.
 //!
 //! All paths schedule an autosave, so none is lost to a restart.
 
 use std::sync::Arc;
 
-use super::edit;
+use super::{edit, presets};
 use crate::modules::project::document::{Micros, TextMaterial};
 use crate::modules::timeline::commands::EditResponse;
 use crate::state::AppState;
@@ -110,30 +100,180 @@ pub fn text_add(
     })
 }
 
-/// Replace a title's parameters wholesale, keeping its identity.
+/// Replace a title's parameters wholesale, keeping its identity, as one undo
+/// step.
 ///
 /// Wholesale rather than a patch of changed fields for the reason the rest of
 /// this boundary gives: the document is server state, the frontend holds a
 /// complete copy of it, and a patch is a second description of the same object
-/// that can disagree with the first.
+/// that can disagree with the first. Setting what is already there changes
+/// nothing and adds no step.
 pub fn text_set(state: &Arc<AppState>, material: TextMaterial) -> Result<EditResponse, String> {
     // Before the lock, because a rejected edit should cost nothing and because
     // the message is the user's.
     edit::check_material(&material)?;
+    let before = state
+        .with_project(|p| p.materials.text(&material.id).cloned())?
+        .ok_or_else(|| format!("no title with the id {}", material.id))?;
+    if before == material {
+        return respond(state);
+    }
+    crate::modules::timeline::commands::timeline_apply(
+        state,
+        crate::modules::timeline::ops::EditCommand::SetTextMaterial {
+            before,
+            after: material,
+        },
+    )
+}
 
-    {
+/// Every title style, in the order the asset panel shows them.
+pub fn text_styles() -> Vec<presets::TitleStyle> {
+    presets::styles()
+}
+
+/// Every text template, in the order the asset panel shows them.
+pub fn text_templates() -> Vec<presets::TextTemplate> {
+    presets::templates()
+}
+
+/// Put a new title in style `style_id` on the timeline at `at`, on `lane`
+/// when that is a title lane. It says the style's sample unless `content`
+/// is given, and lands where the style puts it (a lower third low and left).
+pub fn text_add_style(
+    state: &Arc<AppState>,
+    at: Micros,
+    style_id: &str,
+    content: Option<String>,
+    lane: Option<String>,
+) -> Result<TextAdded, String> {
+    let style = presets::style(style_id)
+        .ok_or_else(|| format!("there is no title style called {style_id}"))?;
+    add_title(state, at, lane, None, |project| {
+        (style.material(project, content), style.transform(), None)
+    })
+}
+
+/// Put a new title from template `template_id` on the timeline at `at`: its
+/// style and its animation, as one clip and one undo step.
+pub fn text_add_template(
+    state: &Arc<AppState>,
+    at: Micros,
+    template_id: &str,
+    content: Option<String>,
+    lane: Option<String>,
+) -> Result<TextAdded, String> {
+    let template = presets::template(template_id)
+        .ok_or_else(|| format!("there is no text template called {template_id}"))?;
+    let style = template.title_style();
+    add_title(state, at, lane, Some(template.name), |project| {
+        let content = content.unwrap_or_else(|| template.sample().to_string());
+        (
+            style.material(project, Some(content)),
+            style.transform(),
+            Some(template.animation()),
+        )
+    })
+}
+
+/// The shared body of the styled adds: mint the material, place it, give the
+/// segment its transform and animation, all as one step.
+fn add_title(
+    state: &Arc<AppState>,
+    at: Micros,
+    lane: Option<String>,
+    label: Option<&str>,
+    make: impl FnOnce(
+        &crate::modules::project::document::Project,
+    ) -> (
+        TextMaterial,
+        crate::modules::project::document::Transform,
+        Option<crate::modules::project::animation::AnimationMaterial>,
+    ),
+) -> Result<TextAdded, String> {
+    let (material_id, placement) = {
         let mut guard = state.project.write();
         let project = guard.as_mut().ok_or("no project is open")?;
-        let slot = project
-            .materials
-            .texts
-            .iter_mut()
-            .find(|m| m.id == material.id)
-            .ok_or_else(|| format!("no title with the id {}", material.id))?;
-        *slot = material;
-    }
+        let (material, transform, animation) = make(project);
+        let material_id = material.id.clone();
+        let mut placement = edit::insert_command_on(
+            project,
+            &material_id,
+            at,
+            edit::DEFAULT_DURATION,
+            lane.as_deref(),
+        )?;
+        edit::dress_placement(&mut placement, transform, animation, label);
+        // Before the command: see `text_add`.
+        project.materials.texts.push(material);
+        state
+            .history
+            .write()
+            .apply(project, placement.command.clone())?;
+        (material_id, placement)
+    };
+    Ok(TextAdded {
+        edit: respond(state)?,
+        material_id,
+        segment_id: placement.segment_id,
+        track_id: placement.track_id,
+        start: placement.start,
+    })
+}
 
-    respond(&state)
+/// Restyle the title on `segment_id` with style `style_id`, keeping its words
+/// and size. One undo step.
+pub fn text_apply_style(
+    state: &Arc<AppState>,
+    segment_id: &str,
+    style_id: &str,
+) -> Result<EditResponse, String> {
+    let style = presets::style(style_id)
+        .ok_or_else(|| format!("there is no title style called {style_id}"))?;
+    let command =
+        state.with_project(|project| edit::restyle_command(project, segment_id, &style))??;
+    crate::modules::timeline::commands::timeline_apply(state, command)
+}
+
+/// Give the title on `segment_id` template `template_id`'s style and
+/// animation, keeping its words and size. One undo step.
+pub fn text_apply_template(
+    state: &Arc<AppState>,
+    segment_id: &str,
+    template_id: &str,
+) -> Result<EditResponse, String> {
+    let template = presets::template(template_id)
+        .ok_or_else(|| format!("there is no text template called {template_id}"))?;
+    let command =
+        state.with_project(|project| edit::template_command(project, segment_id, &template))??;
+    crate::modules::timeline::commands::timeline_apply(state, command)
+}
+
+/// Move the title on `segment_id` to a cell of the 3 × 3 grid and align its
+/// paragraph to match. One undo step.
+pub fn text_set_position(
+    state: &Arc<AppState>,
+    segment_id: &str,
+    position: presets::TextPosition,
+) -> Result<EditResponse, String> {
+    let command =
+        state.with_project(|project| edit::position_command(project, segment_id, position))??;
+    crate::modules::timeline::commands::timeline_apply(state, command)
+}
+
+/// The asset panel's tile of a title style, drawn by the compositor and
+/// cached as a PNG. Blocking and GPU-bound.
+pub fn text_style_tile(style_id: &str, size: (u32, u32)) -> Result<std::path::PathBuf, String> {
+    presets::style_tile(style_id, size)
+}
+
+/// The asset panel's tile of a text template, caught mid-entrance.
+/// Blocking and GPU-bound.
+pub fn text_template_tile(
+    template_id: &str,
+    size: (u32, u32),
+) -> Result<std::path::PathBuf, String> {
+    presets::template_tile(template_id, size)
 }
 
 /// Change the words of a title, as one undo step.
@@ -234,6 +374,142 @@ mod tests {
         assert_eq!(content(&state).content, "Hello");
         assert!(!state.history.read().can_undo());
         assert!(text_set_content(&state, "nope", "x").is_err());
+    }
+
+    fn open_project() -> Arc<AppState> {
+        let state = AppState::new();
+        *state.project.write() = Some(Project::new("t", CanvasConfig::default(), 30.0));
+        state
+    }
+
+    fn undo_steps(state: &Arc<AppState>) -> usize {
+        let mut steps = 0;
+        while state.history.read().can_undo() {
+            crate::modules::timeline::commands::timeline_undo(state).expect("undo");
+            steps += 1;
+        }
+        steps
+    }
+
+    /// A style change through `text_set` is one undo step, and setting the
+    /// same values again adds none.
+    #[test]
+    fn a_style_edit_is_one_undo_step() {
+        let state = open_project();
+        let added = text_add(&state, 0, Some("Hi".into()), None).expect("added");
+        let mut material = state
+            .with_project(|p| p.materials.text(&added.material_id).cloned())
+            .unwrap()
+            .unwrap();
+        material.underline = true;
+        material.letter_spacing = 4.0;
+        material.background = Some([0.0, 0.0, 0.0, 0.5]);
+        material.background_radius = 12.0;
+        text_set(&state, material.clone()).expect("restyled");
+        text_set(&state, material).expect("the same again");
+        assert_eq!(undo_steps(&state), 2, "add, then one restyle");
+        let mut bad = state
+            .with_project(|p| p.materials.text(&added.material_id).cloned())
+            .unwrap()
+            .unwrap();
+        bad.background_radius = f32::NAN;
+        assert!(text_set(&state, bad).is_err());
+    }
+
+    /// A title in a style lands where the style puts it, and is one step.
+    #[test]
+    fn a_styled_title_is_added_in_one_step_at_its_place() {
+        let state = open_project();
+        let added = text_add_style(&state, 1_000_000, "lower-third", None, None).expect("added");
+        let (material, transform) = state
+            .with_project(|p| {
+                let (_, segment) = p.segment(&added.segment_id).unwrap();
+                (
+                    p.materials.text(&added.material_id).cloned().unwrap(),
+                    segment.transform,
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            material.align,
+            crate::modules::project::document::TextAlign::Left
+        );
+        assert!(material.background.is_some());
+        assert!(
+            transform.position[1] < -0.3,
+            "low in the frame: {:?}",
+            transform.position
+        );
+        assert!(text_add_style(&state, 0, "no-such-style", None, None).is_err());
+        assert_eq!(undo_steps(&state), 1);
+    }
+
+    /// A template is a styled title with its animation, added and undone as
+    /// one step; applying one to a title restyles and animates it in one.
+    #[test]
+    fn a_template_adds_style_and_animation_as_one_step() {
+        let state = open_project();
+        let added = text_add_template(&state, 0, "neon-sign", None, None).expect("added");
+        let animated = state
+            .with_project(|p| {
+                let (_, segment) = p.segment(&added.segment_id).unwrap();
+                p.materials.animation_of(segment).cloned()
+            })
+            .unwrap()
+            .expect("the clip is animated");
+        assert!(animated.text_in.is_some() && animated.combo.is_some());
+        assert_eq!(
+            state.history.read().undo_label().as_deref(),
+            Some("Add Neon sign")
+        );
+
+        let plain = text_add(&state, 5_000_000, Some("Plain".into()), None).expect("added");
+        text_apply_template(&state, &plain.segment_id, "pop-headline").expect("applied");
+        let (material, animation) = state
+            .with_project(|p| {
+                let (_, segment) = p.segment(&plain.segment_id).unwrap();
+                (
+                    p.materials.text(&plain.material_id).cloned().unwrap(),
+                    p.materials.animation_of(segment).cloned(),
+                )
+            })
+            .unwrap();
+        assert_eq!(material.content, "Plain", "the words stay");
+        assert!(animation.is_some_and(|a| a.text_in.is_some()));
+        assert_eq!(undo_steps(&state), 3);
+        assert!(state
+            .with_project(|p| p.materials.animations.is_empty())
+            .unwrap());
+    }
+
+    #[test]
+    fn a_style_and_a_position_apply_to_an_existing_title_in_one_step_each() {
+        let state = open_project();
+        let added = text_add(&state, 0, Some("Mine".into()), None).expect("added");
+        text_apply_style(&state, &added.segment_id, "neon-cyan").expect("styled");
+        text_set_position(&state, &added.segment_id, presets::TextPosition::TopLeft)
+            .expect("moved");
+        let (material, transform) = state
+            .with_project(|p| {
+                let (_, segment) = p.segment(&added.segment_id).unwrap();
+                (
+                    p.materials.text(&added.material_id).cloned().unwrap(),
+                    segment.transform,
+                )
+            })
+            .unwrap();
+        assert_eq!(material.content, "Mine");
+        assert!(material.shadow.is_some());
+        assert_eq!(
+            material.align,
+            crate::modules::project::document::TextAlign::Left
+        );
+        assert!(transform.position[1] > 0.5);
+        assert!(
+            text_set_position(&state, &added.segment_id, presets::TextPosition::TopLeft).is_err(),
+            "already there"
+        );
+        assert_eq!(undo_steps(&state), 3);
     }
 
     /// A duplicated title is a second, equal material under its own id, so a
