@@ -216,11 +216,13 @@ fn init_engine(verbose: u8) {
         .try_init();
 
     // The engine sets libav to Error; the hardware encoder probes then print
-    // a line for every encoder this machine lacks. A CLI's stderr is for its
-    // own progress unless asked for more.
+    // a line for every encoder this machine lacks — NVENC at *fatal* level,
+    // hence Quiet rather than Fatal. A CLI's stderr is for its own progress
+    // unless asked for more, and every failure reaches the user as the
+    // engine's own error message anyway.
     chukcut_engine::modules::media::ensure_initialized();
     if verbose == 0 {
-        ffmpeg_next::util::log::set_level(ffmpeg_next::util::log::Level::Fatal);
+        ffmpeg_next::util::log::set_level(ffmpeg_next::util::log::Level::Quiet);
     }
 
     // The working copy is the app's crash recovery, shared per user; a CLI

@@ -153,12 +153,16 @@ impl Operation for ValidateArgs {
 /// a project is in microseconds.
 #[derive(Debug, Clone, Default, Args, Deserialize, JsonSchema)]
 pub struct ConfigureArgs {
+    /// The project's name.
     #[arg(long)]
     pub name: Option<String>,
+    /// Canvas width in pixels; even.
     #[arg(long)]
     pub width: Option<u32>,
+    /// Canvas height in pixels; even.
     #[arg(long)]
     pub height: Option<u32>,
+    /// Frames per second.
     #[arg(long)]
     pub fps: Option<f64>,
     /// Canvas background: #rrggbb or r,g,b in 0..1.
@@ -186,14 +190,20 @@ impl Operation for ConfigureArgs {
             let c = crate::values::srgb_to_linear(parse_color(&bg)?);
             config.background = c;
         }
-        let response = project_commands::project_configure(&session.state, config.clone())?;
+        let before = session.with(ProjectConfig::of);
+        let changed = before.name != config.name
+            || before.width != config.width
+            || before.height != config.height
+            || before.fps != config.fps
+            || before.background != config.background;
+        project_commands::project_configure(&session.state, config.clone())?;
         Ok(Outcome {
             message: format!(
                 "{}: {}x{} at {} fps",
                 config.name, config.width, config.height, config.fps
             ),
             data: json!({"name": config.name, "width": config.width, "height": config.height, "fps": config.fps}),
-            mutated: response.can_undo,
+            mutated: changed,
         })
     }
 }

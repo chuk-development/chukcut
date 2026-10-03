@@ -14,7 +14,7 @@ use chukcut_engine::shell::Channel;
 use clap::Args;
 use schemars::JsonSchema;
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
 
 use super::{enum_named, Ctx, Operation, Outcome};
 use crate::error::{CliError, CliResult};
@@ -35,10 +35,13 @@ pub struct ExportArgs {
     /// A hardware encoder id such as nvenc_h264 or vaapi_h265, or "auto".
     #[arg(long)]
     pub hardware: Option<String>,
+    /// Output width in pixels, overriding the preset.
     #[arg(long)]
     pub width: Option<u32>,
+    /// Output height in pixels, overriding the preset.
     #[arg(long)]
     pub height: Option<u32>,
+    /// Output frame rate, overriding the preset.
     #[arg(long)]
     pub fps: Option<f64>,
     /// h264, h265, vp9 or av1.
@@ -198,9 +201,16 @@ impl Operation for ExportArgs {
         });
         if let Some(format) = &self.sidecar {
             let format: SubtitleFormat = enum_named("subtitle format", format, &["srt", "vtt"])?;
-            let sidecar = caption_commands::sidecar_path(&path, format);
-            let count = caption_commands::captions_export(&session.state, &sidecar, Some(format))?;
-            data["sidecar"] = json!({"path": sidecar, "captions": count});
+            // The video is written by now; a timeline without captions is
+            // not a reason to report the export as failed.
+            if caption_commands::captions_list(&session.state)?.is_empty() {
+                data["sidecar"] = Value::Null;
+            } else {
+                let sidecar = caption_commands::sidecar_path(&path, format);
+                let count =
+                    caption_commands::captions_export(&session.state, &sidecar, Some(format))?;
+                data["sidecar"] = json!({"path": sidecar, "captions": count});
+            }
         }
         Ok(Outcome::read(
             format!(

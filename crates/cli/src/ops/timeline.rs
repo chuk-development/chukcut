@@ -354,8 +354,10 @@ fn trim_one(session: &Session, id: &str, edge: Edge, to: Micros, ripple: bool) -
 pub struct ClipSetArgs {
     /// The clip: id, id prefix or `lane:index`.
     pub clip: String,
+    /// Horizontal position in canvas units: 0 is the centre, 1 the right edge.
     #[arg(long, allow_hyphen_values = true)]
     pub x: Option<f32>,
+    /// Vertical position in canvas units: 0 is the centre, 1 the top edge.
     #[arg(long, allow_hyphen_values = true)]
     pub y: Option<f32>,
     /// Uniform scale; 1 is the clip's fitted size.
@@ -367,8 +369,10 @@ pub struct ClipSetArgs {
     /// 0..1.
     #[arg(long)]
     pub opacity: Option<f32>,
+    /// Mirror left to right.
     #[arg(long)]
     pub flip_h: Option<bool>,
+    /// Mirror top to bottom.
     #[arg(long)]
     pub flip_v: Option<bool>,
     /// Linear gain; 1 is as recorded, 0 is silent.

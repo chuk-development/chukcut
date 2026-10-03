@@ -227,24 +227,31 @@ pub struct CaptionsStyleArgs {
     /// classic, karaoke, yellow, boxed or big.
     #[arg(long)]
     pub preset: Option<String>,
+    /// A font family installed on this machine (`catalog fonts`).
     #[arg(long)]
     pub font: Option<String>,
+    /// Size in canvas pixels.
     #[arg(long)]
     pub size: Option<f32>,
+    /// Text colour: #rrggbb, #rrggbbaa or a name.
     #[arg(long)]
     pub color: Option<String>,
     /// Karaoke: the colour of the word being spoken, or "none".
     #[arg(long)]
     pub highlight: Option<String>,
+    /// Bold on or off.
     #[arg(long)]
     pub bold: Option<bool>,
+    /// Italic on or off.
     #[arg(long)]
     pub italic: Option<bool>,
     /// left, center or right.
     #[arg(long)]
     pub align: Option<String>,
+    /// Outline width in pixels; 0 for none.
     #[arg(long)]
     pub stroke_width: Option<f32>,
+    /// Outline colour.
     #[arg(long)]
     pub stroke_color: Option<String>,
     /// A box behind the text: a colour, or "none".

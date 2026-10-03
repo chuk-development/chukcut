@@ -209,7 +209,7 @@ fn effect_value(kind: &str, param: &str, value: &str) -> CliResult<EffectValue> 
 /// lane at `at`, applying to everything beneath it.
 #[derive(Debug, Clone, Default, Args, Deserialize, JsonSchema)]
 pub struct EffectAddArgs {
-    /// The effect's id, e.g. gaussian_blur, glow, vignette.
+    /// The effect's id, e.g. gaussian_blur, glow, film_grain (`catalog effects`).
     pub kind: String,
     /// Put it on this clip: id, id prefix or `lane:index`.
     #[arg(long)]
@@ -596,8 +596,10 @@ pub struct AnimateTextArgs {
     /// How much neighbouring units overlap, 0..1.
     #[arg(long)]
     pub overlap: Option<f32>,
+    /// The easing curve (ease_out, linear, back, bounce, ...).
     #[arg(long)]
     pub easing: Option<String>,
+    /// Scales the distance, size and angle a unit travels; 1 is as designed.
     #[arg(long)]
     pub strength: Option<f32>,
 }
@@ -665,11 +667,13 @@ pub struct ZoomArgs {
     /// The point that stays still, x in canvas units (0 is the centre).
     #[arg(long, allow_hyphen_values = true)]
     pub pivot_x: Option<f32>,
+    /// The point that stays still, y in canvas units (+1 is the top).
     #[arg(long, allow_hyphen_values = true)]
     pub pivot_y: Option<f32>,
     /// How long the push takes from the clip's start; 0 is a hard punch.
     #[arg(long)]
     pub duration: Option<Time>,
+    /// The easing curve of the push (ease_out, linear, back, ...).
     #[arg(long)]
     pub easing: Option<String>,
     /// Remove the zoom.
@@ -876,8 +880,10 @@ pub struct TitleStyle {
     /// Text colour: #rrggbb, #rrggbbaa or a name.
     #[arg(long)]
     pub color: Option<String>,
+    /// Bold on or off.
     #[arg(long)]
     pub bold: Option<bool>,
+    /// Italic on or off.
     #[arg(long)]
     pub italic: Option<bool>,
     /// left, center or right.
@@ -886,6 +892,7 @@ pub struct TitleStyle {
     /// Outline width in pixels; 0 for none.
     #[arg(long)]
     pub stroke_width: Option<f32>,
+    /// Outline colour.
     #[arg(long)]
     pub stroke_color: Option<String>,
     /// A box behind the text: a colour, or "none".

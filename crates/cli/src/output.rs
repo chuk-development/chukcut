@@ -98,6 +98,14 @@ impl Printer {
             return;
         }
         match op {
+            // `info --full`: the document itself, for a person too.
+            "info" if outcome.data.get("schema_version").is_some() => {
+                let _ = writeln!(
+                    out,
+                    "{}",
+                    serde_json::to_string_pretty(&outcome.data).unwrap_or_default()
+                );
+            }
             "info" if outcome.data.get("tracks").is_some() => {
                 let _ = writeln!(out, "{}", outcome.message);
                 let _ = write!(out, "{}", info_text(&outcome.data));
@@ -141,10 +149,15 @@ fn one_line(item: &Value) -> String {
                 .iter()
                 .find_map(|k| item.get(*k).and_then(Value::as_str))
                 .unwrap_or("");
-            return if detail.is_empty() {
-                name.to_string()
+            let unusable = if item.get("usable") == Some(&Value::Bool(false)) {
+                "  (not usable here)"
             } else {
-                format!("{name:<28} {detail}")
+                ""
+            };
+            return if detail.is_empty() {
+                format!("{name}{unusable}")
+            } else {
+                format!("{name:<28} {detail}{unusable}")
             };
         }
     }
