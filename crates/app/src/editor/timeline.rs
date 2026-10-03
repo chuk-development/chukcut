@@ -16,6 +16,7 @@
 mod batch;
 mod clipboard;
 mod envelope;
+mod inline_text;
 mod links;
 mod media_cache;
 mod ripple;
@@ -347,6 +348,8 @@ pub(crate) struct TimelineState {
     drop_hover: Option<Point<Pixels>>,
     /// Where a wheel scroll is gliding to.
     scroll_target: Option<f32>,
+    /// The text box open on a title or caption clip.
+    inline_text: Option<inline_text::InlineText>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -391,6 +394,7 @@ impl TimelineState {
             hover_clip: None,
             drop_hover: None,
             scroll_target: None,
+            inline_text: None,
             _subscriptions: vec![subscription],
         }
     }
@@ -969,7 +973,12 @@ impl Editor {
 
     // --- pointer -------------------------------------------------------------------
 
-    fn on_lanes_down(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_lanes_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let (x, y) = self.lanes_local(event.position);
         let (width, height) = self.lanes_size();
         let time = self.x_to_time(x);
@@ -997,6 +1006,20 @@ impl Editor {
             self.timeline.drag = Some(Drag::Scrub);
             cx.notify();
             return;
+        }
+
+        // A double-click on a title or a caption edits its words in place.
+        if event.click_count == 2 && self.timeline.tool == Tool::Select {
+            if let Some((_, Hit::Clip { segment_id, .. })) = self.hit(x, y) {
+                if self.can_edit_inline(&segment_id) {
+                    self.open_inline_text(segment_id, window, cx);
+                    // The editor root tracks focus and takes it on a mouse
+                    // down that is not prevented, after this handler: it
+                    // would pull the keyboard straight out of the new box.
+                    window.prevent_default();
+                    return;
+                }
+            }
         }
 
         if self.timeline.tool == Tool::Select {
@@ -3302,6 +3325,7 @@ impl Editor {
             .children(blade_line)
             .children(playhead)
             .children(scrollbar)
+            .children(self.render_inline_text(lanes_w, cx))
             .context_menu({
                 let editor = cx.entity();
                 let focus = self.focus.clone();
