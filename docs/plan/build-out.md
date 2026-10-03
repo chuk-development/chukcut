@@ -48,12 +48,12 @@ column current.
 | 3 | text & titles | text tab (fonts, styles, presets), text inspector (font, size, colour, stroke, shadow, box) | |
 | 3 | motion | in/out/combo presets relative to the clip, easing library, text animator (letter/word/line), punch-in zoom + auto zoom on jump cuts | merged — text animator composites on CPU (slow in export), combo restarts at a split |
 | 3 | integrations | provider registry (secrets.toml 0600) + ElevenLabs TTS/SFX, OpenAI-compatible TTS, Pexels/Pixabay/Freesound search, fal.ai jobs with cost estimate — after captions merge | |
-| 3 | silence | silence + filler-word cutting with a review list, voice cleanup, loudness target on export | running (agent/silence) |
+| 3 | silence | silence + filler-word cutting with a review list, voice cleanup, loudness target on export | merged — ripple only on the clip's own and linked lanes; filler cutting needs an adapter from caption words |
 | 3 | effects | short-form pack (glow, shake, light sweep, RGB split, glitch, blur, vignette), film look (grain, halation, bloom), PiP/layouts with rounded corners, gl-transitions + seamless transitions — after colour merges (compositor) | running (agent/effects) |
 | 3 | audio | audio effects (fades, denoise, normalise), voiceover record, beat markers | |
-| 2 | captions | auto captions (OpenAI-compatible API with own base URL/key/model, or local Whisper), word/sentence mode, SRT/VTT, caption lane, styles (font, colour, stroke, box, position, karaoke highlight), emoji | running (branch agent/captions) |
+| 2 | captions | auto captions (OpenAI-compatible API with own base URL/key/model, or local Whisper), word/sentence mode, SRT/VTT, caption lane, styles (font, colour, stroke, box, position, karaoke highlight), emoji | merged c4418c1 — timeline S splits full text into both halves; emoji picker monochrome in GPUI; cloud path tested only against a mock |
 | 2 | research | ml-features, open-assets, integrations, resolve-plugins — all merged into docs/research/ |
-| 3 | tracking | running (agent/tracking) — motion tracking T1 (Rust KLT, track material + follows link, box select on the player, re-track, smoothing, bake to keyframes) per docs/research/ml-features.md | |
+| 3 | tracking | merged — no re-find after occlusion/leaving frame; motion tracking T1 (Rust KLT, track material + follows link, box select on the player, re-track, smoothing, bake to keyframes) per docs/research/ml-features.md | |
 | 3 | design-2 | apply the kit to timeline + inspector; in/out marks on the ruler; drop ghost with lane (export MediaDrag) — after tracking, motion, silence merge | |
 | 4 | perf | shared GPU device with GPUI (no readback), playback at 4K, proxies on by default for heavy files | |
 | 4 | QA | end-to-end tests over the command layer, a test pass over every panel, fixes | |
