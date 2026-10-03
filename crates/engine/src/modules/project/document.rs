@@ -363,6 +363,11 @@ pub struct MaterialPool {
     /// follows, exactly like a colour adjustment. See `modules::tracking`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub follows: Vec<crate::modules::tracking::FollowMaterial>,
+    /// Speed curves (speed ramps), referenced from the `extras` of the clips
+    /// that play through them. See [`super::speed`]. Kept sorted by id, so
+    /// adding and removing one is exactly invertible.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub speed_curves: Vec<super::speed::SpeedCurveMaterial>,
     /// Every link group id that some segment currently belongs to.
     ///
     /// ## Why linkage is on the segment and this is only a type tag
@@ -1220,6 +1225,13 @@ impl Segment {
         {
             return Some("keyframe value");
         }
+        if self
+            .keyframes
+            .iter()
+            .any(|t| t.keyframes.iter().any(|k| k.easing.problem().is_some()))
+        {
+            return Some("keyframe easing");
+        }
         None
     }
 
@@ -1402,21 +1414,45 @@ pub struct Keyframe {
     pub easing: Easing,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// How a keyframe moves to the next one: the curve progress between two
+/// keyframes runs through. Stored on the keyframe the stretch starts at.
+///
+/// The five unit variants are the original set and serialise as plain
+/// strings, so every file written before the others existed reads unchanged;
+/// the newer ones are tagged objects (`{"curve": "back"}`,
+/// `{"bezier": {"x1": …}}`), which `#[serde(default)]` on
+/// [`Keyframe::easing`] still defaults to `Linear` when absent.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Easing {
+    /// The value holds until the next keyframe, then jumps.
     Hold,
     #[default]
     Linear,
     EaseIn,
     EaseOut,
     EaseInOut,
+    /// A curve from the shared easing library — overshoot, elastic, bounce.
+    Curve(super::animation::Ease),
+    /// A CSS-style cubic Bézier from `(0,0)` to `(1,1)` through two handles.
+    /// `x1` and `x2` stay in `0..1` (time cannot run backwards); `y` may
+    /// leave it, which is an overshoot.
+    Bezier {
+        x1: f32,
+        y1: f32,
+        x2: f32,
+        y2: f32,
+    },
 }
 
 impl Easing {
     /// Remap a normalized 0..1 progress.
     pub fn apply(self, t: f32) -> f32 {
-        let t = t.clamp(0.0, 1.0);
+        let t = if t.is_finite() {
+            t.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         match self {
             Easing::Hold => 0.0,
             Easing::Linear => t,
@@ -1429,7 +1465,297 @@ impl Easing {
                     -1.0 + (4.0 - 2.0 * t) * t
                 }
             }
+            Easing::Curve(ease) => ease.apply(t),
+            Easing::Bezier { x1, y1, x2, y2 } => cubic_bezier(x1, y1, x2, y2, t),
         }
+    }
+
+    /// The name a picker shows.
+    pub fn label(self) -> &'static str {
+        match self {
+            Easing::Hold => "Hold",
+            Easing::Linear => "Linear",
+            Easing::EaseIn => "Ease in",
+            Easing::EaseOut => "Ease out",
+            Easing::EaseInOut => "Ease in-out",
+            Easing::Curve(ease) => ease.label(),
+            Easing::Bezier { .. } => "Custom",
+        }
+    }
+
+    /// Every named easing a picker offers, without `Bezier` (that one is
+    /// drawn, not picked). The library curves that duplicate a basic one by
+    /// name (linear, ease in/out) are left out.
+    pub fn presets() -> Vec<Easing> {
+        use super::animation::Ease;
+        let mut list = vec![
+            Easing::Linear,
+            Easing::Hold,
+            Easing::EaseIn,
+            Easing::EaseOut,
+            Easing::EaseInOut,
+        ];
+        list.extend(
+            Ease::ALL
+                .iter()
+                .filter(|e| {
+                    !matches!(
+                        e,
+                        Ease::Linear | Ease::EaseIn | Ease::EaseOut | Ease::EaseInOut
+                    )
+                })
+                .map(|&e| Easing::Curve(e)),
+        );
+        list
+    }
+
+    /// The handles of the Bézier this easing is, or is closest to, for
+    /// starting the graph editor from a named easing.
+    pub fn handles(self) -> [f32; 4] {
+        match self {
+            Easing::Bezier { x1, y1, x2, y2 } => [x1, y1, x2, y2],
+            // The quadratics, raised to cubics exactly.
+            Easing::EaseIn => [1.0 / 3.0, 0.0, 2.0 / 3.0, 1.0 / 3.0],
+            Easing::EaseOut => [1.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0, 1.0],
+            Easing::EaseInOut => [0.45, 0.0, 0.55, 1.0],
+            Easing::Curve(ease) => {
+                use super::animation::Ease;
+                match ease {
+                    Ease::EaseIn => [0.32, 0.0, 0.67, 0.0],
+                    Ease::EaseOut => [0.33, 1.0, 0.68, 1.0],
+                    Ease::EaseInOut => [0.65, 0.0, 0.35, 1.0],
+                    Ease::Smooth => [0.37, 0.0, 0.63, 1.0],
+                    Ease::Snap => [0.16, 1.0, 0.3, 1.0],
+                    Ease::BackIn => [0.36, 0.0, 0.66, -0.56],
+                    Ease::Back => [0.34, 1.56, 0.64, 1.0],
+                    Ease::BackInOut => [0.68, -0.6, 0.32, 1.6],
+                    _ => [0.25, 0.25, 0.75, 0.75],
+                }
+            }
+            Easing::Hold | Easing::Linear => [0.25, 0.25, 0.75, 0.75],
+        }
+    }
+
+    /// Why this easing cannot be stored, if it cannot.
+    pub fn problem(self) -> Option<&'static str> {
+        if let Easing::Bezier { x1, y1, x2, y2 } = self {
+            if ![x1, y1, x2, y2].iter().all(|v| v.is_finite()) {
+                return Some("an easing handle is not a finite number");
+            }
+            if !(0.0..=1.0).contains(&x1) || !(0.0..=1.0).contains(&x2) {
+                return Some("an easing handle cannot move back in time");
+            }
+            if !(-4.0..=5.0).contains(&y1) || !(-4.0..=5.0).contains(&y2) {
+                return Some("an easing handle is too far out");
+            }
+        }
+        None
+    }
+}
+
+/// CSS `cubic-bezier(x1, y1, x2, y2)` at progress `t`: solve `x(s) = t` for
+/// the curve parameter `s` (Newton, falling back to bisection where the slope
+/// is flat), then return `y(s)`. `x1`, `x2` are clamped into `0..1`, which
+/// keeps `x(s)` monotonic and the solve unique.
+pub fn cubic_bezier(x1: f32, y1: f32, x2: f32, y2: f32, t: f32) -> f32 {
+    if t <= 0.0 {
+        return 0.0;
+    }
+    if t >= 1.0 {
+        return 1.0;
+    }
+    let (x1, x2) = (x1.clamp(0.0, 1.0) as f64, x2.clamp(0.0, 1.0) as f64);
+    let (y1, y2) = (y1 as f64, y2 as f64);
+    let t = t as f64;
+    // B(s) = 3(1-s)²s·p1 + 3(1-s)s²·p2 + s³, as a polynomial in s.
+    let coeff = |p1: f64, p2: f64| {
+        let c = 3.0 * p1;
+        let b = 3.0 * (p2 - p1) - c;
+        let a = 1.0 - c - b;
+        (a, b, c)
+    };
+    let (ax, bx, cx) = coeff(x1, x2);
+    let (ay, by, cy) = coeff(y1, y2);
+    let x_at = |s: f64| ((ax * s + bx) * s + cx) * s;
+    let dx_at = |s: f64| (3.0 * ax * s + 2.0 * bx) * s + cx;
+    let mut s = t;
+    let mut solved = false;
+    for _ in 0..8 {
+        let err = x_at(s) - t;
+        if err.abs() < 1e-7 {
+            solved = true;
+            break;
+        }
+        let d = dx_at(s);
+        if d.abs() < 1e-6 {
+            break;
+        }
+        s -= err / d;
+    }
+    if !solved || !(0.0..=1.0).contains(&s) {
+        let (mut lo, mut hi) = (0.0, 1.0);
+        s = t;
+        for _ in 0..60 {
+            let x = x_at(s);
+            if (x - t).abs() < 1e-7 {
+                break;
+            }
+            if x < t {
+                lo = s;
+            } else {
+                hi = s;
+            }
+            s = 0.5 * (lo + hi);
+        }
+    }
+    (((ay * s + by) * s + cy) * s) as f32
+}
+
+#[cfg(test)]
+mod easing_tests {
+    use super::*;
+    use crate::modules::project::animation::Ease;
+
+    fn close(a: f32, b: f64, what: &str) {
+        assert!((a as f64 - b).abs() < 1e-4, "{what}: {a} vs {b}");
+    }
+
+    /// Reference values from an independent bisection of the same Béziers
+    /// (CSS `ease`, `ease-in-out`, an overshooting back-out).
+    #[test]
+    fn bezier_easing_matches_reference_values() {
+        let css_ease = Easing::Bezier {
+            x1: 0.25,
+            y1: 0.1,
+            x2: 0.25,
+            y2: 1.0,
+        };
+        close(css_ease.apply(0.5), 0.802403387584857, "ease at 0.5");
+        close(css_ease.apply(0.25), 0.408510591355396, "ease at 0.25");
+        let in_out = Easing::Bezier {
+            x1: 0.42,
+            y1: 0.0,
+            x2: 0.58,
+            y2: 1.0,
+        };
+        close(in_out.apply(0.25), 0.129161931047320, "ease-in-out at 0.25");
+        close(in_out.apply(0.5), 0.5, "ease-in-out is symmetric");
+        let back = Easing::Bezier {
+            x1: 0.34,
+            y1: 1.56,
+            x2: 0.64,
+            y2: 1.0,
+        };
+        close(back.apply(0.3), 0.907361380561126, "back-out at 0.3");
+        let linear = Easing::Bezier {
+            x1: 0.25,
+            y1: 0.25,
+            x2: 0.75,
+            y2: 0.75,
+        };
+        for i in 0..=20 {
+            let t = i as f32 / 20.0;
+            close(linear.apply(t), t as f64, "a straight Bézier is linear");
+        }
+    }
+
+    #[test]
+    fn named_easings_match_their_formulas() {
+        close(Easing::Linear.apply(0.3), 0.3, "linear");
+        close(Easing::EaseIn.apply(0.5), 0.25, "ease in");
+        close(Easing::EaseOut.apply(0.5), 0.75, "ease out");
+        close(Easing::EaseInOut.apply(0.25), 0.125, "ease in-out");
+        close(Easing::Hold.apply(0.99), 0.0, "hold");
+        // Penner's back-out at 0.5: 1 + 2.70158·(−0.5)³ + 1.70158·0.25.
+        close(Easing::Curve(Ease::Back).apply(0.5), 1.0876975, "overshoot");
+        close(Easing::Curve(Ease::Bounce).apply(0.5), 0.765625, "bounce");
+        close(Easing::Curve(Ease::Smooth).apply(0.5), 0.5, "sine in-out");
+        for easing in Easing::presets() {
+            if easing != Easing::Hold {
+                close(easing.apply(0.0), 0.0, easing.label());
+                close(easing.apply(1.0), 1.0, easing.label());
+            }
+        }
+    }
+
+    #[test]
+    fn a_keyframe_track_follows_its_easing() {
+        let track = KeyframeTrack {
+            property: AnimatableProperty::Opacity,
+            keyframes: vec![
+                Keyframe {
+                    time: 0,
+                    value: 0.0,
+                    easing: Easing::Bezier {
+                        x1: 0.25,
+                        y1: 0.1,
+                        x2: 0.25,
+                        y2: 1.0,
+                    },
+                },
+                Keyframe {
+                    time: 1_000_000,
+                    value: 2.0,
+                    easing: Easing::Hold,
+                },
+                Keyframe {
+                    time: 2_000_000,
+                    value: 4.0,
+                    easing: Easing::Linear,
+                },
+            ],
+        };
+        close(
+            track.sample(500_000).unwrap(),
+            2.0 * 0.802403387584857,
+            "eased",
+        );
+        close(track.sample(1_999_999).unwrap(), 2.0, "held");
+        close(track.sample(2_000_000).unwrap(), 4.0, "arrived");
+    }
+
+    #[test]
+    fn old_files_read_and_new_easings_round_trip() {
+        let old: Keyframe = serde_json::from_str(r#"{"time":5,"value":1.0,"easing":"ease_in"}"#)
+            .expect("an old keyframe");
+        assert_eq!(old.easing, Easing::EaseIn);
+        let bare: Keyframe = serde_json::from_str(r#"{"time":5}"#).expect("defaults");
+        assert_eq!(bare.easing, Easing::Linear);
+        for easing in [
+            Easing::Curve(Ease::Elastic),
+            Easing::Bezier {
+                x1: 0.1,
+                y1: -0.4,
+                x2: 0.9,
+                y2: 1.3,
+            },
+        ] {
+            let json = serde_json::to_string(&easing).unwrap();
+            let back: Easing = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, easing, "{json}");
+        }
+        assert_eq!(
+            serde_json::to_string(&Easing::Curve(Ease::Back)).unwrap(),
+            r#"{"curve":"back"}"#
+        );
+    }
+
+    #[test]
+    fn handles_that_run_backwards_in_time_are_refused() {
+        let bad = Easing::Bezier {
+            x1: -0.1,
+            y1: 0.0,
+            x2: 0.5,
+            y2: 1.0,
+        };
+        assert!(bad.problem().is_some());
+        let nan = Easing::Bezier {
+            x1: 0.1,
+            y1: f32::NAN,
+            x2: 0.5,
+            y2: 1.0,
+        };
+        assert!(nan.problem().is_some());
     }
 }
 
@@ -1592,6 +1918,14 @@ impl Project {
                         format!("segment speed is not positive: {}", seg.speed),
                         Some(seg.id.clone()),
                     );
+                } else if let Some(curve) = self.materials.speed_curve_of(seg) {
+                    // A curved clip's length is the curve's integral over its
+                    // source range; `speed` is dormant. See `speed.rs`.
+                    if let Err(message) =
+                        super::speed::check_curve_ranges(curve, seg.target_range, seg.source_range)
+                    {
+                        error(message, Some(seg.id.clone()));
+                    }
                 } else if !seg.speed_invariant_holds() {
                     // The two ranges are the document's own definition of what
                     // a speed change means; when they disagree, `split_at`
@@ -1675,6 +2009,16 @@ impl Project {
         }
 
         issues.extend(outside);
+
+        for curve in &self.materials.speed_curves {
+            if let Some(problem) = curve.problem() {
+                issues.push(ValidationIssue {
+                    severity: Severity::Error,
+                    message: problem,
+                    subject_id: Some(curve.id.clone()),
+                });
+            }
+        }
 
         // A colour adjustment is applied on every rendered frame of the clip
         // that references it, so a non-finite value here is a NaN handed to the

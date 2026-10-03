@@ -89,7 +89,7 @@ pub fn remove_ranges_in_sync(
         return Err("the clip's track is locked".into());
     }
     let clip = segment.target_range;
-    let timeline = timeline_cuts(segment, cuts);
+    let timeline = timeline_cuts(project, segment, cuts);
     let timeline = absorb_slivers(clip, timeline);
     if timeline.is_empty() {
         return Err("there is nothing to remove".into());
@@ -390,6 +390,7 @@ fn retime_caption(
 
 /// Source-time cuts as merged, sorted timeline ranges inside the clip.
 fn timeline_cuts(
+    project: &Project,
     segment: &crate::modules::project::document::Segment,
     cuts: &[TimeRange],
 ) -> Vec<TimeRange> {
@@ -400,8 +401,14 @@ fn timeline_cuts(
     };
     let source = segment.source_range;
     let clip = segment.target_range;
+    // Through the speed curve when there is one (`project::speed`).
+    let map = project.materials.time_map(segment);
     let to_timeline = |t: Micros| -> Micros {
-        let offset = ((t - source.start) as f64 / speed).round() as Micros;
+        let offset = if map.is_curved() {
+            map.offset_of(t)
+        } else {
+            ((t - source.start) as f64 / speed).round() as Micros
+        };
         (clip.start + offset).clamp(clip.start, clip.end())
     };
     let mut ranges: Vec<(Micros, Micros)> = cuts

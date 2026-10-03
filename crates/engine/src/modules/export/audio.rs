@@ -229,6 +229,10 @@ pub fn mix_timeline(
             if project.sound_is_on_a_linked_lane(track, segment) {
                 continue;
             }
+            // Muted on a speed curve, as in the preview mixer.
+            if project.materials.speed_curve_of(segment).is_some() {
+                continue;
+            }
 
             // A speed factor changes how much source a segment consumes; the
             // document keeps both ranges, but `source_range.duration` is the

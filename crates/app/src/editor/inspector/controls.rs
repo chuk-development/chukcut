@@ -325,12 +325,19 @@ impl Editor {
             (true, false) => KeyMark::Animated,
             (false, false) => KeyMark::None,
         };
-        Some(
-            KeyframeSlot::new(format!("kf-{prop:?}"), mark)
-                .on_toggle(cx.listener(move |this, _, _, cx| this.toggle_keyframe(prop, cx)))
-                .on_prev(cx.listener(move |this, _, _, cx| this.jump_keyframe(prop, false, cx)))
-                .on_next(cx.listener(move |this, _, _, cx| this.jump_keyframe(prop, true, cx))),
-        )
+        let mut slot = KeyframeSlot::new(format!("kf-{prop:?}"), mark)
+            .on_toggle(cx.listener(move |this, _, _, cx| this.toggle_keyframe(prop, cx)))
+            .on_prev(cx.listener(move |this, _, _, cx| this.jump_keyframe(prop, false, cx)))
+            .on_next(cx.listener(move |this, _, _, cx| this.jump_keyframe(prop, true, cx)));
+        // Right-click on the diamond: the easing of the keyframe the
+        // playhead is on, or moving away from.
+        if let Some((target, current, _)) = self.easing_target(prop, segment) {
+            let editor = cx.entity().downgrade();
+            slot = slot.context_menu(std::rc::Rc::new(move |menu, _, _| {
+                super::easing::easing_items(menu, editor.clone(), target.clone(), current)
+            }));
+        }
+        Some(slot)
     }
 
     /// The reset and keyframe buttons at the right of a row. Rows without a

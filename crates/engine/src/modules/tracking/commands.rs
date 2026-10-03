@@ -179,13 +179,10 @@ fn prepare(
     {
         return Err("draw a box around the object first".into());
     }
-    let start = target
-        .source_time_at(
-            request
-                .at
-                .clamp(target.target_range.start, target.target_range.end() - 1),
-        )
-        .unwrap_or(target.source_range.start);
+    let start = project
+        .materials
+        .time_map(target)
+        .clamped_source_time(request.at);
     let range = (
         target.source_range.start,
         (target.source_range.end() - 1).max(target.source_range.start),

@@ -306,9 +306,8 @@ impl Editor {
             if let (Some(sample), Some((_, target))) =
                 (job.latest, self.project.segment(&job.target_id))
             {
-                let offset = sample.t - target.source_range.start;
                 let time = target.target_range.start
-                    + (offset as f64 / target.speed.max(1e-3) as f64) as Micros;
+                    + self.project.materials.time_map(target).offset_of(sample.t);
                 if target.target_range.contains(time) {
                     self.clock.seek(time);
                 }
@@ -606,12 +605,12 @@ fn path_shapes(
     let mut line = Vec::new();
     let mut marks = Vec::new();
     let source = target.source_range;
+    let map = project.materials.time_map(target);
     for sample in &track.samples {
         if sample.t < source.start || sample.t >= source.end() {
             continue;
         }
-        let time = target.target_range.start
-            + ((sample.t - source.start) as f64 / target.speed.max(1e-3) as f64) as Micros;
+        let time = target.target_range.start + map.offset_of(sample.t);
         // The path the follower takes, so smoothing shows on it.
         let (x, y) = track
             .pose_at(sample.t)

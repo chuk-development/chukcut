@@ -258,6 +258,26 @@ pub enum EditCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         slot: Option<usize>,
     },
+    /// Give a clip a speed curve, change it, or take it away — and with it the
+    /// clip's length on the timeline, which the curve decides.
+    ///
+    /// The source range does not change: a ramp plays the same part of the
+    /// file faster or slower. The timeline range changes in the same step,
+    /// because a clip whose length disagrees with its curve is a document that
+    /// contradicts itself, and a separate trim would have to pass through such
+    /// a state. Both sides carry the whole material, for the reason
+    /// `SetAnimation` does. The body is `speed::edit::set`. See
+    /// `project::speed`.
+    SetSpeedCurve {
+        segment_id: String,
+        before: Option<crate::modules::project::SpeedCurveMaterial>,
+        after: Option<crate::modules::project::SpeedCurveMaterial>,
+        before_target: TimeRange,
+        after_target: TimeRange,
+        /// Where the reference sits in `extras`, as for `SetAnimation`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        slot: Option<usize>,
+    },
     /// Replace a title's parameters, keeping its id — the variant
     /// `text/commands.rs` asks for. Captions edit their words, timing and style
     /// through it, so a caption edit is one undo step like any other edit.
@@ -428,6 +448,25 @@ fn check_segment(segment: &Segment) -> EditResult {
     check_speed_invariant(segment.target_range, segment.source_range, segment.speed)
 }
 
+/// [`check_segment`] for a clip on a speed curve: its length is checked
+/// against the curve, and its dormant `speed` only has to be storable.
+fn check_curved_segment(
+    segment: &Segment,
+    curve: &crate::modules::project::SpeedCurveMaterial,
+) -> EditResult {
+    if let Some(field) = segment.non_finite_field() {
+        return Err(non_finite(field));
+    }
+    check_speed(segment.speed)?;
+    check_finite("volume", segment.volume)?;
+    check_ranges(segment.target_range, segment.source_range)?;
+    crate::modules::project::speed::check_curve_ranges(
+        curve,
+        segment.target_range,
+        segment.source_range,
+    )
+}
+
 impl EditCommand {
     /// Human-readable label for the undo menu.
     pub fn label(&self) -> String {
@@ -487,6 +526,11 @@ impl EditCommand {
                 _ => "Change animation".into(),
             },
             EditCommand::SetTextMaterial { .. } => "Edit text".into(),
+            EditCommand::SetSpeedCurve { before, after, .. } => match (before, after) {
+                (None, Some(_)) => "Add speed curve".into(),
+                (Some(_), None) => "Remove speed curve".into(),
+                _ => "Change speed curve".into(),
+            },
             EditCommand::Composite { label, .. } => label.clone(),
         }
     }
@@ -570,7 +614,11 @@ impl EditCommand {
                 segment,
                 index,
             } => {
-                check_segment(segment)?;
+                let curve = project.materials.speed_curve_of(segment).cloned();
+                match &curve {
+                    None => check_segment(segment)?,
+                    Some(curve) => check_curved_segment(segment, curve)?,
+                }
                 if project.segment(&segment.id).is_some() {
                     return Err(format!(
                         "a clip with the id {} is already on the timeline",
@@ -584,8 +632,10 @@ impl EditCommand {
                     return Err("target range is occupied".into());
                 }
                 let mut segment = segment.clone();
-                segment.source_range =
-                    exact_source(segment.target_range, segment.source_range, segment.speed);
+                if curve.is_none() {
+                    segment.source_range =
+                        exact_source(segment.target_range, segment.source_range, segment.speed);
+                }
                 let index = (*index).min(track.segments.len());
                 track.segments.insert(index, segment);
                 sort_track(project, track_id);
@@ -659,16 +709,29 @@ impl EditCommand {
                 ..
             } => {
                 check_ranges(*after_target, *after_source)?;
-                let (track_id, speed) = project
+                let (track_id, speed, curved) = project
                     .segment(segment_id)
-                    .map(|(t, s)| (t.id.clone(), s.speed))
+                    .map(|(t, s)| {
+                        (
+                            t.id.clone(),
+                            s.speed,
+                            project.materials.speed_curve_of(s).cloned(),
+                        )
+                    })
                     .ok_or_else(|| format!("unknown segment {segment_id}"))?;
 
                 // A trim moves both ranges, and how far each moves depends on
                 // the speed. A caller that trimmed the timeline range without
                 // scaling the source range is asking for a clip that shows the
                 // wrong part of the file, so it is refused rather than repaired.
-                check_speed_invariant(*after_target, *after_source, speed)?;
+                match &curved {
+                    None => check_speed_invariant(*after_target, *after_source, speed)?,
+                    Some(curve) => crate::modules::project::speed::check_curve_ranges(
+                        curve,
+                        *after_target,
+                        *after_source,
+                    )?,
+                }
 
                 let track = project.track_mut(&track_id).expect("track existed");
                 if !track.is_range_free(after_target, Some(segment_id)) {
@@ -677,7 +740,12 @@ impl EditCommand {
 
                 let segment = project.segment_mut(segment_id).expect("segment existed");
                 segment.target_range = *after_target;
-                segment.source_range = exact_source(*after_target, *after_source, speed);
+                // A curved clip's source range is the authority and is
+                // stored as given; its length was checked against it above.
+                segment.source_range = match curved {
+                    None => exact_source(*after_target, *after_source, speed),
+                    Some(_) => *after_source,
+                };
                 sort_track(project, &track_id);
                 Ok(())
             }
@@ -697,10 +765,18 @@ impl EditCommand {
                 segment_id, after, ..
             } => {
                 check_speed(*after)?;
+                let curved = project
+                    .segment(segment_id)
+                    .is_some_and(|(_, s)| project.materials.speed_curve_of(s).is_some());
                 let segment = project
                     .segment_mut(segment_id)
                     .ok_or_else(|| format!("unknown segment {segment_id}"))?;
                 segment.speed = *after;
+                // Under a speed curve the constant speed is dormant (see
+                // `project::speed`): it is remembered, and moves no range.
+                if curved {
+                    return Ok(());
+                }
                 // The speed is the factor *between* the two ranges, so setting
                 // it alone leaves the document contradicting itself: the clip
                 // keeps its place and length on the timeline, so the source
@@ -763,6 +839,9 @@ impl EditCommand {
                 keyframe,
             } => {
                 check_finite("keyframe value", keyframe.value)?;
+                if let Some(problem) = keyframe.easing.problem() {
+                    return Err(problem.into());
+                }
                 let segment = project
                     .segment_mut(segment_id)
                     .ok_or_else(|| format!("unknown segment {segment_id}"))?;
@@ -873,6 +952,9 @@ impl EditCommand {
                 after,
                 ..
             } => {
+                if let Some(problem) = after.problem() {
+                    return Err(problem.into());
+                }
                 let segment = project
                     .segment_mut(segment_id)
                     .ok_or_else(|| format!("unknown segment {segment_id}"))?;
@@ -1011,6 +1093,23 @@ impl EditCommand {
             EditCommand::SetTextMaterial { before, after } => {
                 crate::modules::captions::edit::set_text_material(project, before, after)
             }
+
+            EditCommand::SetSpeedCurve {
+                segment_id,
+                before,
+                after,
+                before_target,
+                after_target,
+                slot,
+            } => crate::modules::speed::edit::set(
+                project,
+                segment_id,
+                before.as_ref(),
+                after.as_ref(),
+                *before_target,
+                *after_target,
+                *slot,
+            ),
 
             EditCommand::Composite { commands, .. } => {
                 for (i, cmd) in commands.iter().enumerate() {
@@ -1239,6 +1338,21 @@ impl EditCommand {
                 after: before.clone(),
                 slot: *slot,
             },
+            EditCommand::SetSpeedCurve {
+                segment_id,
+                before,
+                after,
+                before_target,
+                after_target,
+                slot,
+            } => EditCommand::SetSpeedCurve {
+                segment_id: segment_id.clone(),
+                before: after.clone(),
+                after: before.clone(),
+                before_target: *after_target,
+                after_target: *before_target,
+                slot: *slot,
+            },
             EditCommand::Composite { label, commands } => EditCommand::Composite {
                 label: label.clone(),
                 // Undoing a composite means undoing its parts in reverse.
@@ -1411,18 +1525,38 @@ fn split_one(project: &Project, segment_id: &str, at: Micros) -> Result<SplitHal
     // halves derive their source length from their own timeline length rather
     // than from what is left over, so each one satisfies the document's speed
     // invariant on its own terms.
-    let source_split = source_duration_for(left_duration, segment.speed);
+    //
+    // On a speed curve the cut lands where the curve has carried the source
+    // by then, and the two halves share the curve itself: it is anchored to
+    // the material, so each half plays exactly its own stretch of it and the
+    // speed is continuous across the cut (`project::speed`).
+    let map = project.materials.time_map(segment);
+    let (left_source, right_source) = if map.is_curved() {
+        let cut = map.source_at(left_duration).clamp(
+            segment.source_range.start + 1,
+            segment.source_range.end() - 1,
+        );
+        (
+            TimeRange::new(segment.source_range.start, cut - segment.source_range.start),
+            TimeRange::new(cut, segment.source_range.end() - cut),
+        )
+    } else {
+        let source_split = source_duration_for(left_duration, segment.speed);
+        (
+            TimeRange::new(segment.source_range.start, source_split),
+            TimeRange::new(
+                segment.source_range.start + source_split,
+                source_duration_for(right_duration, segment.speed),
+            ),
+        )
+    };
 
     let left_target = TimeRange::new(segment.target_range.start, left_duration);
-    let left_source = TimeRange::new(segment.source_range.start, source_split);
 
     let mut right = segment.clone();
     right.id = crate::modules::project::new_id();
     right.target_range = TimeRange::new(at, right_duration);
-    right.source_range = TimeRange::new(
-        segment.source_range.start + source_split,
-        source_duration_for(right_duration, segment.speed),
-    );
+    right.source_range = right_source;
     // The right half's left edge is a cut that did not exist a moment ago, so
     // whatever transition described how the original clip was *entered* belongs
     // to the left half, which kept that edge. Unconditional, because a freshly
@@ -1631,7 +1765,8 @@ fn primary_segment(command: &EditCommand) -> Option<&str> {
         | EditCommand::SetTransform { segment_id, .. }
         | EditCommand::SetSpeed { segment_id, .. }
         | EditCommand::SetVolume { segment_id, .. }
-        | EditCommand::SetLinkGroup { segment_id, .. } => Some(segment_id),
+        | EditCommand::SetLinkGroup { segment_id, .. }
+        | EditCommand::SetSpeedCurve { segment_id, .. } => Some(segment_id),
         EditCommand::RemoveSegment { segment, .. } | EditCommand::InsertSegment { segment, .. } => {
             Some(&segment.id)
         }
@@ -1836,10 +1971,7 @@ fn mirror_trim(
                 partner.target_range.start + head,
                 partner.target_range.duration + tail - head,
             );
-            let source = TimeRange::new(
-                partner.source_range.start + source_duration_for(head, partner.speed),
-                source_duration_for(target.duration, partner.speed),
-            );
+            let source = project.materials.time_map(partner).retimed_source(target);
             EditCommand::TrimSegment {
                 segment_id: partner.id.clone(),
                 before_target: partner.target_range,

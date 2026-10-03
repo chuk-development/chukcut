@@ -179,7 +179,13 @@ pub fn replace(
             .start
             .min(duration.saturating_sub(1).max(0));
         let source = (duration - start).max(1);
-        let target = ((source as f64) / f64::from(original.speed.max(0.01))).round() as Micros;
+        let target = match project.materials.speed_curve_of(original) {
+            Some(curve) => crate::modules::project::speed::curve_target_duration(
+                &curve.points,
+                TimeRange::new(start, source),
+            ),
+            None => ((source as f64) / f64::from(original.speed.max(0.01))).round() as Micros,
+        };
         new_segment.source_range = TimeRange::new(start, source);
         new_segment.target_range = TimeRange::new(original.target_range.start, target.max(1));
     }

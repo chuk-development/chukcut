@@ -1337,7 +1337,8 @@ impl Compositor {
             // to everything composited before it, at this point in the
             // painter's order. Decision 0016.
             if project.materials.is_effect_clip(segment) {
-                if let Some(source_time) = segment.source_time_at(time) {
+                if let Some(source_time) = project.materials.time_map(segment).source_time_at(time)
+                {
                     let chain = fx::chain_for(&project.materials, segment, source_time, None);
                     if !chain.is_empty() {
                         draws.items.push(Draw::Adjust { chain });
@@ -1430,7 +1431,7 @@ impl Compositor {
                 }
             };
 
-            let Some(source_time) = segment.source_time_at(time) else {
+            let Some(source_time) = project.materials.time_map(segment).source_time_at(time) else {
                 continue;
             };
             // An overlay that follows a motion track is placed by the track;

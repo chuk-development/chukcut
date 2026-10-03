@@ -316,7 +316,7 @@ impl Editor {
                 unit,
             } => {
                 let playhead = self.clock.position();
-                let source = fx_edit::source_time(segment, playhead);
+                let source = fx_edit::source_time_in(&self.project.materials, segment, playhead);
                 let value = effect.number_at(spec.id, source, default);
                 let slider = self.effect_slider(index, spec, min, max, step, value, window, cx);
                 let keys = effect.keyframes.get(spec.id);
@@ -583,7 +583,7 @@ impl Editor {
         if !commit {
             let source = base
                 .segment(&segment_id)
-                .map(|(_, s)| fx_edit::source_time(s, playhead));
+                .map(|(_, s)| fx_edit::source_time_in(&base.materials, s, playhead));
             let shown = fx_edit::set_param_command(
                 &base,
                 &segment_id,

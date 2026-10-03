@@ -348,6 +348,9 @@ impl From<super::document::Easing> for Ease {
             Easing::EaseIn => Ease::EaseIn,
             Easing::EaseOut => Ease::EaseOut,
             Easing::EaseInOut => Ease::EaseInOut,
+            Easing::Curve(ease) => ease,
+            // A drawn curve has no library name; the nearest is linear.
+            Easing::Bezier { .. } => Ease::Linear,
         }
     }
 }

@@ -400,7 +400,7 @@ impl MediaSourceProvider {
             {
                 continue;
             }
-            let Some(source_time) = segment.source_time_at(time) else {
+            let Some(source_time) = project.materials.time_map(segment).source_time_at(time) else {
                 continue;
             };
             // One position per decoder: the same file twice on screen is

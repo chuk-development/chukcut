@@ -18,9 +18,7 @@
 
 use std::collections::BTreeSet;
 
-use chukcut_engine::modules::project::{
-    source_duration_for, Micros, Project, TimeRange, Track, TrackKind,
-};
+use chukcut_engine::modules::project::{Micros, Project, TimeRange, Track, TrackKind};
 use chukcut_engine::modules::timeline::ops::EditCommand;
 
 /// Where a clip should end up.
@@ -495,10 +493,7 @@ fn partner_trims(project: &Project, trim: &Trimmed, named: &mut BTreeSet<String>
             Trimmed {
                 segment_id: partner.id.clone(),
                 target,
-                source: TimeRange::new(
-                    partner.source_range.start + source_duration_for(head, partner.speed),
-                    source_duration_for(target.duration, partner.speed),
-                ),
+                source: project.materials.time_map(partner).retimed_source(target),
             }
         })
         .collect()

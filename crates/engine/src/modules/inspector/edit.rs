@@ -873,7 +873,9 @@ pub fn set_speed_command(
                 .collect(),
             None => vec![project.segment(segment_id).expect("found above")],
         };
-    if members.iter().all(|(_, segment)| segment.speed == speed) {
+    if members.iter().all(|(_, segment)| {
+        segment.speed == speed && project.materials.speed_curve_of(segment).is_none()
+    }) {
         return Err("the clip already plays at that speed".into());
     }
 
@@ -882,6 +884,73 @@ pub fn set_speed_command(
     };
     let delta = new_duration(primary) - primary.target_range.duration;
 
+    let moves = ripple_moves(project, &members, delta);
+
+    let mut retime = Vec::with_capacity(members.len() * 2);
+    for (_, segment) in &members {
+        let after_target = TimeRange::new(segment.target_range.start, new_duration(segment));
+        // A clip on a speed curve leaves it: the constant speed is set while
+        // the curve still governs (so it changes no range), then the curve
+        // goes and the clip takes the length the new speed gives it — one
+        // step from one consistent state to the next, either way round.
+        if let Some(curve) = project.materials.speed_curve_of(segment) {
+            retime.push(EditCommand::SetSpeed {
+                segment_id: segment.id.clone(),
+                before: segment.speed,
+                after: speed,
+            });
+            retime.push(EditCommand::SetSpeedCurve {
+                segment_id: segment.id.clone(),
+                before: Some(curve.clone()),
+                after: None,
+                before_target: segment.target_range,
+                after_target,
+                slot: segment.extras.iter().position(|id| *id == curve.id),
+            });
+            continue;
+        }
+        // What `SetSpeed` leaves behind, which is what the trim starts from.
+        let mid_source = TimeRange::new(
+            segment.source_range.start,
+            source_duration_for(segment.target_range.duration, speed),
+        );
+        retime.push(EditCommand::SetSpeed {
+            segment_id: segment.id.clone(),
+            before: segment.speed,
+            after: speed,
+        });
+        if after_target != segment.target_range {
+            retime.push(EditCommand::TrimSegment {
+                segment_id: segment.id.clone(),
+                before_target: segment.target_range,
+                before_source: mid_source,
+                after_target,
+                after_source: segment.source_range,
+            });
+        }
+    }
+
+    let commands = if delta > 0 {
+        moves.into_iter().chain(retime).collect()
+    } else {
+        retime.into_iter().chain(moves).collect()
+    };
+    Ok(EditCommand::Composite {
+        label: "Change speed".into(),
+        commands,
+    })
+}
+
+/// The moves that shift every clip after `members` on their lanes by
+/// `delta`, with the sound of each moved clip travelling along, ordered so no
+/// intermediate state overlaps: right to left when growing, left to right when
+/// shrinking. Shared by the constant speed edit and the speed curve edit, which
+/// both change a clip's length in place.
+pub(crate) fn ripple_moves(
+    project: &Project,
+    members: &[(&crate::modules::project::document::Track, &Segment)],
+    delta: Micros,
+) -> Vec<EditCommand> {
     let member_ids: std::collections::BTreeSet<&str> =
         members.iter().map(|(_, s)| s.id.as_str()).collect();
     let mut moved: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
@@ -898,7 +967,7 @@ pub fn set_speed_command(
             });
         };
         let mut later: Vec<(&crate::modules::project::document::Track, &Segment)> = Vec::new();
-        for (track, member) in &members {
+        for (track, member) in members.iter() {
             let end = member.target_range.end();
             for segment in &track.segments {
                 if member_ids.contains(segment.id.as_str()) || segment.target_range.start < end {
@@ -938,39 +1007,7 @@ pub fn set_speed_command(
         }
     }
 
-    let mut retime = Vec::with_capacity(members.len() * 2);
-    for (_, segment) in &members {
-        let after_target = TimeRange::new(segment.target_range.start, new_duration(segment));
-        // What `SetSpeed` leaves behind, which is what the trim starts from.
-        let mid_source = TimeRange::new(
-            segment.source_range.start,
-            source_duration_for(segment.target_range.duration, speed),
-        );
-        retime.push(EditCommand::SetSpeed {
-            segment_id: segment.id.clone(),
-            before: segment.speed,
-            after: speed,
-        });
-        if after_target != segment.target_range {
-            retime.push(EditCommand::TrimSegment {
-                segment_id: segment.id.clone(),
-                before_target: segment.target_range,
-                before_source: mid_source,
-                after_target,
-                after_source: segment.source_range,
-            });
-        }
-    }
-
-    let commands = if delta > 0 {
-        moves.into_iter().chain(retime).collect()
-    } else {
-        retime.into_iter().chain(moves).collect()
-    };
-    Ok(EditCommand::Composite {
-        label: "Change speed".into(),
-        commands,
-    })
+    moves
 }
 
 #[cfg(test)]

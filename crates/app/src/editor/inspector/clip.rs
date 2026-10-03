@@ -125,13 +125,13 @@ impl Editor {
                 SPEED => {
                     let names = ["Standard", "Curve", "Speed effects"];
                     let current = sub(self, SPEED, names[0]);
-                    let (body, footer) = if current == "Standard" {
-                        (
+                    let (body, footer) = match current {
+                        "Standard" => (
                             self.speed_standard(&segment, window, cx),
                             Some(self.speed_footer(&segment, cx)),
-                        )
-                    } else {
-                        (not_yet(current), None)
+                        ),
+                        "Curve" => (self.speed_curve(&segment, cx), None),
+                        _ => (not_yet(current), None),
                     };
                     (
                         Some(sub_tabs(SPEED, &names, current, cx).into_any_element()),
@@ -260,7 +260,9 @@ impl Editor {
         }
         .render(self.collapsed("Blend"), blend_rows, cx);
 
-        let mut sections = vec![transform, blend];
+        let mut sections = vec![transform];
+        sections.extend(self.easing_section(segment, cx));
+        sections.push(blend);
         for title in [
             "Stabilise",
             "Enhance quality",
@@ -528,12 +530,21 @@ impl Editor {
                 .child(Switch::new("speed-pitch").checked(false).disabled(true)),
         );
 
+        let curved = self.project.materials.speed_curve_of(segment).is_some();
         div()
             .flex()
             .flex_col()
             .gap(px(16.0))
             .px(px(PAD))
             .py(px(PAD))
+            .when(curved, |this| {
+                this.child(
+                    div()
+                        .text_size(px(TEXT_CAPTION))
+                        .text_color(rgb(INFO))
+                        .child("The clip plays on a speed curve. A speed set here replaces it."),
+                )
+            })
             .child(speed_row)
             .child(duration_row)
             .child(pitch)
@@ -541,7 +552,8 @@ impl Editor {
     }
 
     fn speed_footer(&self, segment: &Segment, cx: &mut Context<Self>) -> AnyElement {
-        let changed = segment.speed != 1.0;
+        let changed =
+            segment.speed != 1.0 || self.project.materials.speed_curve_of(segment).is_some();
         panel_button(
             "speed-reset",
             "Reset",

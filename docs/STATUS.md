@@ -269,7 +269,7 @@ bug), and its audio is **not** silent.
   full decoder seek (130–227 ms measured). Task #9: key the cache to document
   identity rather than to the session id.
 - **Speed changes shift pitch.** Both in preview and export. A phase vocoder is
-  its own piece of work.
+  its own piece of work. Clips on a speed curve are muted for the same reason.
 - **An export doubles the audio of a linked clip.** An imported file with both
   streams is now two segments naming the same material — the picture on a video
   lane, the sound on an audio lane — and the mixer's rule is "a video material
@@ -2042,6 +2042,51 @@ a font
 from an online library has a hook (any family registered with the text
 renderer shows up in the font list) but no library yet; the drag frame on the
 player is a rectangle, not handles.
+
+## Speed curves and keyframe easing (2026-10-03)
+
+Speed → **Curve**: six ramp presets (Montage, Hero, Bullet, Jump cut, Flash
+in, Flash out; our own shapes), Custom, and a log-scale curve editor (0.1x to
+10x; click adds a point, drag moves it, right-click removes it) with the
+resulting duration. Keyframe easing: right-click an animated diamond in the
+inspector, or a keyframe on the timeline, for the list (linear, hold, ease
+in/out, and the motion library's smooth, snap, anticipate, overshoot,
+elastic, bounce); the Video tab's **Keyframe easing** section draws the move
+the playhead is in with two Bézier handles to drag. Decision 0018.
+
+- **The model.** Points are source instants with a speed; the slowness is
+  interpolated by a smoothstep, so a clip's length is a closed-form integral
+  (`project::speed`). `TimeMap` (`materials.time_map(segment)`) is the one
+  mapping between timeline and source time, and every caller of
+  `Segment::source_time_at` now goes through it: compositor, prefetch,
+  transitions (borrowed frames past a cut keep the edge speed), tracking
+  follows and track start, effect keyframe clock, freeze frame, caption words,
+  silence cuts, cloud placement, the app's tracking overlay and trims.
+  `Segment::source_time_at` itself still ignores curves; do not call it.
+- **Verified.** `tests/speed_curve.rs`: the compositor shows the counter frame
+  the curve reaches at every timeline frame (±1), an export has exactly as
+  many frames as the curve is long and the right frames in it, a split ramp
+  plays frame for frame like the whole one with a continuous speed, a trimmed
+  ramp keeps its slow motion on the same footage, every preset undoes and
+  redoes to the byte, a linked sound takes the same curve, a ramped project
+  saves and opens unchanged. `project::speed` tests the integral against a
+  brute-force sum and the inverse against the forward map;
+  `document::easing_tests` checks Bézier easing against independent reference
+  values (CSS `ease` at 0.5 = 0.80240).
+- **Easing everywhere.** `Easing::apply` gained `Curve(Ease)` and
+  `Bezier { x1, y1, x2, y2 }`; transform, opacity, volume and effect
+  parameter keyframes all sample through it, and transitions too. Old files
+  read unchanged (the five old easings are still plain strings). Grade
+  controls are not keyframable, so there is nothing to ease there.
+- **Rough.** A curved clip is muted (no pitch-preserving stretch); the Curve
+  tab says so. No frame blending or motion blur in slow sections: blending
+  needs two source frames per output frame, and the sequential decoder would
+  seek backwards for the earlier one on every frame — a measured 25–200 ms per
+  seek. It wants a two-frame cache in the provider first. A slip of a curved
+  clip changes its length (another stretch of curve is under it); the app has
+  no slip gesture yet, and a `TrimSegment` that keeps the length is refused.
+  Thumbnails and the waveform of a curved clip step at its average speed. Effect parameters have no easing picker yet (the
+  engine eases them; the Effects tab writes linear keys).
 
 ## Not built yet
 

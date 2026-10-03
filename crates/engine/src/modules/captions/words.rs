@@ -43,8 +43,8 @@ pub fn words_in_clip(project: &Project, segment_id: &str) -> Option<Vec<TimedWor
         .flat_map(|cue| cue.words)
         .filter(|w| w.start >= clip.start && w.start < clip.end())
         .map(|w| TimedWord {
-            start: to_source(segment, w.start),
-            end: to_source(segment, w.end.min(clip.end())),
+            start: to_source(project, segment, w.start),
+            end: to_source(project, segment, w.end.min(clip.end())),
             text: w.text,
         })
         .collect();
@@ -58,8 +58,13 @@ pub fn words_in_clip(project: &Project, segment_id: &str) -> Option<Vec<TimedWor
     Some(words)
 }
 
-/// Timeline instant `t` inside `segment` as source time, through its speed.
-fn to_source(segment: &Segment, t: Micros) -> Micros {
+/// Timeline instant `t` inside `segment` as source time, through its speed
+/// or its speed curve.
+fn to_source(project: &Project, segment: &Segment, t: Micros) -> Micros {
+    let map = project.materials.time_map(segment);
+    if map.is_curved() {
+        return map.source_at((t - segment.target_range.start).max(0));
+    }
     let speed = if segment.speed.is_finite() && segment.speed > 0.0 {
         segment.speed as f64
     } else {
