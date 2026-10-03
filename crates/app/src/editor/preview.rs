@@ -146,8 +146,6 @@ impl Editor {
             .ghost()
             .xsmall()
             .dropdown_caret(true)
-            .text_size(px(TEXT_LABEL))
-            .text_color(rgb(TEXT_DIM))
             .tooltip("Preview quality")
             .dropdown_menu_with_anchor(gpui::Anchor::BottomRight, move |menu, _, _| {
                 PreviewQuality::ALL.into_iter().fold(menu, |menu, each| {

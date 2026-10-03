@@ -517,9 +517,12 @@ impl ExportDialog {
         .when(c.bitrate == Bitrate::Custom, |section| {
             section.child(Self::row(
                 "Mbit/s",
-                div()
-                    .w(px(120.0))
-                    .child(Input::new(&self.custom_bitrate).small()),
+                div().w(px(120.0)).child(
+                    Input::new(&self.custom_bitrate)
+                        .small()
+                        .font_family(FONT_MONO)
+                        .text_size(px(TEXT_LABEL)),
+                ),
             ))
         })
         .child(Self::row("Codec", codec))
@@ -571,7 +574,10 @@ impl ExportDialog {
                     .clone()
                     .map(|notice| div().flex().child(Badge::new(notice).tone(Tone::Warning))),
             )
-            .child(Self::row("Name", Input::new(&self.name).small()))
+            .child(Self::row(
+                "Name",
+                Input::new(&self.name).small().text_size(px(TEXT_LABEL)),
+            ))
             .child(Self::row("Export to", folder))
             .when(exists, |column| {
                 column.child(
@@ -743,16 +749,19 @@ impl ExportDialog {
         let buttons: Vec<AnyElement> = match &self.phase {
             Phase::Settings => vec![
                 Button::new("export-start")
+                    .small()
                     .primary()
                     .label("Export")
                     .on_click(cx.listener(|this, _, _, cx| this.start(cx)))
                     .into_any_element(),
                 Button::new("export-cancel")
+                    .small()
                     .label("Cancel")
                     .on_click(cx.listener(|this, _, window, cx| this.cancel(window, cx)))
                     .into_any_element(),
             ],
             Phase::Starting | Phase::Running { .. } => vec![Button::new("export-cancel")
+                .small()
                 .label("Cancel export")
                 .on_click(cx.listener(|this, _, window, cx| this.cancel(window, cx)))
                 .into_any_element()],
@@ -760,17 +769,20 @@ impl ExportDialog {
                 let (folder, file) = (path.clone(), path.clone());
                 vec![
                     Button::new("export-reveal")
+                        .small()
                         .primary()
                         .icon(Lucide::FolderOpen)
                         .label("Show in folder")
                         .on_click(move |_, _, cx| cx.reveal_path(&folder))
                         .into_any_element(),
                     Button::new("export-play")
+                        .small()
                         .icon(Lucide::Play)
                         .label("Play")
                         .on_click(move |_, _, cx| cx.open_with_system(&file))
                         .into_any_element(),
                     Button::new("export-close")
+                        .small()
                         .label("Close")
                         .on_click(|_, window, cx| window.close_dialog(cx))
                         .into_any_element(),
@@ -778,6 +790,7 @@ impl ExportDialog {
             }
             Phase::Failed(_) => vec![
                 Button::new("export-back")
+                    .small()
                     .primary()
                     .label("Back to settings")
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -786,6 +799,7 @@ impl ExportDialog {
                     }))
                     .into_any_element(),
                 Button::new("export-close")
+                    .small()
                     .label("Close")
                     .on_click(|_, window, cx| window.close_dialog(cx))
                     .into_any_element(),

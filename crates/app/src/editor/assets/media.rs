@@ -344,11 +344,8 @@ impl Editor {
         let id = item.id.clone();
         let picked = self.assets.picked.as_deref() == Some(item.id.as_str());
         let pick_id = item.id.clone();
-        let detail = if used.contains(&item.id) {
-            format!("{} · on the timeline", badge_time(item.duration))
-        } else {
-            badge_time(item.duration)
-        };
+        let on_timeline = used.contains(&item.id);
+        let duration = badge_time(item.duration);
         div()
             .id(SharedString::from(format!("audio-{}", item.id)))
             .h(px(52.0))
@@ -408,10 +405,13 @@ impl Editor {
                     )
                     .child(
                         div()
+                            .flex()
+                            .flex_row()
+                            .gap(px(6.0))
                             .text_size(px(TEXT_CAPTION))
-                            .font_family(FONT_MONO)
                             .text_color(rgb(TEXT_MUTED))
-                            .child(detail),
+                            .child(div().font_family(FONT_MONO).child(duration))
+                            .when(on_timeline, |this| this.child("·").child("on the timeline")),
                     ),
             )
             .child(
