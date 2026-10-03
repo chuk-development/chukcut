@@ -58,6 +58,7 @@ mod assets;
 mod captions;
 mod cloud;
 mod export;
+mod font_picker;
 mod home;
 mod inspector;
 mod lifecycle;

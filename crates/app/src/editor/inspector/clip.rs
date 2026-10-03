@@ -85,7 +85,7 @@ impl Editor {
             ClipKind::Video => vec![VIDEO, SPEED, ANIMATION, ADJUST],
             ClipKind::Image => vec![VIDEO, ANIMATION, ADJUST, TRACKING],
             ClipKind::Audio => vec![BASIC, VOICE, SPEED],
-            ClipKind::Text => vec![VIDEO, ANIMATION, TRACKING],
+            ClipKind::Text => vec![text_style::TEXT_TAB, VIDEO, ANIMATION, TRACKING],
         };
         // Effects: on every picture, and all an effect clip has.
         if self.project.materials.is_effect_clip(&segment) {
@@ -119,6 +119,7 @@ impl Editor {
                     )
                 }
                 effects::EFFECTS => (None, self.effects_tab(&segment, window, cx), None),
+                text_style::TEXT_TAB => (None, self.text_style_tab(&segment, cx), None),
                 AUDIO | BASIC => (None, self.audio_basic(window, cx), None),
                 VOICE => (None, not_yet("Voice changer"), None),
                 TRACKING => (None, self.tracking_tab(&segment, window, cx), None),

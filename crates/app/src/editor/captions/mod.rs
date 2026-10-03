@@ -72,7 +72,6 @@ pub(crate) struct CaptionsPanel {
     style_all: bool,
     emoji_open: bool,
     emoji_category: usize,
-    fonts: Arc<Mutex<Vec<String>>>,
     pub(crate) drag: Option<CaptionDrag>,
 
     name: Entity<InputState>,
@@ -132,14 +131,6 @@ impl CaptionsPanel {
             ),
         ];
 
-        // The font list scans the system once, tens of milliseconds; not on
-        // the UI thread.
-        let fonts = Arc::new(Mutex::new(Vec::new()));
-        let sink = Arc::clone(&fonts);
-        std::thread::spawn(move || {
-            *sink.lock() = chukcut_engine::modules::text::TextRenderer::shared().font_families();
-        });
-
         Self {
             accounts: cloud_commands::cloud_accounts(
                 &CloudStore::user(),
@@ -156,7 +147,6 @@ impl CaptionsPanel {
             style_all: true,
             emoji_open: false,
             emoji_category: 0,
-            fonts,
             drag: None,
             name,
             url,
@@ -648,7 +638,11 @@ impl Editor {
     }
 
     /// Apply a change to the current style, to all captions or the selected one.
-    fn restyle_captions(&mut self, change: impl FnOnce(&mut CaptionStyle), cx: &mut Context<Self>) {
+    pub(crate) fn restyle_captions(
+        &mut self,
+        change: impl FnOnce(&mut CaptionStyle),
+        cx: &mut Context<Self>,
+    ) {
         let mut style = self.current_caption_style();
         change(&mut style);
         let target = if self.captions.style_all {

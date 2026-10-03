@@ -902,43 +902,22 @@ impl Editor {
                 }),
         );
 
-        let editor = cx.entity().downgrade();
-        let fonts = self.captions.fonts.lock().clone();
+        // The library's picker: system fonts and the Fontsource catalogue,
+        // each drawn in its own face. A downloaded family is registered with
+        // the text renderer before the pick arrives.
         let family = style.font_family.clone();
-        let font_picker = Button::new("cap-font")
-            .label(if family == "sans-serif" {
+        let picker = self.assets.library.caption_fonts.clone();
+        picker.update(cx, |picker, _| picker.current = family.clone());
+        let font_picker = crate::editor::font_picker::font_button(
+            "cap-font",
+            if family == "sans-serif" {
                 "Default (sans-serif)".to_string()
             } else {
                 family.clone()
-            })
-            .small()
-            .outline()
-            .dropdown_menu_with_anchor(gpui::Anchor::TopLeft, move |menu, _, _| {
-                let pick = |name: String| {
-                    let editor = editor.clone();
-                    move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
-                        let name = name.clone();
-                        let _ = editor.update(cx, |this, cx| {
-                            this.restyle_captions(move |s| s.font_family = name, cx)
-                        });
-                    }
-                };
-                let menu = menu.max_h(px(420.0)).scrollable(true).item(
-                    PopupMenuItem::new("Default (sans-serif)")
-                        .checked(family == "sans-serif")
-                        .on_click(pick("sans-serif".into())),
-                );
-                // The hook for an online font library: once a downloaded
-                // family is registered with the text renderer it appears in
-                // this list like any installed one.
-                fonts.iter().fold(menu, |menu, name| {
-                    menu.item(
-                        PopupMenuItem::new(name.clone())
-                            .checked(&family == name)
-                            .on_click(pick(name.clone())),
-                    )
-                })
-            });
+            },
+            &picker,
+            cx,
+        );
 
         let size = style.font_size;
         let step_button = |id: &'static str, icon: Lucide, delta: f32, cx: &mut Context<Self>| {

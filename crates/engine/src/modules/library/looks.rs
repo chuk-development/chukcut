@@ -278,7 +278,7 @@ pub const LOOKS: &[Look] = &[
         },
     },
     Look {
-        name: "Golden 400",
+        name: "Golden Hour",
         category: "Film",
         apply: |c| {
             clamp(split_tone(
@@ -417,7 +417,7 @@ pub const LOOKS: &[Look] = &[
         },
     },
     Look {
-        name: "Polaroid",
+        name: "Instant",
         category: "Vintage",
         apply: |c| {
             clamp(fade(

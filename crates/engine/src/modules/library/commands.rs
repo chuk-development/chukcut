@@ -74,7 +74,8 @@ fn font_list() -> &'static Mutex<Option<Arc<FontList>>> {
 /// The Fontsource catalogue, read once per process (and from disk for a
 /// week).
 pub fn library_font_catalogue() -> Result<Arc<FontList>, String> {
-    if let Some(list) = font_list().lock().clone() {
+    let cached = font_list().lock().clone();
+    if let Some(list) = cached {
         return Ok(list);
     }
     let (fonts, stale) = fonts::catalogue(&FontSource::default(), &super::catalogue_dir())?;
@@ -176,7 +177,8 @@ fn sticker_index_cell() -> &'static Mutex<Option<Arc<StickerIndex>>> {
 
 /// The emoji index (see `stickers::index`).
 pub fn library_sticker_index() -> Result<Arc<StickerIndex>, String> {
-    if let Some(index) = sticker_index_cell().lock().clone() {
+    let cached = sticker_index_cell().lock().clone();
+    if let Some(index) = cached {
         return Ok(index);
     }
     let index = Arc::new(stickers::index(
@@ -215,7 +217,10 @@ fn icon_sets_cell() -> &'static Mutex<Option<Arc<Vec<IconSet>>>> {
 
 /// Icons matching `query` from the sets the licence policy allows.
 pub fn library_icon_search(query: &str) -> Result<Vec<IconHit>, String> {
-    let sets = match icon_sets_cell().lock().clone() {
+    // Read the cell into a local first: a guard in the match scrutinee
+    // would live through the arms and deadlock the store below.
+    let cached = icon_sets_cell().lock().clone();
+    let sets = match cached {
         Some(sets) => sets,
         None => {
             let sets = Arc::new(stickers::icon_sets(
@@ -278,7 +283,8 @@ fn music_cell() -> &'static Mutex<Option<MusicList>> {
 /// The whole Incompetech catalogue matching `query`, and whether the list is
 /// an old copy.
 pub fn library_music_search(query: &str) -> Result<(Vec<Track>, bool), String> {
-    let list = match music_cell().lock().clone() {
+    let cached = music_cell().lock().clone();
+    let list = match cached {
         Some(list) => list,
         None => {
             let list = Arc::new(sounds::catalogue(

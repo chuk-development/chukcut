@@ -36,6 +36,7 @@ mod controls;
 mod details;
 mod effects;
 mod grading;
+mod text_style;
 mod tracking;
 mod voice;
 
