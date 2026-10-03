@@ -78,7 +78,6 @@ pub(crate) const INFO: u32 = 0x5aa8ff;
 // --- the timeline --------------------------------------------------------------
 
 pub(crate) const PLAYHEAD: u32 = 0xffffff;
-pub(crate) const TRACK_HEADER: u32 = 0x1f2125;
 pub(crate) const CLIP_VIDEO: u32 = 0x0d4f54;
 pub(crate) const CLIP_VIDEO_TITLE: u32 = 0x11666c;
 pub(crate) const CLIP_IMAGE: u32 = 0x463b86;

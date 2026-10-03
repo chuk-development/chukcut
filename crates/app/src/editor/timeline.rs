@@ -29,13 +29,12 @@ use chukcut_engine::modules::transitions::commands as transition_commands;
 use chukcut_engine::modules::transitions::edit as transition_edit;
 use chukcut_engine::modules::transitions::resolve as transition_resolve;
 use gpui::assets::IconName;
-use gpui::component::button::{Button, ButtonVariants};
 use gpui::component::menu::{ContextMenuExt, DropdownMenu};
 use gpui::component::slider::{Slider, SliderEvent, SliderState};
-use gpui::component::{Disableable, Icon, Selectable, Sizable};
 use gpui::{fill, point, size, Corners, CursorStyle, Entity, KeyBinding, Subscription};
 
 use super::*;
+use crate::ui::{self, IconButton, IconSrc};
 use media_cache::{MediaCache, Picture};
 use ripple::Edge;
 
@@ -89,7 +88,7 @@ pub(crate) fn key_bindings() -> Vec<KeyBinding> {
 
 // --- geometry -------------------------------------------------------------------
 
-const TOOLBAR_H: f32 = 36.0;
+const TOOLBAR_H: f32 = PANEL_HEADER_H;
 /// The track header column.
 const HEADER_W: f32 = 132.0;
 /// The column between the headers and time zero, where the Cover box sits.
@@ -177,13 +176,6 @@ fn row_height(kind: TrackKind, main: bool) -> f32 {
 }
 
 // Colours only the timeline uses. Shared ones come from `theme`.
-const LANES_BG: u32 = 0x1c1c1c;
-const ROW_BG: u32 = 0x222222;
-const AUDIO_TITLE: u32 = 0x0c2547;
-const SNAP_LINE: u32 = 0xf2c94c;
-const SCROLL_THUMB: u32 = 0x4a4a4a;
-const TRANSITION_BADGE: u32 = 0xdcdcdc;
-
 /// The slider runs 0..=1000 over a logarithmic zoom range, so each step of it
 /// is the same relative change at any zoom.
 fn zoom_to_slider(zoom: f32) -> f32 {
@@ -342,6 +334,8 @@ pub(crate) struct TimelineState {
     /// The pointer over the lanes while a tile is dragged from the media
     /// panel.
     drop_hover: Option<Point<Pixels>>,
+    /// The tile held over the lanes, for its drop ghost.
+    drop_media: Option<super::assets::MediaDrag>,
     /// Where a wheel scroll is gliding to.
     scroll_target: Option<f32>,
     _subscriptions: Vec<Subscription>,
@@ -387,6 +381,7 @@ impl TimelineState {
             selected_transition: None,
             hover_clip: None,
             drop_hover: None,
+            drop_media: None,
             scroll_target: None,
             _subscriptions: vec![subscription],
         }
@@ -397,51 +392,34 @@ impl TimelineState {
 
 // Drawn for chukcut in Lucide's grid and stroke so they sit with the Lucide
 // icons around them. Only the alpha is used; the colour comes from the text.
-const SVG_HEAD: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">"#;
-const SPLIT_ICON: &str = r#"<path d="M4 4h4v16H4"/><path d="M20 4h-4v16h4"/>"#;
-const DELETE_LEFT_ICON: &str = r#"<path d="M4 4h4v16H4" stroke-dasharray="2 3"/><path d="M20 4h-4v16h4"/><path d="M12 2v20"/>"#;
-const DELETE_RIGHT_ICON: &str = r#"<path d="M4 4h4v16H4"/><path d="M20 4h-4v16h4" stroke-dasharray="2 3"/><path d="M12 2v20"/>"#;
-const SNAP_ICON: &str = r#"<path d="M12 2v20"/><rect x="2" y="7" width="7" height="10" rx="1.5"/><rect x="15" y="7" width="7" height="10" rx="1.5"/>"#;
-const TRANSITION_ICON: &str = r#"<path d="M3 5l9 7-9 7z"/><path d="M21 5l-9 7 9 7z"/>"#;
-const ZOOM_FIT_ICON: &str = r#"<path d="M3 8V5a2 2 0 0 1 2-2h3"/><path d="M16 3h3a2 2 0 0 1 2 2v3"/><path d="M21 16v3a2 2 0 0 1-2 2h-3"/><path d="M8 21H5a2 2 0 0 1-2-2v-3"/><path d="M7 12h10"/><path d="m10 9-3 3 3 3"/><path d="m14 9 3 3-3 3"/>"#;
-
-fn own_icon(body: &str) -> Icon {
-    Icon::default().data(format!("{SVG_HEAD}{body}</svg>").as_bytes())
-}
-
-fn tool_button(id: &'static str, icon: impl Into<Icon>, tooltip: &'static str) -> Button {
-    Button::new(id).ghost().small().icon(icon).tooltip(tooltip)
-}
-
-/// A switch in the toolbar: the icon turns the accent colour while it is on,
-/// as CapCut draws its magnet and snapping buttons.
-fn toggle_button(
+/// A toolbar button: the kit's icon button, its tooltip naming the
+/// shortcut that does the same.
+fn tool_button(
     id: &'static str,
-    icon: impl Into<Icon>,
+    icon: impl Into<IconSrc>,
     tooltip: &'static str,
-    on: bool,
-) -> Button {
-    let icon: Icon = icon.into();
-    let icon = if on {
-        icon.text_color(rgb(ACCENT))
+    keys: &'static str,
+) -> IconButton {
+    let button = IconButton::new(id, icon).tooltip(tooltip);
+    if keys.is_empty() {
+        button
     } else {
-        icon
-    };
-    tool_button(id, icon, tooltip).selected(on)
+        button.shortcut(keys)
+    }
 }
 
 fn separator() -> impl IntoElement {
-    div().w(px(1.0)).h(px(18.0)).mx(px(4.0)).bg(rgb(BORDER))
+    div().w(px(1.0)).h(px(16.0)).mx(px(6.0)).bg(rgb(BORDER))
 }
 
 fn marker_color(color: MarkerColor) -> u32 {
     match color {
-        MarkerColor::Blue => 0x3d8bfd,
-        MarkerColor::Green => 0x3ccf6b,
-        MarkerColor::Yellow => 0xf2c94c,
-        MarkerColor::Orange => 0xf2994a,
-        MarkerColor::Red => 0xeb5757,
-        MarkerColor::Purple => 0xa77bf3,
+        MarkerColor::Blue => MARKER_BLUE,
+        MarkerColor::Green => MARKER_GREEN,
+        MarkerColor::Yellow => MARKER_YELLOW,
+        MarkerColor::Orange => MARKER_ORANGE,
+        MarkerColor::Red => MARKER_RED,
+        MarkerColor::Purple => MARKER_PURPLE,
     }
 }
 
@@ -2294,6 +2272,7 @@ impl Editor {
         // A drop ends the drag without a mouse-up reaching the editor.
         if !cx.has_active_drag() {
             self.timeline.drop_hover = None;
+            self.timeline.drop_media = None;
         }
 
         // A wheel scroll glides the rest of the way, a third per frame.
@@ -2329,33 +2308,38 @@ impl Editor {
             .flex()
             .flex_col()
             .child(
+                // The gutter above the panel is the splitter; a short grip
+                // shows in it under the pointer.
                 div()
                     .id("timeline-splitter")
+                    .group("timeline-splitter")
                     .h(px(SPLITTER_H))
                     .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
                     .cursor_row_resize()
-                    .on_mouse_down(MouseButton::Left, cx.listener(Self::on_splitter_down)),
+                    .on_mouse_down(MouseButton::Left, cx.listener(Self::on_splitter_down))
+                    .child(
+                        div()
+                            .w(px(40.0))
+                            .h(px(2.0))
+                            .rounded_full()
+                            .group_hover("timeline-splitter", |style| style.bg(rgb(BORDER_STRONG))),
+                    ),
             )
             .child(
-                div()
+                ui::Panel::new("timeline")
                     .flex_1()
-                    .min_h(px(0.0))
-                    .mx(px(6.0))
-                    .mb(px(6.0))
-                    .rounded(px(6.0))
-                    .overflow_hidden()
-                    .flex()
-                    .flex_col()
-                    .bg(rgb(PANEL))
-                    .child(self.render_toolbar_row(cx))
+                    .mx(px(GUTTER))
+                    .mb(px(GUTTER))
+                    .header(self.render_toolbar_row(cx))
                     .child(
                         div()
                             .flex_1()
                             .min_h(px(0.0))
                             .flex()
                             .flex_row()
-                            .border_t_1()
-                            .border_color(rgb(BORDER))
                             .child(self.render_headers(&rows, cx))
                             .child(self.render_cover_column(&rows))
                             .child(self.render_lanes(&rows, lanes_w, lanes_h, cx)),
@@ -2392,59 +2376,70 @@ impl Editor {
             .items_center()
             .gap(px(2.0))
             .child(
-                tool_button(
-                    "tool",
-                    match tool {
-                        Tool::Select => IconName::MousePointer2,
-                        Tool::Blade => IconName::Scissors,
-                    },
-                    "Tool: select (A) or split (B)",
-                )
-                .dropdown_caret(true)
-                .dropdown_menu(move |menu, _, _| {
-                    menu.action_context(focus.clone())
-                        .menu_with_check("Select", tool == Tool::Select, Box::new(SelectTool))
-                        .menu_with_check("Split", tool == Tool::Blade, Box::new(BladeTool))
-                }),
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .child(
+                        tool_button(
+                            "tool",
+                            match tool {
+                                Tool::Select => IconName::MousePointer2,
+                                Tool::Blade => IconName::Scissors,
+                            },
+                            "Tool: select (A) or split (B)",
+                            "",
+                        )
+                        .dropdown_menu(move |menu, _, _| {
+                            menu.action_context(focus.clone())
+                                .menu_with_check(
+                                    "Select",
+                                    tool == Tool::Select,
+                                    Box::new(SelectTool),
+                                )
+                                .menu_with_check("Split", tool == Tool::Blade, Box::new(BladeTool))
+                        }),
+                    )
+                    .child(ui::icons::glyph(
+                        ui::icons::CHEVRON_DOWN,
+                        10.0,
+                        rgb(TEXT_MUTED),
+                    )),
             )
             .child(separator())
             .child(
-                tool_button("undo", IconName::Undo2, "Undo (Ctrl+Z)")
+                tool_button("undo", IconName::Undo2, "Undo", "ctrl-z")
                     .disabled(!can_undo)
                     .on_click(cx.listener(|this, _, w, cx| this.on_undo(&Undo, w, cx))),
             )
             .child(
-                tool_button("redo", IconName::Redo2, "Redo (Ctrl+Shift+Z)")
+                tool_button("redo", IconName::Redo2, "Redo", "ctrl-shift-z")
                     .disabled(!can_redo)
                     .on_click(cx.listener(|this, _, w, cx| this.on_redo(&Redo, w, cx))),
             )
             .child(separator())
             .child(
-                tool_button("split", own_icon(SPLIT_ICON), "Split (Ctrl+B)")
+                tool_button("split", ui::icons::SPLIT, "Split", "ctrl-b")
                     .disabled(!can_split)
                     .on_click(cx.listener(|this, _, w, cx| this.on_split(&Split, w, cx))),
             )
             .child(
-                tool_button("delete-left", own_icon(DELETE_LEFT_ICON), "Delete left (Q)")
+                tool_button("delete-left", ui::icons::DELETE_LEFT, "Delete left", "q")
                     .disabled(!can_trim)
                     .on_click(cx.listener(|this, _, _, cx| this.trim_to_playhead(Edge::Head, cx))),
             )
             .child(
-                tool_button(
-                    "delete-right",
-                    own_icon(DELETE_RIGHT_ICON),
-                    "Delete right (W)",
-                )
-                .disabled(!can_trim)
-                .on_click(cx.listener(|this, _, _, cx| this.trim_to_playhead(Edge::Tail, cx))),
+                tool_button("delete-right", ui::icons::DELETE_RIGHT, "Delete right", "w")
+                    .disabled(!can_trim)
+                    .on_click(cx.listener(|this, _, _, cx| this.trim_to_playhead(Edge::Tail, cx))),
             )
             .child(
-                tool_button("delete", IconName::Trash, "Delete (Del)")
+                tool_button("delete", IconName::Trash, "Delete", "delete")
                     .disabled(selected.is_none())
                     .on_click(cx.listener(|this, _, w, cx| this.on_delete(&DeleteSelected, w, cx))),
             )
             .child(
-                tool_button("marker", IconName::Bookmark, "Marker (M)")
+                tool_button("marker", IconName::Bookmark, "Marker", "m")
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_marker(cx))),
             );
 
@@ -2454,37 +2449,29 @@ impl Editor {
             .items_center()
             .gap(px(2.0))
             .child(
-                toggle_button(
-                    "magnet",
-                    IconName::Magnet,
-                    "Main track magnet (P)",
-                    self.timeline.magnet,
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.timeline.magnet = !this.timeline.magnet;
-                    cx.notify();
-                })),
+                tool_button("magnet", IconName::Magnet, "Main track magnet", "p")
+                    .toggled(self.timeline.magnet)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.timeline.magnet = !this.timeline.magnet;
+                        cx.notify();
+                    })),
             )
             .child(
-                toggle_button(
-                    "snapping",
-                    own_icon(SNAP_ICON),
-                    "Snapping (N)",
-                    self.timeline.snapping,
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.timeline.snapping = !this.timeline.snapping;
-                    cx.notify();
-                })),
+                tool_button("snapping", ui::icons::SNAP, "Snapping", "n")
+                    .toggled(self.timeline.snapping)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.timeline.snapping = !this.timeline.snapping;
+                        cx.notify();
+                    })),
             )
             .child(separator())
             .child(
-                tool_button("zoom-fit", own_icon(ZOOM_FIT_ICON), "Zoom to fit (Shift+Z)")
+                tool_button("zoom-fit", ui::icons::ZOOM_FIT, "Zoom to fit", "shift-z")
                     .disabled(self.project.duration() <= 0)
                     .on_click(cx.listener(|this, _, _, cx| this.zoom_to_fit(cx))),
             )
             .child(
-                tool_button("zoom-out", IconName::ZoomOut, "Zoom out (Ctrl+-)")
+                tool_button("zoom-out", IconName::ZoomOut, "Zoom out", "ctrl--")
                     .on_click(cx.listener(|this, _, _, cx| this.zoom_by(1.0 / 1.4, cx))),
             )
             .child(
@@ -2494,7 +2481,7 @@ impl Editor {
                     .child(Slider::new(&self.timeline.zoom_slider).horizontal()),
             )
             .child(
-                tool_button("zoom-in", IconName::ZoomIn, "Zoom in (Ctrl+=)")
+                tool_button("zoom-in", IconName::ZoomIn, "Zoom in", "ctrl-=")
                     .on_click(cx.listener(|this, _, _, cx| this.zoom_by(1.4, cx))),
             );
 
@@ -2506,6 +2493,8 @@ impl Editor {
             .items_center()
             .justify_between()
             .px(px(8.0))
+            .border_b_1()
+            .border_color(rgb(HAIRLINE))
             .child(left)
             .child(right)
     }
@@ -2530,17 +2519,16 @@ impl Editor {
                               flag: Flag,
                               cx: &mut Context<Self>| {
                     let id = id.clone();
-                    Button::new(SharedString::from(format!("{name}-{id}")))
-                        .ghost()
+                    IconButton::new(SharedString::from(format!("{name}-{id}")), icon)
                         .small()
-                        .icon(Icon::new(icon).text_color(rgb(if on { ACCENT } else { TEXT_DIM })))
+                        .toggled(on)
                         .tooltip(tooltip)
                         .on_click(
                             cx.listener(move |this, _, _, cx| this.toggle_track(&id, flag, cx)),
                         )
                         .into_any_element()
                 };
-                let spacer = || div().w(px(22.0)).into_any_element();
+                let spacer = || div().w(px(24.0)).flex_none().into_any_element();
                 let lock = toggle(
                     "lock",
                     if track.locked {
@@ -2598,10 +2586,10 @@ impl Editor {
                     .pl(px(8.0))
                     .child(
                         div()
-                            .w(px(22.0))
+                            .w(px(24.0))
                             .flex()
                             .justify_center()
-                            .child(Icon::new(kind_icon).small().text_color(rgb(TEXT_DIM))),
+                            .child(IconSrc::from(kind_icon).svg(14.0, rgb(TEXT_MUTED))),
                     )
                     .child(lock)
                     .child(eye)
@@ -2615,9 +2603,9 @@ impl Editor {
             .h_full()
             .relative()
             .overflow_hidden()
-            .bg(rgb(LANES_BG))
+            .bg(rgb(PANEL))
             .border_r_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(HAIRLINE))
             .on_scroll_wheel(cx.listener(Self::on_timeline_scroll))
             .children(headers)
     }
@@ -2631,22 +2619,20 @@ impl Editor {
                 .top(px(row.top + (row.height - size) / 2.0))
                 .w(px(size))
                 .h(px(size))
-                .rounded(px(4.0))
+                .rounded(px(R_SM))
                 .bg(rgb(PANEL_RAISED))
+                .border_1()
+                .border_color(rgb(HAIRLINE))
                 .flex()
                 .flex_col()
                 .items_center()
                 .justify_center()
                 .gap(px(1.0))
-                .child(
-                    Icon::new(IconName::PencilLine)
-                        .small()
-                        .text_color(rgb(TEXT)),
-                )
+                .child(IconSrc::from(IconName::PencilLine).svg(14.0, rgb(TEXT_DIM)))
                 .child(
                     div()
-                        .text_size(px(10.0))
-                        .text_color(rgb(TEXT))
+                        .text_size(px(TEXT_BADGE))
+                        .text_color(rgb(TEXT_DIM))
                         .child("Cover"),
                 )
         });
@@ -2656,7 +2642,7 @@ impl Editor {
             .h_full()
             .relative()
             .overflow_hidden()
-            .bg(rgb(LANES_BG))
+            .bg(rgb(PANEL))
             .children(cover)
     }
 
@@ -2677,6 +2663,55 @@ impl Editor {
             .max(0.0) as i64;
         let last = (((self.timeline.scroll_x + lanes_w) / zoom) as f64 / step).ceil() as i64;
         let mut ruler = Vec::new();
+        // The in/out range under the labels: a faint band, an accent rule
+        // along the bottom, and a bracket at each set mark.
+        let (mark_in, mark_out) = self.play_range();
+        if mark_in.is_some() || mark_out.is_some() {
+            let start = mark_in.unwrap_or(0);
+            let end = mark_out.unwrap_or_else(|| self.project.duration().max(start));
+            let (x0, x1) = (self.time_to_x(start), self.time_to_x(end));
+            if x1 > x0 {
+                ruler.push(
+                    div()
+                        .absolute()
+                        .left(px(x0))
+                        .top(px(0.0))
+                        .w(px(x1 - x0))
+                        .h(px(RULER_H))
+                        .bg(range_fill())
+                        .child(
+                            div()
+                                .absolute()
+                                .left(px(0.0))
+                                .right(px(0.0))
+                                .bottom(px(0.0))
+                                .h(px(2.0))
+                                .bg(with_alpha(ACCENT, 0.6)),
+                        )
+                        .into_any_element(),
+                );
+            }
+            let bracket = |x: f32, opening: bool| {
+                div()
+                    .absolute()
+                    .left(px(if opening { x } else { x - 6.0 }))
+                    .top(px(4.0))
+                    .w(px(6.0))
+                    .h(px(RULER_H - 4.0))
+                    .border_color(rgb(ACCENT))
+                    .border_t_2()
+                    .border_b_2()
+                    .when(opening, |this| this.border_l_2())
+                    .when(!opening, |this| this.border_r_2())
+                    .into_any_element()
+            };
+            if let Some(start) = mark_in {
+                ruler.push(bracket(self.time_to_x(start), true));
+            }
+            if let Some(end) = mark_out {
+                ruler.push(bracket(self.time_to_x(end), false));
+            }
+        }
         for i in first..=last {
             let seconds = i as f64 * step;
             let x = self.time_to_x((seconds * 1_000_000.0).round() as Micros);
@@ -2687,11 +2722,12 @@ impl Editor {
                     .top(px(6.0))
                     .h(px(12.0))
                     .border_l_1()
-                    .border_color(rgb(TEXT_DIM))
-                    .pl(px(3.0))
-                    .text_size(px(10.0))
+                    .border_color(rgb(TEXT_MUTED))
+                    .pl(px(4.0))
+                    .font_family(FONT_MONO)
+                    .text_size(px(TEXT_BADGE))
                     .line_height(px(12.0))
-                    .text_color(rgb(TEXT_DIM))
+                    .text_color(rgb(TEXT_MUTED))
                     .child(ruler_label(seconds, self.project.fps))
                     .into_any_element(),
             );
@@ -2799,7 +2835,7 @@ impl Editor {
                     .top(px(row.top))
                     .w_full()
                     .h(px(row.height))
-                    .bg(rgb(if row.main { TRACK_HEADER } else { ROW_BG })),
+                    .bg(rgb(if row.main { LANE_MAIN } else { LANE })),
             );
             for segment in &track.segments {
                 let mut target = segment.target_range;
@@ -2906,7 +2942,7 @@ impl Editor {
                         .h(px(height))
                         .border_1()
                         .border_color(rgb(ACCENT))
-                        .bg(rgb(ROW_BG))
+                        .bg(accent_drop())
                         .into_any_element(),
                 );
             } else if self.timeline.magnet && self.is_main_track(track) && group.is_empty() {
@@ -2977,15 +3013,20 @@ impl Editor {
                         .top(px(top))
                         .w(px(right - left))
                         .h(px(badge_h))
-                        .rounded(px(4.0))
+                        .rounded(px(R_SM))
                         .border_1()
-                        .border_color(rgb(if chosen { PLAYHEAD } else { 0x101010 }))
-                        .bg(rgb(if chosen { ACCENT } else { TRANSITION_BADGE }).opacity(0.92))
+                        .border_color(rgb(if chosen { PLAYHEAD } else { BG }))
+                        .bg(rgb(if chosen { ACCENT } else { TEXT }).opacity(0.92))
+                        .shadow_sm()
                         .flex()
                         .items_center()
                         .justify_center()
                         .cursor_pointer()
-                        .child(own_icon(TRANSITION_ICON).xsmall().text_color(rgb(0x101010)))
+                        .child(ui::icons::glyph(
+                            ui::icons::TRANSITION,
+                            12.0,
+                            rgb(if chosen { ON_ACCENT } else { BG }),
+                        ))
                         .child(edge().left(px(0.0)))
                         .child(edge().right(px(0.0)))
                         .into_any_element(),
@@ -3011,7 +3052,7 @@ impl Editor {
                     .h(px(band.height()))
                     .border_1()
                     .border_color(rgb(ACCENT))
-                    .bg(rgb(ACCENT).opacity(0.12))
+                    .bg(accent_soft())
                     .into_any_element(),
             );
         }
@@ -3019,19 +3060,74 @@ impl Editor {
         // A tile from the media panel held over the lanes: where it would
         // start. Only the time — the tile's kind decides its lane, and the
         // media panel, not the timeline, knows what is being dragged.
-        if let Some((at, _)) = self
+        if let Some((at, lane)) = self
             .timeline
             .drop_hover
             .and_then(|position| self.drop_target(position))
         {
+            // The ghost: the clip the drop would insert, on the lane and at
+            // the time the drop's own command puts it.
+            let ghost = self.timeline.drop_media.as_ref().and_then(|media| {
+                let command = super::assets::drop_command(
+                    &self.project,
+                    &media.material_id,
+                    lane.as_deref(),
+                    at,
+                )
+                .ok()?;
+                let EditCommand::InsertSegment {
+                    track_id, segment, ..
+                } = command
+                else {
+                    return None;
+                };
+                let row = self.row_of(&track_id)?;
+                let kind = self.project.track(&track_id)?.kind;
+                Some((row, segment.target_range, kind, media))
+            });
+            let at = ghost
+                .as_ref()
+                .map(|(_, range, _, _)| range.start)
+                .unwrap_or(at);
             let x = self.time_to_x(at);
+            if let Some((row, range, kind, media)) = &ghost {
+                let x1 = self.time_to_x(range.end());
+                let body = self.clip_color(*kind, &media.material_id);
+                overlay.push(
+                    div()
+                        .absolute()
+                        .left(px(x))
+                        .top(px(row.top))
+                        .w(px((x1 - x).max(2.0)))
+                        .h(px(row.height))
+                        .rounded(px(R_SM))
+                        .overflow_hidden()
+                        .bg(with_alpha(body, 0.7))
+                        .border_1()
+                        .border_color(rgb(ACCENT))
+                        .child(
+                            div()
+                                .h(px(TITLE_H))
+                                .px(px(5.0))
+                                .bg(with_alpha(clip_title(body), 0.85))
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .text_size(px(TEXT_CAPTION))
+                                .line_height(px(TITLE_H))
+                                .text_color(rgb(TEXT))
+                                .child(media.name.clone()),
+                        )
+                        .into_any_element(),
+                );
+            }
             let top = RULER_H + 2.0;
             overlay.push(
                 div()
                     .absolute()
                     .left(px(x - 1.0))
                     .top(px(top))
-                    .w(px(3.0))
+                    .w(px(2.0))
                     .h(px((lanes_h - SCROLLBAR_H - top).max(0.0)))
                     .rounded(px(1.0))
                     .bg(rgb(ACCENT))
@@ -3043,10 +3139,11 @@ impl Editor {
                     .left(px(x + 4.0))
                     .top(px(top))
                     .px(px(4.0))
-                    .rounded(px(3.0))
+                    .rounded(px(R_XS))
                     .bg(rgb(ACCENT))
-                    .text_size(px(10.0))
-                    .text_color(rgb(0x0b1214))
+                    .font_family(FONT_MONO)
+                    .text_size(px(TEXT_BADGE))
+                    .text_color(rgb(ON_ACCENT))
                     .child(time_label(at, self.project.fps))
                     .into_any_element(),
             );
@@ -3062,17 +3159,17 @@ impl Editor {
                         .top(px(row.top + 6.0))
                         .w(px((lanes_w - 16.0).clamp(0.0, 640.0)))
                         .h(px(row.height - 12.0))
-                        .rounded(px(4.0))
+                        .rounded(px(R_SM))
                         .border_1()
                         .border_dashed()
-                        .border_color(rgb(BORDER))
+                        .border_color(rgb(BORDER_STRONG))
                         .flex()
                         .items_center()
                         .justify_center()
                         .gap(px(8.0))
-                        .text_size(px(12.0))
+                        .text_size(px(TEXT_LABEL))
                         .text_color(rgb(TEXT_DIM))
-                        .child(Icon::new(IconName::Film).small().text_color(rgb(TEXT_DIM)))
+                        .child(IconSrc::from(IconName::Film).svg(14.0, rgb(TEXT_MUTED)))
                         .child("Drop media here, or import it with Ctrl+I"),
                 );
             }
@@ -3099,13 +3196,15 @@ impl Editor {
                         .top(px(RULER_H))
                         .w(px(1.0))
                         .h(px((tracks_bottom - RULER_H).max(0.0)))
-                        .bg(gpui::white().opacity(0.6)),
+                        .bg(with_alpha(TEXT, 0.6)),
                 )
             }
             _ => None,
         };
         let playhead_x = self.time_to_x(self.clock.position());
         let playhead = (playhead_x >= -6.0 && playhead_x <= lanes_w + 6.0).then(|| {
+            // A white head in the ruler and a hairline down through the
+            // lanes; the head has a dark rim so it reads over a light clip.
             div()
                 .absolute()
                 .left(px(playhead_x - 5.0))
@@ -3116,9 +3215,9 @@ impl Editor {
                     div()
                         .absolute()
                         .left(px(5.0))
-                        .top(px(10.0))
+                        .top(px(12.0))
                         .w(px(1.0))
-                        .h(px((tracks_bottom - 12.0).max(0.0)))
+                        .h(px((tracks_bottom - 14.0).max(0.0)))
                         .bg(rgb(PLAYHEAD)),
                 )
                 .child(
@@ -3128,10 +3227,11 @@ impl Editor {
                         .top(px(0.0))
                         .w(px(11.0))
                         .h(px(14.0))
-                        .rounded(px(3.0))
+                        .rounded_t(px(R_XS))
+                        .rounded_b(px(5.5))
                         .border_1()
-                        .border_color(rgb(PLAYHEAD))
-                        .bg(rgb(0x3a3a3a)),
+                        .border_color(rgb(BG))
+                        .bg(rgb(PLAYHEAD)),
                 )
         });
 
@@ -3147,7 +3247,7 @@ impl Editor {
                 .w(px(thumb_w))
                 .h(px(6.0))
                 .rounded_full()
-                .bg(rgb(SCROLL_THUMB))
+                .bg(rgb(BORDER_STRONG))
         });
 
         div()
@@ -3157,11 +3257,22 @@ impl Editor {
             .h_full()
             .relative()
             .overflow_hidden()
-            .bg(rgb(LANES_BG))
+            .bg(rgb(LANES))
             .when(self.timeline.tool == Tool::Blade, |this| {
                 this.cursor(CursorStyle::Crosshair)
             })
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_lanes_down))
+            .on_drag_move(cx.listener(
+                |this, event: &gpui::DragMoveEvent<super::assets::MediaDrag>, _, cx| {
+                    let media = event.drag(cx).clone();
+                    let changed = this.timeline.drop_media.as_ref().map(|m| &m.material_id)
+                        != Some(&media.material_id);
+                    if changed {
+                        this.timeline.drop_media = Some(media);
+                        cx.notify();
+                    }
+                },
+            ))
             .on_scroll_wheel(cx.listener(Self::on_timeline_scroll))
             // Files dropped from the file manager land at the end of their
             // lane, like an import.
@@ -3201,6 +3312,9 @@ impl Editor {
                     .top(px(0.0))
                     .w_full()
                     .h(px(RULER_H))
+                    .bg(rgb(PANEL))
+                    .border_b_1()
+                    .border_color(rgb(HAIRLINE))
                     .children(ruler),
             )
             .children(snap_line)
@@ -3262,38 +3376,48 @@ impl Editor {
             .top(px(top))
             .w(px(width))
             .h(px(height))
-            .rounded(px(4.0))
+            .rounded(px(R_SM))
             .overflow_hidden()
             .bg(rgb(color));
         if track.hidden {
             body = body.opacity(0.45);
         }
 
-        // The name stays in view while the clip's head is scrolled off.
+        // Every clip has a title strip one step lighter than its body, the
+        // name on it. The name stays in view while the clip's head is
+        // scrolled off.
+        let strip = clip_title(color);
         let label_left = (-x0).max(0.0) + 2.0;
-        let label = |bg: u32| {
+        let label = || {
             div()
                 .absolute()
                 .left(px(label_left))
-                .top(px(1.0))
+                .top(px(0.0))
                 .max_w(px((width - label_left - 2.0).max(0.0)))
-                .h(px(TITLE_H - 2.0))
+                .h(px(TITLE_H))
                 .px(px(4.0))
-                .rounded(px(2.0))
-                .bg(rgb(bg))
                 .overflow_hidden()
                 .whitespace_nowrap()
                 .flex()
                 .flex_row()
                 .items_center()
                 .gap(px(3.0))
-                .text_size(px(11.0))
-                .line_height(px(TITLE_H - 2.0))
+                .text_size(px(TEXT_CAPTION))
+                .line_height(px(TITLE_H))
                 .text_color(rgb(TEXT))
                 .when(linked, |this| {
-                    this.child(Icon::new(IconName::Link2).xsmall().text_color(rgb(TEXT)))
+                    this.child(IconSrc::from(IconName::Link2).svg(11.0, rgb(TEXT)))
                 })
-                .child(name.clone())
+                .child(div().overflow_hidden().text_ellipsis().child(name.clone()))
+        };
+        let title_strip = || {
+            div()
+                .absolute()
+                .left(px(0.0))
+                .top(px(0.0))
+                .w_full()
+                .h(px(TITLE_H))
+                .bg(rgb(strip))
         };
 
         match kind {
@@ -3313,15 +3437,7 @@ impl Editor {
                 } else {
                     height - TITLE_H
                 };
-                body = body.child(
-                    div()
-                        .absolute()
-                        .left(px(0.0))
-                        .top(px(0.0))
-                        .w_full()
-                        .h(px(TITLE_H))
-                        .bg(rgb(CLIP_VIDEO_TITLE)),
-                );
+                body = body.child(title_strip());
                 if let Some(picture) = self.picture(&segment.material_id) {
                     let tile_w = (thumbs_h * picture.aspect).max(8.0);
                     let count = if picture.still {
@@ -3403,9 +3519,10 @@ impl Editor {
                         );
                     }
                 }
-                body = body.child(label(CLIP_VIDEO));
+                body = body.child(label());
             }
             TrackKind::Audio => {
+                body = body.child(title_strip());
                 self.request_wave(&segment.material_id, cx);
                 let wave_h = (height - TITLE_H - 3.0).max(1.0);
                 if let Some(wave) = self.timeline.media.wave(&segment.material_id) {
@@ -3430,7 +3547,7 @@ impl Editor {
                     );
                 }
                 body = self.render_fades(body, segment, target, width);
-                body = body.child(label(AUDIO_TITLE));
+                body = body.child(label());
             }
             TrackKind::Text => {
                 body = body.child(
@@ -3447,14 +3564,14 @@ impl Editor {
                         .gap(px(4.0))
                         .overflow_hidden()
                         .whitespace_nowrap()
-                        .text_size(px(11.0))
+                        .text_size(px(TEXT_CAPTION))
                         .text_color(rgb(TEXT))
-                        .child(Icon::new(IconName::Type).xsmall().text_color(rgb(TEXT)))
+                        .child(IconSrc::from(IconName::Type).svg(12.0, rgb(TEXT)))
                         .child(name.clone()),
                 );
             }
             _ => {
-                body = body.child(label(color));
+                body = body.child(title_strip()).child(label());
             }
         }
 
@@ -3502,7 +3619,7 @@ impl Editor {
                     .left(px(0.0))
                     .top(px(0.0))
                     .size_full()
-                    .rounded(px(4.0))
+                    .rounded(px(R_SM))
                     .border_2()
                     .border_color(rgb(PLAYHEAD)),
             );
@@ -3513,9 +3630,9 @@ impl Editor {
                     .left(px(0.0))
                     .top(px(0.0))
                     .size_full()
-                    .rounded(px(4.0))
+                    .rounded(px(R_SM))
                     .border_1()
-                    .border_color(gpui::white().opacity(0.45)),
+                    .border_color(with_alpha(TEXT, 0.45)),
             );
         }
         // A trim handle where the pointer is about to grab an edge, or on
@@ -3554,7 +3671,7 @@ impl Editor {
                     .left(px(0.0))
                     .top(px(0.0))
                     .size_full()
-                    .bg(gpui::black().opacity(0.35)),
+                    .bg(scrim(0.35)),
             );
         }
         body.into_any_element()
@@ -3611,7 +3728,7 @@ impl Editor {
                     for (x, chosen) in &points {
                         let (cx, cy) = (bounds.origin.x + px(*x), bounds.origin.y + px(y));
                         for (radius, color) in [
-                            (r + 1.0, rgb(0x101010)),
+                            (r + 1.0, rgb(BG)),
                             (r, rgb(if *chosen { ACCENT } else { PLAYHEAD })),
                         ] {
                             let mut path = gpui::PathBuilder::fill();
@@ -3710,7 +3827,7 @@ impl Editor {
                 .size(px(FADE_HANDLE * 2.0))
                 .rounded_full()
                 .border_1()
-                .border_color(rgb(0x101010))
+                .border_color(rgb(BG))
                 .bg(rgb(PLAYHEAD))
                 .cursor_ew_resize()
         };

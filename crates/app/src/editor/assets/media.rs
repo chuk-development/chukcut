@@ -493,10 +493,21 @@ impl Editor {
         let Some((at, lane)) = self.drop_target(window.mouse_position()) else {
             return;
         };
-        let command = insert_at(&self.project, &drag.material_id, lane.as_deref(), at)
-            .or_else(|_| edits::append(&self.project, &drag.material_id));
+        let command = drop_command(&self.project, &drag.material_id, lane.as_deref(), at);
         self.apply(command, cx);
     }
+}
+
+/// What dropping a material at `at` over `lane` does: an insert there, or an
+/// append when that is refused. The timeline draws its drop ghost from this
+/// same command, so the ghost is the result.
+pub(crate) fn drop_command(
+    project: &Project,
+    material_id: &str,
+    lane: Option<&str>,
+    at: Micros,
+) -> Result<EditCommand, String> {
+    insert_at(project, material_id, lane, at).or_else(|_| edits::append(project, material_id))
 }
 
 /// Put a material at `at` on `lane` — or on the first unlocked lane of its

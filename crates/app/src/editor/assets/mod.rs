@@ -7,6 +7,7 @@
 
 mod library;
 mod media;
+pub(crate) use media::{drop_command, MediaDrag};
 
 use std::collections::HashMap;
 
