@@ -1773,10 +1773,25 @@ caption added after the first frame was drawn as the red offline placeholder,
 and a retyped one kept its old pixels. `MediaSourceProvider::sync_texts` now
 runs before every preview frame and drops the cached upload of a changed title.
 
+**The timeline's split divides a caption's words** (glue, 2026-10-03).
+`split_at` asks `captions::edit::split_material` for two materials: the left
+half keeps its material (shortened by a `SetTextMaterial`), the right half
+gets a new one through `AddMaterial(PoolMaterial::Text)` — the first text
+material minted *inside* an undoable command, so S, Ctrl+B, the blade, split
+all and silence cuts all divide captions and undo exactly. Word times stay in
+source time; the right half's source starts at the cut. A cut with no text
+on one side (a one-word caption) keeps the whole caption on both halves.
+`tests/split_glue.rs` splits a document where clips carry a grade, an
+animation, keyframes, transitions, a link, a follower and captions, a few
+hundred seeded times, and checks validate, every `extras` reference, every
+follow link, every caption word's timeline time and byte-exact undo/redo. It
+found one real bug: undoing a split whose left half lost its animation put
+the animation id back at the end of `extras`; `SetAnimation` now carries the
+`slot` it removed the id from.
+
 Known gaps: the emoji *picker* is drawn by GPUI, which shows some emoji as
 monochrome outlines (the caption itself is colour, drawn by our rasteriser);
-the timeline's own split (S) duplicates a caption's text into both
-halves — the panel's "Split at playhead" divides the words properly; a font
+a font
 from an online library has a hook (any family registered with the text
 renderer shows up in the font list) but no library yet; the drag frame on the
 player is a rectangle, not handles.
@@ -2491,15 +2506,19 @@ What works, verified:
 
 Rough or missing:
 
-- **Only the clip's lane and linked lanes ripple.** Captions, music and
-  overlays on other lanes stay put, so cutting after captions exist leaves
-  them out of step. Cut first, caption second — or teach `remove_ranges` to
-  move caption clips by the same shift.
-- **Filler words need a transcript provider.** `silence::filler::WordTimings`
-  is the seam; nothing registers one yet. The captions branch stores caption
-  words in caption-segment source time and transcripts in timeline time; an
-  adapter maps those into the cut clip's source time and calls
-  `register_word_timings` at startup.
+- **"Keep everything in sync"** (the panel's default, glue 2026-10-03):
+  `remove_ranges_in_sync` cuts the same stretches out of every unlocked lane.
+  A title or caption a cut runs through is shortened, and a caption's words
+  are re-timed through the closed-up timeline, so it stays one caption on
+  its words; music and overlays are split at the cut's edges and the inside
+  removed; a clip wholly inside a cut goes; locked lanes stay. Off, only the
+  clip's own and linked lanes ripple, as before. One undo step either way.
+- **Filler words read the captions.** `captions::words::CaptionWordTimings`
+  implements `silence::filler::WordTimings`: caption words (timeline time)
+  through the cut clip's placement and speed into its source time.
+  `AppState::new` registers it. Captions from an `.srt` have no word times
+  and give no transcript — estimating them would cut beside the filler.
+  `captions::TimedWord` is the one word type.
 - Normalize and Reduce noise act on one clip. After a silence cut the pieces
   share the cleanup block (splitting clones `extras`) but a normalise applied
   afterwards lands on the selected piece only.
