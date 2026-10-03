@@ -87,6 +87,10 @@ pub(crate) struct CloudPanel {
     // Text to speech.
     tts_text: Entity<TextareaState>,
     voice_typed: Entity<InputState>,
+    /// ElevenLabs: the chosen model; `None` is the account's default.
+    tts_model: Option<String>,
+    /// OpenAI-compatible: the speech model typed; empty is the default.
+    tts_model_typed: Entity<InputState>,
     voices: HashMap<String, Voices>,
     voice: Option<String>,
     stability: f32,
@@ -160,6 +164,8 @@ impl CloudPanel {
             chosen: HashMap::new(),
             tts_text,
             voice_typed: input("Voice name, e.g. alloy or af_bella", window, cx),
+            tts_model: None,
+            tts_model_typed: input("Model, e.g. gpt-4o-mini-tts or tts-1", window, cx),
             voices: HashMap::new(),
             voice: None,
             stability: 0.5,

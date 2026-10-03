@@ -56,6 +56,8 @@ pub(crate) struct AccountForm {
 pub(crate) struct CaptionsPanel {
     settings: SpeechSettings,
     accounts: Vec<AccountView>,
+    /// `accounts::ACCOUNTS_CHANGED` when `accounts` was read.
+    accounts_seen: u64,
     form: Option<AccountForm>,
     test: Option<TestReport>,
     testing: bool,
@@ -139,6 +141,7 @@ impl CaptionsPanel {
                 &CloudStore::user(),
                 Some(Capability::Transcribe),
             ),
+            accounts_seen: super::accounts::accounts_generation(),
             settings,
             form: None,
             test: None,
@@ -162,6 +165,15 @@ impl CaptionsPanel {
 
     fn save_settings(&self) -> Result<(), String> {
         self.settings.save()
+    }
+
+    /// Read the accounts again when Settings changed them.
+    pub(crate) fn sync_accounts(&mut self) {
+        let generation = super::accounts::accounts_generation();
+        if generation != self.accounts_seen {
+            self.accounts_seen = generation;
+            self.reload_accounts();
+        }
     }
 
     fn reload_accounts(&mut self) {

@@ -387,6 +387,7 @@ impl Editor {
     }
 
     fn render_accounts(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        self.captions.sync_accounts();
         if self.captions.form.is_some() {
             return self.render_account_form(cx).into_any_element();
         }

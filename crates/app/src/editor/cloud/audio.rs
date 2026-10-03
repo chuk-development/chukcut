@@ -11,6 +11,16 @@ use gpui::component::{Disableable as _, Sizable as _};
 
 use super::*;
 
+/// ElevenLabs' speech models, best first (`docs/research/integrations.md`
+/// §1.1). An editor does not need the low-latency ones by default.
+const ELEVEN_MODELS: [(&str, &str); 5] = [
+    ("eleven_multilingual_v2", "Multilingual v2"),
+    ("eleven_v3", "v3"),
+    ("eleven_v4", "v4"),
+    ("eleven_v4_turbo", "v4 Turbo"),
+    ("eleven_flash_v2_5", "Flash 2.5"),
+];
+
 /// The Audio tab's categories after Import and Project audio.
 pub(crate) const AUDIO_CATEGORIES: [&str; 3] = ["Text to speech", "Sound effects", "Music"];
 
@@ -163,6 +173,34 @@ impl Editor {
                 .into_any_element(),
         };
 
+        let model_row = if eleven {
+            let current = cloud
+                .tts_model
+                .clone()
+                .unwrap_or_else(|| account.account.default_model.clone());
+            column()
+                .gap(px(4.0))
+                .child(label("Model"))
+                .child(row().children(ELEVEN_MODELS.iter().map(|(id, name)| {
+                    let id = id.to_string();
+                    chip(
+                        SharedString::from(format!("tts-model-{id}")),
+                        *name,
+                        current == id,
+                        cx.listener(move |this, _, _, cx| {
+                            this.assets.cloud.tts_model = Some(id.clone());
+                            cx.notify();
+                        }),
+                    )
+                })))
+                .into_any_element()
+        } else {
+            column()
+                .gap(px(4.0))
+                .child(label("Model"))
+                .child(Input::new(&cloud.tts_model_typed).small())
+                .into_any_element()
+        };
         let settings = if eleven {
             let (stability, similarity, speed) = (cloud.stability, cloud.similarity, cloud.speed);
             column()
@@ -241,6 +279,7 @@ impl Editor {
             )
             .child(Textarea::new(&cloud.tts_text).h(px(96.0)))
             .child(voices)
+            .child(model_row)
             .child(settings)
             .child(
                 row()
@@ -294,6 +333,11 @@ impl Editor {
         request.stability = cloud.stability;
         request.similarity = cloud.similarity;
         request.speed = cloud.speed;
+        request.model = if account.account.kind == ProviderKind::Elevenlabs {
+            cloud.tts_model.clone().unwrap_or_default()
+        } else {
+            cloud.tts_model_typed.read(cx).value().trim().to_string()
+        };
         request.with_timing = account.account.kind == ProviderKind::Elevenlabs;
         let captions = cloud.tts_captions && request.with_timing;
         let at = self.clock.position();
