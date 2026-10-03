@@ -20,6 +20,7 @@ pub mod mask;
 pub mod project;
 pub mod render;
 pub mod summary;
+pub mod template;
 pub mod text;
 pub mod timeline;
 
@@ -247,6 +248,9 @@ operations!(
     cloud::StockDownloadArgs,
     render::ExportArgs,
     render::RenderFrameArgs,
+    template::TemplateSaveArgs,
+    template::TemplateReplaceArgs,
+    template::TemplateSlotsArgs,
 );
 
 /// Parse a snake_case engine enum from its name, listing the valid names

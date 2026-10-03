@@ -29,6 +29,7 @@ pub mod render;
 pub mod silence;
 pub mod speech;
 pub mod speed;
+pub mod template;
 pub mod text;
 pub mod timeline;
 pub mod tracking;
