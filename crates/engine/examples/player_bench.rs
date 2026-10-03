@@ -48,6 +48,7 @@ use parking_lot::{Condvar, Mutex};
 use chukcut_engine::modules::media::MediaSourceProvider;
 use chukcut_engine::modules::motion::edit;
 use chukcut_engine::modules::preview::clock::{frame_at, frame_time};
+use chukcut_engine::modules::preview::player::{FramePlayer, PlayerRequest};
 use chukcut_engine::modules::project::animation::{TextPreset, TextSlot};
 use chukcut_engine::modules::project::document::{
     ColorAdjustMaterial, TextAlign, TextMaterial, VideoMaterial,
@@ -56,7 +57,7 @@ use chukcut_engine::modules::project::grade::Grade;
 use chukcut_engine::modules::project::{
     CanvasConfig, Micros, Project, Segment, TimeRange, Track, TrackKind, Transform, SAMPLE_SLACK,
 };
-use chukcut_engine::modules::render::{Compositor, RenderContext};
+use chukcut_engine::modules::render::{BgraReadback, Compositor, RenderContext, SourceProvider};
 
 const FPS: f64 = 30.0;
 /// How long the generated clips are. Longer than any window measured, so no
@@ -170,6 +171,59 @@ fn main() {
         }
     }
 
+    if wanted("stages") {
+        heading(
+            "Per frame, serial, new path (ms) — GPU swizzle, tight async readback, parallel decode",
+        );
+        println!(
+            "{:<24} {:>6} {:>8} {:>9} {:>9} {:>8} {:>8} {:>9} {:>8} {:>8}",
+            "scenario",
+            "layers",
+            "sources",
+            "composite",
+            "readback",
+            "of wait",
+            "copy",
+            "UI upload",
+            "total",
+            "ceiling"
+        );
+        for scenario in &scenarios {
+            for layers in [1, 3, 5] {
+                let project = scenario.project(layers);
+                let frames = if options.quick { 20 } else { 60 };
+                let row = new_stages(&ctx, &project, scenario.render, frames);
+                println!(
+                    "{:<24} {:>6} {:>8.2} {:>9.2} {:>9.2} {:>8.2} {:>8.2} {:>9.2} {:>8.2} {:>6.0}fps",
+                    scenario.label,
+                    layers,
+                    row.sources,
+                    row.composite,
+                    row.readback,
+                    row.wait,
+                    row.copy,
+                    row.upload,
+                    row.total(),
+                    1000.0 / row.render_thread()
+                );
+            }
+        }
+    }
+
+    if options.only.as_deref() == Some("export") {
+        let seconds = if options.quick { 12 } else { 60 };
+        heading(&format!(
+            "Export, {seconds} s of 1080p: grade, vignette and grain, three clips, a title and a letter-animated title"
+        ));
+        for hardware in [Some("nvenc_h264"), None] {
+            match export(&ctx, &scenarios[0], seconds, hardware) {
+                Ok(line) => println!("{line}"),
+                Err(error) => println!("{}: {error}", hardware.unwrap_or("software")),
+            }
+        }
+        return;
+    }
+
     if wanted("playback") {
         heading("Playback at 30 fps in real time, 4 s of timeline — frames shown, of 120");
         println!(
@@ -180,10 +234,27 @@ fn main() {
         for scenario in &scenarios {
             for layers in [1, 3, 5] {
                 let project = Arc::new(scenario.project(layers));
-                let legacy = LegacyPlayer::new(Arc::clone(&ctx));
-                let result = playback(&legacy, &ctx, &project, scenario.render, seconds);
-                drop(legacy);
-                result.print(scenario.label, layers, "legacy");
+                if options.only.as_deref() != Some("player") {
+                    let legacy = LegacyPlayer::new(Arc::clone(&ctx));
+                    let result = playback(&legacy, &ctx, &project, scenario.render, seconds);
+                    drop(legacy);
+                    result.print(scenario.label, layers, "legacy");
+                }
+                let player = NewPlayer(FramePlayer::with_context(Arc::clone(&ctx)));
+                let result = playback(&player, &ctx, &project, scenario.render, seconds);
+                let stats = player.0.stats();
+                drop(player);
+                result.print(scenario.label, layers, "player");
+                println!(
+                    "{:>41} rendered {}, late {}, skipped {}, latency {:.1} ms, readback wait {:.2} + copy {:.2} ms",
+                    "",
+                    stats.rendered,
+                    stats.late,
+                    stats.skipped,
+                    stats.latency_ms,
+                    stats.readback_wait_ms,
+                    stats.readback_copy_ms
+                );
             }
         }
     }
@@ -199,6 +270,9 @@ struct Stages {
     wait: f64,
     swizzle: f64,
     upload: f64,
+    /// New path only: the memcpy out of the mapped buffer, already inside
+    /// `readback`, shown on its own.
+    copy: f64,
 }
 
 impl Stages {
@@ -250,6 +324,88 @@ fn legacy_stages(
         wait: per(stats.readback_wait_ns),
         swizzle: swizzle / frames as f64,
         upload: upload / frames as f64,
+        copy: 0.0,
+    }
+}
+
+/// The new chain, one frame at a time: decode every clip in parallel, composite,
+/// swizzle and pack on the GPU, map, one copy out. Serial, so it is latency;
+/// the player overlaps decode with readback on top of this.
+fn new_stages(
+    ctx: &Arc<RenderContext>,
+    project: &Project,
+    size: (u32, u32),
+    frames: usize,
+) -> Stages {
+    let compositor = Compositor::new(Arc::clone(ctx));
+    let sources = MediaSourceProvider::from_project(project);
+    let mut readback: BgraReadback<()> = BgraReadback::new(Arc::clone(ctx), 3);
+    let start = frame_time(30, FPS) + SAMPLE_SLACK;
+    sources.prefetch(ctx, project, start, size);
+    let target = compositor
+        .render_to_texture(project, start, size, &sources)
+        .expect("render");
+    let _ = readback.submit(&target, ());
+    compositor.pool().release(target);
+    let _ = readback.collect_oldest();
+    compositor.reset_stats();
+    readback.reset_stats();
+
+    let mut decode = 0.0;
+    let mut readback_ms = 0.0;
+    let mut upload = 0.0;
+    for n in 0..frames as i64 {
+        let at = frame_time(31 + n, FPS) + SAMPLE_SLACK;
+        let started = Instant::now();
+        sources.prefetch(ctx, project, at, size);
+        decode += ms(started);
+        let target = compositor
+            .render_to_texture(project, at, size, &sources)
+            .expect("render");
+        let started = Instant::now();
+        let _ = readback.submit(&target, ());
+        compositor.pool().release(target);
+        let (_, frame) = readback.collect_oldest().expect("in flight");
+        readback_ms += ms(started);
+        let frame = frame.expect("readback");
+        let started = Instant::now();
+        gpui_upload(ctx, &frame.data, size);
+        upload += ms(started);
+    }
+    let stats = compositor.stats();
+    let per = |ns: u64| stats.per_frame(ns) / 1e6;
+    let rb = readback.stats();
+    let n = frames as f64;
+    Stages {
+        // Decode-ahead plus whatever the render still had to fetch itself
+        // (titles, the animated text).
+        sources: decode / n + per(stats.sources_ns),
+        composite: per(stats.composite_ns),
+        readback: readback_ms / n,
+        wait: rb.wait_ns as f64 / n / 1e6,
+        // The column is "swizzle" for the legacy path; here it is the one
+        // memcpy out of the mapped buffer, which the readback column includes.
+        swizzle: 0.0,
+        upload: upload / n,
+        copy: rb.copy_ns as f64 / n / 1e6,
+    }
+}
+
+struct NewPlayer(FramePlayer);
+
+impl Arm for NewPlayer {
+    fn request(&self, project: &Arc<Project>, time: Micros, size: (u32, u32), playing: bool) {
+        self.0.request(PlayerRequest {
+            project: Arc::clone(project),
+            generation: 1,
+            time,
+            size,
+            playing,
+        });
+    }
+
+    fn take(&self, clock: Micros) -> Option<(Micros, Vec<u8>)> {
+        self.0.take(clock).map(|frame| (frame.time, frame.bgra))
     }
 }
 
@@ -385,9 +541,11 @@ struct LegacyPlayer {
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
+type LegacyRequest = (Arc<Project>, Micros, (u32, u32));
+
 #[derive(Default)]
 struct LegacyShared {
-    request: Mutex<Option<(Arc<Project>, Micros, (u32, u32))>>,
+    request: Mutex<Option<LegacyRequest>>,
     wake: Condvar,
     result: Mutex<Option<(Micros, Vec<u8>)>>,
     stop: std::sync::atomic::AtomicBool,
@@ -457,6 +615,90 @@ impl Drop for LegacyPlayer {
             let _ = thread.join();
         }
     }
+}
+
+// --- export --------------------------------------------------------------------------
+
+struct Quiet;
+
+impl chukcut_engine::modules::export::job::ProgressSink for Quiet {
+    fn send(&self, _: chukcut_engine::modules::export::ExportProgress) {}
+}
+
+/// The 5-layer project repeated end to end to `seconds`, exported through
+/// `run_export` exactly as the export dialog does.
+fn export(
+    ctx: &Arc<RenderContext>,
+    scenario: &Scenario,
+    seconds: u32,
+    hardware: Option<&str>,
+) -> Result<String, String> {
+    use chukcut_engine::modules::export::job::{self, ExportJob, ExportRequest};
+    let one = scenario.project(5);
+    let span = (CLIP_SECONDS * 1e6) as Micros;
+    let laps = (seconds as Micros * 1_000_000 + span - 1) / span;
+    let mut project = one.clone();
+    for track in &mut project.tracks {
+        let template = track.segments[0].clone();
+        track.segments.clear();
+        for lap in 0..laps {
+            let mut segment = template.clone();
+            segment.id = format!("{}-{lap}", template.id);
+            segment.target_range = TimeRange::new(lap * span, span);
+            track.segments.push(segment);
+        }
+    }
+    // Every lap shares the animated title's animation material, through the
+    // segment's extras, so the text animator runs on every lap.
+    let out = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("player-bench")
+        .join(format!("export-{}.mp4", hardware.unwrap_or("x264")));
+    let request = ExportRequest {
+        output_path: out.to_string_lossy().into_owned(),
+        preset_id: None,
+        overrides: Some(chukcut_engine::modules::export::ExportOverrides {
+            width: Some(scenario.canvas.0),
+            height: Some(scenario.canvas.1),
+            ..Default::default()
+        }),
+        hardware: hardware.map(String::from),
+        include_audio: false,
+        range: None,
+    };
+    let settings = job::resolve_settings(&project, &request).map_err(|e| e.to_string())?;
+    let encoder = settings.video.encoder_name.clone();
+    let compositor = Arc::new(Compositor::with_config(
+        Arc::clone(ctx),
+        chukcut_engine::modules::render::CompositorConfig {
+            strict_sources: true,
+            ..Default::default()
+        },
+    ));
+    let sources = Arc::new(MediaSourceProvider::from_project(&project));
+    let export = ExportJob {
+        job_id: "player-bench".into(),
+        project,
+        settings,
+        compositor: Arc::clone(&compositor),
+        sources,
+        audio: Arc::new(chukcut_engine::modules::audio::FileAudioSource),
+        cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    };
+    let started = Instant::now();
+    let outcome = job::run_export(&export, &Quiet).map_err(|e| e.to_string())?;
+    let elapsed = started.elapsed().as_secs_f64();
+    let stats = compositor.stats();
+    let per = |ns: u64| stats.per_frame(ns) / 1e6;
+    Ok(format!(
+        "{encoder:<12} {} frames in {elapsed:.1} s = {:.1} fps (sources {:.2} + composite {:.2} + readback {:.2} + nv12 {:.2} ms per frame)",
+        outcome.frames,
+        outcome.frames as f64 / elapsed,
+        per(stats.sources_ns),
+        per(stats.composite_ns),
+        per(stats.readback_ns),
+        per(stats.nv12_ns),
+    ))
 }
 
 // --- projects ------------------------------------------------------------------------

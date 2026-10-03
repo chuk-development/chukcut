@@ -93,7 +93,7 @@ pub struct Editor {
     generation: u64,
 
     frame: Option<Arc<RenderImage>>,
-    last_request: Option<(i64, (u32, u32), u64)>,
+    last_request: Option<(i64, (u32, u32), u64, bool)>,
     scale: f32,
 
     selected: Option<String>,
@@ -187,10 +187,40 @@ impl Editor {
         std::thread::spawn(|| {
             let _ = chukcut_engine::modules::export::hwaccel::detect();
         });
+        editor.consider_proxies();
         if !startup.is_empty() {
             editor.import_paths(startup, cx);
         }
         editor
+    }
+
+    /// Apply the settings' proxy policy: preview from proxies unless it is
+    /// `Off`, and queue a proxy for every video the policy says needs one.
+    /// The queue skips files it has a proxy for or already decided against,
+    /// but deciding probes each file, so it runs off the UI thread.
+    pub(crate) fn consider_proxies(&mut self) {
+        use chukcut_engine::modules::workspace::settings::ProxyPolicy;
+        let policy = self.shell.settings.proxy_policy;
+        self.player.use_proxies(policy != ProxyPolicy::Off);
+        if policy == ProxyPolicy::Off {
+            return;
+        }
+        let paths: Vec<String> = self
+            .project
+            .materials
+            .videos
+            .iter()
+            .map(|video| video.path.clone())
+            .collect();
+        std::thread::spawn(move || {
+            for path in paths {
+                if let Err(error) =
+                    chukcut_engine::modules::proxy::commands::proxy_consider(path.clone(), policy)
+                {
+                    tracing::debug!(%path, %error, "no proxy");
+                }
+            }
+        });
     }
 
     // --- the clock and the picture --------------------------------------------
@@ -209,7 +239,7 @@ impl Editor {
             changed = true;
         }
         changed |= self.poll_tracking(cx);
-        if let Some(frame) = self.player.take() {
+        if let Some(frame) = self.player.take(self.clock.position()) {
             if let Some(old) = self.frame.replace(frame.image) {
                 // A frame is uploaded into the window's atlas when drawn; drop
                 // the old one or every frame of playback stays resident.
@@ -250,7 +280,15 @@ impl Editor {
             return;
         };
         let time = self.clock.position();
-        let key = (frame_at(time, self.project.fps), size, self.generation);
+        // Normal-speed playback renders ahead on the audio clock; a shuttle
+        // or a scrub renders exactly where the playhead is.
+        let playing = self.clock.is_playing() && !self.shell.playback_driven();
+        let key = (
+            frame_at(time, self.project.fps),
+            size,
+            self.generation,
+            playing,
+        );
         if self.last_request == Some(key) {
             return;
         }
@@ -258,8 +296,10 @@ impl Editor {
         // Just inside the frame, like the export: see `SAMPLE_SLACK`.
         self.player.request(
             Arc::clone(&self.project),
+            self.generation,
             time + chukcut_engine::modules::project::SAMPLE_SLACK,
             size,
+            playing,
         );
     }
 
@@ -346,6 +386,7 @@ impl Editor {
             }
             let _ = this.update(cx, |editor, cx| {
                 editor.refresh(cx);
+                editor.consider_proxies();
                 let result = if errors.is_empty() {
                     Ok(())
                 } else {

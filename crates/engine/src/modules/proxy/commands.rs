@@ -32,6 +32,30 @@ impl ProxyProgressSink for ChannelSink {
     }
 }
 
+/// Consider `path` for a proxy under the user's policy: what import and
+/// project open call for every video.
+///
+/// `Off` makes nothing. `Auto` asks [`super::decide`], which builds one for
+/// footage this machine cannot decode inside the frame budget — 4K HEVC, say,
+/// and not 1080p H.264. `Always` builds one for every file a proxy would be
+/// meaningfully smaller than, by telling the rule the file is too slow.
+/// Returns at once; the transcode runs on the proxy queue's thread.
+pub fn proxy_consider(
+    path: String,
+    policy: crate::modules::workspace::settings::ProxyPolicy,
+) -> Result<Option<EnqueueOutcome>, String> {
+    use crate::modules::workspace::settings::ProxyPolicy;
+    let queue = ProxyQueue::shared();
+    let source = PathBuf::from(path);
+    let outcome = match policy {
+        ProxyPolicy::Off => return Ok(None),
+        ProxyPolicy::Auto => queue.enqueue(&source),
+        // A measured cost far past any frame budget: "too slow" by fiat.
+        ProxyPolicy::Always => queue.enqueue_with(&source, Some(1.0e9)),
+    };
+    outcome.map(Some).map_err(|e| e.to_string())
+}
+
 /// Consider a file for a proxy. Returns immediately; the transcode, if any,
 /// runs in the background.
 ///
