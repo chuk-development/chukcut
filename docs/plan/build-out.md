@@ -59,3 +59,5 @@ column current.
 | 4 | glue | caption split, filler adapter, ripple-all on silence cut, freeze frame, follow-link validation, proxy policy, inline text edit | done on agent/glue — the player does not switch to proxies yet (perf owns player.rs; seam `from_project_for_preview` + `proxy_generation()`); Ctrl+X deletes a tracked clip without the bake prompt; freeze length fixed at 3 s, orphaned stills not cleaned up |
 | 4 | QA | end-to-end tests over the command layer, a test pass over every panel, fixes, docs/QA.md | running (agent/qa) |
 | 4 | packaging | release build, desktop entry, icon, install script, README | merged — tarball 20.8 MB, CI not yet run on GitHub |
+| 5 | cli | `crates/cli`: chukcut-cli subcommands + `chukcut-cli mcp` server over the command layer, docs/cli.md | running (agent/cli) |
+| 5 | library | Fontsource fonts + picker, stickers (Fluent/Noto/Iconify), music & SFX pack, 20–30 own LUT looks | running (agent/library) |
