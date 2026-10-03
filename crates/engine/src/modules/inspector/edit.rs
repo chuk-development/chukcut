@@ -56,7 +56,7 @@ pub struct ColorEdit {
 
 /// The remove + insert pair described in the module docs, for a segment with
 /// `mutate` applied to it.
-fn replace_segment(
+pub(crate) fn replace_segment(
     project: &Project,
     segment_id: &str,
     label: &str,

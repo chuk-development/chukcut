@@ -381,6 +381,11 @@ pub struct MaterialPool {
     /// adding and removing one is exactly invertible.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub speed_curves: Vec<super::speed::SpeedCurveMaterial>,
+    /// Masks, chroma key and blend mode, referenced from the `extras` of the
+    /// clip they cut out, like a colour adjustment. See
+    /// [`super::compositing::CompositingMaterial`]. Skipped when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compositing: Vec<super::compositing::CompositingMaterial>,
     /// Every link group id that some segment currently belongs to.
     ///
     /// ## Why linkage is on the segment and this is only a type tag
@@ -484,6 +489,20 @@ impl MaterialPool {
     /// the first, because rendering *a* grade beats rendering none.
     pub fn color_adjust_of(&self, segment: &Segment) -> Option<&ColorAdjustMaterial> {
         segment.extras.iter().find_map(|id| self.color_adjust(id))
+    }
+
+    pub fn compositing(&self, id: &str) -> Option<&super::compositing::CompositingMaterial> {
+        self.compositing.iter().find(|m| m.id == id)
+    }
+
+    /// The masks, key and blend mode of `segment`, if it has any. The
+    /// resolution step for the category, like [`Self::color_adjust_of`]; a
+    /// segment carrying two is malformed and this returns the first.
+    pub fn compositing_of(
+        &self,
+        segment: &Segment,
+    ) -> Option<&super::compositing::CompositingMaterial> {
+        segment.extras.iter().find_map(|id| self.compositing(id))
     }
 
     pub fn effect(&self, id: &str) -> Option<&super::effects::EffectMaterial> {
@@ -2115,6 +2134,19 @@ impl Project {
                         subject_id: Some(m.id.clone()),
                     });
                 }
+            }
+        }
+
+        // Masks and keys are evaluated on every frame of their clip, so a
+        // non-finite value is a NaN handed to the GPU and a save that never
+        // opens again — the colour adjustment's reason, above.
+        for m in &self.materials.compositing {
+            if let Some(field) = m.non_finite_field() {
+                issues.push(ValidationIssue {
+                    severity: Severity::Error,
+                    message: format!("{field} is not a finite number"),
+                    subject_id: Some(m.id.clone()),
+                });
             }
         }
 

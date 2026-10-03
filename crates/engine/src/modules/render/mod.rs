@@ -54,6 +54,7 @@
 //!   skipped. A muted track still draws: muting silences a lane, `hidden` is
 //!   what conceals it.
 
+pub mod blend;
 pub mod compositor;
 pub mod context;
 /// DMA-BUF export. Linux only: everything in it is a DRM concept.
@@ -63,6 +64,7 @@ pub mod error;
 pub mod grade;
 pub mod layout;
 pub mod lut;
+pub mod matte;
 pub mod nv12;
 pub mod readback;
 pub mod source;

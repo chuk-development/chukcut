@@ -789,6 +789,37 @@ impl<'a> FxFrame<'a> {
         }
     }
 
+    /// Lay `layer` (a clip, straight alpha) onto `base` (the frame so far)
+    /// with blend mode `mode` (`BlendMode::code`), into a fresh texture of
+    /// `out_key`, which the caller owns. Both inputs are in `out_key.format`.
+    pub fn blend(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        base: &wgpu::TextureView,
+        layer: &wgpu::TextureView,
+        size: (u32, u32),
+        mode: u32,
+        out_key: TextureKey,
+    ) -> PooledTexture {
+        let out = self.pool.acquire(self.ctx.device(), out_key);
+        let srgb = if out_key.format.is_srgb() { 1.0 } else { 0.0 };
+        let mut p = [[0.0; 4]; 6];
+        p[0] = [mode as f32, srgb, 0.0, 0.0];
+        self.pass(
+            encoder,
+            "fs_blend",
+            base,
+            size,
+            Some(layer),
+            out.view(),
+            out_key.format,
+            (out_key.width, out_key.height),
+            [size.0 as f32, size.1 as f32, 0.0, 0.0],
+            p,
+        );
+        out
+    }
+
     /// Give every intermediate texture back. Call after the encoder has been
     /// submitted.
     pub fn finish(self) {

@@ -10,6 +10,7 @@ pub mod analysis;
 pub mod audio;
 pub mod captions;
 pub mod cloud;
+pub mod compositing;
 pub mod effects;
 pub mod export;
 pub mod fx;

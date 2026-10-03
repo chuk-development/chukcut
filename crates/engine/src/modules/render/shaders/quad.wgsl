@@ -81,6 +81,20 @@ struct QuadUniform {
     // Per HSL band (`project::grade::HSL_BANDS` order): hue, saturation,
     // luminance; w unused.
     hsl: array<vec4<f32>, 8>,
+    // Masks and chroma key, packed by `render::matte::MatteBlock`: flags
+    // (`M_*` below) and the mask count in xy.
+    matte_flags: vec4<u32>,
+    // The quad in pixels: width, height, one over the shorter side.
+    matte_size: vec4<f32>,
+    // Key colour (encoded rgb) and tolerance (a CbCr distance).
+    key: vec4<f32>,
+    // Softness (a CbCr distance), spill, edge shrink radius (a fraction of
+    // the source's shorter side).
+    key2: vec4<f32>,
+    // Three rows per mask: centre and half size, rotation and feather and
+    // roundness, shape and operation and invert. `render::matte` has the
+    // units.
+    masks: array<vec4<f32>, 24>,
 };
 
 // The bits of `features`. `render::grade::feature` spells the same numbers
@@ -101,6 +115,53 @@ const F_LUT_1D: u32 = 4096u;
 // The stages that run in encoded space, between `linear_to_srgb` and its
 // inverse. Any of them (or the original grade, or a LUT) opens that bracket.
 const F_ENCODED: u32 = 766u;
+
+// The bits of `matte_flags.x`. `render::matte::flag` spells the same numbers
+// and a Rust test reads this file to check they agree. Like the grade's
+// bits, a clip with no mask and no key carries none of them and takes the
+// path it took before either existed.
+const M_MASK: u32 = 1u;
+const M_KEY: u32 = 2u;
+const M_KEY_SHRINK: u32 = 4u;
+const M_VIEW_MATTE: u32 = 8u;
+const KEY_SCALE: f32 = 0.6;
+const STAR_INNER: f32 = 0.381966;
+// The heart: the classic parametric curve at 32 points, width -1..1
+// (`render::matte::heart_polygon`, which a test compares with this).
+const HEART: array<vec2<f32>, 32> = array<vec2<f32>, 32>(
+    vec2<f32>(0.000000, 0.471148),
+    vec2<f32>(0.007425, 0.518696),
+    vec2<f32>(0.056043, 0.640494),
+    vec2<f32>(0.171481, 0.783209),
+    vec2<f32>(0.353553, 0.884061),
+    vec2<f32>(0.574830, 0.896430),
+    vec2<f32>(0.788581, 0.806034),
+    vec2<f32>(0.943456, 0.631124),
+    vec2<f32>(1.000000, 0.408648),
+    vec2<f32>(0.943456, 0.175209),
+    vec2<f32>(0.788581, -0.046796),
+    vec2<f32>(0.574830, -0.251568),
+    vec2<f32>(0.353553, -0.441764),
+    vec2<f32>(0.171481, -0.616701),
+    vec2<f32>(0.056043, -0.765139),
+    vec2<f32>(0.007425, -0.867212),
+    vec2<f32>(0.000000, -0.903852),
+    vec2<f32>(-0.007425, -0.867212),
+    vec2<f32>(-0.056043, -0.765139),
+    vec2<f32>(-0.171481, -0.616701),
+    vec2<f32>(-0.353553, -0.441764),
+    vec2<f32>(-0.574830, -0.251568),
+    vec2<f32>(-0.788581, -0.046796),
+    vec2<f32>(-0.943456, 0.175209),
+    vec2<f32>(-1.000000, 0.408648),
+    vec2<f32>(-0.943456, 0.631124),
+    vec2<f32>(-0.788581, 0.806034),
+    vec2<f32>(-0.574830, 0.896430),
+    vec2<f32>(-0.353553, 0.884061),
+    vec2<f32>(-0.171481, 0.783209),
+    vec2<f32>(-0.056043, 0.640494),
+    vec2<f32>(-0.007425, 0.518696),
+);
 
 // Strengths, mirrored in `render::grade` (and checked there).
 const TINT_STRENGTH: f32 = 0.2;
@@ -352,6 +413,171 @@ fn pcg(v: u32) -> u32 {
     return (word >> 22u) ^ word;
 }
 
+// ---------------------------------------------------------------------------
+// Masks and the chroma key. `render::matte` is the CPU reference for every
+// function here, line for line; change both or the pixel tests fail.
+// ---------------------------------------------------------------------------
+
+// One polygon edge's contribution to `poly_distance`: the squared distance
+// to the edge in x, and whether a ray to +x crosses it in y.
+fn edge_step(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>, acc: vec2<f32>) -> vec2<f32> {
+    let e = b - a;
+    let w = p - a;
+    let t = clamp(dot(w, e) / dot(e, e), 0.0, 1.0);
+    let d = w - e * t;
+    let best = min(acc.x, dot(d, d));
+    var inside = acc.y;
+    if ((a.y > p.y) != (b.y > p.y)) {
+        let x = a.x + (p.y - a.y) / (b.y - a.y) * (b.x - a.x);
+        if (p.x < x) {
+            inside = 1.0 - inside;
+        }
+    }
+    return vec2<f32>(best, inside);
+}
+
+fn signed_from(acc: vec2<f32>) -> f32 {
+    let d = sqrt(acc.x);
+    return select(d, -d, acc.y > 0.5);
+}
+
+fn star_corner(k: u32) -> vec2<f32> {
+    let angle = 1.5707964 + f32(k) * 0.62831855;
+    let r = select(STAR_INNER, 1.0, (k % 2u) == 0u);
+    return vec2<f32>(r * cos(angle), r * sin(angle));
+}
+
+fn star_distance(p: vec2<f32>) -> f32 {
+    var acc = vec2<f32>(1e30, 0.0);
+    for (var k = 0u; k < 10u; k = k + 1u) {
+        acc = edge_step(p, star_corner(k), star_corner((k + 1u) % 10u), acc);
+    }
+    return signed_from(acc);
+}
+
+fn heart_distance(p: vec2<f32>) -> f32 {
+    var points = HEART;
+    var acc = vec2<f32>(1e30, 0.0);
+    for (var k = 0u; k < 32u; k = k + 1u) {
+        acc = edge_step(p, points[k], points[(k + 1u) % 32u], acc);
+    }
+    return signed_from(acc);
+}
+
+// Signed distance from `q` (the mask's own frame, short-side units) to a
+// shape of half-size `half`: negative inside.
+fn shape_distance(shape: u32, q: vec2<f32>, half: vec2<f32>, roundness: f32) -> f32 {
+    let a = max(half.x, 0.0001);
+    let b = max(half.y, 0.0001);
+    let small = min(a, b);
+    switch (shape) {
+        case 0u: {
+            return q.y;
+        }
+        case 1u: {
+            return abs(q.y) - b;
+        }
+        case 2u: {
+            return (length(q / vec2<f32>(a, b)) - 1.0) * small;
+        }
+        case 3u: {
+            let r = clamp(roundness, 0.0, 1.0) * small;
+            let v = abs(q) - vec2<f32>(a, b) + vec2<f32>(r);
+            return length(max(v, vec2<f32>(0.0))) + min(max(v.x, v.y), 0.0) - r;
+        }
+        case 4u: {
+            return star_distance(q / vec2<f32>(a, b)) * small;
+        }
+        case 5u: {
+            return heart_distance(q / vec2<f32>(a, b)) * small;
+        }
+        default: {
+            return 1e30;
+        }
+    }
+}
+
+// How much of the clip shows at `local` under every mask, combined in order.
+fn mask_coverage(local: vec2<f32>) -> f32 {
+    let size = quad.matte_size;
+    let p = vec2<f32>((local.x - 0.5) * size.x, (0.5 - local.y) * size.y) * size.z;
+    var acc = 0.0;
+    for (var i = 0u; i < quad.matte_flags.y; i = i + 1u) {
+        let m0 = quad.masks[i * 3u];
+        let m1 = quad.masks[i * 3u + 1u];
+        let m2 = quad.masks[i * 3u + 2u];
+        let d = p - m0.xy;
+        // Into the mask's frame: undo its clockwise turn.
+        let q = vec2<f32>(d.x * m1.x - d.y * m1.y, d.x * m1.y + d.y * m1.x);
+        let dist = shape_distance(u32(m2.x), q, m0.zw, m1.w);
+        let soft = max(m1.z, size.z);
+        var c = 1.0 - smoothstep(-0.5 * soft, 0.5 * soft, dist);
+        if (m2.z > 0.5) {
+            c = 1.0 - c;
+        }
+        let op = u32(m2.y);
+        if (i == 0u) {
+            acc = select(c, 1.0 - c, op == 1u);
+        } else if (op == 1u) {
+            acc = min(acc, 1.0 - c);
+        } else if (op == 2u) {
+            acc = min(acc, c);
+        } else {
+            acc = max(acc, c);
+        }
+    }
+    return acc;
+}
+
+// BT.709 chroma of encoded RGB.
+fn cbcr(c: vec3<f32>) -> vec2<f32> {
+    let y = dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
+    return vec2<f32>((c.b - y) / 1.8556, (c.r - y) / 1.5748);
+}
+
+// The key's alpha for one encoded colour.
+fn key_alpha(c: vec3<f32>) -> f32 {
+    let d = distance(cbcr(c), cbcr(quad.key.rgb));
+    let lo = quad.key.w;
+    return smoothstep(lo, lo + quad.key2.x + 0.0001, d);
+}
+
+// The key colour's tint taken out, luma kept.
+fn despill(c: vec3<f32>) -> vec3<f32> {
+    let k = cbcr(quad.key.rgb);
+    let len = length(k);
+    if (len < 0.0001 || quad.key2.y <= 0.0) {
+        return c;
+    }
+    let dir = k / len;
+    let y = dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
+    var p = cbcr(c);
+    let d = distance(p, k);
+    let hi = quad.key.w + quad.key2.x;
+    let weight = clamp(1.0 - (d - hi) / KEY_SCALE, 0.0, 1.0);
+    let along = max(dot(p, dir), 0.0) * quad.key2.y * weight;
+    p = p - dir * along;
+    let r = y + 1.5748 * p.y;
+    let b = y + 1.8556 * p.x;
+    let g = (y - 0.2126 * r - 0.0722 * b) / 0.7152;
+    return clamp(vec3<f32>(r, g, b), vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+// The key's alpha pulled in at the edges: the smallest alpha over two rings
+// of eight taps around the pixel.
+fn shrunk_key_alpha(uv: vec2<f32>, centre: f32) -> f32 {
+    let dims = vec2<f32>(textureDimensions(source_texture));
+    let radius = quad.key2.z * min(dims.x, dims.y) / dims;
+    var a = centre;
+    for (var i = 0u; i < 16u; i = i + 1u) {
+        let angle = f32(i % 8u) * 0.7853982;
+        let r = select(radius, radius * 0.5, i >= 8u);
+        let tap = source_linear(uv + vec2<f32>(cos(angle), sin(angle)) * r);
+        a = min(a, key_alpha(linear_to_srgb(tap)));
+    }
+    return a;
+}
+
 @vertex
 fn vs_main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
@@ -393,6 +619,17 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         texel = vec4<f32>(srgb_to_linear(rgb), 1.0);
     } else {
         texel = textureSample(source_texture, source_sampler, in.uv);
+    }
+    // The chroma key, on the footage as shot: before any grade, in encoded
+    // colour. Spill comes out of what stays; the alpha waits for the masks.
+    var key_cover = 1.0;
+    if ((quad.matte_flags.x & M_KEY) != 0u) {
+        let shot = linear_to_srgb(texel.rgb);
+        key_cover = key_alpha(shot);
+        if ((quad.matte_flags.x & M_KEY_SHRINK) != 0u) {
+            key_cover = shrunk_key_alpha(in.uv, key_cover);
+        }
+        texel = vec4<f32>(srgb_to_linear(despill(shot)), texel.a);
     }
     // Per-clip colour, after decode and before compositing, so a transition
     // layer and an ordinary quad get it the same way. Every stage is behind a
@@ -524,6 +761,18 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         rgb = max(rgb * (1.0 + n * quad.detail.z * GRAIN_STRENGTH), vec3<f32>(0.0));
     }
     texel = vec4<f32>(rgb, texel.a);
+    // The masks and the key's matte, as coverage in the quad's own frame.
+    if (quad.matte_flags.x != 0u) {
+        var cover = key_cover;
+        if ((quad.matte_flags.x & M_MASK) != 0u) {
+            cover = cover * mask_coverage(in.local);
+        }
+        texel = vec4<f32>(texel.rgb, texel.a * cover);
+        // "Show matte": the alpha as grey, opaque, so what is kept is white.
+        if ((quad.matte_flags.x & M_VIEW_MATTE) != 0u) {
+            return vec4<f32>(vec3<f32>(srgb_to_linear(vec3<f32>(texel.a))), 1.0);
+        }
+    }
     // Straight alpha: opacity scales coverage, not colour. The pipeline's
     // blend state does the source-over multiply.
     return vec4<f32>(texel.rgb, texel.a * quad.opacity);

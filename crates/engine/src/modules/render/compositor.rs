@@ -91,6 +91,13 @@ struct QuadUniform {
     gamma: [f32; 4],
     offset: [f32; 4],
     hsl: [[f32; 4]; 8],
+    /// Masks and chroma key, [`super::matte::MatteBlock`]. Flags 0 for a
+    /// clip with neither, which then takes the path it always took.
+    matte_flags: [u32; 4],
+    matte_size: [f32; 4],
+    key: [f32; 4],
+    key2: [f32; 4],
+    masks: [[f32; 4]; crate::modules::project::compositing::MAX_MASKS * 3],
 }
 
 // `#[repr(C)]`, every field a `f32` array, no padding: the definition of a
@@ -974,6 +981,11 @@ impl Compositor {
                 gamma: grade.gamma,
                 offset: grade.offset,
                 hsl: grade.hsl,
+                matte_flags: quad.matte.flags,
+                matte_size: quad.matte.size,
+                key: quad.matte.key,
+                key2: quad.matte.key2,
+                masks: quad.matte.masks,
             };
             self.ctx.queue().write_buffer(
                 uniform_buffer,
@@ -1012,7 +1024,7 @@ impl Compositor {
         // item needs it, so a frame without effects takes exactly the path it
         // always took.
         let needs_fx = draws.items.iter().any(|item| match item {
-            Draw::Effected { .. } | Draw::Adjust { .. } => true,
+            Draw::Effected { .. } | Draw::Adjust { .. } | Draw::Blended { .. } => true,
             Draw::Transition { from_fx, to_fx, .. } => !from_fx.is_empty() || !to_fx.is_empty(),
             Draw::Quad(_) => false,
         });
@@ -1026,6 +1038,9 @@ impl Compositor {
         let mut layer_targets: Vec<PooledTexture> = Vec::new();
         let mut layer_groups: Vec<Option<wgpu::BindGroup>> = Vec::with_capacity(draws.items.len());
         let mut overs: Vec<Option<OverDraw>> = Vec::with_capacity(draws.items.len());
+        // A blended clip's finished layer, by item, for the blend pass that
+        // lays it on once the frame beneath it is composited.
+        let mut blend_layers: Vec<Option<PooledTexture>> = Vec::with_capacity(draws.items.len());
         for item in &draws.items {
             match item {
                 Draw::Transition {
@@ -1068,6 +1083,7 @@ impl Compositor {
                         sides[1].view(),
                     )));
                     overs.push(None);
+                    blend_layers.push(None);
                     layer_targets.extend(sides);
                 }
                 Draw::Effected { quad, chain } => {
@@ -1093,19 +1109,50 @@ impl Compositor {
                         size,
                     )));
                     layer_groups.push(None);
+                    blend_layers.push(None);
                     layer_targets.push(layer);
                     layer_targets.push(out);
+                }
+                Draw::Blended { quad, chain, .. } => {
+                    let frame = fx_frame.as_mut().expect("opened for a blended clip");
+                    let layer = self.pool.acquire(device, self.target_key(size));
+                    self.draw_layer(
+                        &mut encoder,
+                        &uniform_group,
+                        &source_groups,
+                        Some(quad),
+                        layer.view(),
+                    );
+                    let layer = if chain.is_empty() {
+                        layer
+                    } else {
+                        let out = frame.apply(
+                            &mut encoder,
+                            layer.view(),
+                            size,
+                            chain,
+                            self.target_key(size),
+                        );
+                        layer_targets.push(layer);
+                        out
+                    };
+                    blend_layers.push(Some(layer));
+                    layer_groups.push(None);
+                    overs.push(None);
                 }
                 Draw::Quad(_) | Draw::Adjust { .. } => {
                     layer_groups.push(None);
                     overs.push(None);
+                    blend_layers.push(None);
                 }
             }
         }
 
         // The composite, in painter's order. An effect clip splits it: the
         // pass so far is ended, the effect clip's effects run over what it
-        // drew into a fresh target, and compositing carries on into that.
+        // drew into a fresh target, and compositing carries on into that. A
+        // clip with a blend mode splits it the same way: its layer is laid
+        // onto the frame so far by the blend pass, into a fresh target.
         let mut target = target;
         let mut retired: Vec<PooledTexture> = Vec::new();
         let mut transition_slot = 0u32;
@@ -1113,7 +1160,7 @@ impl Compositor {
         loop {
             let end = draws.items[start..]
                 .iter()
-                .position(|item| matches!(item, Draw::Adjust { .. }))
+                .position(|item| matches!(item, Draw::Adjust { .. } | Draw::Blended { .. }))
                 .map_or(draws.items.len(), |at| start + at);
             {
                 let load = if start == 0 {
@@ -1181,30 +1228,49 @@ impl Compositor {
                                 over.draw(&mut pass);
                             }
                         }
-                        Draw::Adjust { .. } => unreachable!("a pass ends at an effect clip"),
+                        Draw::Adjust { .. } | Draw::Blended { .. } => {
+                            unreachable!("a pass ends at an effect clip or a blended clip")
+                        }
                     }
                 }
             }
             if end >= draws.items.len() {
                 break;
             }
-            let Draw::Adjust { chain } = &draws.items[end] else {
-                unreachable!("found by position above");
+            let frame = fx_frame
+                .as_mut()
+                .expect("opened for an effect or blended clip");
+            let out = match &draws.items[end] {
+                Draw::Adjust { chain } => frame.apply(
+                    &mut encoder,
+                    target.view(),
+                    size,
+                    chain,
+                    self.target_key(size),
+                ),
+                Draw::Blended { mode, .. } => {
+                    let layer = blend_layers[end].as_ref().expect("drawn above");
+                    frame.blend(
+                        &mut encoder,
+                        target.view(),
+                        layer.view(),
+                        size,
+                        *mode,
+                        self.target_key(size),
+                    )
+                }
+                _ => unreachable!("found by position above"),
             };
-            let frame = fx_frame.as_mut().expect("opened for an effect clip");
-            let out = frame.apply(
-                &mut encoder,
-                target.view(),
-                size,
-                chain,
-                self.target_key(size),
-            );
             retired.push(std::mem::replace(&mut target, out));
             start = end + 1;
         }
         self.ctx.queue().submit(Some(encoder.finish()));
         drop(uniforms);
-        for layer in layer_targets.into_iter().chain(retired) {
+        for layer in layer_targets
+            .into_iter()
+            .chain(retired)
+            .chain(blend_layers.into_iter().flatten())
+        {
             self.pool.release(layer);
         }
         if let Some(frame) = fx_frame {
@@ -1464,9 +1530,17 @@ impl Compositor {
                     source_time,
                     Some(quad.placement.mvp),
                 );
-                draws
-                    .items
-                    .push(blurred(project, segment, time, quad, chain));
+                // A blend mode needs the frame beneath, so the clip goes
+                // through a layer and the blend pass. Normal, and a mode
+                // this build does not know, take the ordinary draw.
+                let mode = project
+                    .materials
+                    .compositing_of(segment)
+                    .and_then(|m| m.blend.code());
+                draws.items.push(match mode {
+                    Some(mode) => Draw::Blended { quad, chain, mode },
+                    None => blurred(project, segment, time, quad, chain),
+                });
             }
         }
 
@@ -1606,6 +1680,16 @@ impl Compositor {
             grade.features |= super::grade::feature::CURVES;
         }
 
+        // Masks and the chroma key, measured in the quad as it is drawn in
+        // this render; at rest (or absent) they set no flag.
+        let matte = materials
+            .compositing_of(segment)
+            .map(|m| {
+                let quad = super::matte::quad_pixel_size(&placement.mvp, size);
+                super::matte::MatteBlock::new(m, source_time, quad)
+            })
+            .unwrap_or_default();
+
         let slot = draws.slots as u32;
         draws.slots += 1;
         Ok(Some(QuadDraw {
@@ -1615,6 +1699,7 @@ impl Compositor {
             lut,
             grade,
             curves,
+            matte,
             slot,
         }))
     }
@@ -1792,6 +1877,8 @@ struct QuadDraw {
     grade: super::grade::GradeBlock,
     /// The baked tone curves, when the clip has any.
     curves: Option<std::sync::Arc<super::grade::GpuCurves>>,
+    /// Masks and chroma key, packed; no flag when the clip has neither.
+    matte: super::matte::MatteBlock,
     slot: u32,
 }
 
@@ -1823,6 +1910,14 @@ enum Draw {
     Adjust {
         chain: Vec<FxInstance>,
     },
+    /// A clip with a blend mode other than normal: drawn into a layer (its
+    /// effects run over it), then laid onto everything composited so far by
+    /// the blend pass. `mode` is `BlendMode::code`.
+    Blended {
+        quad: QuadDraw,
+        chain: Vec<FxInstance>,
+        mode: u32,
+    },
 }
 
 /// Everything a frame draws, plus how many uniform blocks it needs.
@@ -1840,7 +1935,9 @@ impl DrawList {
         self.items
             .iter()
             .flat_map(|item| match item {
-                Draw::Quad(quad) | Draw::Effected { quad, .. } => [Some(quad), None],
+                Draw::Quad(quad) | Draw::Effected { quad, .. } | Draw::Blended { quad, .. } => {
+                    [Some(quad), None]
+                }
                 Draw::Transition { from, to, .. } => [from.as_ref(), to.as_ref()],
                 Draw::Adjust { .. } => [None, None],
             })

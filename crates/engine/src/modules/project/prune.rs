@@ -16,6 +16,7 @@
 //! and save again writes the same bytes.
 //!
 //! Only parameter categories are pruned: colour adjustments, effects,
+//! compositing (masks, keys, blend modes),
 //! animations, speed curves, follow links and the `extras` map (analysis
 //! results, voice cleanup, clip names). Media stays — an unused import is the
 //! media library (decision 0009) — and so do titles' text, transitions,
@@ -45,6 +46,9 @@ pub fn prune_unreferenced(project: &mut Project) -> usize {
         add(&m.id, to_value(m));
     }
     for m in &pool.effects {
+        add(&m.id, to_value(m));
+    }
+    for m in &pool.compositing {
         add(&m.id, to_value(m));
     }
     for m in &pool.animations {
@@ -88,18 +92,21 @@ pub fn prune_unreferenced(project: &mut Project) -> usize {
     let pool = &mut project.materials;
     let before = pool.color_adjusts.len()
         + pool.effects.len()
+        + pool.compositing.len()
         + pool.animations.len()
         + pool.speed_curves.len()
         + pool.follows.len()
         + pool.extras.len();
     pool.color_adjusts.retain(|m| reached.contains(&m.id));
     pool.effects.retain(|m| reached.contains(&m.id));
+    pool.compositing.retain(|m| reached.contains(&m.id));
     pool.animations.retain(|m| reached.contains(&m.id));
     pool.speed_curves.retain(|m| reached.contains(&m.id));
     pool.follows.retain(|m| reached.contains(&m.id));
     pool.extras.retain(|id, _| reached.contains(id));
     let after = pool.color_adjusts.len()
         + pool.effects.len()
+        + pool.compositing.len()
         + pool.animations.len()
         + pool.speed_curves.len()
         + pool.follows.len()

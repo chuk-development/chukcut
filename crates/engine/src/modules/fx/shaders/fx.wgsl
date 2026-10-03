@@ -518,3 +518,112 @@ fn fs_frame(in: VertexOutput) -> @location(0) vec4<f32> {
     let shadow = vec4<f32>(sc.rgb * shadow_a, shadow_a);
     return clip + shadow * (1.0 - clip.a);
 }
+
+// ---------------------------------------------------------------------------
+// Blend modes: a clip's layer laid onto the frame so far
+// ---------------------------------------------------------------------------
+//
+// t0 = the frame composited so far, t1 = the clip's layer (straight alpha,
+// already masked, keyed and faded), both in the compositor's format.
+// p[0] = (mode, 1 when that format is sRGB, 0, 0)
+//
+// The modes are the W3C compositing formulas on gamma-encoded colour, which
+// is what every editor's blend menu means. The result is then laid on with
+// the same straight-alpha source-over, in light, that a normal clip gets
+// from the pipeline's blend state, so "normal" here would be the ordinary
+// draw exactly. `render/blend.rs` is the CPU reference.
+
+fn to_encoded(c: vec3<f32>) -> vec3<f32> {
+    if (fx.p[0].y < 0.5) {
+        return c;
+    }
+    let x = clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
+    return select(1.055 * pow(x, vec3<f32>(1.0 / 2.4)) - vec3<f32>(0.055), x * 12.92, x <= vec3<f32>(0.0031308));
+}
+
+fn to_linear(c: vec3<f32>) -> vec3<f32> {
+    if (fx.p[0].y < 0.5) {
+        return c;
+    }
+    return select(pow((c + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4)), c / 12.92, c <= vec3<f32>(0.04045));
+}
+
+fn soft_light_d(b: f32) -> f32 {
+    if (b <= 0.25) {
+        return ((16.0 * b - 12.0) * b + 4.0) * b;
+    }
+    return sqrt(b);
+}
+
+fn blend_channel(mode: u32, b: f32, s: f32) -> f32 {
+    switch (mode) {
+        case 1u: { return b * s; }
+        case 2u: { return b + s - b * s; }
+        case 3u: {
+            // Overlay is hard light with the layers swapped.
+            if (b <= 0.5) {
+                return s * 2.0 * b;
+            }
+            let t = 2.0 * b - 1.0;
+            return s + t - s * t;
+        }
+        case 4u: {
+            if (s <= 0.5) {
+                return b - (1.0 - 2.0 * s) * b * (1.0 - b);
+            }
+            return b + (2.0 * s - 1.0) * (soft_light_d(b) - b);
+        }
+        case 5u: {
+            if (s <= 0.5) {
+                return b * 2.0 * s;
+            }
+            let t = 2.0 * s - 1.0;
+            return b + t - b * t;
+        }
+        case 6u: { return min(b, s); }
+        case 7u: { return max(b, s); }
+        case 8u: {
+            if (b <= 0.0) {
+                return 0.0;
+            }
+            if (s >= 1.0) {
+                return 1.0;
+            }
+            return min(1.0, b / (1.0 - s));
+        }
+        case 9u: {
+            if (b >= 1.0) {
+                return 1.0;
+            }
+            if (s <= 0.0) {
+                return 0.0;
+            }
+            return 1.0 - min(1.0, (1.0 - b) / s);
+        }
+        case 10u: { return abs(b - s); }
+        case 11u: { return b + s - 2.0 * b * s; }
+        case 12u: { return min(1.0, b + s); }
+        case 13u: { return max(0.0, b - s); }
+        default: { return s; }
+    }
+}
+
+@fragment
+fn fs_blend(in: VertexOutput) -> @location(0) vec4<f32> {
+    let p = vec2<i32>(in.clip_position.xy);
+    let base = load0(p);
+    let dims = vec2<i32>(textureDimensions(t1));
+    let top = textureLoad(t1, clamp(p, vec2<i32>(0), dims - vec2<i32>(1)), 0);
+    let mode = u32(fx.p[0].x);
+    let cb = to_encoded(base.rgb);
+    let cs = to_encoded(clamp(top.rgb, vec3<f32>(0.0), vec3<f32>(1.0)));
+    let mixed = vec3<f32>(
+        blend_channel(mode, cb.r, cs.r),
+        blend_channel(mode, cb.g, cs.g),
+        blend_channel(mode, cb.b, cs.b),
+    );
+    // Where the frame beneath is transparent the clip shows as itself.
+    let shown = to_linear(clamp(cs * (1.0 - base.a) + mixed * base.a, vec3<f32>(0.0), vec3<f32>(1.0)));
+    let a = top.a;
+    return vec4<f32>(shown * a + base.rgb * (1.0 - a), a + base.a * (1.0 - a));
+}

@@ -16,6 +16,7 @@
 pub mod animation;
 pub mod autosave;
 pub mod commands;
+pub mod compositing;
 pub mod configure;
 pub mod document;
 pub mod effects;
