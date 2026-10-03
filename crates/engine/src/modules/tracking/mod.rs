@@ -7,7 +7,9 @@
 //!   corners inside the box, a RANSAC similarity fit for position, scale and
 //!   rotation, and a template search that re-finds the object when the flow
 //!   loses it. Pure Rust, CPU only, no model to download. Runs as a background
-//!   job over the clip's source range at a reduced frame size.
+//!   job over the clip's source range at a reduced frame size. Step T2 adds
+//!   VitTrack, a learned tracker for fast motion, run in the ML worker
+//!   (`modules/ml/tracker.rs`); [`TrackerKind`] chooses per track.
 //! - **Document** ([`model`]): the result is a [`TrackingMaterial`] in the
 //!   pool — samples in *source* time and source-frame fractions — and an
 //!   overlay follows it through a [`FollowMaterial`] its `extras` name.
@@ -32,6 +34,6 @@ pub mod validate;
 
 pub use edit::TrackingCommand;
 pub use model::{
-    FollowMaterial, FollowMode, Pose, TrackSample, TrackSettings, TrackingMaterial, FLAG_ANCHOR,
-    FLAG_LOST, LOW_CONFIDENCE,
+    FollowMaterial, FollowMode, Pose, TrackSample, TrackSettings, TrackerKind, TrackingMaterial,
+    FLAG_ANCHOR, FLAG_LOST, LOW_CONFIDENCE,
 };

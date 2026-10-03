@@ -11,6 +11,7 @@
 
 pub mod protocol;
 pub mod registry;
+pub mod rvm;
 pub mod vittrack;
 pub mod yunet;
 

@@ -100,7 +100,8 @@ pub fn binary() -> Option<PathBuf> {
     })
 }
 
-type Pending = Arc<Mutex<HashMap<u64, mpsc::Sender<Reply>>>>;
+/// A reply and the payload that came with it (empty for most).
+type Pending = Arc<Mutex<HashMap<u64, mpsc::Sender<(Reply, Vec<u8>)>>>>;
 
 /// One running worker process.
 pub struct Client {
@@ -136,11 +137,11 @@ impl Client {
                     let mut stdout = BufReader::new(stdout);
                     loop {
                         match read_frame::<Message>(&mut stdout) {
-                            Ok(Some((message, _))) => {
+                            Ok(Some((message, payload))) => {
                                 let last = !matches!(message.body, Reply::Progress { .. });
                                 let mut pending = pending.lock();
                                 if let Some(tx) = pending.get(&message.id) {
-                                    let _ = tx.send(message.body);
+                                    let _ = tx.send((message.body, payload));
                                 }
                                 if last {
                                     pending.remove(&message.id);
@@ -215,6 +216,20 @@ impl Client {
         cancel: Option<&AtomicBool>,
         timeout: Duration,
     ) -> Result<Outcome, MlError> {
+        self.call_for_payload(body, payload, progress, cancel, timeout)
+            .map(|(outcome, _)| outcome)
+    }
+
+    /// [`Self::call_with`], keeping the payload the answer carried (a
+    /// matte's alpha bytes).
+    pub fn call_for_payload(
+        &self,
+        body: RequestBody,
+        payload: &[u8],
+        progress: &dyn Fn(f32, &str),
+        cancel: Option<&AtomicBool>,
+        timeout: Duration,
+    ) -> Result<(Outcome, Vec<u8>), MlError> {
         if !self.alive() {
             return Err(MlError::Crashed("the worker is not running".into()));
         }
@@ -230,9 +245,9 @@ impl Client {
         let mut cancel_sent = false;
         loop {
             match rx.recv_timeout(Duration::from_millis(50)) {
-                Ok(Reply::Progress { fraction, stage }) => progress(fraction, &stage),
-                Ok(Reply::Done { outcome }) => return Ok(outcome),
-                Ok(Reply::Error { kind, message }) => {
+                Ok((Reply::Progress { fraction, stage }, _)) => progress(fraction, &stage),
+                Ok((Reply::Done { outcome }, payload)) => return Ok((outcome, payload)),
+                Ok((Reply::Error { kind, message }, _)) => {
                     return Err(match kind {
                         ErrorKind::RuntimeMissing => MlError::RuntimeMissing(message),
                         ErrorKind::ModelMissing => MlError::ModelMissing(message),
@@ -373,6 +388,23 @@ pub fn request(
         Err(MlError::Crashed(why)) => {
             tracing::warn!("ML request failed ({why}); retrying on a new worker");
             client()?.call_with(body, payload, progress, cancel, timeout)
+        }
+        other => other,
+    }
+}
+
+/// [`request`], keeping the answer's payload.
+pub fn request_payload(
+    body: RequestBody,
+    payload: &[u8],
+    progress: &dyn Fn(f32, &str),
+    cancel: Option<&AtomicBool>,
+    timeout: Duration,
+) -> Result<(Outcome, Vec<u8>), MlError> {
+    match client()?.call_for_payload(body.clone(), payload, progress, cancel, timeout) {
+        Err(MlError::Crashed(why)) => {
+            tracing::warn!("ML request failed ({why}); retrying on a new worker");
+            client()?.call_for_payload(body, payload, progress, cancel, timeout)
         }
         other => other,
     }

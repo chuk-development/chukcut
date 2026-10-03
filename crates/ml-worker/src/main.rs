@@ -31,15 +31,22 @@ use chukcut_ml_worker::protocol::{
 };
 use chukcut_ml_worker::registry::{self, ModelSpec, Task};
 use chukcut_ml_worker::runtime::{Failure, Runtime};
-use chukcut_ml_worker::{vittrack, yunet};
+use chukcut_ml_worker::{rvm, vittrack, yunet};
 use ort::value::Tensor;
 
 type Out = Arc<Mutex<BufWriter<std::io::Stdout>>>;
 
+/// VitTrack's three output maps: confidence, size, offset.
+type VitMaps = (Vec<f32>, Vec<f32>, Vec<f32>);
+
 fn send(out: &Out, id: u64, body: Reply) {
+    send_with(out, id, body, &[]);
+}
+
+fn send_with(out: &Out, id: u64, body: Reply, payload: &[u8]) {
     let mut out = out.lock().unwrap_or_else(|e| e.into_inner());
     // A closed stdout means the editor is gone; the read loop notices too.
-    let _ = write_frame(&mut *out, &Message { id, body }, &[]);
+    let _ = write_frame(&mut *out, &Message { id, body }, payload);
 }
 
 fn default_root() -> PathBuf {
@@ -109,7 +116,9 @@ fn main() {
         root,
         runtime: None,
         tracks: HashMap::new(),
+        mattes: HashMap::new(),
         cancelled,
+        reply_payload: Vec::new(),
     };
     while let Ok((request, payload)) = rx.recv() {
         let id = request.id;
@@ -132,7 +141,12 @@ fn main() {
             Ok(outcome) => Reply::Done { outcome },
             Err((kind, message)) => Reply::Error { kind, message },
         };
-        send(&out, id, reply);
+        // Only a `done` carries the payload a request left behind.
+        let reply_payload = std::mem::take(&mut worker.reply_payload);
+        match reply {
+            Reply::Done { .. } => send_with(&out, id, reply, &reply_payload),
+            _ => send(&out, id, reply),
+        }
         worker.take_cancel(id);
         if shutdown {
             break;
@@ -150,14 +164,32 @@ fn cancelled_reply() -> Reply {
 struct Track {
     spec: &'static ModelSpec,
     template: Vec<f32>,
+    /// Where the object was last seen; the next search is around it.
     last: vittrack::Rect,
+    /// The last box held with confidence (`vittrack::CONFIDENT`): the size
+    /// scans look for and new boxes are checked against.
+    held: vittrack::Rect,
+    /// The object's colours in the first frame, which a re-detection must
+    /// match.
+    colours: Vec<f32>,
+}
+
+/// A matting session: the recurrent state after the last frame, and the
+/// frame size it belongs to.
+struct MatteSession {
+    size: (usize, usize),
+    states: [rvm::State; 4],
 }
 
 struct Worker {
     root: PathBuf,
     runtime: Option<Runtime>,
     tracks: HashMap<u64, Track>,
+    mattes: HashMap<u64, MatteSession>,
     cancelled: Arc<Mutex<HashSet<u64>>>,
+    /// What the request being answered sends back beside its header (a
+    /// matte); taken and cleared when the reply goes out.
+    reply_payload: Vec<u8>,
 }
 
 fn bad(message: impl Into<String>) -> Failure {
@@ -284,6 +316,8 @@ impl Worker {
                         spec,
                         template,
                         last,
+                        held: last,
+                        colours: vittrack::colour_signature(payload, w, h, last),
                     },
                 );
                 Ok(Outcome::Ok)
@@ -292,18 +326,42 @@ impl Worker {
                 session,
                 width,
                 height,
+                redetect,
             } => {
                 let (w, h) = frame(payload, width, height)?;
                 let started = Instant::now();
-                let (bbox, score) = self.track(session, payload, w, h)?;
+                let (bbox, score, redetected) = self.track(session, payload, w, h, redetect)?;
                 Ok(Outcome::Track {
                     bbox: bbox.map(vittrack::Rect::to_f32),
                     score,
                     millis: millis(started),
+                    redetected,
                 })
             }
             RequestBody::TrackEnd { session } => {
                 self.tracks.remove(&session);
+                Ok(Outcome::Ok)
+            }
+            RequestBody::Matte {
+                model: name,
+                session,
+                width,
+                height,
+            } => {
+                let (w, h) = frame(payload, width, height)?;
+                let spec = model(&name, Task::Matte)?;
+                let started = Instant::now();
+                let (alpha, provider) = self.matte(spec, session, payload, w, h)?;
+                self.reply_payload = alpha;
+                Ok(Outcome::Matte {
+                    width,
+                    height,
+                    millis: millis(started),
+                    provider,
+                })
+            }
+            RequestBody::MatteEnd { session } => {
+                self.mattes.remove(&session);
                 Ok(Outcome::Ok)
             }
             RequestBody::Benchmark {
@@ -357,23 +415,83 @@ impl Worker {
         Ok((faces, loaded.provider.to_string()))
     }
 
-    fn track(
+    /// The matte of the next frame of `session`, as alpha bytes, and the
+    /// provider it ran on. The session's state moves on by one frame.
+    fn matte(
         &mut self,
+        spec: &'static ModelSpec,
         session: u64,
         rgba: &[u8],
         w: usize,
         h: usize,
-    ) -> Result<(Option<vittrack::Rect>, f32), Failure> {
-        let track = self
-            .tracks
-            .get(&session)
-            .ok_or_else(|| bad(format!("no track {session}; start it first")))?;
-        let (spec, last, template) = (track.spec, track.last, track.template.clone());
-        let search = vittrack::crop_tensor(rgba, w, h, last, 4, vittrack::SEARCH_SIZE);
+    ) -> Result<(Vec<u8>, String), Failure> {
+        let states = match self.mattes.get(&session) {
+            Some(m) if m.size == (w, h) => m.states.clone(),
+            _ => std::array::from_fn(|_| rvm::State::zero()),
+        };
+        let loaded = self.runtime()?.session(spec)?;
+        let provider = loaded.provider.to_string();
+        let src = Tensor::from_array(([1i64, 3, h as i64, w as i64], rvm::input(rgba, w, h)))
+            .map_err(inference)?;
+        let ratio =
+            Tensor::from_array(([1i64], vec![rvm::downsample_ratio(w, h)])).map_err(inference)?;
+        let [r1, r2, r3, r4] = states.map(|s| Tensor::from_array((s.shape, s.data)));
+        let outputs = loaded
+            .session
+            .run(ort::inputs![
+                "src" => src,
+                "r1i" => r1.map_err(inference)?,
+                "r2i" => r2.map_err(inference)?,
+                "r3i" => r3.map_err(inference)?,
+                "r4i" => r4.map_err(inference)?,
+                "downsample_ratio" => ratio,
+            ])
+            .map_err(inference)?;
+        let extract = |name: &str| -> Result<rvm::State, Failure> {
+            let value = outputs
+                .get(name)
+                .ok_or_else(|| inference(format!("the model has no output {name}")))?;
+            let (shape, data) = value.try_extract_tensor::<f32>().map_err(inference)?;
+            Ok(rvm::State {
+                shape: shape.to_vec(),
+                data: data.to_vec(),
+            })
+        };
+        let pha = extract("pha")?;
+        if pha.data.len() != w * h {
+            return Err(inference(format!(
+                "the matte is {} values for a {w}x{h} frame",
+                pha.data.len()
+            )));
+        }
+        let mut next = Vec::with_capacity(4);
+        for name in rvm::STATE_OUTPUTS {
+            next.push(extract(name)?);
+        }
+        drop(outputs);
+        let states: [rvm::State; 4] = next.try_into().expect("four states");
+        self.mattes.insert(
+            session,
+            MatteSession {
+                size: (w, h),
+                states,
+            },
+        );
+        Ok((rvm::alpha_bytes(&pha.data), provider))
+    }
+
+    /// One VitTrack run: `template` against `search`, the three output maps.
+    fn vit_run(
+        &mut self,
+        spec: &'static ModelSpec,
+        template: &[f32],
+        search: Vec<f32>,
+    ) -> Result<VitMaps, Failure> {
         let loaded = self.runtime()?.session(spec)?;
         let t = vittrack::TEMPLATE_SIZE as i64;
         let s = vittrack::SEARCH_SIZE as i64;
-        let template = Tensor::from_array(([1i64, 3, t, t], template)).map_err(inference)?;
+        let template =
+            Tensor::from_array(([1i64, 3, t, t], template.to_vec())).map_err(inference)?;
         let search = Tensor::from_array(([1i64, 3, s, s], search)).map_err(inference)?;
         let outputs = loaded
             .session
@@ -389,13 +507,64 @@ impl Worker {
                 .1
                 .to_vec())
         };
-        let (conf, size, offset) = (get("output1")?, get("output2")?, get("output3")?);
-        drop(outputs);
-        let (next, score) = vittrack::update(last, &conf, &size, &offset);
+        Ok((get("output1")?, get("output2")?, get("output3")?))
+    }
+
+    /// The tracked box in this frame: the search around the last box, then,
+    /// when that finds nothing and `redetect` is set, a scan of the whole
+    /// frame. Answers the box (or `None`), its score and whether the scan
+    /// found it.
+    fn track(
+        &mut self,
+        session: u64,
+        rgba: &[u8],
+        w: usize,
+        h: usize,
+        redetect: bool,
+    ) -> Result<(Option<vittrack::Rect>, f32, bool), Failure> {
+        let track = self
+            .tracks
+            .get(&session)
+            .ok_or_else(|| bad(format!("no track {session}; start it first")))?;
+        let (spec, last, held) = (track.spec, track.last, track.held);
+        let (template, colours) = (track.template.clone(), track.colours.clone());
+        let search = vittrack::crop_tensor(rgba, w, h, last, 4, vittrack::SEARCH_SIZE);
+        let (conf, size, offset) = self.vit_run(spec, &template, search)?;
+        let (mut next, mut score) = vittrack::update(last, held, &conf, &size, &offset);
+        let mut redetected = false;
+        if next.is_none() && redetect {
+            let mut best: Option<(vittrack::Rect, f32)> = None;
+            for window in vittrack::scan_boxes(w, h, held) {
+                let search = vittrack::crop_tensor(rgba, w, h, window, 4, vittrack::SEARCH_SIZE);
+                let (conf, size, offset) = self.vit_run(spec, &template, search)?;
+                let (Some(hit), raw) = vittrack::scan_hit(window, &conf, &size, &offset) else {
+                    continue;
+                };
+                if raw < vittrack::REDETECT_THRESHOLD
+                    || !vittrack::plausible(held, hit)
+                    || best.is_some_and(|(_, s)| raw <= s)
+                {
+                    continue;
+                }
+                let colour =
+                    vittrack::colour_match(&colours, &vittrack::colour_signature(rgba, w, h, hit));
+                if colour >= vittrack::MIN_COLOUR_MATCH {
+                    best = Some((hit, raw));
+                }
+            }
+            if let Some((hit, raw)) = best {
+                next = Some(hit);
+                score = raw;
+                redetected = true;
+            }
+        }
         if let (Some(next), Some(track)) = (next, self.tracks.get_mut(&session)) {
             track.last = next;
+            if redetected || score >= vittrack::CONFIDENT {
+                track.held = next;
+            }
         }
-        Ok((next, score))
+        Ok((next, score, redetected))
     }
 
     fn benchmark(
@@ -437,10 +606,13 @@ impl Worker {
                             spec,
                             template,
                             last: bbox,
+                            held: bbox,
+                            colours: vittrack::colour_signature(&rgba, w, h, bbox),
                         },
                     );
-                    worker.track(session, &rgba, w, h).map(|_| ())
+                    worker.track(session, &rgba, w, h, false).map(|_| ())
                 }
+                Task::Matte => worker.matte(spec, session, &rgba, w, h).map(|_| ()),
             }
         };
         // One untimed run: the first run on a GPU provider allocates and
@@ -450,6 +622,7 @@ impl Worker {
         for i in 0..iterations {
             if self.is_cancelled(id) {
                 self.tracks.remove(&session);
+                self.mattes.remove(&session);
                 return Err((ErrorKind::Cancelled, "cancelled".into()));
             }
             let started = Instant::now();
@@ -458,6 +631,7 @@ impl Worker {
             progress((i + 1) as f32 / iterations as f32, "running");
         }
         self.tracks.remove(&session);
+        self.mattes.remove(&session);
         Ok(Outcome::Benchmark {
             provider,
             iterations,

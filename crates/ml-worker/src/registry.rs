@@ -7,6 +7,9 @@
 //!   commit, never a branch), and the SHA-256 is the Git LFS object id at that
 //!   commit, which *is* the SHA-256 of the file. Read from
 //!   `raw.githubusercontent.com/opencv/opencv_zoo/<commit>/…` on 2026-10-03.
+//!   RVM is a GitHub release asset of tag `v1.0.0` (commit `17d1774`); a
+//!   release asset can be replaced by its owner, which the SHA-256 (taken
+//!   from the download on 2026-10-04) would catch.
 //! - **Runtime packs**: ONNX Runtime itself, as Microsoft publishes it on
 //!   GitHub. The worker loads it at run time (`ort`'s `load-dynamic`), so
 //!   neither the editor nor the worker binary carries a gigabyte of CUDA
@@ -38,6 +41,9 @@ pub enum Task {
     DetectFaces,
     /// Single-object tracking: a box in, a box per frame out.
     TrackBox,
+    /// Person matting: an alpha matte per frame, recurrent over a run of
+    /// frames.
+    Matte,
 }
 
 /// One downloadable model.
@@ -91,6 +97,21 @@ pub const MODELS: &[ModelSpec] = &[
         bytes: 714_726,
         file: "object_tracking_vittrack_2023sep.onnx",
         providers_tested: &["CPU", "CUDA"],
+    },
+    ModelSpec {
+        id: "rvm",
+        version: "1.0.0-mobilenetv3",
+        name: "Robust Video Matting (people)",
+        task: Task::Matte,
+        // The repository's licence, which covers the released weights; GPL
+        // allows commercial use, and chukcut is GPL itself (decision 0010).
+        licence: "GPL-3.0",
+        commercial_ok: true,
+        url: "https://github.com/PeterL1n/RobustVideoMatting/releases/download/v1.0.0/rvm_mobilenetv3_fp32.onnx",
+        sha256: "88d4531297118f595bf2fd60f6f566aec2e559393802d1f436c380f0cbbd2828",
+        bytes: 14_975_696,
+        file: "rvm_mobilenetv3_fp32.onnx",
+        providers_tested: &["CPU"],
     },
 ];
 

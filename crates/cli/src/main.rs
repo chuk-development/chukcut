@@ -34,6 +34,7 @@ use ops::layout::*;
 use ops::look::*;
 use ops::markers::*;
 use ops::mask::*;
+use ops::ml::*;
 use ops::project::*;
 use ops::render::*;
 use ops::text::*;
@@ -200,6 +201,8 @@ enum Command {
     Batch(BatchArgs),
     /// List effects, audio effects, transitions, animations, grade controls, presets, encoders, models, LUTs or fonts.
     Catalog(CatalogArgs),
+    /// Machine learning: models, runtime packs, status and speed of the ML worker.
+    Ml(MlArgs),
     /// Serve every operation to an MCP client over stdio.
     Mcp,
 }
@@ -560,6 +563,7 @@ fn dispatch(command: Command, dry: bool, ctx: &Ctx) -> CliResult<(&'static str, 
         Command::ExportQueue(o) => on(o, dry, ctx),
         Command::RenderFrame(o) => on(o, dry, ctx),
         Command::Catalog(args) => Ok(("catalog", args.run()?, false)),
+        Command::Ml(args) => Ok(("ml", args.run()?, false)),
         Command::Batch(args) => {
             let raw = read_input(&args.file)?;
             let ops = batch_ops(&raw)?;

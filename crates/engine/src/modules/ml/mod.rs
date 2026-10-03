@@ -13,7 +13,10 @@
 //!   URL and SHA-256 in the registry (`chukcut_ml_worker::registry`), into
 //!   the cache (`~/.cache/chukcut/ml`), on first use, with progress.
 //! - **Faces** ([`faces`]): YuNet, for auto reframe.
-//! - **Tracker** ([`tracker`]): VitTrack, tracker T2 for fast motion.
+//! - **Tracker** ([`tracker`]): VitTrack, tracker T2 for fast motion, with a
+//!   whole-frame scan that finds the object again after it was hidden.
+//! - **Matte** ([`matte`]): Robust Video Matting, for "Remove background"
+//!   (`modules/matting`).
 //! - **Commands** ([`commands`]): what the UI, the CLI and MCP call.
 //!
 //! **Degrading.** Every caller treats ML as optional. No worker binary, no
@@ -31,6 +34,7 @@ use chukcut_ml_worker::registry;
 pub mod commands;
 pub mod download;
 pub mod faces;
+pub mod matte;
 pub mod tracker;
 pub mod worker;
 

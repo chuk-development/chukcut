@@ -30,6 +30,7 @@ use base64::Engine as _;
 use serde_json::{json, Map, Value};
 
 use crate::error::{CliError, CliResult};
+use crate::ops::ml::MlArgs;
 use crate::ops::project::{CatalogArgs, NewArgs};
 use crate::ops::render::render_png;
 use crate::ops::{self, summary, Ctx, Outcome};
@@ -75,6 +76,7 @@ const OPEN_WORLD: &[&str] = &[
     "stock_kinds",
     "stock_search",
     "stock_download",
+    "ml",
 ];
 
 type Out = Arc<Mutex<std::io::Stdout>>;
@@ -268,6 +270,11 @@ impl Server {
     fn run_tool(&mut self, name: &str, args: &mut Value, ctx: &Ctx) -> CliResult<ToolOutput> {
         if name == "catalog" {
             let args: CatalogArgs =
+                serde_json::from_value(args.clone()).map_err(|e| CliError::usage(e.to_string()))?;
+            return args.run().map(ToolOutput::text);
+        }
+        if name == "ml" {
+            let args: MlArgs =
                 serde_json::from_value(args.clone()).map_err(|e| CliError::usage(e.to_string()))?;
             return args.run().map(ToolOutput::text);
         }
@@ -546,12 +553,14 @@ fn tools() -> Vec<Value> {
         &catalog.description,
         catalog.schema,
     ));
+    let ml = ops::tool_spec::<MlArgs>("ml");
+    out.push(tool_json(ml.name, &ml.description, ml.schema));
     out
 }
 
 fn tool_names() -> Vec<&'static str> {
     let mut names = ops::names();
-    names.extend(["new_project", "view_frame", "batch", "catalog"]);
+    names.extend(["new_project", "view_frame", "batch", "catalog", "ml"]);
     names
 }
 
@@ -646,7 +655,7 @@ mod tests {
                 !tool["description"].as_str().unwrap_or("").is_empty(),
                 "{name} has no description"
             );
-            if name != "catalog" {
+            if name != "catalog" && name != "ml" {
                 assert_eq!(tool["inputSchema"]["required"][0], "project", "{name}");
             }
         }

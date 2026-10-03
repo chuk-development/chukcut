@@ -19,7 +19,7 @@ use chukcut_engine::modules::timeline::commands as timeline_commands;
 use chukcut_engine::modules::timeline::ops::EditCommand;
 use chukcut_engine::modules::tracking::commands::{self as tracking_commands, StartTracking};
 use chukcut_engine::modules::tracking::job::Direction;
-use chukcut_engine::modules::tracking::FollowMode;
+use chukcut_engine::modules::tracking::{FollowMode, TrackerKind};
 use chukcut_engine::modules::transitions::commands as transition_commands;
 use clap::Args;
 use schemars::JsonSchema;
@@ -1228,6 +1228,11 @@ pub struct TrackArgs {
     /// position, position_scale or position_scale_rotation.
     #[arg(long)]
     pub mode: Option<String>,
+    /// klt (standard, no model) or vittrack (fast motion; runs in the ML
+    /// worker, falls back to klt when it cannot).
+    #[arg(long)]
+    #[serde(default)]
+    pub tracker: Option<String>,
 }
 
 impl Operation for TrackArgs {
@@ -1275,6 +1280,11 @@ impl Operation for TrackArgs {
                 .transpose()?
                 .unwrap_or_default(),
             retrack: None,
+            tracker: self
+                .tracker
+                .as_deref()
+                .map(|t| enum_named::<TrackerKind>("tracker", t, &["klt", "vittrack"]))
+                .transpose()?,
         };
         let job = tracking_commands::tracking_start(&session.state, request, None)?;
         let outcome = loop {

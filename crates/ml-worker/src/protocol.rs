@@ -16,7 +16,8 @@
 //! copy on both sides for every frame.
 //!
 //! Every request carries an `id`. The worker answers each id with zero or more
-//! `progress` messages and then exactly one `done` or `error`. Requests run
+//! `progress` messages and then exactly one `done` or `error`. A `done` may
+//! carry a payload too: a matte comes back as one byte of alpha per pixel. Requests run
 //! one at a time in the order they arrive; a `cancel` is the exception — the
 //! worker reads it as soon as it arrives and the request it names stops at
 //! its next check and ends with an `error` of kind `cancelled`.
@@ -28,7 +29,10 @@ use serde::{Deserialize, Serialize};
 /// Bumped when a change would make an old engine and a new worker (or the
 /// reverse) misread each other. `hello` reports it; the engine refuses a
 /// worker with another number instead of failing on a strange message later.
-pub const PROTOCOL_VERSION: u32 = 1;
+///
+/// 2: whole-frame re-detection for tracks, and mattes (the first reply with a
+/// payload).
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// A header longer than this is a broken stream, not a message.
 const MAX_HEADER: usize = 1 << 20;
@@ -79,9 +83,29 @@ pub enum RequestBody {
         session: u64,
         width: u32,
         height: u32,
+        /// When the search around the last box finds nothing, search the
+        /// whole frame (`vittrack::scan_boxes`). Costs one model run per
+        /// window, about a hundred at 640×360, so the engine asks for it on
+        /// some lost frames, not all.
+        #[serde(default)]
+        redetect: bool,
     },
     /// Forget a track. Answered with [`Outcome::Ok`].
     TrackEnd { session: u64 },
+    /// The alpha matte of the next frame (the payload) in matting session
+    /// `session`. Frames of one session must be consecutive frames of one
+    /// shot: the model carries state from each to the next. A new session id
+    /// (or a new frame size) starts from a clean state. Answered with
+    /// [`Outcome::Matte`] and the matte as the payload, `width × height`
+    /// bytes.
+    Matte {
+        model: String,
+        session: u64,
+        width: u32,
+        height: u32,
+    },
+    /// Forget a matting session's state. Answered with [`Outcome::Ok`].
+    MatteEnd { session: u64 },
     /// Run `model` `iterations` times on a synthetic input of `width` ×
     /// `height` and report the time per run. Reports progress and can be
     /// cancelled; it is how a speed claim in the docs is measured.
@@ -142,6 +166,18 @@ pub enum Outcome {
         bbox: Option<[f32; 4]>,
         score: f32,
         millis: f32,
+        /// The box came from a whole-frame scan, not from the search around
+        /// the last one.
+        #[serde(default)]
+        redetected: bool,
+    },
+    /// The payload is the matte: `width × height` bytes, 0 transparent to
+    /// 255 opaque, rows top to bottom.
+    Matte {
+        width: u32,
+        height: u32,
+        millis: f32,
+        provider: String,
     },
     Benchmark {
         provider: String,
@@ -287,6 +323,7 @@ mod tests {
                     bbox: None,
                     score: 0.1,
                     millis: 2.0,
+                    redetected: false,
                 },
             },
         };

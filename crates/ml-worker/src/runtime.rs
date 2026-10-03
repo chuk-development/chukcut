@@ -112,12 +112,18 @@ impl Runtime {
             eprintln!("chukcut-ml-worker: an ONNX Runtime environment already existed");
         }
         let info = ort::info();
-        // "ORT Build Info: git-branch=rel-1.28.3, git-commit-id=…, …"
-        let runtime_version = info
-            .split(", ")
-            .find_map(|part| part.split("git-branch=rel-").nth(1))
-            .unwrap_or("unknown")
-            .to_string();
+        // The build info string of Microsoft's builds names no version
+        // ("git-branch=HEAD"), but the library's real file name does:
+        // libonnxruntime.so -> libonnxruntime.so.1 -> libonnxruntime.so.1.28.3.
+        let runtime_version = std::fs::canonicalize(&lib)
+            .ok()
+            .and_then(|p| {
+                p.file_name()?
+                    .to_str()?
+                    .split_once(".so.")
+                    .map(|(_, v)| v.to_string())
+            })
+            .unwrap_or_else(|| info.to_string());
         let mut probe = Probe {
             runtime: lib.display().to_string(),
             runtime_version,

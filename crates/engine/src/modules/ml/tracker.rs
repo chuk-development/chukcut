@@ -55,17 +55,22 @@ impl VitTracker {
     }
 
     /// The object's box in the next frame and the tracker's confidence;
-    /// `None` when it is lost in this frame (the box then stays put).
+    /// `None` when it is lost in this frame (the box then stays put). With
+    /// `redetect`, a frame where the search around the last box finds
+    /// nothing is searched whole, which re-finds an object that came out from
+    /// behind something further on or came back into the frame elsewhere.
     pub fn update(
         &mut self,
         rgba: &[u8],
         width: usize,
         height: usize,
+        redetect: bool,
     ) -> Result<(Option<[f32; 4]>, f32), MlError> {
         let body = RequestBody::TrackUpdate {
             session: self.session,
             width: width as u32,
             height: height as u32,
+            redetect,
         };
         let outcome = match worker::request(body, rgba, &|_, _| {}, None, Duration::from_secs(30)) {
             // A new worker does not know this track: start it again here.
