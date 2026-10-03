@@ -356,7 +356,7 @@ fn fs_vhs(in: VertexOutput) -> @location(0) vec4<f32> {
     rgb = rgb * (1.0 - fx.p[0].w * 0.35 * line);
     // Noise, stronger in the tracking band.
     let n = hash2(u32(p.x) + row * 4099u, tick + 3u) * 2.0 - 1.0;
-    rgb = rgb + vec3<f32>(n * fx.p[0].y * 0.25 * (1.0 + 2.0 * in_band)) * centre.a;
+    rgb = rgb + vec3<f32>(n * fx.p[0].y * 0.12 * (1.0 + 2.0 * in_band)) * centre.a;
     // Tape is a little washed out.
     let grey = dot(rgb, LUMA);
     rgb = mix(rgb, vec3<f32>(grey), 0.2 * intensity);

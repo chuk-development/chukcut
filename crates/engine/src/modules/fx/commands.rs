@@ -245,6 +245,26 @@ pub fn fx_tile(kind: String, size: (u32, u32)) -> Result<PathBuf, String> {
     super::tiles::effect_tile(&kind, size)
 }
 
+/// The preview tile of a transition — a built-in kind, or a library preset —
+/// caught 40% of the way from the day sample to the night one. Blocking.
+pub fn fx_transition_tile(
+    kind: crate::modules::project::document::TransitionKind,
+    preset: Option<String>,
+    size: (u32, u32),
+) -> Result<PathBuf, String> {
+    super::tiles::transition_tile(kind, preset.as_deref(), size)
+}
+
+/// The preview tile of a split-screen layout. Blocking.
+pub fn fx_split_tile(layout: SplitLayout, size: (u32, u32)) -> Result<PathBuf, String> {
+    super::tiles::split_tile(layout, size)
+}
+
+/// The preview tile of the picture-in-picture preset. Blocking.
+pub fn fx_pip_tile(size: (u32, u32)) -> Result<PathBuf, String> {
+    super::tiles::pip_tile(size)
+}
+
 fn respond(state: &AppState) -> Result<EditResponse, String> {
     let project = state.project.read().clone().ok_or("no project is open")?;
     let origin = state.project_path.read().clone();
