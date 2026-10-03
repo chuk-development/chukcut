@@ -42,19 +42,19 @@ column current.
 | 1 | inspector | `editor/inspector/`, engine `modules/inspector` | merged f6a9906 |
 | 1 | assets/title/player/export | `editor/assets/`, `title_bar.rs`, `preview.rs`, `editor/export/` | merged 7a35019 |
 | 2 | design | design language: `ui/` component kit + tokens (`theme.rs`), restyle title bar, asset panel, player | merged (agent/design) — kit not yet applied to timeline + inspector |
-| 2 | colour | grading engine (shader) + LUTs + Adjust/HSL/Curves/Wheels UI in the inspector | running (branch agent/colour) |
-| 2 | timeline-2 | multi-select, clipboard, keyframes on clips, transitions on the timeline, text lane, detach/link audio, fade handles | running (branch agent/timeline2) |
+| 2 | colour | grading engine (shader) + LUTs + Adjust/HSL/Curves/Wheels UI in the inspector | merged ba0b00f — Save as preset, auto adjust/colour match, Mask sub-tab still placeholders |
+| 2 | timeline-2 | multi-select, clipboard, keyframes on clips, transitions on the timeline, text lane, detach/link audio, fade handles | merged 101f61f — no freeze frame (engine), drop ghost lacks lane (needs `MediaDrag` export), in/out marks not on ruler |
 | 2 | shell | start screen + recent projects, autosave restore, settings (proxies, cache, hardware), shortcuts sheet, playback/scrub robustness | merged 331c980 — in/out marks not drawn on the ruler yet (timeline owner); proxy policy + cache limit stored but unused |
 | 3 | text & titles | text tab (fonts, styles, presets), text inspector (font, size, colour, stroke, shadow, box) | |
 | 3 | motion | in/out/combo presets relative to the clip, easing library, text animator (letter/word/line), punch-in zoom + auto zoom on jump cuts | running (agent/motion) |
 | 3 | integrations | provider registry (secrets.toml 0600) + ElevenLabs TTS/SFX, OpenAI-compatible TTS, Pexels/Pixabay/Freesound search, fal.ai jobs with cost estimate — after captions merge | |
 | 3 | silence | silence + filler-word cutting with a review list, voice cleanup, loudness target on export | running (agent/silence) |
-| 3 | effects | short-form pack (glow, shake, light sweep, RGB split, glitch, blur, vignette), film look (grain, halation, bloom), PiP/layouts with rounded corners, gl-transitions + seamless transitions — after colour merges (compositor) | |
+| 3 | effects | short-form pack (glow, shake, light sweep, RGB split, glitch, blur, vignette), film look (grain, halation, bloom), PiP/layouts with rounded corners, gl-transitions + seamless transitions — after colour merges (compositor) | running (agent/effects) |
 | 3 | audio | audio effects (fades, denoise, normalise), voiceover record, beat markers | |
 | 2 | captions | auto captions (OpenAI-compatible API with own base URL/key/model, or local Whisper), word/sentence mode, SRT/VTT, caption lane, styles (font, colour, stroke, box, position, karaoke highlight), emoji | running (branch agent/captions) |
 | 2 | research | ml-features, open-assets, integrations, resolve-plugins — all merged into docs/research/ |
 | 3 | tracking | running (agent/tracking) — motion tracking T1 (Rust KLT, track material + follows link, box select on the player, re-track, smoothing, bake to keyframes) per docs/research/ml-features.md | |
-| 3 | design-2 | apply the kit to timeline + inspector (after timeline-2 and colour merge) | |
+| 3 | design-2 | apply the kit to timeline + inspector; in/out marks on the ruler; drop ghost with lane (export MediaDrag) — after tracking, motion, silence merge | |
 | 4 | perf | shared GPU device with GPUI (no readback), playback at 4K, proxies on by default for heavy files | |
 | 4 | QA | end-to-end tests over the command layer, a test pass over every panel, fixes | |
 | 4 | packaging | release build, desktop entry, icon, install script, README | |
