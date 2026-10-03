@@ -17,6 +17,7 @@ const ANIMATION: &str = "Animation";
 const ADJUST: &str = "Adjust";
 const BASIC: &str = "Basic";
 const VOICE: &str = "Voice changer";
+const TRACKING: &str = "Tracking";
 
 /// Which edge or centre an alignment button snaps the clip to.
 #[derive(Clone, Copy)]
@@ -82,9 +83,9 @@ impl Editor {
                 vec![VIDEO, AUDIO, SPEED, ANIMATION, ADJUST]
             }
             ClipKind::Video => vec![VIDEO, SPEED, ANIMATION, ADJUST],
-            ClipKind::Image => vec![VIDEO, ANIMATION, ADJUST],
+            ClipKind::Image => vec![VIDEO, ANIMATION, ADJUST, TRACKING],
             ClipKind::Audio => vec![BASIC, VOICE, SPEED],
-            ClipKind::Text => vec![VIDEO, ANIMATION],
+            ClipKind::Text => vec![VIDEO, ANIMATION, TRACKING],
         };
         let active = self
             .inspector
@@ -113,6 +114,7 @@ impl Editor {
                 }
                 AUDIO | BASIC => (None, self.audio_basic(window, cx), None),
                 VOICE => (None, not_yet("Voice changer"), None),
+                TRACKING => (None, self.tracking_tab(&segment, window, cx), None),
                 SPEED => {
                     let names = ["Standard", "Curve", "Speed effects"];
                     let current = sub(self, SPEED, names[0]);

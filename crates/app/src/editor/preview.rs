@@ -260,7 +260,12 @@ impl Editor {
                     .child(
                         // A hairline frame so a black picture still shows
                         // where the canvas ends.
-                        div().border_1().border_color(rgb(HAIRLINE)).child(picture),
+                        div()
+                            .relative()
+                            .border_1()
+                            .border_color(rgb(HAIRLINE))
+                            .child(picture)
+                            .child(self.render_tracking_overlay(cx)),
                     ),
             )
             .child(

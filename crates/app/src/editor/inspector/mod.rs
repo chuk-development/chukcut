@@ -32,6 +32,7 @@ use super::*;
 mod clip;
 mod controls;
 mod details;
+mod tracking;
 
 pub(super) use details::SettingsForm;
 
