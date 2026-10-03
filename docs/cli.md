@@ -374,7 +374,7 @@ exact name, or its index in tab order (`0` is the first). A compound clip is
 a clip that holds a timeline of its own. Opening one is an edit like any
 other: the saved file remembers it, and later commands edit the compound
 clip's lanes until `compound close`. `export` always renders the whole
-timeline, even while a compound clip is open. Decision 0022.
+timeline, even while a compound clip is open. Decision 0024.
 
 #### `timeline list PROJECT`
 

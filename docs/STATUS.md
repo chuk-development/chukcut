@@ -96,7 +96,7 @@ Judge performance from a release build only.
 
 ## Timelines and compound clips (2026-10-04, agent/compound)
 
-Decision 0022. A project holds several **sequences**: timelines (tabs above
+Decision 0024. A project holds several **sequences**: timelines (tabs above
 the lanes, "+" adds one, right-click renames, duplicates or deletes) and
 compound clips (select clips, Alt+G or the clip menu; double-click to open,
 breadcrumbs or the clip menu to close; Alt+Shift+G puts the clips back).

@@ -5,7 +5,7 @@
 //!
 //! Every action is a command in `modules/sequence/commands.rs`; opening and
 //! closing a compound clip are edits on the undo stack like any other
-//! (decision 0022), so this file only picks what to act on and where the
+//! (decision 0024), so this file only picks what to act on and where the
 //! playhead goes afterwards.
 
 use chukcut_engine::modules::sequence::{self, build as seq_build, commands as seq};

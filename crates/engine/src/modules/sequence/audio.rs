@@ -13,7 +13,7 @@
 //! through), mute (a muted lane, inside or out, contributes nothing), volume
 //! keyframes of the clips inside. What does not: a compound clip's *own*
 //! volume keyframes and a speed curve on the compound clip itself — those play
-//! at its plain volume and its constant speed. Decision 0022.
+//! at its plain volume and its constant speed. Decision 0024.
 
 use std::borrow::Cow;
 

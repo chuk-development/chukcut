@@ -100,7 +100,7 @@ clip**; its `source_range` is a range of that sequence's time.
 ```
 
 A file with one timeline has neither key: the main timeline's id is `main`
-and its name "Timeline 01" when nothing says otherwise. Decision 0022.
+and its name "Timeline 01" when nothing says otherwise. Decision 0024.
 
 ## The two ranges
 

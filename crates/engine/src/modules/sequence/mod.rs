@@ -19,7 +19,7 @@
 //! names segments and lanes of the sequence that was active when it was made,
 //! so undoing an edit made inside a compound clip only works while that
 //! compound is active again. Putting navigation on the same stack keeps the
-//! two in step. Decision 0022.
+//! two in step. Decision 0024.
 //!
 //! The order of all sequences — the tab order — is the pool list with the
 //! active sequence inserted at `ActiveSequence::slot`. Switching takes the

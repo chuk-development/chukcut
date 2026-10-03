@@ -1,4 +1,4 @@
-# 0022 — Several timelines per project, and compound clips, as swapped sequences
+# 0024 — Several timelines per project, and compound clips, as swapped sequences
 
 Date: 2026-10-04. Status: accepted.
 
