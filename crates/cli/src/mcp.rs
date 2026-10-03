@@ -57,6 +57,21 @@ const READ_ONLY: &[&str] = &[
     "loudness",
     "catalog",
     "view_frame",
+    "marker_list",
+    "analysis",
+    "stock_kinds",
+    "stock_search",
+];
+
+/// The tools that talk to a service outside this machine: MCP's
+/// `openWorldHint`.
+const OPEN_WORLD: &[&str] = &[
+    "captions_transcribe",
+    "translate_captions",
+    "tts",
+    "stock_kinds",
+    "stock_search",
+    "stock_download",
 ];
 
 type Out = Arc<Mutex<std::io::Stdout>>;
@@ -485,7 +500,7 @@ fn tool_json(name: &str, description: &str, schema: Value) -> Value {
         "annotations": {
             "readOnlyHint": READ_ONLY.contains(&name),
             "destructiveHint": false,
-            "openWorldHint": name == "captions_transcribe",
+            "openWorldHint": OPEN_WORLD.contains(&name),
         },
     })
 }
@@ -633,6 +648,44 @@ mod tests {
             }
         }
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        for added in [
+            "marker_add",
+            "marker_set",
+            "marker_remove",
+            "marker_list",
+            "crop",
+            "curve",
+            "freeze",
+            "speed_curve",
+            "layout_pip",
+            "layout_split",
+            "title_style",
+            "title_template",
+            "title_position",
+            "title_duplicate",
+            "scenes_detect",
+            "scenes_split",
+            "scenes_clear",
+            "stabilise",
+            "stabilise_set",
+            "stabilise_remove",
+            "beats_detect",
+            "beats_clear",
+            "beats_cut",
+            "beats_snap",
+            "reframe",
+            "analysis",
+            "translate_captions",
+            "tts",
+            "stock_kinds",
+            "stock_search",
+            "stock_download",
+        ] {
+            assert!(names.contains(&added), "{added} is a tool");
+        }
+        for name in READ_ONLY.iter().chain(OPEN_WORLD) {
+            assert!(names.contains(name), "{name} in a hint list is a tool");
+        }
         let mut unique = names.clone();
         unique.sort();
         unique.dedup();

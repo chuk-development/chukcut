@@ -133,6 +133,48 @@ fn an_mcp_session_edits_undoes_and_looks() {
     let split = tools.iter().find(|t| t["name"] == "split").unwrap();
     assert_eq!(split["inputSchema"]["required"], json!(["project", "at"]));
 
+    // The operations added after the first CLI, each with an object schema.
+    for (name, required) in [
+        ("marker_add", json!(["project", "at"])),
+        ("marker_list", json!(["project"])),
+        ("crop", json!(["project", "clip"])),
+        ("curve", json!(["project", "clip"])),
+        ("freeze", json!(["project", "clip", "at"])),
+        ("speed_curve", json!(["project", "clip"])),
+        ("layout_pip", json!(["project", "clip"])),
+        ("layout_split", json!(["project", "clips"])),
+        ("title_style", json!(["project", "style"])),
+        ("title_template", json!(["project", "template"])),
+        ("title_position", json!(["project", "clip", "position"])),
+        ("title_duplicate", json!(["project", "clip"])),
+        ("scenes_detect", json!(["project", "clip"])),
+        ("stabilise", json!(["project", "clip"])),
+        ("beats_detect", json!(["project", "clip"])),
+        ("beats_cut", json!(["project"])),
+        ("reframe", json!(["project"])),
+        ("analysis", json!(["project", "clip"])),
+        ("translate_captions", json!(["project", "to"])),
+        ("tts", json!(["project", "text", "voice"])),
+        ("stock_search", json!(["project", "query"])),
+        ("stock_download", json!(["project", "query", "id"])),
+    ] {
+        let tool = tools
+            .iter()
+            .find(|t| t["name"] == name)
+            .unwrap_or_else(|| panic!("{name} is offered"));
+        assert_eq!(tool["inputSchema"]["type"], "object", "{name}");
+        assert_eq!(tool["inputSchema"]["required"], required, "{name}");
+    }
+    let read_only = |name: &str| {
+        tools.iter().find(|t| t["name"] == name).unwrap()["annotations"]["readOnlyHint"]
+            .as_bool()
+            .unwrap()
+    };
+    assert!(read_only("marker_list") && read_only("analysis") && read_only("stock_search"));
+    assert!(!read_only("marker_add") && !read_only("scenes_detect"));
+    let tts = tools.iter().find(|t| t["name"] == "tts").unwrap();
+    assert_eq!(tts["annotations"]["openWorldHint"], true);
+
     client.ok(
         "new_project",
         json!({"project": p, "width": 1080, "height": 1920}),
