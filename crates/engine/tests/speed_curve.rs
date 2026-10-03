@@ -206,6 +206,22 @@ fn a_linked_sound_takes_the_same_curve_and_stays_in_sync() {
         .all(|p| p.segment_id != "sound" && p.segment_id != a));
 }
 
+#[test]
+fn a_ramped_project_saves_and_opens_unchanged() {
+    let (mut project, a, _) = two_clips();
+    let mut history = History::default();
+    ramp(&mut project, &mut history, &a, SpeedPreset::JumpCut);
+    let saved = serde_json::to_string_pretty(&project).unwrap();
+    let opened: Project = serde_json::from_str(&saved).expect("the file opens");
+    assert_eq!(canonical(&opened), canonical(&project));
+    no_errors(&opened);
+    // A file written before speed curves existed has no such key at all.
+    let (plain, _, _) = two_clips();
+    assert!(!serde_json::to_string(&plain)
+        .unwrap()
+        .contains("speed_curves"));
+}
+
 // ---------------------------------------------------------------------------
 // Pictures
 // ---------------------------------------------------------------------------

@@ -374,8 +374,8 @@ impl Editor {
                 [("10x", 0.0_f32), ("1x", 0.5), ("0.1x", 1.0)].map(|(label, at)| {
                     div()
                         .absolute()
-                        .left(px(4.0))
-                        .top(px(INSET + at * (EDITOR_H - 2.0 * INSET) - 7.0))
+                        .left(px(INSET + 8.0))
+                        .top(px(INSET + at * (EDITOR_H - 2.0 * INSET) - 14.0))
                         .text_size(px(TEXT_BADGE))
                         .font_family(FONT_MONO)
                         .text_color(rgb(TEXT_MUTED))

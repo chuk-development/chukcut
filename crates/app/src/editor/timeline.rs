@@ -2068,8 +2068,11 @@ impl Editor {
     fn reset_speed(&mut self, cx: &mut Context<Self>) {
         let mut result = Ok(());
         for id in self.selection() {
-            let speed = self.project.segment(&id).map(|(_, s)| s.speed);
-            if speed.is_some_and(|speed| speed != 1.0) {
+            // A speed curve counts: resetting leaves it for real time.
+            let changed = self.project.segment(&id).is_some_and(|(_, s)| {
+                s.speed != 1.0 || self.project.materials.speed_curve_of(s).is_some()
+            });
+            if changed {
                 result = inspector_commands::inspector_set_speed(&self.state, id, 1.0).map(|_| ());
                 if result.is_err() {
                     break;
@@ -2116,9 +2119,9 @@ impl Editor {
                 .as_deref()
                 .is_some_and(|id| self.project.link_group_of(id).is_some()),
             can_reset_speed: ids.iter().any(|id| {
-                self.project
-                    .segment(id)
-                    .is_some_and(|(_, s)| s.speed != 1.0)
+                self.project.segment(id).is_some_and(|(_, s)| {
+                    s.speed != 1.0 || self.project.materials.speed_curve_of(s).is_some()
+                })
             }),
             can_freeze: self.freeze_target().is_some(),
         }

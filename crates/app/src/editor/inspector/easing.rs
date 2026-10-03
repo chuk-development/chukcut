@@ -26,8 +26,8 @@ const GRAPH_H: f32 = 140.0;
 const INSET: f32 = 10.0;
 const GRAB_PX: f32 = 10.0;
 /// The graph's vertical range: room for an overshoot above 1 and below 0.
-const Y_LO: f32 = -0.35;
-const Y_HI: f32 = 1.35;
+const Y_LO: f32 = -0.6;
+const Y_HI: f32 = 1.6;
 
 /// Which keyframes an easing edit is aimed at: the ones at `time` (relative
 /// to the clip) on each of `properties`.
@@ -138,6 +138,13 @@ impl Editor {
             .position(|k| (k.time - rel).abs() <= tolerance)
             .or_else(|| keys.iter().rposition(|k| k.time < rel))
             .unwrap_or(0);
+        // The last keyframe's easing shapes nothing (no move leaves it), so
+        // on it the move that arrives there is the one meant.
+        let index = if index + 1 == keys.len() {
+            index.saturating_sub(1)
+        } else {
+            index
+        };
         let key = keys.get(index)?;
         let next = keys.get(index + 1).map(|k| k.time);
         let properties = segment
@@ -331,7 +338,7 @@ impl Editor {
         let bounds = Rc::clone(&self.inspector.easing.bounds);
         let entity = cx.entity().downgrade();
         let handles = easing.handles();
-        let show_handles = !matches!(easing, Easing::Hold | Easing::Linear);
+        let show_handles = easing != Easing::Hold;
         div()
             .id("easing-graph")
             .w_full()
@@ -503,10 +510,11 @@ fn paint_easing(
     }
     if show_handles {
         let [x1, y1, x2, y2] = handles;
+        let (y1, y2) = (y1.clamp(Y_LO, Y_HI), y2.clamp(Y_LO, Y_HI));
         stroke(window, (0.0, 0.0), (x1, y1), TEXT_MUTED, 1.0);
         stroke(window, (1.0, 1.0), (x2, y2), TEXT_MUTED, 1.0);
         for (x, y) in [(x1, y1), (x2, y2)] {
-            let centre = at(x, y);
+            let centre = at(x, y.clamp(Y_LO, Y_HI));
             window.paint_quad(disc(centre, 5.0, rgb(WELL)));
             window.paint_quad(ring(centre, 5.0, rgb(TEXT), 1.5));
         }
