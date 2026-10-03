@@ -90,7 +90,7 @@ column current.
 - **Restart rule:** agents share one `CARGO_TARGET_DIR` (or delete their `target/` right after their branch merges); check `df -h /` before launching.
 - **ML worker** (backlog 3): partial, uncommitted work in `/home/user/git/chukcut-mlworker` (branch agent/mlworker) — review it, commit or redo.
 - **Release build is stale:** rebuild `cargo build --release -p chukcut`; the running binary predates the alpha fixes (d9d86dd, agent/alpha merge).
-- **CI:** check that the run after the font fix (635bad8) and later commits is green on GitHub.
+- **CI:** green after the font fix (runs 37142894595, 37144217430 passed on 2026-10-03).
 - **Dependabot PRs** (rust-minor group, ffmpeg-next 9.0) are unreviewed; ffmpeg-next 9 needs a build + full test run before merging.
 - **Owner decisions pending:** (1) a project identity (URL + project e-mail, not the owner's) for Wikimedia/Musopen User-Agent — until then those sources stay off; (2) delete the fork `chukfinley/filmcraft` (needs `gh auth refresh -h github.com -s delete_repo`).
 - **Follow-up:** check `effects/graph.rs:735` (data-driven blend state) for the NVIDIA alpha rounding.
