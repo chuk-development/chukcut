@@ -108,6 +108,7 @@ pub struct Editor {
     /// The newest progress message of a running export, written from the
     /// export thread and read by [`Self::tick`].
     export_progress: Arc<parking_lot::Mutex<Option<ExportProgress>>>,
+    inspector: inspector::Inspector,
     _ticker: Task<()>,
 }
 
@@ -159,6 +160,7 @@ impl Editor {
             viewer: Rc::new(Cell::new(Bounds::default())),
             timeline: Rc::new(Cell::new(Bounds::default())),
             export_progress: Arc::new(parking_lot::Mutex::new(None)),
+            inspector: inspector::Inspector::default(),
             _ticker: ticker,
         };
         // Hardware encoder detection opens each device and encodes a test
@@ -576,7 +578,7 @@ impl Render for Editor {
                     .min_h(px(0.0))
                     .child(self.render_media(cx))
                     .child(self.render_preview(cx))
-                    .child(self.render_inspector(cx)),
+                    .child(self.render_inspector(window, cx)),
             )
             .child(self.render_timeline(cx))
     }
