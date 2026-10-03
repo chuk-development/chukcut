@@ -41,10 +41,10 @@ column current.
 | 1 | timeline | `editor/timeline*`, `edits.rs` | merged 6d56c34 |
 | 1 | inspector | `editor/inspector/`, engine `modules/inspector` | merged f6a9906 |
 | 1 | assets/title/player/export | `editor/assets/`, `title_bar.rs`, `preview.rs`, `editor/export/` | merged 7a35019 |
-| 2 | design | design language: `ui/` component kit + tokens (`theme.rs`), restyle title bar, asset panel, player | |
-| 2 | colour | grading engine (shader) + LUTs + Adjust/HSL/Curves/Wheels UI in the inspector | |
-| 2 | timeline-2 | multi-select, clipboard, keyframes on clips, transitions on the timeline, text lane, detach/link audio, fade handles | |
-| 2 | shell | start screen + recent projects, autosave restore, settings (proxies, cache, hardware), shortcuts sheet, playback/scrub robustness | |
+| 2 | design | design language: `ui/` component kit + tokens (`theme.rs`), restyle title bar, asset panel, player | running (branch agent/design) |
+| 2 | colour | grading engine (shader) + LUTs + Adjust/HSL/Curves/Wheels UI in the inspector | running (branch agent/colour) |
+| 2 | timeline-2 | multi-select, clipboard, keyframes on clips, transitions on the timeline, text lane, detach/link audio, fade handles | running (branch agent/timeline2) |
+| 2 | shell | start screen + recent projects, autosave restore, settings (proxies, cache, hardware), shortcuts sheet, playback/scrub robustness | running (branch agent/shell) |
 | 3 | text & titles | text tab (fonts, styles, presets), text inspector (font, size, colour, stroke, shadow, box) | |
 | 3 | motion | animation presets (in/out/combo) via keyframes, masks, speed curves | |
 | 3 | effects | our own GPU effects (blur, glow, shake, zoom, glitch, RGB split, vignette) via the effect runtime; filters tab | |
