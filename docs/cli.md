@@ -222,6 +222,7 @@ Lists what you can use. Does not need a project.
 | Kind | Lists |
 |---|---|
 | `effects` | effect ids and their parameters (ranges, defaults, choices) |
+| `audio` | audio effect ids and their parameters (ranges, defaults, units) |
 | `transitions` | the built-in kinds and the library presets |
 | `animations` | clip presets (which slot each one fits), text presets, easings |
 | `grade` | every grade control name and its resting value |
@@ -534,6 +535,51 @@ cache.
 Measures EBU R128 loudness: integrated LUFS, loudness range and true peak. For
 one clip, or for the whole mix as the export would make it.
 
+#### `audio-effect add PROJECT CLIP KIND [--set name=value]…`
+
+Adds an audio effect to the clip's sound (a video clip's linked audio clip
+when it has one): `eq3` (low, mid, mid_freq, high), `eq5` (five bands of
+frequency, gain and width), `compressor`, `reverb`, `delay` (an echo),
+`pitch` (semitones, keeping or moving the formants), or a voice preset.
+`catalog audio` lists every parameter with its range and default. Effects run
+in stack order; the clip's speed change comes first.
+
+#### `audio-effect set PROJECT CLIP EFFECT [--set name=value]… [--enabled BOOL] [--index N]`
+
+Changes an effect, named by its index in the clip's audio stack, its kind or
+its id: parameters, on or off, or its position in the stack.
+
+#### `audio-effect remove PROJECT CLIP EFFECT` · `audio-effect list PROJECT CLIP`
+
+Takes an effect off; lists the stack with every parameter's value, the pitch
+switch and any ducking.
+
+#### `voice PROJECT CLIP PRESET [--intensity 0..1]` · `voice PROJECT CLIP --off`
+
+The voice changer: `deep`, `chipmunk`, `robot`, `telephone` or `megaphone`.
+A clip has one voice at a time; a new one replaces the old one in place.
+
+#### `audio-pitch PROJECT CLIP [--follow-speed]`
+
+"Change audio pitch". Every speed change keeps the pitch by default (a
+time stretch). With `--follow-speed` the pitch moves with the speed, like a
+tape; without it, it is kept again. Speed curves follow the same switch.
+
+#### `duck PROJECT CLIP [--depth dB] [--attack TIME] [--release TIME] [--threshold dBFS]`
+
+Turns a music clip down wherever someone speaks on another lane (default
+12 dB, 250ms attack ending where speech starts, 500ms release). Speech is
+found by level and by RNNoise's voice detector, so a sound effect does not
+duck the music. The result is volume keyframes, multiplied into any fades the
+clip has, in one undo step. Ducking again starts from the clip's own volume;
+`--off` gives it back.
+
+#### `record PROJECT --duration TIME [--at TIME] [--count-in SECONDS]`
+
+Records a voiceover from the default input device for `--duration` (after an
+optional count-in, which is not kept) and puts it on a new audio lane at
+`--at`. The file is saved next to the project in `<project name> Media/`.
+
 ### Render
 
 #### `export PROJECT OUTPUT`
@@ -615,7 +661,9 @@ The operation names are the MCP tool names: `info`, `validate`, `configure`,
 `transition_add`, `transition_remove`, `track`, `captions_transcribe`,
 `captions_import`, `captions_export`, `captions_style`, `captions_list`,
 `silence_detect`, `silence_remove`, `normalize`, `denoise`, `loudness`,
-`export`, `render_frame`. The arguments are the command's options and
+`audio_effect_add`, `audio_effect_set`, `audio_effect_remove`,
+`audio_effects`, `voice`, `audio_pitch`, `duck`, `record`, `export`,
+`render_frame`. The arguments are the command's options and
 positional arguments without the project. `chukcut-cli mcp` lists each one's
 JSON Schema (see below).
 

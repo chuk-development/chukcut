@@ -8,6 +8,7 @@
 //! has one undo history.
 
 pub mod audio;
+pub mod audiofx;
 pub mod look;
 pub mod project;
 pub mod render;
@@ -189,6 +190,14 @@ operations!(
     audio::NormalizeArgs,
     audio::DenoiseArgs,
     audio::LoudnessArgs,
+    audiofx::AudioEffectAddArgs,
+    audiofx::AudioEffectSetArgs,
+    audiofx::AudioEffectRemoveArgs,
+    audiofx::AudioEffectsArgs,
+    audiofx::VoiceArgs,
+    audiofx::AudioPitchArgs,
+    audiofx::DuckArgs,
+    audiofx::RecordArgs,
     render::ExportArgs,
     render::RenderFrameArgs,
 );

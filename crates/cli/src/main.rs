@@ -25,6 +25,7 @@ use serde_json::{json, Value};
 
 use error::{CliError, CliResult};
 use ops::audio::*;
+use ops::audiofx::*;
 use ops::look::*;
 use ops::project::*;
 use ops::render::*;
@@ -122,6 +123,17 @@ enum Command {
     Denoise(On<DenoiseArgs>),
     /// Measure loudness of a clip or the whole mix.
     Loudness(On<LoudnessArgs>),
+    /// Add, change, list or remove audio effects (EQ, compressor, reverb, echo, pitch).
+    #[command(subcommand)]
+    AudioEffect(AudioEffectCommand),
+    /// Give a clip's voice a preset: deep, chipmunk, robot, telephone, megaphone.
+    Voice(On<VoiceArgs>),
+    /// Whether a clip's pitch follows its speed ("Change audio pitch").
+    AudioPitch(On<AudioPitchArgs>),
+    /// Turn a music clip down wherever someone speaks on another lane.
+    Duck(On<DuckArgs>),
+    /// Record a voiceover from the default input onto a new audio lane.
+    Record(On<RecordArgs>),
     /// Track a region of a video and optionally make an overlay follow it.
     Track(On<TrackArgs>),
     /// Add or remove transitions.
@@ -133,7 +145,7 @@ enum Command {
     RenderFrame(On<RenderFrameArgs>),
     /// Run a JSON list of operations against one project, with one undo history.
     Batch(BatchArgs),
-    /// List effects, transitions, animations, grade controls, presets, encoders, models, LUTs or fonts.
+    /// List effects, audio effects, transitions, animations, grade controls, presets, encoders, models, LUTs or fonts.
     Catalog(CatalogArgs),
     /// Serve every operation to an MCP client over stdio.
     Mcp,
@@ -147,6 +159,18 @@ enum EffectCommand {
     Set(On<EffectSetArgs>),
     /// Take an effect off a clip.
     Remove(On<EffectRemoveArgs>),
+}
+
+#[derive(Subcommand)]
+enum AudioEffectCommand {
+    /// Add an audio effect to a clip's sound.
+    Add(On<AudioEffectAddArgs>),
+    /// Set an audio effect's parameters, switch it, or move it in the stack.
+    Set(On<AudioEffectSetArgs>),
+    /// Take an audio effect off a clip.
+    Remove(On<AudioEffectRemoveArgs>),
+    /// List a clip's audio effects and settings.
+    List(On<AudioEffectsArgs>),
 }
 
 #[derive(Subcommand)]
@@ -346,6 +370,14 @@ fn dispatch(command: Command, dry: bool, ctx: &Ctx) -> CliResult<(&'static str, 
         Command::Normalize(o) => on(o, dry, ctx),
         Command::Denoise(o) => on(o, dry, ctx),
         Command::Loudness(o) => on(o, dry, ctx),
+        Command::AudioEffect(AudioEffectCommand::Add(o)) => on(o, dry, ctx),
+        Command::AudioEffect(AudioEffectCommand::Set(o)) => on(o, dry, ctx),
+        Command::AudioEffect(AudioEffectCommand::Remove(o)) => on(o, dry, ctx),
+        Command::AudioEffect(AudioEffectCommand::List(o)) => on(o, dry, ctx),
+        Command::Voice(o) => on(o, dry, ctx),
+        Command::AudioPitch(o) => on(o, dry, ctx),
+        Command::Duck(o) => on(o, dry, ctx),
+        Command::Record(o) => on(o, dry, ctx),
         Command::Track(o) => on(o, dry, ctx),
         Command::Transition(TransitionCommand::Add(o)) => on(o, dry, ctx),
         Command::Transition(TransitionCommand::Remove(o)) => on(o, dry, ctx),
