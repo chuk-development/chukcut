@@ -138,6 +138,13 @@ pub fn luts_dir() -> PathBuf {
     data_root().join("luts")
 }
 
+/// Stills made by "Freeze frame". Under [`data_root`], never the cache: the
+/// project references the file, and "clear cache" must not take a picture
+/// out of somebody's cut.
+pub fn freeze_frames_dir() -> PathBuf {
+    data_root().join("freeze-frames")
+}
+
 /// Create a directory and every missing parent, returning it for chaining.
 pub fn ensure(dir: PathBuf) -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(&dir)?;
