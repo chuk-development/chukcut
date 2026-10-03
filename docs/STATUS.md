@@ -2405,8 +2405,14 @@ pointer, a scrollbar, a resizable split (42% of the window by default).
   rule as silence cutting: music on other lanes stays), then the still in the
   gap. The still carries the clip's crop and its *animated* transform at the
   playhead, no keyframes, and the clip's colour/effect extras. Undo leaves
-  the PNG on disk on purpose, so redo still has it; nothing collects orphaned
-  stills yet. Default length 3 s (`freeze::DEFAULT_FREEZE`); there is no UI
+  the PNG on disk on purpose, so redo still has it. On save and on close,
+  `freeze::sweep_unused` deletes the stills *this process* made that nothing
+  reaches any more: not the open document, not a command on the undo or redo
+  stack (`DocumentHistory::mentions`), and not a project file saved in this
+  process. Stills from earlier sessions are never touched — the directory is
+  shared by every project, and one that is not open may use them. The PNG is
+  named after the source and the frame time (`take frame 0m02.150s
+  1a2b3c4d.png`), which is what the media library shows. Default length 3 s (`freeze::DEFAULT_FREEZE`); there is no UI
   to choose another.
 - **Transitions draw as a badge over their cut**, as wide as the stretch they
   cover. Click selects it (Del removes it); its ends change the length
@@ -2452,8 +2458,8 @@ pointer, a scrollbar, a resizable split (42% of the window by default).
   every `bake` followed by the delete gesture's own commands run through
   `compose_edits`, `mirror_linked_edits` and `detach_broken_transitions` —
   one undo step. The bakes must come first: a follow is evaluated through the
-  tracked clip, so after the delete there is nothing left to bake. Only the
-  Delete key / menu / toolbar ask; **Ctrl+X does not** (it deletes plainly).
+  tracked clip, so after the delete there is nothing left to bake. The
+  Delete key, menu, toolbar and Ctrl+X (cut) all ask.
 
 ## Analysis: scenes, stabilisation, beats, auto reframe (2026-10-03)
 

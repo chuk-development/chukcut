@@ -104,6 +104,11 @@ impl Editor {
         };
         let (sub_tabs_row, body, footer): (Option<AnyElement>, AnyElement, Option<AnyElement>) =
             match active {
+                // A title has a position, scale and opacity and nothing to
+                // cut out or retouch: no sub-tabs, only Basic.
+                VIDEO if kind == ClipKind::Text => {
+                    (None, self.video_basic(&segment, kind, window, cx), None)
+                }
                 VIDEO => {
                     let names = ["Basic", "Remove background", "Mask", "Retouch"];
                     let current = sub(self, VIDEO, names[0]);
@@ -264,10 +269,14 @@ impl Editor {
         let mut sections = vec![transform];
         sections.extend(self.easing_section(segment, cx));
         sections.push(blend);
-        if kind != ClipKind::Text {
+        // Footage tools; a title has no footage to stabilise or denoise.
+        let footage_tools: &[&str] = if kind == ClipKind::Text {
+            &[]
+        } else {
             sections.extend(self.analysis_video_sections(segment, cx));
-        }
-        for title in ["Enhance quality", "Reduce image noise", "Optical flow"] {
+            &["Enhance quality", "Reduce image noise", "Optical flow"]
+        };
+        for &title in footage_tools {
             sections.push(Section::missing(title, "Not in the engine yet").render(
                 true,
                 Vec::new(),

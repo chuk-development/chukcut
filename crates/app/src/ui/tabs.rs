@@ -144,9 +144,14 @@ impl RenderOnce for RailTab {
         div()
             .id(self.id)
             .group(group.clone())
-            .min_w(px(56.0))
+            // Share the rail's width and give way on a narrow window: at
+            // 1366 px the asset panel is ~400 px, and eight tabs at their
+            // natural width wrapped "Captions" and pushed Stock out of sight.
+            .flex_1()
+            .min_w(px(0.0))
+            .max_w(px(72.0))
             .h(px(48.0))
-            .px(px(6.0))
+            .px(px(4.0))
             .flex()
             .flex_col()
             .items_center()
@@ -168,6 +173,10 @@ impl RenderOnce for RailTab {
             )
             .child(
                 div()
+                    .max_w_full()
+                    .whitespace_nowrap()
+                    .overflow_hidden()
+                    .text_ellipsis()
                     .text_size(px(TEXT_CAPTION))
                     .when(on, |this| this.font_weight(FontWeight::MEDIUM))
                     .text_color(rgb(if on { TEXT } else { TEXT_DIM }))

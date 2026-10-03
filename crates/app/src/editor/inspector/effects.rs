@@ -14,8 +14,9 @@ use chukcut_engine::modules::fx::{self, edit as fx_edit, ParamKind};
 use chukcut_engine::modules::project::{EffectMaterial, EffectValue};
 use gpui::assets::IconName;
 use gpui::component::slider::{Slider, SliderEvent, SliderState};
-use gpui::component::{Icon, Sizable};
 use gpui::{AnyElement, Subscription};
+
+use crate::ui::{EmptyState, IconButton};
 
 use super::controls::*;
 use super::*;
@@ -23,7 +24,8 @@ use super::*;
 /// The tab's label in the inspector's top row.
 pub(super) const EFFECTS: &str = "Effects";
 
-/// Swatches a colour parameter offers, as sRGB hex.
+/// Swatches a colour parameter offers, as sRGB hex. These are values the
+/// user picks for the effect, not chrome, so they are not theme tokens.
 const SWATCHES: [u32; 9] = [
     0xffffff, 0x000000, 0xff3b30, 0xff9500, 0xffcc00, 0x34c759, 0x32d6ff, 0x3478f6, 0xaf52de,
 ];
@@ -97,22 +99,14 @@ impl Editor {
             .collect();
         if stack.is_empty() {
             return div()
-                .p_6()
-                .flex()
-                .flex_col()
-                .items_center()
-                .gap_2()
+                .p(px(PAD))
                 .child(
-                    div()
-                        .text_sm()
-                        .text_color(rgb(TEXT_DIM))
-                        .child("No effects on this clip"),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(TEXT_MUTED))
-                        .child("Pick one in the Effects tab of the asset panel."),
+                    EmptyState::new(
+                        "fx-empty",
+                        crate::ui::icons::EFFECTS,
+                        "No effects on this clip",
+                    )
+                    .hint("Pick one in the Effects tab of the asset panel."),
                 )
                 .into_any_element();
         }
@@ -187,69 +181,54 @@ impl Editor {
         });
 
         let (s, e) = (segment_id.clone(), effect_id.clone());
-        let eye = div()
-            .id(SharedString::from(format!("fx-eye-{index}")))
-            .size(px(20.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(3.0))
-            .cursor_pointer()
-            .hover(|style| style.bg(rgb(PANEL_RAISED)))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                let result =
-                    fx_commands::fx_set_enabled(&this.state, s.clone(), e.clone(), !enabled)
-                        .map(|_| ());
-                this.refresh(cx);
-                this.report(result, cx);
-            }))
-            .child(
-                Icon::new(if enabled {
-                    IconName::Eye
-                } else {
-                    IconName::EyeOff
-                })
-                .xsmall()
-                .text_color(rgb(if enabled { TEXT_DIM } else { TEXT_MUTED })),
-            );
-        let (s, e) = (segment_id.clone(), effect_id.clone());
-        let delete = div()
-            .id(SharedString::from(format!("fx-delete-{index}")))
-            .size(px(20.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(3.0))
-            .when(!own, |this| {
-                this.cursor_pointer()
-                    .hover(|style| style.bg(rgb(PANEL_RAISED)))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        let result =
-                            fx_commands::fx_remove(&this.state, s.clone(), e.clone()).map(|_| ());
-                        this.refresh(cx);
-                        this.report(result, cx);
-                    }))
-            })
-            .child(Icon::new(IconName::Trash).xsmall().text_color(rgb(if own {
-                DISABLED
+        let eye = IconButton::new(
+            SharedString::from(format!("fx-eye-{index}")),
+            if enabled {
+                IconName::Eye
             } else {
-                TEXT_DIM
-            })));
+                IconName::EyeOff
+            },
+        )
+        .small()
+        .tint(if enabled { TEXT_DIM } else { TEXT_MUTED })
+        .tooltip(if enabled { "Turn off" } else { "Turn on" })
+        .on_click(cx.listener(move |this, _, _, cx| {
+            let result = fx_commands::fx_set_enabled(&this.state, s.clone(), e.clone(), !enabled)
+                .map(|_| ());
+            this.refresh(cx);
+            this.report(result, cx);
+        }));
+        let (s, e) = (segment_id.clone(), effect_id.clone());
+        // An effect clip's own effect is the clip; it goes with the clip.
+        let delete = IconButton::new(
+            SharedString::from(format!("fx-delete-{index}")),
+            IconName::Trash,
+        )
+        .small()
+        .tint(TEXT_DIM)
+        .disabled(own)
+        .tooltip("Remove effect")
+        .on_click(cx.listener(move |this, _, _, cx| {
+            let result = fx_commands::fx_remove(&this.state, s.clone(), e.clone()).map(|_| ());
+            this.refresh(cx);
+            this.report(result, cx);
+        }));
 
         let can_up = position.is_some_and(|p| p > 0);
         let can_down = position.is_some_and(|p| p + 1 < extras_count);
         let header = div()
-            .h(px(36.0))
+            .h(px(PANEL_HEADER_H - 4.0))
             .flex()
             .flex_row()
             .items_center()
-            .gap_1()
+            .gap(px(4.0))
             .child(eye)
             .child(
                 div()
                     .flex_1()
-                    .text_sm()
-                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .min_w(px(0.0))
+                    .text_size(px(TEXT_BODY))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(rgb(if enabled { TEXT } else { TEXT_DIM }))
                     .overflow_hidden()
                     .whitespace_nowrap()
@@ -269,7 +248,7 @@ impl Editor {
         } else {
             rows.push(
                 div()
-                    .text_xs()
+                    .text_size(px(TEXT_CAPTION))
                     .text_color(rgb(TEXT_MUTED))
                     .child("Made by a newer version of chukcut; kept as it is.")
                     .into_any_element(),
@@ -279,10 +258,10 @@ impl Editor {
         div()
             .flex()
             .flex_col()
-            .px_3()
-            .pb_3()
+            .px(px(PAD))
+            .pb(px(PAD))
             .border_b_1()
-            .border_color(rgb(0x2f2f2f))
+            .border_color(rgb(HAIRLINE))
             .child(header)
             .child(
                 div()
@@ -306,7 +285,10 @@ impl Editor {
     ) -> AnyElement {
         let segment_id = segment.id.clone();
         let effect_id = effect.id.clone();
-        let label = div().text_xs().text_color(rgb(TEXT)).child(spec.label);
+        let label = div()
+            .text_size(px(TEXT_LABEL))
+            .text_color(rgb(TEXT_DIM))
+            .child(spec.label);
         match spec.kind {
             ParamKind::Number {
                 min,
@@ -383,14 +365,14 @@ impl Editor {
                             .flex()
                             .flex_row()
                             .items_center()
-                            .gap_3()
-                            .child(div().flex_1().px_1().child(Slider::new(&slider)))
+                            .gap(px(12.0))
+                            .child(div().flex_1().px(px(4.0)).child(Slider::new(&slider)))
                             .child(
                                 div()
                                     .w(px(56.0))
                                     .text_right()
-                                    .font_family("Noto Sans Mono")
-                                    .text_xs()
+                                    .font_family(FONT_MONO)
+                                    .text_size(px(TEXT_LABEL))
                                     .text_color(rgb(TEXT))
                                     .child(format!("{value:.decimals$}{unit}")),
                             )
@@ -412,14 +394,19 @@ impl Editor {
                     div()
                         .id(SharedString::from(format!("fx-choice-{index}-{param}-{i}")))
                         .px(px(8.0))
-                        .h(px(24.0))
+                        .h(px(CONTROL_H - 2.0))
                         .flex()
                         .items_center()
-                        .rounded(px(4.0))
-                        .text_xs()
-                        .text_color(rgb(if selected { TEXT } else { TEXT_DIM }))
-                        .bg(rgb(if selected { PANEL_RAISED } else { 0x1f1f1f }))
-                        .when(selected, |this| this.border_1().border_color(rgb(ACCENT)))
+                        .rounded(px(R_SM))
+                        .text_size(px(TEXT_LABEL))
+                        .text_color(rgb(if selected { ACCENT } else { TEXT_DIM }))
+                        .border_1()
+                        .border_color(rgb(if selected { ACCENT } else { BORDER }))
+                        .bg(if selected {
+                            accent_soft()
+                        } else {
+                            rgb(WELL).into()
+                        })
                         .cursor_pointer()
                         .hover(|style| style.text_color(rgb(TEXT)))
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -464,10 +451,10 @@ impl Editor {
                             "fx-colour-{index}-{param}-{hex:06x}"
                         )))
                         .size(px(18.0))
-                        .rounded(px(4.0))
+                        .rounded(px(R_XS))
                         .bg(rgb(hex))
                         .border_2()
-                        .border_color(rgb(if selected { ACCENT } else { 0x3a3a3a }))
+                        .border_color(rgb(if selected { ACCENT } else { BORDER }))
                         .cursor_pointer()
                         .on_click(cx.listener(move |this, _, _, cx| {
                             let result = fx_commands::fx_set_param(

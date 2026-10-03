@@ -1952,10 +1952,15 @@ impl Editor {
         true
     }
 
-    fn cut_selection(&mut self, cx: &mut Context<Self>) {
+    /// Ctrl+X: copy, then delete the way the Delete key does — including
+    /// the prompt to bake followers when a tracked clip goes.
+    fn cut_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.copy_selection(cx) {
             self.timeline.selected_keyframe = None;
             self.timeline.selected_transition = None;
+            if self.offer_bake_before_delete(window, cx) {
+                return;
+            }
             self.delete_selection(cx);
         }
     }
@@ -2315,7 +2320,7 @@ impl Editor {
         .on_action(cx.listener(|this, _: &CopyClips, _, cx| {
             this.copy_selection(cx);
         }))
-        .on_action(cx.listener(|this, _: &CutClips, _, cx| this.cut_selection(cx)))
+        .on_action(cx.listener(|this, _: &CutClips, window, cx| this.cut_selection(window, cx)))
         .on_action(cx.listener(|this, _: &PasteClips, _, cx| this.paste_clipboard(cx)))
         .on_action(cx.listener(|this, _: &DuplicateClips, _, cx| this.duplicate_selection(cx)))
         .on_action(cx.listener(|this, _: &SelectAllClips, _, cx| this.select_all(cx)))
