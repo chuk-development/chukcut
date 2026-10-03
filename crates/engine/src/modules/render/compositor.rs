@@ -32,6 +32,7 @@ use super::layout::{self, QuadPlacement};
 use super::nv12::{Nv12Converter, Nv12Frame, Nv12PlaneWriter, READ_FORMAT};
 use super::source::{SourceFrame, SourceProvider, SourceRequest};
 use super::texture_pool::{PooledTexture, TextureKey, TexturePool, DEFAULT_BUDGET_BYTES};
+use crate::modules::fx::{self, FxInstance, FxRenderer, OverDraw};
 use crate::modules::motion;
 use crate::modules::project::document::{MaterialKind, MaterialPool, Micros, Project, Segment};
 use crate::modules::project::document::{TransitionDirection, TransitionKind};
@@ -334,6 +335,10 @@ pub struct Compositor {
     /// kind at once precisely so scrubbing into a second kind does not compile
     /// anything.
     transitions: OnceLock<TransitionPipeline>,
+    /// The built-in effect pipelines (`modules/fx`), built on first use for
+    /// the same reason as `transitions`: a project with no effects in it
+    /// should not pay for the shader module.
+    fx: OnceLock<FxRenderer>,
 }
 
 /// A reusable GPU buffer that only ever grows.
@@ -669,6 +674,7 @@ impl Compositor {
             nv12: OnceLock::new(),
             nv12_planes: OnceLock::new(),
             transitions: OnceLock::new(),
+            fx: OnceLock::new(),
         }
     }
 
@@ -1002,103 +1008,217 @@ impl Compositor {
             label: Some("chukcut frame"),
         });
 
-        // Every transition's two layers, drawn into full-canvas targets of
-        // their own before the frame is composited. They have to be complete
-        // passes rather than draws inside the composite pass: a render pass
-        // cannot sample the attachment it is writing.
+        // The effect passes of this frame, if it has any. Opened only when an
+        // item needs it, so a frame without effects takes exactly the path it
+        // always took.
+        let needs_fx = draws.items.iter().any(|item| match item {
+            Draw::Effected { .. } | Draw::Adjust { .. } => true,
+            Draw::Transition { from_fx, to_fx, .. } => !from_fx.is_empty() || !to_fx.is_empty(),
+            Draw::Quad(_) => false,
+        });
+        let mut fx_frame = needs_fx.then(|| self.fx_renderer().begin(&self.ctx, &self.pool));
+
+        // Every transition's two layers, and every effected clip's layer,
+        // drawn into full-canvas targets of their own before the frame is
+        // composited. They have to be complete passes rather than draws inside
+        // the composite pass: a render pass cannot sample the attachment it is
+        // writing.
         let mut layer_targets: Vec<PooledTexture> = Vec::new();
         let mut layer_groups: Vec<Option<wgpu::BindGroup>> = Vec::with_capacity(draws.items.len());
+        let mut overs: Vec<Option<OverDraw>> = Vec::with_capacity(draws.items.len());
         for item in &draws.items {
-            let Draw::Transition { from, to, .. } = item else {
-                layer_groups.push(None);
-                continue;
-            };
-            let pipeline = self.transition_pipeline();
-            let from_target = self.pool.acquire(device, self.target_key(size));
-            let to_target = self.pool.acquire(device, self.target_key(size));
-            self.draw_layer(
-                &mut encoder,
-                &uniform_group,
-                &source_groups,
-                from.as_ref(),
-                from_target.view(),
-            );
-            self.draw_layer(
-                &mut encoder,
-                &uniform_group,
-                &source_groups,
-                to.as_ref(),
-                to_target.view(),
-            );
-            layer_groups.push(Some(pipeline.bind_layers(
-                &self.ctx,
-                from_target.view(),
-                to_target.view(),
-            )));
-            layer_targets.push(from_target);
-            layer_targets.push(to_target);
-        }
-
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("chukcut composite"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: target.view(),
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: bg[0] as f64,
-                            g: bg[1] as f64,
-                            b: bg[2] as f64,
-                            a: bg[3] as f64,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                ..Default::default()
-            });
-
-            pass.set_vertex_buffer(0, self.vertices.slice(..));
-            pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint16);
-
-            let mut transition_slot = 0u32;
-            for (i, item) in draws.items.iter().enumerate() {
-                match item {
-                    Draw::Quad(quad) => {
-                        let Some(group) = source_groups[quad.slot as usize].as_ref() else {
-                            continue;
-                        };
-                        pass.set_pipeline(&self.pipeline);
-                        pass.set_bind_group(0, &uniform_group, &[quad.slot * self.uniform_stride]);
-                        pass.set_bind_group(1, group, &[]);
-                        pass.draw_indexed(0..QUAD_INDICES.len() as u32, 0, 0..1);
-                    }
-                    Draw::Transition { params, .. } => {
-                        let Some(layers) = layer_groups[i].as_ref() else {
-                            continue;
-                        };
-                        self.transition_pipeline().draw(
-                            &self.ctx,
-                            &mut pass,
-                            transition_slot,
-                            params,
-                            layers,
+            match item {
+                Draw::Transition {
+                    from,
+                    to,
+                    from_fx,
+                    to_fx,
+                    ..
+                } => {
+                    let pipeline = self.transition_pipeline();
+                    let mut sides = Vec::with_capacity(2);
+                    for (quad, chain) in [(from, from_fx), (to, to_fx)] {
+                        let layer = self.pool.acquire(device, self.target_key(size));
+                        self.draw_layer(
+                            &mut encoder,
+                            &uniform_group,
+                            &source_groups,
+                            quad.as_ref(),
+                            layer.view(),
                         );
-                        transition_slot += 1;
+                        let layer = match fx_frame.as_mut().filter(|_| !chain.is_empty()) {
+                            Some(frame) => {
+                                let out = frame.apply(
+                                    &mut encoder,
+                                    layer.view(),
+                                    size,
+                                    chain,
+                                    self.target_key(size),
+                                );
+                                layer_targets.push(layer);
+                                out
+                            }
+                            None => layer,
+                        };
+                        sides.push(layer);
                     }
+                    layer_groups.push(Some(pipeline.bind_layers(
+                        &self.ctx,
+                        sides[0].view(),
+                        sides[1].view(),
+                    )));
+                    overs.push(None);
+                    layer_targets.extend(sides);
+                }
+                Draw::Effected { quad, chain } => {
+                    let frame = fx_frame.as_mut().expect("opened for an effected clip");
+                    let layer = self.pool.acquire(device, self.target_key(size));
+                    self.draw_layer(
+                        &mut encoder,
+                        &uniform_group,
+                        &source_groups,
+                        Some(quad),
+                        layer.view(),
+                    );
+                    let out = frame.apply(
+                        &mut encoder,
+                        layer.view(),
+                        size,
+                        chain,
+                        self.target_key(size),
+                    );
+                    overs.push(Some(frame.prepare_over(
+                        out.view(),
+                        self.config.format,
+                        size,
+                    )));
+                    layer_groups.push(None);
+                    layer_targets.push(layer);
+                    layer_targets.push(out);
+                }
+                Draw::Quad(_) | Draw::Adjust { .. } => {
+                    layer_groups.push(None);
+                    overs.push(None);
                 }
             }
         }
+
+        // The composite, in painter's order. An effect clip splits it: the
+        // pass so far is ended, the effect clip's effects run over what it
+        // drew into a fresh target, and compositing carries on into that.
+        let mut target = target;
+        let mut retired: Vec<PooledTexture> = Vec::new();
+        let mut transition_slot = 0u32;
+        let mut start = 0usize;
+        loop {
+            let end = draws.items[start..]
+                .iter()
+                .position(|item| matches!(item, Draw::Adjust { .. }))
+                .map_or(draws.items.len(), |at| start + at);
+            {
+                let load = if start == 0 {
+                    wgpu::LoadOp::Clear(wgpu::Color {
+                        r: bg[0] as f64,
+                        g: bg[1] as f64,
+                        b: bg[2] as f64,
+                        a: bg[3] as f64,
+                    })
+                } else {
+                    wgpu::LoadOp::Load
+                };
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("chukcut composite"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: target.view(),
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    ..Default::default()
+                });
+
+                for (i, item) in draws.items.iter().enumerate().take(end).skip(start) {
+                    match item {
+                        Draw::Quad(quad) => {
+                            let Some(group) = source_groups[quad.slot as usize].as_ref() else {
+                                continue;
+                            };
+                            // Set per draw rather than once per pass: an
+                            // effected clip or a transition in between binds
+                            // pipelines of its own.
+                            pass.set_pipeline(&self.pipeline);
+                            pass.set_vertex_buffer(0, self.vertices.slice(..));
+                            pass.set_index_buffer(
+                                self.indices.slice(..),
+                                wgpu::IndexFormat::Uint16,
+                            );
+                            pass.set_bind_group(
+                                0,
+                                &uniform_group,
+                                &[quad.slot * self.uniform_stride],
+                            );
+                            pass.set_bind_group(1, group, &[]);
+                            pass.draw_indexed(0..QUAD_INDICES.len() as u32, 0, 0..1);
+                        }
+                        Draw::Transition { params, .. } => {
+                            let Some(layers) = layer_groups[i].as_ref() else {
+                                continue;
+                            };
+                            self.transition_pipeline().draw(
+                                &self.ctx,
+                                &mut pass,
+                                transition_slot,
+                                params,
+                                layers,
+                            );
+                            transition_slot += 1;
+                        }
+                        Draw::Effected { .. } => {
+                            if let Some(over) = overs[i].as_ref() {
+                                over.draw(&mut pass);
+                            }
+                        }
+                        Draw::Adjust { .. } => unreachable!("a pass ends at an effect clip"),
+                    }
+                }
+            }
+            if end >= draws.items.len() {
+                break;
+            }
+            let Draw::Adjust { chain } = &draws.items[end] else {
+                unreachable!("found by position above");
+            };
+            let frame = fx_frame.as_mut().expect("opened for an effect clip");
+            let out = frame.apply(
+                &mut encoder,
+                target.view(),
+                size,
+                chain,
+                self.target_key(size),
+            );
+            retired.push(std::mem::replace(&mut target, out));
+            start = end + 1;
+        }
         self.ctx.queue().submit(Some(encoder.finish()));
         drop(uniforms);
-        for layer in layer_targets {
+        for layer in layer_targets.into_iter().chain(retired) {
             self.pool.release(layer);
+        }
+        if let Some(frame) = fx_frame {
+            frame.finish();
         }
         add(&self.stats.composite_ns, composited);
         self.stats.frames.fetch_add(1, Ordering::Relaxed);
 
         Ok(target)
+    }
+
+    /// The built-in effect renderer, built on first use. See [`Self::fx`].
+    fn fx_renderer(&self) -> &FxRenderer {
+        self.fx.get_or_init(|| FxRenderer::new(&self.ctx))
     }
 
     /// The transition pipelines, built on first use. See [`Self::transitions`].
@@ -1213,6 +1333,19 @@ impl Compositor {
         let mut draws = DrawList::default();
 
         for (track, segment) in layout::visible_segments(project, time) {
+            // An effect clip draws nothing of its own: it applies its effects
+            // to everything composited before it, at this point in the
+            // painter's order. Decision 0016.
+            if project.materials.is_effect_clip(segment) {
+                if let Some(source_time) = segment.source_time_at(time) {
+                    let chain = fx::chain_for(&project.materials, segment, source_time, None);
+                    if !chain.is_empty() {
+                        draws.items.push(Draw::Adjust { chain });
+                    }
+                }
+                continue;
+            }
+
             // A transition claims the segment the compositor was about to draw
             // and replaces it with a blend of two. Exactly one of the two clips
             // contains any instant of the window — the cut is the boundary
@@ -1248,10 +1381,27 @@ impl Compositor {
                     &mut draws,
                 )?;
                 if from.is_some() || to.is_some() {
+                    // Each side carries its own clip's effects into its layer
+                    // before the two are blended.
+                    let side_fx =
+                        |quad: &Option<QuadDraw>, layer: &transitions::TransitionLayer| {
+                            quad.as_ref().map_or_else(Vec::new, |q| {
+                                fx::chain_for(
+                                    &project.materials,
+                                    layer.segment,
+                                    layer.source_time,
+                                    Some(q.placement.mvp),
+                                )
+                            })
+                        };
+                    let from_fx = side_fx(&from, &instant.from);
+                    let to_fx = side_fx(&to, &instant.to);
                     draws.items.push(Draw::Transition {
                         params: TransitionParams::from(&instant),
                         from,
                         to,
+                        from_fx,
+                        to_fx,
                     });
                 }
                 continue;
@@ -1299,7 +1449,15 @@ impl Compositor {
                 &mut draws,
             )?;
             if let Some(quad) = quad {
-                draws.items.push(blurred(project, segment, time, quad));
+                let chain = fx::chain_for(
+                    &project.materials,
+                    segment,
+                    source_time,
+                    Some(quad.placement.mvp),
+                );
+                draws
+                    .items
+                    .push(blurred(project, segment, time, quad, chain));
             }
         }
 
@@ -1562,13 +1720,28 @@ impl std::fmt::Debug for Compositor {
 /// Through the transition pipeline rather than a blur in the quad shader, so
 /// the blur is frame-space (a small clip blurs as much as a full-frame one)
 /// and the quad pipeline, which the colour grade owns, is untouched.
-fn blurred(project: &Project, segment: &Segment, time: Micros, quad: QuadDraw) -> Draw {
+fn blurred(
+    project: &Project,
+    segment: &Segment,
+    time: Micros,
+    quad: QuadDraw,
+    chain: Vec<FxInstance>,
+) -> Draw {
+    // Without a blur animation the clip is an ordinary quad, or an effected
+    // one when it carries built-in effects (`modules/fx`).
+    let plain = |quad: QuadDraw, chain: Vec<FxInstance>| {
+        if chain.is_empty() {
+            Draw::Quad(quad)
+        } else {
+            Draw::Effected { quad, chain }
+        }
+    };
     let keyed = layout::animated_transform(segment, time);
     let Some(m) = motion::clip_motion(&project.materials, segment, time, keyed) else {
-        return Draw::Quad(quad);
+        return plain(quad, chain);
     };
     if m.blur <= 0.0 || m.blur_radius <= 0.0 {
-        return Draw::Quad(quad);
+        return plain(quad, chain);
     }
     Draw::Transition {
         params: TransitionParams {
@@ -1578,9 +1751,13 @@ fn blurred(project: &Project, segment: &Segment, time: Micros, quad: QuadDraw) -
             softness: m.blur_radius,
             zoom: 0.0,
             color: [0.0; 4],
+            library: None,
         },
         from: None,
         to: Some(quad),
+        // The clip's effects run on its layer before the blur blends it in.
+        from_fx: Vec::new(),
+        to_fx: chain,
     }
 }
 
@@ -1610,6 +1787,10 @@ struct QuadDraw {
 }
 
 /// One thing the composite pass draws.
+///
+/// The variants differ in size — an effect clip carries only its chain — and
+/// that is fine: a frame has a handful of these, built and dropped per frame.
+#[allow(clippy::large_enum_variant)]
 enum Draw {
     Quad(QuadDraw),
     /// Two clips blended against the frame. Either side may be `None`, which is
@@ -1618,6 +1799,20 @@ enum Draw {
         params: TransitionParams,
         from: Option<QuadDraw>,
         to: Option<QuadDraw>,
+        /// Each side's own effects, run over its layer before the blend.
+        from_fx: Vec<FxInstance>,
+        to_fx: Vec<FxInstance>,
+    },
+    /// A clip with effects: drawn into a layer of its own, the effects run
+    /// over the layer, and the result composited where the clip would have
+    /// been.
+    Effected {
+        quad: QuadDraw,
+        chain: Vec<FxInstance>,
+    },
+    /// An effect clip: its effects run over everything composited so far.
+    Adjust {
+        chain: Vec<FxInstance>,
     },
 }
 
@@ -1636,8 +1831,9 @@ impl DrawList {
         self.items
             .iter()
             .flat_map(|item| match item {
-                Draw::Quad(quad) => [Some(quad), None],
+                Draw::Quad(quad) | Draw::Effected { quad, .. } => [Some(quad), None],
                 Draw::Transition { from, to, .. } => [from.as_ref(), to.as_ref()],
+                Draw::Adjust { .. } => [None, None],
             })
             .flatten()
     }

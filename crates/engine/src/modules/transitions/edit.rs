@@ -221,6 +221,33 @@ pub fn add_command(
     })
 }
 
+/// [`add_command`] for a library transition: `preset` is a
+/// `library::presets()` id.
+pub fn add_preset_command(
+    project: &Project,
+    segment_id: &str,
+    preset: &str,
+    duration: Option<Micros>,
+) -> Result<EditCommand, String> {
+    if super::library::preset(preset).is_none() {
+        return Err(format!("there is no transition called {preset}"));
+    }
+    let EditCommand::AddTransition {
+        segment_id,
+        transition,
+    } = add_command(project, segment_id, TransitionKind::Library, duration)?
+    else {
+        unreachable!("add_command builds an AddTransition");
+    };
+    Ok(EditCommand::AddTransition {
+        segment_id,
+        transition: TransitionMaterial {
+            preset: Some(preset.to_string()),
+            ..transition
+        },
+    })
+}
+
 /// The command that takes the transition off the head of `segment_id`.
 pub fn remove_command(project: &Project, segment_id: &str) -> Result<EditCommand, String> {
     let material = current(project, segment_id)?;

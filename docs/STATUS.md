@@ -1718,6 +1718,82 @@ preview, both export tiers and transition layers get the same pixels.
   hue-vs-hue curve. The `Import LUT…` button uses the desktop file portal,
   which does not exist under Xvfb; the import itself is covered by tests.
 
+## Effects, layouts and the transition library (2026-10-03)
+
+Built-in effects, picture in picture and split screens, and 125 library
+transitions. Engine in `modules/fx/` and `modules/transitions/library/`; UI
+in `editor/assets/effects.rs`, the Transitions tab in
+`editor/assets/library.rs`, and `editor/inspector/effects.rs`. Decision 0016
+has the model.
+
+- **Model.** An effect is an `EffectMaterial` (`project/effects.rs`) in the
+  new pool category `materials.effects`, skipped on save when empty. On a
+  clip its id sits in `extras`, in order; as an **effect clip** it is the
+  material of a segment on an effect lane and applies to everything
+  composited beneath it. `kind` is a string and `params` a sparse map, so an
+  unknown effect loads and renders as nothing, and a default is never
+  stored. Keyframes and the animation clock are in the clip's **source
+  time**, so a split keeps one continuous shake across the cut.
+- **Edits** (`fx/edit.rs`) mint a material and swap the reference with a
+  `RemoveSegment` + `InsertSegment` composite — decision 0007's rule, no new
+  `EditCommand` variant. Commands: `fx_add`, `_remove`, `_set`,
+  `_set_param` (at the playhead when animated), `_toggle_keyframe`,
+  `_set_enabled`, `_reset`, `_move`, `_add_clip`, `_layout_split`,
+  `_layout_pip`, and the tile commands.
+- **Effects** (17): blur, zoom blur, glow (threshold, source channel, tint),
+  light sweep, shake (seeded), RGB split, glitch (seeded), VHS, pixelate,
+  mirror, kaleidoscope, grain (the grade's PCG grain), halation, bloom, gate
+  weave, letterbox, and **frame** — rounded corners, border and drop shadow
+  for picture in picture, as signed distances in the clip's own frame, so no
+  blur pass. Vignette is not an effect: the grade has one.
+- **Rendering.** The compositor draws an effected clip into a layer (the
+  transition layer pipeline), runs the passes over it in premultiplied
+  linear `Rgba16Float` and composites the result where the clip would have
+  been; a transition side runs its clip's effects before the blend; an
+  effect clip ends the composite pass, runs over the target so far and
+  carries on in a fresh target. All in the frame's one command encoder. A
+  frame with no live effect takes the old path exactly. Lengths are
+  fractions of the frame's shorter side, so preview and export match.
+- **Tests** (`fx/render_tests.rs`, 24, plus an ignored measurement): blur, pixelate, RGB split, every
+  mirror mode, letterbox, shake, gate weave, light sweep, grain and the
+  frame against CPU references written from the same description; glow,
+  bloom, halation, zoom blur, kaleidoscope, glitch and VHS structurally
+  (flat stays flat, light spreads past the threshold and not below it,
+  symmetry, a seed repeats and another differs); effect clips apply below
+  and not above; a hidden effect lane does nothing; preview/export parity
+  on a frame with an effect clip, an effected clip and grain; at rest,
+  switched off or unknown is byte-identical. Two deliberate shader
+  mutations both failed the suite.
+- **Layouts.** Split screens (top and bottom, side by side, three rows,
+  three columns, grid) crop each selected clip to its cell's shape and
+  scale it to fill the cell, topmost lane first, one undo step. Picture in
+  picture scales a clip into a corner and gives it a frame.
+- **Transition library.** 120 gl-transitions ported to WGSL by naga through
+  `transitions/library/port.py` (committed output, licence headers kept,
+  `LICENSE-gl-transitions.md`, `NOTICE.md`); five left out with reasons.
+  Five seamless transitions of ours move both clips with shutter motion
+  blur: zoom in, zoom out, spin, whip pan, push. All are `TransitionKind::
+  Library` with a `preset`; the existing draw path dispatches to a
+  per-preset pipeline compiled on first draw. Every preset is checked to
+  validate, to start on the outgoing clip and to end on the incoming one
+  (one documented exception).
+- **Tiles.** Every effect, transition and layout tile is the real thing,
+  rendered by the compositor over a procedural sample landscape and cached
+  as a PNG under `~/.cache/chukcut/fx-tiles`, keyed by a hash of its shader
+  source.
+- **Cost.** `fx::render_tests::measure_effect_cost_per_frame` (ignored;
+  `--release --ignored --nocapture`). Measured under a load average of
+  about 30, so only an upper bound: no effect added more than ~2.5 ms to a
+  1080x1920 frame on the RTX 3060. Re-measure on a quiet machine.
+- **Traps.** Some gl-transitions add 1 to alpha as if it were a colour;
+  GL clamps on write, so the harness clamps alpha before unpremultiplying,
+  or the frame darkens by half. A WGSL `let` named after a builtin (`step`)
+  is legal and confusing; `fx.wgsl` avoids it. `naga-cli` is only needed to
+  regenerate the ports: `cargo install naga-cli --version 30.0.0`.
+- Not done: a colour picker (colour parameters offer nine swatches), keyframe
+  easing per effect parameter (linear only), effect presets (saved
+  parameter sets), and motion blur that follows a clip's own keyframed
+  motion.
 ## Captions and auto captions (2026-10-03)
 
 A **Captions** tab in the asset panel, CapCut's "Untertitel": auto captions,

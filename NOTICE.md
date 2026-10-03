@@ -19,6 +19,7 @@ is a map, not a substitute for those texts.
 | wgpu, naga | MIT / Apache-2.0 | GPU compositing and shader translation |
 | glslang, SPIRV-Tools, shaderc | Apache-2.0 | GLSL → SPIR-V for the effect runtime |
 | GPUI (Zed) | Apache-2.0 | User interface |
+| gl-transitions (120 transitions, translated to WGSL, in `crates/engine/src/modules/transitions/library/gl/`) | MIT; `InvertedPageCurl` BSD-3-Clause, `StereoViewer` BSD-2-Clause | Library transitions; authors and licence texts in `transitions/library/LICENSE-gl-transitions.md` |
 
 `cargo tree` enumerates the complete set.
 

@@ -340,6 +340,14 @@ pub struct MaterialPool {
     /// payoff [`TransitionMaterial`] records for the same choice.
     #[serde(default)]
     pub color_adjusts: Vec<ColorAdjustMaterial>,
+    /// Built-in effects, referenced from a clip's `extras` (the effect sees
+    /// that clip) or as the material of a clip on an effect lane (the effect
+    /// sees everything beneath it). See [`super::effects::EffectMaterial`].
+    ///
+    /// Skipped when empty, so a project that never uses an effect saves
+    /// byte-identical to one written before effects existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effects: Vec<super::effects::EffectMaterial>,
     /// Keyframe-free animation — In, Out, Combo, text animator, punch-in
     /// zoom — referenced from the `extras` of the segment it animates. A
     /// typed category for the reasons `transitions` is one; see
@@ -451,6 +459,27 @@ impl MaterialPool {
     /// the first, because rendering *a* grade beats rendering none.
     pub fn color_adjust_of(&self, segment: &Segment) -> Option<&ColorAdjustMaterial> {
         segment.extras.iter().find_map(|id| self.color_adjust(id))
+    }
+
+    pub fn effect(&self, id: &str) -> Option<&super::effects::EffectMaterial> {
+        self.effects.iter().find(|m| m.id == id)
+    }
+
+    /// Whether `segment` is an effect clip: its material is an effect, so it
+    /// applies to what is composited beneath it rather than drawing a
+    /// picture of its own.
+    pub fn is_effect_clip(&self, segment: &Segment) -> bool {
+        self.effect(&segment.material_id).is_some()
+    }
+
+    /// Every effect applied by `segment`, in application order: an effect
+    /// clip's own material first, then each id in `extras` that resolves as
+    /// an effect.
+    pub fn effects_of(&self, segment: &Segment) -> Vec<&super::effects::EffectMaterial> {
+        self.effect(&segment.material_id)
+            .into_iter()
+            .chain(segment.extras.iter().filter_map(|id| self.effect(id)))
+            .collect()
     }
 
     pub fn animation(&self, id: &str) -> Option<&super::animation::AnimationMaterial> {
@@ -658,6 +687,10 @@ pub enum TransitionKind {
     /// frame width. Also what the motion module's blur animations draw with,
     /// one side empty.
     Blur,
+    /// One of the library's data-driven transitions — the ported
+    /// gl-transitions and the seamless set — named by
+    /// [`TransitionMaterial::preset`]. See `transitions/library`.
+    Library,
 }
 
 /// Which way a directional transition travels across the frame.
@@ -773,6 +806,14 @@ pub struct TransitionMaterial {
     /// Zoom only: extra scale the push adds. `0.35` reaches 1.35x.
     #[serde(default = "default_zoom")]
     pub zoom: f32,
+    /// Library only: which library transition, `gl:<id>` or `seamless:<id>`.
+    /// A preset this build does not know renders as a dissolve.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<String>,
+    /// Library only: parameter values that differ from the preset's
+    /// defaults, by parameter name, one to four numbers each.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: BTreeMap<String, Vec<f32>>,
 }
 
 fn default_softness() -> f32 {
@@ -795,6 +836,16 @@ impl TransitionMaterial {
             color: opaque_black(),
             softness: default_softness(),
             zoom: default_zoom(),
+            preset: None,
+            params: BTreeMap::new(),
+        }
+    }
+
+    /// A library transition, `preset` at its defaults.
+    pub fn library(preset: impl Into<String>, duration: Micros) -> Self {
+        Self {
+            preset: Some(preset.into()),
+            ..Self::new(TransitionKind::Library, duration)
         }
     }
 }
@@ -1334,7 +1385,7 @@ impl KeyframeTrack {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Keyframe {
     /// Relative to the segment start.
     pub time: Micros,
@@ -1514,7 +1565,9 @@ impl Project {
                 // a normal state a user can be in — the clip draws as missing,
                 // the preview composites a placeholder, and undo makes it whole
                 // again. An error would brand every such document as corrupt.
-                if self.materials.kind_of(&seg.material_id).is_none() {
+                if self.materials.kind_of(&seg.material_id).is_none()
+                    && !self.materials.is_effect_clip(seg)
+                {
                     outside.push(ValidationIssue {
                         severity: Severity::Warning,
                         message: format!("segment references unknown material {}", seg.material_id),

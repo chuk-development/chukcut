@@ -930,3 +930,69 @@ fn a_vertical_export_at_delivery_resolution_is_the_length_it_should_be() {
     assert!(result.probe.has_audio);
     let _ = std::fs::remove_file(&result.path);
 }
+
+// ---------------------------------------------------------------------------
+// Effects
+// ---------------------------------------------------------------------------
+
+/// An effect clip is not missing media, and what it does reaches the file:
+/// the counter clip under a "mirror left onto right" effect clip exports with
+/// every frame, and each frame decodes mirror-symmetric.
+#[test]
+fn an_effect_clip_exports_and_its_effect_is_in_the_file() {
+    use chukcut_engine::modules::project::document::{Segment, TimeRange, Transform};
+    use chukcut_engine::modules::project::EffectMaterial;
+
+    let Some(mut project) = counter_project(1_000_000, 30.0) else {
+        eprintln!("skipping: no media fixtures");
+        return;
+    };
+    let mirror = EffectMaterial::new("mirror");
+    let mut lane = Track::new(TrackKind::Effect, "Effects 1");
+    lane.segments.push(Segment {
+        id: "fx".into(),
+        material_id: mirror.id.clone(),
+        target_range: TimeRange::new(0, 1_000_000),
+        source_range: TimeRange::new(0, 1_000_000),
+        render_index: 1,
+        speed: 1.0,
+        volume: 1.0,
+        transform: Transform::default(),
+        crop: None,
+        extras: Vec::new(),
+        keyframes: Vec::new(),
+    });
+    project.materials.effects.push(mirror);
+    project.tracks.push(lane);
+    assert!(job::missing_media(&project).is_empty());
+
+    let path = scratch("effect-clip.mp4");
+    let result = exported!(&project, request(&path, None, false));
+    assert_eq!(result.probe.decoded_frames, 30);
+
+    let mut decoder = VideoDecoder::open(&result.path).expect("open the export");
+    let frame = decoder.seek_and_decode(500_000).expect("decode the export");
+    let (w, h) = (frame.width as usize, frame.height as usize);
+    let px = |x: usize, y: usize| {
+        let i = (y * w + x) * 4;
+        [
+            frame.data[i] as i32,
+            frame.data[i + 1] as i32,
+            frame.data[i + 2] as i32,
+        ]
+    };
+    let mut worst = 0;
+    for y in (4..h - 4).step_by(17) {
+        for x in (4..w / 2 - 4).step_by(13) {
+            let (a, b) = (px(x, y), px(w - 1 - x, y));
+            for c in 0..3 {
+                worst = worst.max((a[c] - b[c]).abs());
+            }
+        }
+    }
+    assert!(
+        worst <= 24,
+        "the export is not mirrored: worst difference {worst}"
+    );
+    let _ = std::fs::remove_file(&result.path);
+}

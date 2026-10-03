@@ -11,6 +11,7 @@ pub mod captions;
 pub mod cloud;
 pub mod effects;
 pub mod export;
+pub mod fx;
 pub mod gpu;
 pub mod inspector;
 pub mod loudness;

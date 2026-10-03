@@ -73,72 +73,12 @@ fn gradient(from: u32, to: u32) -> gpui::Background {
     )
 }
 
-/// The picture of a transition tile: clip A (teal) giving way to clip B
-/// (violet) the way the transition does it.
-fn transition_art(kind: TransitionKind) -> AnyElement {
-    const A: u32 = 0x1a9aa5;
-    const B: u32 = 0x6b5bd2;
-    let half = |color: u32| div().flex_1().h_full().bg(rgb(color));
-    let base = div().size_full().flex().flex_row().overflow_hidden();
-    match kind {
-        TransitionKind::Dissolve => base
-            .bg({
-                let (a, b): (Hsla, Hsla) = (rgb(A).into(), rgb(B).into());
-                linear_gradient(90.0, linear_color_stop(a, 0.2), linear_color_stop(b, 0.8))
-            })
-            .into_any_element(),
-        TransitionKind::DipToColor => base
-            .child(half(A))
-            .child(div().w(px(36.0)).h_full().bg(rgb(0x000000)))
-            .child(half(B))
-            .into_any_element(),
-        TransitionKind::Wipe => base
-            .child(half(B))
-            .child(div().w(px(3.0)).h_full().bg(rgb(0xffffff)))
-            .child(half(A))
-            .into_any_element(),
-        TransitionKind::Slide => base
-            .bg(rgb(B))
-            .relative()
-            .child(
-                div()
-                    .absolute()
-                    .left(px(-40.0))
-                    .top_0()
-                    .w(px(TILE_W))
-                    .h_full()
-                    .bg(rgb(A))
-                    .border_r_2()
-                    .border_color(rgb(0xffffff)),
-            )
-            .into_any_element(),
-        TransitionKind::Blur => base
-            .bg({
-                let (a, b): (Hsla, Hsla) = (rgb(A).into(), rgb(B).into());
-                linear_gradient(90.0, linear_color_stop(a, 0.0), linear_color_stop(b, 1.0))
-            })
-            .opacity(0.7)
-            .into_any_element(),
-        TransitionKind::Zoom => base
-            .bg(rgb(B))
-            .items_center()
-            .justify_center()
-            .child(
-                div()
-                    .w(px(64.0))
-                    .h(px(38.0))
-                    .rounded_sm()
-                    .bg(rgb(A))
-                    .border_1()
-                    .border_color(rgb(0xffffff)),
-            )
-            .into_any_element(),
-    }
-}
+/// The Transitions tab's category column.
+pub(super) const TRANSITION_CATEGORIES: [&str; 3] = ["Basic", "Seamless", "Library"];
 
 impl Editor {
     /// One dim line above a tab's tiles.
-    fn hint(text: impl Into<SharedString>) -> impl IntoElement {
+    pub(super) fn hint(text: impl Into<SharedString>) -> impl IntoElement {
         div()
             .flex()
             .flex_row()
@@ -151,7 +91,7 @@ impl Editor {
     }
 
     /// The wrapping grid of a tab's tiles.
-    fn tile_grid(tiles: impl IntoIterator<Item = impl IntoElement>) -> gpui::Div {
+    pub(super) fn tile_grid(tiles: impl IntoIterator<Item = impl IntoElement>) -> gpui::Div {
         div()
             .flex()
             .flex_row()
@@ -207,36 +147,68 @@ impl Editor {
         }
     }
 
-    pub(super) fn render_transitions_tab(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_transitions_tab(
+        &mut self,
+        category: usize,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        use chukcut_engine::modules::fx::commands as fx_commands;
+        use chukcut_engine::modules::transitions::library::Family;
         let query = self.assets.query(cx);
         let hint = if self.selected.is_some() {
             "Click a transition to put it between the selected clip and the next."
         } else {
             "Select a clip on the timeline, then pick a transition."
         };
-        let tiles = transition_commands::transitions_catalog()
+        let family = match category {
+            0 => None,
+            1 => Some(Family::Seamless),
+            _ => Some(Family::Gl),
+        };
+        let descriptors: Vec<_> = transition_commands::transitions_catalog()
             .into_iter()
-            .filter(|descriptor| matches(descriptor.label, &query))
-            .map(|descriptor| {
-                let kind = descriptor.kind;
-                let editor = cx.entity().downgrade();
+            .filter(|d| d.family == family && matches(d.label, &query))
+            .collect();
+        let mut tiles = Vec::with_capacity(descriptors.len());
+        for descriptor in descriptors {
+            let kind = descriptor.kind;
+            let preset = descriptor.preset;
+            // Drawn by the compositor, from the day sample to the night one.
+            let picture = self.rendered_tile(
+                format!("tr:{kind:?}:{}", preset.unwrap_or("")),
+                move || {
+                    fx_commands::fx_transition_tile(
+                        kind,
+                        preset.map(str::to_string),
+                        super::effects::TILE_PX,
+                    )
+                },
+                cx,
+            );
+            let editor = cx.entity().downgrade();
+            let tooltip = match descriptor.family {
+                Some(Family::Gl) => format!(
+                    "{} By {}, {}.",
+                    descriptor.description, descriptor.author, descriptor.license
+                ),
+                _ => descriptor.description.to_string(),
+            };
+            tiles.push(
                 Self::tile(
-                    SharedString::from(format!("transition-{:?}", kind)),
-                    transition_art(kind),
+                    SharedString::from(format!("transition-{kind:?}-{}", preset.unwrap_or(""))),
+                    picture,
                     descriptor.label.to_string(),
                     false,
                     move |_, _, cx| {
-                        let _ = editor.update(cx, |this, cx| this.add_transition(kind, cx));
+                        let _ = editor.update(cx, |this, cx| this.add_transition(kind, preset, cx));
                     },
                 )
-                .tooltip({
-                    let description = descriptor.description;
-                    move |window, cx| {
-                        gpui::component::tooltip::Tooltip::new(description).build(window, cx)
-                    }
+                .tooltip(move |window, cx| {
+                    gpui::component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
                 })
-                .on_click(cx.listener(move |this, _, _, cx| this.add_transition(kind, cx)))
-            });
+                .on_click(cx.listener(move |this, _, _, cx| this.add_transition(kind, preset, cx))),
+            );
+        }
         div()
             .flex_1()
             .min_h(px(0.0))
@@ -250,8 +222,14 @@ impl Editor {
     /// Put a transition at the end of the selected clip, which is where
     /// CapCut puts it: the head of the clip after it. A last clip takes it
     /// at its own head instead. A clip that already has one gets its kind
-    /// changed rather than a second one.
-    fn add_transition(&mut self, kind: TransitionKind, cx: &mut Context<Self>) {
+    /// changed rather than a second one. `preset` names a library
+    /// transition.
+    fn add_transition(
+        &mut self,
+        kind: TransitionKind,
+        preset: Option<&'static str>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(selected) = self.selected.clone() else {
             self.report(
                 Err("Select a clip first: the transition goes between it and the next one".into()),
@@ -286,12 +264,20 @@ impl Editor {
             .project
             .segment(&target)
             .and_then(|(_, segment)| self.project.materials.transition_of(segment).cloned());
-        let result = match existing {
-            Some(mut transition) => {
+        let result = match (existing, preset) {
+            (Some(mut transition), _) => {
                 transition.kind = kind;
+                transition.preset = preset.map(str::to_string);
+                transition.params.clear();
                 transition_commands::transitions_set(&self.state, target, transition)
             }
-            None => transition_commands::transitions_add(&self.state, target, kind, None),
+            (None, Some(preset)) => transition_commands::transitions_add_preset(
+                &self.state,
+                target,
+                preset.to_string(),
+                None,
+            ),
+            (None, None) => transition_commands::transitions_add(&self.state, target, kind, None),
         }
         .map(|_| ());
         self.refresh(cx);

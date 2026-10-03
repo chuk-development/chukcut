@@ -536,6 +536,8 @@ pub fn missing_media(project: &Project) -> Vec<String> {
             let at = segment.target_range.start as f64 / 1_000_000.0;
             let materials = &project.materials;
             match materials.kind_of(&segment.material_id) {
+                // An effect clip has no media to go missing.
+                None if materials.is_effect_clip(segment) => {}
                 None => lines.push(format!(
                     "the clip at {at:.1}s on \"{}\" references media that was removed from the \
                      project",
