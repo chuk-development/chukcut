@@ -13,14 +13,24 @@
 //! multi-clip gestures (ripple delete, magnetic reorder) are built in
 //! [`ripple`].
 
+mod batch;
+mod clipboard;
+mod envelope;
+mod links;
 mod media_cache;
 mod ripple;
+mod selection;
 
+use chukcut_engine::modules::inspector::commands as inspector_commands;
 use chukcut_engine::modules::project::{Marker, MarkerColor, Segment, TimeRange};
+use chukcut_engine::modules::text::commands as text_commands;
 use chukcut_engine::modules::timeline::ops::TrackFlags;
+use chukcut_engine::modules::transitions::commands as transition_commands;
+use chukcut_engine::modules::transitions::edit as transition_edit;
+use chukcut_engine::modules::transitions::resolve as transition_resolve;
 use gpui::assets::IconName;
 use gpui::component::button::{Button, ButtonVariants};
-use gpui::component::menu::DropdownMenu;
+use gpui::component::menu::{ContextMenuExt, DropdownMenu};
 use gpui::component::slider::{Slider, SliderEvent, SliderState};
 use gpui::component::{Disableable, Icon, Selectable, Sizable};
 use gpui::{fill, point, size, Corners, CursorStyle, Entity, KeyBinding, Subscription};
@@ -39,23 +49,41 @@ actions!(
         ToggleSnapping,
         ZoomToFit,
         SelectTool,
-        BladeTool
+        BladeTool,
+        CopyClips,
+        CutClips,
+        PasteClips,
+        DuplicateClips,
+        SelectAllClips,
+        ClearSelection,
+        DetachAudio,
+        LinkClips,
+        UnlinkClips,
+        ResetSpeed
     ]
 );
 
-/// The timeline's own shortcuts, CapCut's keys.
+/// The timeline's own shortcuts, CapCut's keys. Kept out of text fields,
+/// where the letters and Ctrl+C/X/V/A belong to the field.
 pub(crate) fn key_bindings() -> Vec<KeyBinding> {
+    const TYPING_OFF: Option<&str> = Some("!Input");
     vec![
-        KeyBinding::new("q", DeleteLeft, None),
-        KeyBinding::new("w", DeleteRight, None),
-        KeyBinding::new("m", ToggleMarker, None),
-        KeyBinding::new("p", ToggleMagnet, None),
-        KeyBinding::new("n", ToggleSnapping, None),
-        KeyBinding::new("shift-z", ZoomToFit, None),
-        KeyBinding::new("a", SelectTool, None),
-        KeyBinding::new("b", BladeTool, None),
+        KeyBinding::new("q", DeleteLeft, TYPING_OFF),
+        KeyBinding::new("w", DeleteRight, TYPING_OFF),
+        KeyBinding::new("m", ToggleMarker, TYPING_OFF),
+        KeyBinding::new("p", ToggleMagnet, TYPING_OFF),
+        KeyBinding::new("n", ToggleSnapping, TYPING_OFF),
+        KeyBinding::new("shift-z", ZoomToFit, TYPING_OFF),
+        KeyBinding::new("a", SelectTool, TYPING_OFF),
+        KeyBinding::new("b", BladeTool, TYPING_OFF),
         KeyBinding::new("ctrl-+", ZoomIn, None),
         KeyBinding::new("ctrl-shift-=", ZoomIn, None),
+        KeyBinding::new("ctrl-c", CopyClips, TYPING_OFF),
+        KeyBinding::new("ctrl-x", CutClips, TYPING_OFF),
+        KeyBinding::new("ctrl-v", PasteClips, TYPING_OFF),
+        KeyBinding::new("ctrl-d", DuplicateClips, TYPING_OFF),
+        KeyBinding::new("ctrl-a", SelectAllClips, TYPING_OFF),
+        KeyBinding::new("escape", ClearSelection, TYPING_OFF),
     ]
 }
 
@@ -81,6 +109,63 @@ const DRAG_SLOP: f32 = 3.0;
 const ZOOM_MIN: f32 = 0.5;
 const ZOOM_MAX: f32 = 2400.0;
 const TITLE_H: f32 = 16.0;
+/// The strip at the bottom of a main-lane video clip that shows its sound.
+const SOUND_STRIP_H: f32 = 14.0;
+/// A transition badge: its narrowest, its height, and how far inside its
+/// ends a press grabs an end (and changes the length) rather than selecting.
+const BADGE_MIN_W: f32 = 18.0;
+const BADGE_H: f32 = 20.0;
+const BADGE_EDGE: f32 = 5.0;
+/// The shortest transition an edge drag leaves: two frames at 30 fps.
+const MIN_TRANSITION: Micros = 66_667;
+/// A keyframe diamond's size, and its centre's distance above the clip's
+/// bottom edge.
+const DIAMOND: f32 = 9.0;
+const DIAMOND_INSET: f32 = 9.0;
+/// A fade handle's radius, and its centre's distance below the clip's top.
+const FADE_HANDLE: f32 = 5.0;
+const FADE_HANDLE_Y: f32 = TITLE_H + 6.0;
+
+/// A transition badge's top and height on a lane: centred on the clip
+/// under the title.
+fn badge_y(row: &Row) -> (f32, f32) {
+    (
+        row.top + TITLE_H + (row.height - TITLE_H - BADGE_H) / 2.0,
+        BADGE_H,
+    )
+}
+
+fn diamond_y(row: &Row) -> f32 {
+    row.top + row.height - DIAMOND_INSET
+}
+
+/// How far a trim moved the clip's edge: for a head trim, where the head
+/// would be had the clip kept its end — the same whether the trim moved the
+/// start or (on the magnetic main lane) kept it and shortened the clip.
+fn edge_shift(edge: Edge, before: TimeRange, after: TimeRange) -> Micros {
+    match edge {
+        Edge::Head => (before.end() - after.duration) - before.start,
+        Edge::Tail => after.end() - before.end(),
+    }
+}
+
+/// A fade length in pixels at `zoom`.
+fn fade_x(length: Micros, zoom: f32) -> f32 {
+    length as f32 / 1_000_000.0 * zoom
+}
+
+/// Where a fade handle sits from its edge of the clip: at the end of the
+/// fade, but never so close to the edge that half of it is cut off.
+fn fade_handle_x(length: Micros, zoom: f32) -> f32 {
+    fade_x(length, zoom).max(FADE_HANDLE + 1.0)
+}
+
+/// The transition length an edge dragged to `time` asks for: twice the
+/// distance to the cut, since a transition is centred on it, kept between
+/// two frames and what the clips either side allow.
+fn transition_drag(cut: Micros, time: Micros, max: Micros) -> Micros {
+    (2 * (time - cut).abs()).max(MIN_TRANSITION).min(max)
+}
 
 fn row_height(kind: TrackKind, main: bool) -> f32 {
     match kind {
@@ -97,6 +182,7 @@ const ROW_BG: u32 = 0x222222;
 const AUDIO_TITLE: u32 = 0x0c2547;
 const SNAP_LINE: u32 = 0xf2c94c;
 const SCROLL_THUMB: u32 = 0x4a4a4a;
+const TRANSITION_BADGE: u32 = 0xdcdcdc;
 
 /// The slider runs 0..=1000 over a logarithmic zoom range, so each step of it
 /// is the same relative change at any zoom.
@@ -131,6 +217,8 @@ pub(crate) enum Drag {
         /// Held over the free space above the video lanes or below the audio
         /// lanes: dropping there makes a new lane, as in CapCut.
         new_lane: bool,
+        /// The rest of the selection, which moves by the same distance.
+        group: Vec<String>,
     },
     Trim {
         segment_id: String,
@@ -140,6 +228,38 @@ pub(crate) enum Drag {
         ripple: bool,
         target: TimeRange,
         source: TimeRange,
+        /// The rest of the selection, trimmed at the same edge by the same
+        /// distance: their live ranges.
+        group: Vec<batch::Trimmed>,
+    },
+    /// A rubber band over the lanes, from where the press landed.
+    Band {
+        from: (f32, f32),
+        to: (f32, f32),
+        moved: bool,
+        /// What was selected before, when Ctrl or Shift adds to it.
+        base: Vec<String>,
+    },
+    /// A keyframe diamond of the selected clip, clip-relative times.
+    Keyframe {
+        segment_id: String,
+        from: Micros,
+        to: Micros,
+        down_x: f32,
+        moved: bool,
+    },
+    /// A fade handle of a sound clip.
+    Fade {
+        segment_id: String,
+        side: envelope::Side,
+        length: Micros,
+    },
+    /// An edge of a transition badge: the length, centred on the cut.
+    Transition {
+        segment_id: String,
+        cut: Micros,
+        duration: Micros,
+        max: Micros,
     },
     Scrollbar {
         grab: f32,
@@ -147,6 +267,18 @@ pub(crate) enum Drag {
     Resize {
         window_h: f32,
     },
+}
+
+/// What the right-click menu can offer, decided when it opens.
+#[derive(Clone, Copy, Default)]
+struct MenuState {
+    clips: bool,
+    can_split: bool,
+    can_paste: bool,
+    can_detach: bool,
+    can_link: bool,
+    can_unlink: bool,
+    can_reset_speed: bool,
 }
 
 /// One lane as drawn: where it is, in lanes-local pixels.
@@ -198,6 +330,20 @@ pub(crate) struct TimelineState {
     snap: Option<Micros>,
     zoom_slider: Entity<SliderState>,
     media: MediaCache,
+    /// Every selected clip; `Editor::selected` is the primary one among them.
+    selection: Vec<String>,
+    clipboard: Option<clipboard::Clipboard>,
+    /// A keyframe instant of the selected clip, clip-relative.
+    selected_keyframe: Option<(String, Micros)>,
+    /// A transition, named by the clip it leads into.
+    selected_transition: Option<String>,
+    /// The clip under the pointer, and which part of it.
+    hover_clip: Option<(String, Zone)>,
+    /// The pointer over the lanes while a tile is dragged from the media
+    /// panel.
+    drop_hover: Option<Point<Pixels>>,
+    /// Where a wheel scroll is gliding to.
+    scroll_target: Option<f32>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -235,6 +381,13 @@ impl TimelineState {
             snap: None,
             zoom_slider,
             media: MediaCache::default(),
+            selection: Vec::new(),
+            clipboard: None,
+            selected_keyframe: None,
+            selected_transition: None,
+            hover_clip: None,
+            drop_hover: None,
+            scroll_target: None,
             _subscriptions: vec![subscription],
         }
     }
@@ -249,6 +402,7 @@ const SPLIT_ICON: &str = r#"<path d="M4 4h4v16H4"/><path d="M20 4h-4v16h4"/>"#;
 const DELETE_LEFT_ICON: &str = r#"<path d="M4 4h4v16H4" stroke-dasharray="2 3"/><path d="M20 4h-4v16h4"/><path d="M12 2v20"/>"#;
 const DELETE_RIGHT_ICON: &str = r#"<path d="M4 4h4v16H4"/><path d="M20 4h-4v16h4" stroke-dasharray="2 3"/><path d="M12 2v20"/>"#;
 const SNAP_ICON: &str = r#"<path d="M12 2v20"/><rect x="2" y="7" width="7" height="10" rx="1.5"/><rect x="15" y="7" width="7" height="10" rx="1.5"/>"#;
+const TRANSITION_ICON: &str = r#"<path d="M3 5l9 7-9 7z"/><path d="M21 5l-9 7 9 7z"/>"#;
 const ZOOM_FIT_ICON: &str = r#"<path d="M3 8V5a2 2 0 0 1 2-2h3"/><path d="M16 3h3a2 2 0 0 1 2 2v3"/><path d="M21 16v3a2 2 0 0 1-2 2h-3"/><path d="M8 21H5a2 2 0 0 1-2-2v-3"/><path d="M7 12h10"/><path d="m10 9-3 3 3 3"/><path d="m14 9 3 3-3 3"/>"#;
 
 fn own_icon(body: &str) -> Icon {
@@ -343,6 +497,35 @@ fn ruler_label(seconds: f64, fps: f64) -> String {
     }
 }
 
+/// An engine refusal, in the words of what the user just did.
+fn friendly(error: &str) -> String {
+    if error.contains("occupied") {
+        "Another clip is in the way".into()
+    } else {
+        error.to_string()
+    }
+}
+
+/// A point in time as the player writes it: `mm:ss:ff`, hours in front once
+/// there are any.
+fn time_label(time: Micros, fps: f64) -> String {
+    let fps = if fps > 0.0 { fps } else { 30.0 };
+    let frames = (time.max(0) as f64 / 1_000_000.0 * fps).round() as i64;
+    let per_second = fps.round().max(1.0) as i64;
+    let (seconds, frame) = (frames / per_second, frames % per_second);
+    if seconds >= 3600 {
+        format!(
+            "{}:{:02}:{:02}:{:02}",
+            seconds / 3600,
+            seconds / 60 % 60,
+            seconds % 60,
+            frame
+        )
+    } else {
+        format!("{:02}:{:02}:{:02}", seconds / 60, seconds % 60, frame)
+    }
+}
+
 // --- the editor's timeline ------------------------------------------------------------
 
 impl Editor {
@@ -374,7 +557,14 @@ impl Editor {
         let lane = self
             .row_at(y)
             .map(|row| self.project.tracks[row.track].id.clone());
-        Some((self.x_to_time(x), lane))
+        // A drop snaps like a dragged clip's head: to cuts, the playhead and
+        // markers.
+        let time = self.x_to_time(x);
+        let time = self
+            .snap(&[time], &[])
+            .map(|(shift, _)| time + shift)
+            .unwrap_or(time);
+        Some((time, lane))
     }
 
     /// Lanes-local coordinates of a window position.
@@ -545,13 +735,13 @@ impl Editor {
     // --- snapping ------------------------------------------------------------------
 
     /// Everything an edge can snap to: time zero, the playhead, markers, and
-    /// the edges of every clip but `exclude`.
-    fn snap_points(&self, exclude: &str) -> Vec<Micros> {
+    /// the edges of every clip but the ones in `exclude`.
+    fn snap_points(&self, exclude: &[String]) -> Vec<Micros> {
         let mut points = vec![0, self.clock.position()];
         points.extend(self.project.markers.iter().map(|m| m.time));
         for track in &self.project.tracks {
             for segment in &track.segments {
-                if segment.id != exclude {
+                if !exclude.contains(&segment.id) {
                     points.push(segment.target_range.start);
                     points.push(segment.target_range.end());
                 }
@@ -562,7 +752,7 @@ impl Editor {
 
     /// The shift that brings the nearest of `edges` onto a snap point, when
     /// one is within reach, and the point it lands on.
-    fn snap(&self, edges: &[Micros], exclude: &str) -> Option<(Micros, Micros)> {
+    fn snap(&self, edges: &[Micros], exclude: &[String]) -> Option<(Micros, Micros)> {
         if !self.timeline.snapping {
             return None;
         }
@@ -574,12 +764,214 @@ impl Editor {
             .min_by_key(|(shift, _)| shift.abs())
     }
 
+    // --- selection -------------------------------------------------------------------
+
+    /// Every selected clip, the primary one included. Another panel that sets
+    /// `selected` to a clip outside the set makes the set that one clip.
+    pub(super) fn selection(&self) -> Vec<String> {
+        let Some(primary) = self.selected.as_deref() else {
+            return Vec::new();
+        };
+        if self.timeline.selection.iter().any(|id| id == primary) {
+            // A clip whose lane was locked since it was selected drops out:
+            // a locked lane is not edited, not even as part of a selection.
+            self.timeline
+                .selection
+                .iter()
+                .filter(|id| self.project.segment(id).is_some_and(|(t, _)| !t.locked))
+                .cloned()
+                .collect()
+        } else {
+            vec![primary.to_string()]
+        }
+    }
+
+    fn set_selection(&mut self, set: Vec<String>, primary: Option<String>) {
+        self.selected = primary.or_else(|| set.last().cloned());
+        self.timeline.selection = set;
+        self.timeline.selected_keyframe = None;
+        self.timeline.selected_transition = None;
+    }
+
+    fn select_only(&mut self, segment_id: &str) {
+        self.set_selection(vec![segment_id.to_string()], Some(segment_id.to_string()));
+    }
+
+    fn clear_selection(&mut self) {
+        self.set_selection(Vec::new(), None);
+    }
+
+    /// The main lane's id while the magnet is on: the lane every multi-clip
+    /// gesture keeps gapless.
+    fn magnet_lane(&self) -> Option<String> {
+        self.timeline
+            .magnet
+            .then(|| self.main_track_index())
+            .flatten()
+            .map(|i| self.project.tracks[i].id.clone())
+    }
+
+    /// Every clip on an unlocked lane as drawn, for the rubber band.
+    fn drawn_clips(&self) -> Vec<selection::Drawn> {
+        let (rows, _) = self.rows();
+        let mut out = Vec::new();
+        for row in &rows {
+            let track = &self.project.tracks[row.track];
+            if track.locked {
+                continue;
+            }
+            for segment in &track.segments {
+                out.push(selection::Drawn {
+                    segment_id: segment.id.clone(),
+                    left: self.time_to_x(segment.target_range.start),
+                    right: self.time_to_x(segment.target_range.end()),
+                    top: row.top,
+                    bottom: row.top + row.height,
+                });
+            }
+        }
+        out
+    }
+
+    // --- what is under the pointer ---------------------------------------------------
+
+    /// A transition badge's left and right, lanes-local; never narrower than
+    /// can be grabbed.
+    fn badge_x(&self, cut: Micros, window: TimeRange) -> (f32, f32) {
+        let (left, right) = (self.time_to_x(window.start), self.time_to_x(window.end()));
+        if right - left >= BADGE_MIN_W {
+            (left, right)
+        } else {
+            let x = self.time_to_x(cut);
+            (x - BADGE_MIN_W / 2.0, x + BADGE_MIN_W / 2.0)
+        }
+    }
+
+    /// The transition badge under a lanes-local point: the clip it leads
+    /// into, its cut, its length, and whether the press is on an edge.
+    fn transition_hit(&self, x: f32, y: f32) -> Option<(String, Micros, Micros, bool)> {
+        let row = self.row_at(y)?;
+        let track = &self.project.tracks[row.track];
+        if track.locked {
+            return None;
+        }
+        let (top, height) = badge_y(&row);
+        if y < top || y > top + height {
+            return None;
+        }
+        for span in transition_resolve::spans(track, &self.project.materials) {
+            let (left, right) = self.badge_x(span.cut, span.window);
+            if x >= left - 2.0 && x <= right + 2.0 {
+                let edge = x < left + BADGE_EDGE || x > right - BADGE_EDGE;
+                return Some((span.to.id.clone(), span.cut, span.material.duration, edge));
+            }
+        }
+        None
+    }
+
+    /// The keyframe diamond of the primary clip under a lanes-local point,
+    /// as the clip and the clip-relative instant.
+    fn keyframe_hit(&self, x: f32, y: f32) -> Option<(String, Micros)> {
+        let id = self.selected.as_deref()?;
+        let (track, segment) = self.project.segment(id)?;
+        if track.locked {
+            return None;
+        }
+        let row = self.row_of(&track.id)?;
+        if (y - diamond_y(&row)).abs() > DIAMOND / 2.0 + 3.0 {
+            return None;
+        }
+        envelope::instants(segment)
+            .into_iter()
+            .filter(|t| *t <= segment.target_range.duration)
+            .map(|t| {
+                let dx = (self.time_to_x(segment.target_range.start + t) - x).abs();
+                (t, dx)
+            })
+            .filter(|(_, dx)| *dx <= DIAMOND / 2.0 + 3.0)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(t, _)| (id.to_string(), t))
+    }
+
+    /// Whether a sound clip shows its fade handles: when it is selected or
+    /// under the pointer, as CapCut shows them.
+    fn shows_fades(&self, segment_id: &str) -> bool {
+        self.timeline
+            .hover_clip
+            .as_ref()
+            .is_some_and(|(id, _)| id == segment_id)
+            || self.selection().iter().any(|id| id == segment_id)
+    }
+
+    /// The fade handle under a lanes-local point: the clip, which fade, and
+    /// its length now.
+    fn fade_hit(&self, x: f32, y: f32) -> Option<(String, envelope::Side, Micros)> {
+        let row = self.row_at(y)?;
+        let track = &self.project.tracks[row.track];
+        if track.kind != TrackKind::Audio || track.locked {
+            return None;
+        }
+        if (y - (row.top + FADE_HANDLE_Y)).abs() > FADE_HANDLE + 3.0 {
+            return None;
+        }
+        let zoom = self.timeline.zoom;
+        for segment in &track.segments {
+            if !self.shows_fades(&segment.id) {
+                continue;
+            }
+            let (fade_in, fade_out) = envelope::fades(segment);
+            let x0 = self.time_to_x(segment.target_range.start);
+            let x1 = self.time_to_x(segment.target_range.end());
+            let handle_in = x0 + fade_handle_x(fade_in, zoom);
+            let handle_out = x1 - 1.0 - fade_handle_x(fade_out, zoom);
+            let reach = FADE_HANDLE + 3.0;
+            if (x - handle_in).abs() <= reach {
+                return Some((segment.id.clone(), envelope::Side::In, fade_in));
+            }
+            if (x - handle_out).abs() <= reach {
+                return Some((segment.id.clone(), envelope::Side::Out, fade_out));
+            }
+        }
+        None
+    }
+
+    /// Keep the hovered clip (and the blade's line) in step with the pointer.
+    fn track_hover(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let inside = self.timeline.lanes.get().contains(&position);
+        if self.timeline.tool == Tool::Blade {
+            let hover = inside.then_some(position);
+            if hover != self.timeline.hover {
+                self.timeline.hover = hover;
+                cx.notify();
+            }
+        }
+        let clip = if inside {
+            let (x, y) = self.lanes_local(position);
+            match self.hit(x, y) {
+                Some((row, Hit::Clip { segment_id, zone }))
+                    if !self.project.tracks[row.track].locked =>
+                {
+                    Some((segment_id, zone))
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if clip != self.timeline.hover_clip {
+            self.timeline.hover_clip = clip;
+            cx.notify();
+        }
+    }
+
     // --- pointer -------------------------------------------------------------------
 
     fn on_lanes_down(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         let (x, y) = self.lanes_local(event.position);
         let (width, height) = self.lanes_size();
         let time = self.x_to_time(x);
+        let (ctrl, shift) = (event.modifiers.control, event.modifiers.shift);
+        self.timeline.scroll_target = None;
 
         if y >= height - SCROLLBAR_H {
             let content = self.content_width();
@@ -604,6 +996,56 @@ impl Editor {
             return;
         }
 
+        if self.timeline.tool == Tool::Select {
+            if let Some((segment_id, cut, duration, edge)) = self.transition_hit(x, y) {
+                self.clear_selection();
+                self.timeline.selected_transition = Some(segment_id.clone());
+                if edge {
+                    let max = transition_edit::allowed_duration(&self.project, &segment_id);
+                    self.timeline.drag = Some(Drag::Transition {
+                        segment_id,
+                        cut,
+                        duration,
+                        max,
+                    });
+                }
+                cx.notify();
+                return;
+            }
+            if let Some((segment_id, at)) = self.keyframe_hit(x, y) {
+                let start = self
+                    .project
+                    .segment(&segment_id)
+                    .map(|(_, s)| s.target_range.start)
+                    .unwrap_or(0);
+                self.timeline.selected_transition = None;
+                self.timeline.selected_keyframe = Some((segment_id.clone(), at));
+                self.pause();
+                self.seek(start + at);
+                self.timeline.drag = Some(Drag::Keyframe {
+                    segment_id,
+                    from: at,
+                    to: at,
+                    down_x: x,
+                    moved: false,
+                });
+                cx.notify();
+                return;
+            }
+            if let Some((segment_id, side, length)) = self.fade_hit(x, y) {
+                if !self.selection().contains(&segment_id) {
+                    self.select_only(&segment_id);
+                }
+                self.timeline.drag = Some(Drag::Fade {
+                    segment_id,
+                    side,
+                    length,
+                });
+                cx.notify();
+                return;
+            }
+        }
+
         let hit = self.hit(x, y);
         let clip = match &hit {
             Some((row, Hit::Clip { segment_id, zone }))
@@ -614,16 +1056,26 @@ impl Editor {
             _ => None,
         };
         let Some((row, segment_id, zone)) = clip else {
-            self.selected = None;
-            self.seek(time);
-            self.timeline.drag = Some(Drag::Scrub);
+            // Empty lane space: a drag draws a rubber band, a click seeks.
+            let base = if ctrl || shift {
+                self.selection()
+            } else {
+                self.clear_selection();
+                Vec::new()
+            };
+            self.timeline.drag = Some(Drag::Band {
+                from: (x, y),
+                to: (x, y),
+                moved: false,
+                base,
+            });
             cx.notify();
             return;
         };
 
         if self.timeline.tool == Tool::Blade {
             let at = self
-                .snap(&[time], "")
+                .snap(&[time], &[])
                 .map(|(shift, _)| time + shift)
                 .unwrap_or(time);
             let result = timeline_commands::timeline_split(&self.state, segment_id, at).map(|_| ());
@@ -632,7 +1084,37 @@ impl Editor {
             return;
         }
 
-        self.selected = Some(segment_id.clone());
+        if ctrl || shift {
+            let lane = &self.project.tracks[row.track];
+            let (set, primary) = selection::clicked(
+                &self.selection(),
+                self.selected.as_deref(),
+                &segment_id,
+                lane,
+                ctrl,
+                shift,
+            );
+            self.set_selection(set, primary);
+            cx.notify();
+            return;
+        }
+
+        let current = self.selection();
+        if current.len() > 1 && current.contains(&segment_id) {
+            // A press on one clip of a selection keeps the selection: the
+            // drag that may follow moves or trims all of it. A click without
+            // a drag narrows it to this clip on release.
+            self.selected = Some(segment_id.clone());
+            self.timeline.selected_keyframe = None;
+            self.timeline.selected_transition = None;
+        } else {
+            self.select_only(&segment_id);
+        }
+        let group: Vec<String> = self
+            .selection()
+            .into_iter()
+            .filter(|id| *id != segment_id)
+            .collect();
         let track = &self.project.tracks[row.track];
         let Some(segment) = track.segments.iter().find(|s| s.id == segment_id) else {
             return;
@@ -649,13 +1131,23 @@ impl Editor {
                 } else {
                     segment.target_range.end()
                 };
+                let trims = group
+                    .iter()
+                    .filter_map(|id| self.project.segment(id))
+                    .map(|(_, s)| batch::Trimmed {
+                        segment_id: s.id.clone(),
+                        target: s.target_range,
+                        source: s.source_range,
+                    })
+                    .collect();
                 Drag::Trim {
                     segment_id,
                     edge,
                     grab: time - at,
-                    ripple: self.timeline.magnet && row.main,
+                    ripple: self.timeline.magnet && row.main && group.is_empty(),
                     target: segment.target_range,
                     source: segment.source_range,
+                    group: trims,
                 }
             }
             Zone::Body => Drag::Clip {
@@ -669,6 +1161,7 @@ impl Editor {
                 track: track.id.clone(),
                 start: segment.target_range.start,
                 new_lane: false,
+                group,
             },
         });
         cx.notify();
@@ -692,21 +1185,68 @@ impl Editor {
         cx.notify();
     }
 
+    /// Where an edge of a clip being trimmed lands for the pointer at `to`:
+    /// against its neighbours on a free lane, anywhere on a rippled one, and
+    /// what the clip's ranges become.
+    fn live_trim(
+        &self,
+        segment_id: &str,
+        edge: Edge,
+        to: Micros,
+        ripple: bool,
+    ) -> Option<(TimeRange, TimeRange)> {
+        let (track, segment) = self.project.segment(segment_id)?;
+        let mut to = to;
+        if !ripple {
+            let index = track
+                .segments
+                .iter()
+                .position(|s| s.id == segment_id)
+                .unwrap_or(0);
+            to = match edge {
+                Edge::Head => to.max(
+                    index
+                        .checked_sub(1)
+                        .map(|i| track.segments[i].target_range.end())
+                        .unwrap_or(0),
+                ),
+                Edge::Tail => to.min(
+                    track
+                        .segments
+                        .get(index + 1)
+                        .map(|s| s.target_range.start)
+                        .unwrap_or(Micros::MAX),
+                ),
+            };
+        }
+        let limit = ripple::source_limit(&self.project, &segment.material_id);
+        // On the magnetic main lane a head trim keeps the clip's start; the
+        // lane closes up behind it.
+        let anchored = edge == Edge::Head && self.timeline.magnet && self.is_main_track(&track.id);
+        Some(ripple::trimmed(segment, edge, to, limit, anchored))
+    }
+
     pub(super) fn on_mouse_move(
         &mut self,
         event: &MouseMoveEvent,
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.timeline.drag.is_none() || event.pressed_button != Some(MouseButton::Left) {
-            if self.timeline.tool == Tool::Blade {
-                let inside = self.timeline.lanes.get().contains(&event.position);
-                let hover = inside.then_some(event.position);
-                if hover != self.timeline.hover {
-                    self.timeline.hover = hover;
-                    cx.notify();
-                }
+        // A tile dragged from the media panel: show where it would land.
+        if cx.has_active_drag() {
+            let inside = self.timeline.lanes.get().contains(&event.position);
+            let hover = inside.then_some(event.position);
+            if hover != self.timeline.drop_hover {
+                self.timeline.drop_hover = hover;
+                cx.notify();
             }
+            return;
+        }
+        if self.timeline.drop_hover.take().is_some() {
+            cx.notify();
+        }
+        if self.timeline.drag.is_none() || event.pressed_button != Some(MouseButton::Left) {
+            self.track_hover(event.position, cx);
             return;
         }
         let (x, y) = self.lanes_local(event.position);
@@ -715,6 +1255,31 @@ impl Editor {
             Some(Drag::Scrub) => {
                 self.seek(time);
                 self.timeline.drag = Some(Drag::Scrub);
+            }
+            Some(Drag::Band {
+                from,
+                mut moved,
+                base,
+                ..
+            }) => {
+                moved |= (x - from.0).abs() >= DRAG_SLOP || (y - from.1).abs() >= DRAG_SLOP;
+                if moved {
+                    let band = selection::Band::from_corners(from, (x, y));
+                    let mut set = base.clone();
+                    for id in selection::band_hits(&self.drawn_clips(), band) {
+                        if !set.contains(&id) {
+                            set.push(id);
+                        }
+                    }
+                    let primary = set.last().cloned();
+                    self.set_selection(set, primary);
+                }
+                self.timeline.drag = Some(Drag::Band {
+                    from,
+                    to: (x, y),
+                    moved,
+                    base,
+                });
             }
             Some(Drag::Clip {
                 segment_id,
@@ -727,6 +1292,7 @@ impl Editor {
                 mut track,
                 mut start,
                 mut new_lane,
+                group,
             }) => {
                 moved |= (x - down_x).abs() >= DRAG_SLOP;
                 self.timeline.snap = None;
@@ -736,27 +1302,46 @@ impl Editor {
                         .segment(&segment_id)
                         .map(|(_, s)| s.target_range.duration)
                         .unwrap_or(0);
-                    start = (time - grab).max(0);
-                    if let Some((shift, point)) = self.snap(&[start, start + duration], &segment_id)
-                    {
-                        start = (start + shift).max(0);
+                    // A selection stops where its earliest clip reaches zero.
+                    let earliest = group
+                        .iter()
+                        .filter_map(|id| self.project.segment(id))
+                        .map(|(_, s)| s.target_range.start)
+                        .chain([origin_start])
+                        .min()
+                        .unwrap_or(origin_start);
+                    let floor = origin_start - earliest;
+                    start = (time - grab).max(floor);
+                    let mut exclude = group.clone();
+                    exclude.push(segment_id.clone());
+                    if let Some((shift, point)) = self.snap(&[start, start + duration], &exclude) {
+                        start = (start + shift).max(floor);
                         self.timeline.snap = Some(point);
                     }
                     new_lane = false;
-                    match self.row_at(y) {
-                        Some(row) => {
-                            let lane = &self.project.tracks[row.track];
-                            if lane.kind == kind && !lane.locked {
-                                track = lane.id.clone();
+                    // A selection changes lanes only when it all sits on one.
+                    let one_lane = group.iter().all(|id| {
+                        self.project
+                            .segment(id)
+                            .is_some_and(|(t, _)| t.id == origin_track)
+                    });
+                    if one_lane {
+                        match self.row_at(y) {
+                            Some(row) => {
+                                let lane = &self.project.tracks[row.track];
+                                if lane.kind == kind && !lane.locked {
+                                    track = lane.id.clone();
+                                }
                             }
-                        }
-                        None => {
-                            if let Some((top, height)) = self.new_lane_row(kind) {
-                                new_lane = match kind {
-                                    TrackKind::Video => y < top + height,
-                                    _ => y >= top,
-                                };
+                            None if group.is_empty() => {
+                                if let Some((top, height)) = self.new_lane_row(kind) {
+                                    new_lane = match kind {
+                                        TrackKind::Audio => y >= top,
+                                        _ => y < top + height,
+                                    };
+                                }
                             }
+                            None => {}
                         }
                     }
                 }
@@ -771,6 +1356,7 @@ impl Editor {
                     track,
                     start,
                     new_lane,
+                    group,
                 });
             }
             Some(Drag::Trim {
@@ -778,43 +1364,43 @@ impl Editor {
                 edge,
                 grab,
                 ripple,
+                mut group,
                 ..
             }) => {
                 self.timeline.snap = None;
-                let Some((track, segment)) = self.project.segment(&segment_id) else {
+                let Some((_, segment)) = self.project.segment(&segment_id) else {
                     return;
                 };
+                let mut exclude: Vec<String> = group.iter().map(|t| t.segment_id.clone()).collect();
+                exclude.push(segment_id.clone());
                 let mut to = time - grab;
-                if let Some((shift, point)) = self.snap(&[to], &segment_id) {
+                if let Some((shift, point)) = self.snap(&[to], &exclude) {
                     to += shift;
                     self.timeline.snap = Some(point);
                 }
-                // A free lane keeps its neighbours; a rippled one pushes them.
-                if !ripple {
-                    let index = track
-                        .segments
-                        .iter()
-                        .position(|s| s.id == segment_id)
-                        .unwrap_or(0);
-                    to = match edge {
-                        Edge::Head => to.max(
-                            index
-                                .checked_sub(1)
-                                .map(|i| track.segments[i].target_range.end())
-                                .unwrap_or(0),
-                        ),
-                        Edge::Tail => to.min(
-                            track
-                                .segments
-                                .get(index + 1)
-                                .map(|s| s.target_range.start)
-                                .unwrap_or(Micros::MAX),
-                        ),
+                let Some((target, source)) = self.live_trim(&segment_id, edge, to, ripple) else {
+                    return;
+                };
+                // The rest of the selection follows the edge by the distance
+                // it actually moved (after the clip's own limits), each
+                // against its own neighbours and material. A head trim that
+                // keeps its start moves its edge by what it gave up.
+                let delta = edge_shift(edge, segment.target_range, target);
+                for member in &mut group {
+                    let Some((_, other)) = self.project.segment(&member.segment_id) else {
+                        continue;
                     };
+                    let at = match edge {
+                        Edge::Head => other.target_range.start,
+                        Edge::Tail => other.target_range.end(),
+                    };
+                    if let Some((t, s)) =
+                        self.live_trim(&member.segment_id, edge, at + delta, false)
+                    {
+                        member.target = t;
+                        member.source = s;
+                    }
                 }
-                let limit = ripple::source_limit(&self.project, &segment.material_id);
-                let anchored = ripple && edge == Edge::Head;
-                let (target, source) = ripple::trimmed(segment, edge, to, limit, anchored);
                 self.timeline.drag = Some(Drag::Trim {
                     segment_id,
                     edge,
@@ -822,6 +1408,74 @@ impl Editor {
                     ripple,
                     target,
                     source,
+                    group,
+                });
+            }
+            Some(Drag::Keyframe {
+                segment_id,
+                from,
+                down_x,
+                mut moved,
+                ..
+            }) => {
+                moved |= (x - down_x).abs() >= DRAG_SLOP;
+                let mut to = from;
+                if moved {
+                    if let Some((_, segment)) = self.project.segment(&segment_id) {
+                        let start = segment.target_range.start;
+                        let mut at = time;
+                        self.timeline.snap = None;
+                        if let Some((shift, point)) = self.snap(&[at], &[]) {
+                            at += shift;
+                            self.timeline.snap = Some(point);
+                        }
+                        to = (at - start).clamp(0, segment.target_range.duration);
+                        self.seek(start + to);
+                    }
+                }
+                self.timeline.drag = Some(Drag::Keyframe {
+                    segment_id,
+                    from,
+                    to,
+                    down_x,
+                    moved,
+                });
+            }
+            Some(Drag::Fade {
+                segment_id, side, ..
+            }) => {
+                let mut length = 0;
+                if let Some((_, segment)) = self.project.segment(&segment_id) {
+                    let (fade_in, fade_out) = envelope::fades(segment);
+                    let other = match side {
+                        envelope::Side::In => fade_out,
+                        envelope::Side::Out => fade_in,
+                    };
+                    length = envelope::dragged_fade(
+                        side,
+                        time - segment.target_range.start,
+                        segment.target_range.duration,
+                        other,
+                    );
+                }
+                self.timeline.drag = Some(Drag::Fade {
+                    segment_id,
+                    side,
+                    length,
+                });
+            }
+            Some(Drag::Transition {
+                segment_id,
+                cut,
+                max,
+                ..
+            }) => {
+                let duration = transition_drag(cut, time, max);
+                self.timeline.drag = Some(Drag::Transition {
+                    segment_id,
+                    cut,
+                    duration,
+                    max,
                 });
             }
             Some(Drag::Scrollbar { grab }) => {
@@ -840,7 +1494,14 @@ impl Editor {
 
     pub(super) fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.timeline.snap = None;
+        self.timeline.drop_hover = None;
         match self.timeline.drag.take() {
+            Some(Drag::Clip {
+                segment_id,
+                moved: false,
+                group,
+                ..
+            }) if !group.is_empty() => self.select_only(&segment_id),
             Some(Drag::Clip {
                 segment_id,
                 kind,
@@ -860,6 +1521,29 @@ impl Editor {
                 origin_start,
                 track,
                 start,
+                group,
+                ..
+            }) if !group.is_empty() && (track != origin_track || start != origin_start) => {
+                let mut ids = vec![segment_id];
+                ids.extend(group);
+                let to_lane = (track != origin_track).then_some(track);
+                let magnet = self.magnet_lane();
+                let commands = batch::group_move(
+                    &self.project,
+                    &ids,
+                    start - origin_start,
+                    to_lane.as_deref(),
+                    magnet.as_deref(),
+                );
+                self.apply_many(commands, "Move clips", cx);
+            }
+            Some(Drag::Clip {
+                segment_id,
+                moved: true,
+                origin_track,
+                origin_start,
+                track,
+                start,
                 ..
             }) if track != origin_track || start != origin_start => {
                 let commands = self.move_commands(&segment_id, &origin_track, &track, start);
@@ -870,10 +1554,79 @@ impl Editor {
                 ripple,
                 target,
                 source,
+                group,
                 ..
             }) => {
-                let commands = ripple::trim(&self.project, &segment_id, target, source, ripple);
-                self.apply_many(commands, "Trim clip", cx);
+                if group.is_empty() {
+                    let commands = ripple::trim(&self.project, &segment_id, target, source, ripple);
+                    self.apply_many(commands, "Trim clip", cx);
+                } else {
+                    let mut trims = group;
+                    trims.push(batch::Trimmed {
+                        segment_id,
+                        target,
+                        source,
+                    });
+                    let magnet = self.magnet_lane();
+                    let commands = batch::group_trim(&self.project, &trims, magnet.as_deref());
+                    self.apply_many(commands, "Trim clips", cx);
+                }
+            }
+            Some(Drag::Band {
+                from, moved: false, ..
+            }) => {
+                let time = self.x_to_time(from.0);
+                self.seek(time);
+            }
+            Some(Drag::Keyframe {
+                segment_id,
+                from,
+                to,
+                moved: true,
+                ..
+            }) if to != from => {
+                let command = self
+                    .project
+                    .segment(&segment_id)
+                    .ok_or_else(|| "the clip is gone".to_string())
+                    .and_then(|(_, segment)| envelope::retime(segment, from, to));
+                self.apply(command, cx);
+                if self.status.is_none() {
+                    self.timeline.selected_keyframe = Some((segment_id, to));
+                }
+            }
+            Some(Drag::Fade {
+                segment_id,
+                side,
+                length,
+            }) => {
+                if let Some((_, segment)) = self.project.segment(&segment_id) {
+                    let (fade_in, fade_out) = envelope::fades(segment);
+                    let (fade_in, fade_out) = match side {
+                        envelope::Side::In => (length, fade_out),
+                        envelope::Side::Out => (fade_in, length),
+                    };
+                    if (fade_in, fade_out) != envelope::fades(segment) {
+                        let command = envelope::fade_command(segment, fade_in, fade_out);
+                        self.apply(command, cx);
+                    }
+                }
+            }
+            Some(Drag::Transition {
+                segment_id,
+                duration,
+                ..
+            }) => {
+                let current = transition_edit::current(&self.project, &segment_id)
+                    .map(|t| t.duration)
+                    .unwrap_or(duration);
+                if current != duration {
+                    let result =
+                        transition_commands::transitions_retime(&self.state, segment_id, duration)
+                            .map(|_| ());
+                    self.refresh(cx);
+                    self.report(result, cx);
+                }
             }
             _ => {}
         }
@@ -943,7 +1696,8 @@ impl Editor {
                 .map(|row| row.top + row.height)
                 .reduce(f32::max)
                 .map(|bottom| (bottom + ROW_GAP, height)),
-            _ => None,
+            // Titles and the other overlays stack on top of everything.
+            _ => rows.first().map(|row| (row.top - ROW_GAP - height, height)),
         }
     }
 
@@ -957,22 +1711,7 @@ impl Editor {
         kind: TrackKind,
         start: Micros,
     ) -> Result<EditCommand, String> {
-        let tracks = &self.project.tracks;
-        let count = tracks.iter().filter(|t| t.kind == kind).count();
-        let name = match kind {
-            TrackKind::Video => format!("Video {}", count + 1),
-            TrackKind::Audio => format!("Audio {}", count + 1),
-            _ => return Err("only video and audio clips make new lanes".into()),
-        };
-        let index = match kind {
-            TrackKind::Video => tracks
-                .iter()
-                .rposition(|t| t.kind == TrackKind::Video)
-                .map(|i| i + 1)
-                .unwrap_or(0),
-            _ => tracks.len(),
-        };
-        let track = Track::new(kind, name);
+        let (track, index) = clipboard::new_lane(&self.project, kind);
         let to = track.id.clone();
         let emptied = ripple::drop_emptied_lane(&self.project, segment_id, Some(index));
         let mut commands = vec![EditCommand::AddTrack { track, index }];
@@ -1013,7 +1752,7 @@ impl Editor {
             timeline_commands::timeline_apply_many(&self.state, commands, label.into()).map(|_| ())
         });
         self.refresh(cx);
-        self.report(result, cx);
+        self.report(result.map_err(|error| friendly(&error)), cx);
     }
 
     pub(super) fn on_timeline_scroll(
@@ -1028,14 +1767,28 @@ impl Editor {
             let (x, _) = self.lanes_local(event.position);
             let factor = if dy > 0.0 { 1.15 } else { 1.0 / 1.15 };
             if dy != 0.0 {
+                self.timeline.scroll_target = None;
                 self.set_zoom(self.timeline.zoom * factor, x.max(0.0));
             }
         } else if event.modifiers.shift {
             self.timeline.scroll_y -= dy;
-        } else if dx.abs() > dy.abs() {
-            self.timeline.scroll_x -= dx;
         } else {
-            self.timeline.scroll_x -= dy;
+            let step = if dx.abs() > dy.abs() { dx } else { dy };
+            if event.delta.precise() {
+                // A touchpad already sends a smooth stream of small steps.
+                self.timeline.scroll_target = None;
+                self.timeline.scroll_x -= step;
+            } else {
+                // A wheel sends coarse notches: glide to where they point, a
+                // few frames at a time (see `render_timeline`).
+                let from = self
+                    .timeline
+                    .scroll_target
+                    .unwrap_or(self.timeline.scroll_x);
+                let (width, _) = self.lanes_size();
+                let max_x = (self.content_width() - width).max(0.0);
+                self.timeline.scroll_target = Some((from - step).clamp(0.0, max_x));
+            }
         }
         self.clamp_scroll();
         cx.notify();
@@ -1044,7 +1797,7 @@ impl Editor {
     // --- commands ------------------------------------------------------------------
 
     /// Delete a clip; on the main lane with the magnet on, close the hole.
-    pub(super) fn remove_clip(&mut self, segment_id: &str, cx: &mut Context<Self>) {
+    fn remove_clip(&mut self, segment_id: &str, cx: &mut Context<Self>) {
         let ripple = self.timeline.magnet
             && self
                 .project
@@ -1055,6 +1808,234 @@ impl Editor {
             commands
         });
         self.apply_many(commands, "Delete clip", cx);
+    }
+
+    /// Delete what is selected on the timeline: a transition, a keyframe
+    /// instant, or the clips, as one undo step. What the Delete key does.
+    pub(super) fn delete_selection(&mut self, cx: &mut Context<Self>) {
+        if let Some(segment_id) = self.timeline.selected_transition.take() {
+            let result =
+                transition_commands::transitions_remove(&self.state, segment_id).map(|_| ());
+            self.refresh(cx);
+            self.report(result, cx);
+            return;
+        }
+        if let Some((segment_id, at)) = self.timeline.selected_keyframe.take() {
+            let command = self
+                .project
+                .segment(&segment_id)
+                .ok_or_else(|| "the clip is gone".to_string())
+                .and_then(|(_, segment)| envelope::remove(segment, at));
+            self.apply(command, cx);
+            return;
+        }
+        let ids = self.selection();
+        match ids.as_slice() {
+            [] => {}
+            [one] => {
+                let one = one.clone();
+                self.clear_selection();
+                self.remove_clip(&one, cx);
+            }
+            _ => {
+                self.clear_selection();
+                let magnet = self.magnet_lane();
+                let commands = batch::group_delete(&self.project, &ids, magnet.as_deref());
+                self.apply_many(commands, "Delete clips", cx);
+            }
+        }
+    }
+
+    // --- the clipboard ---------------------------------------------------------------
+
+    fn copy_selection(&mut self, cx: &mut Context<Self>) -> bool {
+        let ids = self.selection();
+        let Some(board) = clipboard::copy(&self.project, &ids) else {
+            self.status = Some("Select a clip to copy".into());
+            cx.notify();
+            return false;
+        };
+        let count = board.clips.len();
+        self.timeline.clipboard = Some(board);
+        self.status = Some(match count {
+            1 => "Copied 1 clip".into(),
+            n => format!("Copied {n} clips").into(),
+        });
+        cx.notify();
+        true
+    }
+
+    fn cut_selection(&mut self, cx: &mut Context<Self>) {
+        if self.copy_selection(cx) {
+            self.timeline.selected_keyframe = None;
+            self.timeline.selected_transition = None;
+            self.delete_selection(cx);
+        }
+    }
+
+    fn paste_clipboard(&mut self, cx: &mut Context<Self>) {
+        let Some(board) = self.timeline.clipboard.clone() else {
+            self.status = Some("Nothing to paste: copy a clip first".into());
+            cx.notify();
+            return;
+        };
+        let at = self.clock.position();
+        self.paste_board(board, at, "Paste", cx);
+    }
+
+    /// Ctrl+D: a copy of the selection right after it, without touching the
+    /// clipboard, as CapCut's duplicate.
+    fn duplicate_selection(&mut self, cx: &mut Context<Self>) {
+        let ids = self.selection();
+        let Some(board) = clipboard::copy(&self.project, &ids) else {
+            self.status = Some("Select a clip to duplicate".into());
+            cx.notify();
+            return;
+        };
+        let end = board
+            .clips
+            .iter()
+            .filter_map(|c| self.project.segment(&c.segment.id))
+            .map(|(_, s)| s.target_range.end())
+            .max()
+            .unwrap_or(0);
+        self.paste_board(board, end, "Duplicate", cx);
+    }
+
+    fn paste_board(
+        &mut self,
+        board: clipboard::Clipboard,
+        at: Micros,
+        label: &str,
+        cx: &mut Context<Self>,
+    ) {
+        // A pasted title gets a material of its own first.
+        let mut fresh: Vec<(String, String)> = Vec::new();
+        for id in board.text_materials(&self.project) {
+            match text_commands::text_duplicate(&self.state, id.clone()) {
+                Ok(new) => fresh.push((id, new)),
+                Err(error) => {
+                    self.report(Err(error), cx);
+                    return;
+                }
+            }
+        }
+        let material = |id: &str| {
+            fresh
+                .iter()
+                .find(|(old, _)| old == id)
+                .map(|(_, new)| new.clone())
+                .unwrap_or_else(|| id.to_string())
+        };
+        let magnet = self.magnet_lane();
+        match clipboard::paste(&self.project, &board, at, magnet.as_deref(), &material) {
+            Ok(pasted) => {
+                self.apply_many(Ok(pasted.commands), label, cx);
+                if self.status.is_none() {
+                    let primary = pasted.ids.first().cloned();
+                    self.set_selection(pasted.ids, primary);
+                }
+            }
+            Err(error) => self.report(Err(error), cx),
+        }
+        cx.notify();
+    }
+
+    fn select_all(&mut self, cx: &mut Context<Self>) {
+        let ids = batch::all_clips(&self.project);
+        let primary = ids.first().cloned();
+        self.set_selection(ids, primary);
+        cx.notify();
+    }
+
+    // --- links and sound -----------------------------------------------------------------
+
+    fn detach_audio(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.selected.clone() else {
+            return;
+        };
+        let command = links::detach_audio(&self.project, &id);
+        self.apply(command, cx);
+    }
+
+    fn link_selection(&mut self, cx: &mut Context<Self>) {
+        let ids = self.selection();
+        if ids.len() < 2 {
+            self.status = Some("Select two or more clips to link".into());
+            cx.notify();
+            return;
+        }
+        let result = timeline_commands::timeline_link(&self.state, ids).map(|_| ());
+        self.refresh(cx);
+        self.report(result, cx);
+    }
+
+    fn unlink_selection(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.selected.clone() else {
+            return;
+        };
+        let result = timeline_commands::timeline_unlink(&self.state, id).map(|_| ());
+        self.refresh(cx);
+        self.report(result, cx);
+    }
+
+    /// Every selected clip back to normal speed; a linked partner follows.
+    fn reset_speed(&mut self, cx: &mut Context<Self>) {
+        let mut result = Ok(());
+        for id in self.selection() {
+            let speed = self.project.segment(&id).map(|(_, s)| s.speed);
+            if speed.is_some_and(|speed| speed != 1.0) {
+                result = inspector_commands::inspector_set_speed(&self.state, id, 1.0).map(|_| ());
+                if result.is_err() {
+                    break;
+                }
+                self.refresh(cx);
+            }
+        }
+        self.refresh(cx);
+        self.report(result, cx);
+    }
+
+    /// What the right-click menu offers, for the press at `position`: a clip
+    /// there joins the selection first (or becomes it, when it was not in it).
+    fn context_target(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) -> MenuState {
+        let (x, y) = self.lanes_local(position);
+        if let Some((_, Hit::Clip { segment_id, .. })) = self.hit(x, y) {
+            if !self.selection().contains(&segment_id) {
+                self.select_only(&segment_id);
+            } else {
+                self.selected = Some(segment_id);
+            }
+        } else if self.timeline.lanes.get().contains(&position) {
+            self.clear_selection();
+        }
+        cx.notify();
+        let ids = self.selection();
+        let at = self.clock.position();
+        let primary = self
+            .selected
+            .as_deref()
+            .and_then(|id| self.project.segment(id));
+        MenuState {
+            clips: !ids.is_empty(),
+            can_split: primary
+                .is_some_and(|(_, s)| s.target_range.start < at && at < s.target_range.end()),
+            can_paste: self.timeline.clipboard.is_some(),
+            can_detach: self
+                .selected
+                .as_deref()
+                .is_some_and(|id| links::can_detach(&self.project, id)),
+            can_link: ids.len() > 1,
+            can_unlink: self
+                .selected
+                .as_deref()
+                .is_some_and(|id| self.project.link_group_of(id).is_some()),
+            can_reset_speed: ids.iter().any(|id| {
+                self.project
+                    .segment(id)
+                    .is_some_and(|(_, s)| s.speed != 1.0)
+            }),
+        }
     }
 
     /// The clip Q and W act on: the selected one when the playhead is inside
@@ -1183,6 +2164,21 @@ impl Editor {
         .on_action(cx.listener(|this, _: &ZoomToFit, _, cx| this.zoom_to_fit(cx)))
         .on_action(cx.listener(|this, _: &SelectTool, _, cx| this.set_tool(Tool::Select, cx)))
         .on_action(cx.listener(|this, _: &BladeTool, _, cx| this.set_tool(Tool::Blade, cx)))
+        .on_action(cx.listener(|this, _: &CopyClips, _, cx| {
+            this.copy_selection(cx);
+        }))
+        .on_action(cx.listener(|this, _: &CutClips, _, cx| this.cut_selection(cx)))
+        .on_action(cx.listener(|this, _: &PasteClips, _, cx| this.paste_clipboard(cx)))
+        .on_action(cx.listener(|this, _: &DuplicateClips, _, cx| this.duplicate_selection(cx)))
+        .on_action(cx.listener(|this, _: &SelectAllClips, _, cx| this.select_all(cx)))
+        .on_action(cx.listener(|this, _: &ClearSelection, _, cx| {
+            this.clear_selection();
+            cx.notify();
+        }))
+        .on_action(cx.listener(|this, _: &DetachAudio, _, cx| this.detach_audio(cx)))
+        .on_action(cx.listener(|this, _: &LinkClips, _, cx| this.link_selection(cx)))
+        .on_action(cx.listener(|this, _: &UnlinkClips, _, cx| this.unlink_selection(cx)))
+        .on_action(cx.listener(|this, _: &ResetSpeed, _, cx| this.reset_speed(cx)))
     }
 
     // --- media -----------------------------------------------------------------------
@@ -1246,20 +2242,28 @@ impl Editor {
         .detach();
     }
 
+    /// Load the waveform of a sound file, or of a video file's sound — a
+    /// detached sound clip names the video's material.
     fn request_wave(&mut self, material_id: &str, cx: &mut Context<Self>) {
-        let Some(audio) = self
-            .project
-            .materials
+        let pool = &self.project.materials;
+        let source = pool
             .audios
             .iter()
             .find(|m| m.id == material_id)
-        else {
+            .map(|m| (m.path.clone(), m.duration))
+            .or_else(|| {
+                pool.videos
+                    .iter()
+                    .find(|m| m.id == material_id && m.has_audio)
+                    .map(|m| (m.path.clone(), m.duration))
+            });
+        let Some((path, duration)) = source else {
             return;
         };
         if !self.timeline.media.wanted_wave(material_id) {
             return;
         }
-        let (path, duration, id) = (audio.path.clone(), audio.duration, audio.id.clone());
+        let id = material_id.to_string();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
@@ -1287,11 +2291,30 @@ impl Editor {
             slider.update(cx, |state, cx| state.set_value(slider_value, window, cx));
         }
 
+        // A drop ends the drag without a mouse-up reaching the editor.
+        if !cx.has_active_drag() {
+            self.timeline.drop_hover = None;
+        }
+
+        // A wheel scroll glides the rest of the way, a third per frame.
+        if let Some(target) = self.timeline.scroll_target {
+            let gap = target - self.timeline.scroll_x;
+            if gap.abs() < 0.5 {
+                self.timeline.scroll_x = target;
+                self.timeline.scroll_target = None;
+            } else {
+                self.timeline.scroll_x += gap * 0.35;
+                window.request_animation_frame();
+            }
+            self.clamp_scroll();
+        }
+
         // Follow the playhead a page at a time while playing.
         let (lanes_w, lanes_h) = self.lanes_size();
         if self.clock.is_playing() && self.timeline.drag.is_none() {
             let x = self.time_to_x(self.clock.position());
             if x > lanes_w - 24.0 || x < 0.0 {
+                self.timeline.scroll_target = None;
                 self.timeline.scroll_x += x - lanes_w * 0.1;
                 self.clamp_scroll();
             }
@@ -1728,6 +2751,45 @@ impl Editor {
             }),
             _ => None,
         };
+        // Where a dragged selection, and the clips linked to a dragged clip,
+        // will land: the drop's own arithmetic, so the ghost is the result.
+        let ghosts: Vec<batch::Place> = match &self.timeline.drag {
+            Some(Drag::Clip {
+                segment_id,
+                moved: true,
+                origin_track,
+                origin_start,
+                track,
+                start,
+                group,
+                new_lane: false,
+                ..
+            }) => {
+                let places = if group.is_empty() {
+                    vec![batch::Place::new(segment_id, track, *start)]
+                } else {
+                    let mut ids = vec![segment_id.clone()];
+                    ids.extend(group.iter().cloned());
+                    let to_lane = (track != origin_track).then_some(track.as_str());
+                    let magnet = self.magnet_lane();
+                    batch::group_places(
+                        &self.project,
+                        &ids,
+                        start - origin_start,
+                        to_lane,
+                        magnet.as_deref(),
+                    )
+                    .unwrap_or_default()
+                };
+                let mut all = batch::with_partners(&self.project, &places);
+                // A single clip draws itself where the pointer has it.
+                if group.is_empty() {
+                    all.retain(|p| p.segment_id != *segment_id);
+                }
+                all
+            }
+            _ => Vec::new(),
+        };
         for row in rows {
             let track = &project.tracks[row.track];
             lanes.push(
@@ -1753,7 +2815,9 @@ impl Editor {
                         start,
                         new_lane,
                         ..
-                    }) if *segment_id == segment.id => {
+                    }) if *segment_id == segment.id
+                        && !ghosts.iter().any(|g| g.segment_id == segment.id) =>
+                    {
                         let ghost = new_lane.then(|| self.new_lane_row(track.kind)).flatten();
                         if let Some((ghost_top, ghost_height)) = ghost {
                             top = ghost_top;
@@ -1765,6 +2829,20 @@ impl Editor {
                         target.start = *start;
                         dragged = true;
                     }
+                    Some(Drag::Clip { .. })
+                        if ghosts.iter().any(|g| g.segment_id == segment.id) =>
+                    {
+                        if let Some(ghost) = ghosts.iter().find(|g| g.segment_id == segment.id) {
+                            if ghost.track_id != track.id {
+                                if let Some(to_row) = self.row_of(&ghost.track_id) {
+                                    top = to_row.top;
+                                    height = to_row.height;
+                                }
+                            }
+                            target.start = ghost.start;
+                            dragged = true;
+                        }
+                    }
                     Some(Drag::Trim {
                         segment_id,
                         target: live_target,
@@ -1773,6 +2851,14 @@ impl Editor {
                     }) if *segment_id == segment.id => {
                         target = *live_target;
                         source = *live_source;
+                    }
+                    Some(Drag::Trim { group, .. })
+                        if group.iter().any(|m| m.segment_id == segment.id) =>
+                    {
+                        if let Some(member) = group.iter().find(|m| m.segment_id == segment.id) {
+                            target = member.target;
+                            source = member.source;
+                        }
                     }
                     _ => {}
                 }
@@ -1805,6 +2891,7 @@ impl Editor {
             start,
             new_lane,
             kind,
+            group,
             ..
         }) = &self.timeline.drag
         {
@@ -1822,7 +2909,7 @@ impl Editor {
                         .bg(rgb(ROW_BG))
                         .into_any_element(),
                 );
-            } else if self.timeline.magnet && self.is_main_track(track) {
+            } else if self.timeline.magnet && self.is_main_track(track) && group.is_empty() {
                 if let (Some(lane), Some(row)) = (self.project.track(track), self.row_of(track)) {
                     let duration = self
                         .project
@@ -1850,6 +2937,119 @@ impl Editor {
                     );
                 }
             }
+        }
+
+        // Transitions: a badge over every cut that has one, its width the
+        // stretch of timeline it covers. A dragged edge shows the new length.
+        for row in rows {
+            let track = &project.tracks[row.track];
+            for span in transition_resolve::spans(track, &project.materials) {
+                let live = match &self.timeline.drag {
+                    Some(Drag::Transition {
+                        segment_id,
+                        duration,
+                        ..
+                    }) if *segment_id == span.to.id => Some(*duration),
+                    _ => None,
+                };
+                let range = live
+                    .and_then(|d| transition_resolve::window_for(span.cut, d, span.from, span.to))
+                    .unwrap_or(span.window);
+                let (left, right) = self.badge_x(span.cut, range);
+                if right < 0.0 || left > lanes_w {
+                    continue;
+                }
+                let (top, badge_h) = badge_y(row);
+                let chosen =
+                    self.timeline.selected_transition.as_deref() == Some(span.to.id.as_str());
+                let edge = || {
+                    div()
+                        .absolute()
+                        .top(px(0.0))
+                        .w(px(BADGE_EDGE))
+                        .h_full()
+                        .cursor_ew_resize()
+                };
+                overlay.push(
+                    div()
+                        .absolute()
+                        .left(px(left))
+                        .top(px(top))
+                        .w(px(right - left))
+                        .h(px(badge_h))
+                        .rounded(px(4.0))
+                        .border_1()
+                        .border_color(rgb(if chosen { PLAYHEAD } else { 0x101010 }))
+                        .bg(rgb(if chosen { ACCENT } else { TRANSITION_BADGE }).opacity(0.92))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .child(own_icon(TRANSITION_ICON).xsmall().text_color(rgb(0x101010)))
+                        .child(edge().left(px(0.0)))
+                        .child(edge().right(px(0.0)))
+                        .into_any_element(),
+                );
+            }
+        }
+
+        // The rubber band.
+        if let Some(Drag::Band {
+            from,
+            to,
+            moved: true,
+            ..
+        }) = &self.timeline.drag
+        {
+            let band = selection::Band::from_corners(*from, *to);
+            overlay.push(
+                div()
+                    .absolute()
+                    .left(px(band.left))
+                    .top(px(band.top))
+                    .w(px(band.width()))
+                    .h(px(band.height()))
+                    .border_1()
+                    .border_color(rgb(ACCENT))
+                    .bg(rgb(ACCENT).opacity(0.12))
+                    .into_any_element(),
+            );
+        }
+
+        // A tile from the media panel held over the lanes: where it would
+        // start. Only the time — the tile's kind decides its lane, and the
+        // media panel, not the timeline, knows what is being dragged.
+        if let Some((at, _)) = self
+            .timeline
+            .drop_hover
+            .and_then(|position| self.drop_target(position))
+        {
+            let x = self.time_to_x(at);
+            let top = RULER_H + 2.0;
+            overlay.push(
+                div()
+                    .absolute()
+                    .left(px(x - 1.0))
+                    .top(px(top))
+                    .w(px(3.0))
+                    .h(px((lanes_h - SCROLLBAR_H - top).max(0.0)))
+                    .rounded(px(1.0))
+                    .bg(rgb(ACCENT))
+                    .into_any_element(),
+            );
+            overlay.push(
+                div()
+                    .absolute()
+                    .left(px(x + 4.0))
+                    .top(px(top))
+                    .px(px(4.0))
+                    .rounded(px(3.0))
+                    .bg(rgb(ACCENT))
+                    .text_size(px(10.0))
+                    .text_color(rgb(0x0b1214))
+                    .child(time_label(at, self.project.fps))
+                    .into_any_element(),
+            );
         }
 
         // An empty timeline says how to start, in the main lane.
@@ -2007,6 +3207,15 @@ impl Editor {
             .children(blade_line)
             .children(playhead)
             .children(scrollbar)
+            .context_menu({
+                let editor = cx.entity();
+                let focus = self.focus.clone();
+                move |menu, window, cx| {
+                    let position = window.mouse_position();
+                    let state = editor.update(cx, |editor, cx| editor.context_target(position, cx));
+                    clip_menu(menu.action_context(focus.clone()), state)
+                }
+            })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2024,10 +3233,16 @@ impl Editor {
         lanes_w: f32,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let _ = target;
-        let selected = self.selected.as_deref() == Some(segment.id.as_str());
+        let selected = self.selection().contains(&segment.id);
+        let primary = self.selected.as_deref() == Some(segment.id.as_str());
+        let hovered = self
+            .timeline
+            .hover_clip
+            .as_ref()
+            .filter(|(id, _)| *id == segment.id)
+            .map(|(_, zone)| *zone);
         let width = (x1 - x0 - 1.0).max(2.0);
-        let name = self.material_name(&segment.material_id);
+        let mut name = self.material_name(&segment.material_id);
         let kind = track.kind;
         let color = self.clip_color(kind, &segment.material_id);
         let zoom = self.timeline.zoom;
@@ -2036,6 +3251,10 @@ impl Editor {
         } else {
             1.0
         };
+        if (speed - 1.0).abs() > 1e-3 {
+            name = format!("{speed:.1}x · {name}");
+        }
+        let linked = self.project.materials.link_of(segment).is_some();
 
         let mut body = div()
             .absolute()
@@ -2064,16 +3283,33 @@ impl Editor {
                 .bg(rgb(bg))
                 .overflow_hidden()
                 .whitespace_nowrap()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(3.0))
                 .text_size(px(11.0))
                 .line_height(px(TITLE_H - 2.0))
                 .text_color(rgb(TEXT))
+                .when(linked, |this| {
+                    this.child(Icon::new(IconName::Link2).xsmall().text_color(rgb(TEXT)))
+                })
                 .child(name.clone())
         };
 
         match kind {
             TrackKind::Video => {
+                // The main lane keeps a strip at the bottom for the clip's
+                // own sound, as CapCut draws it.
+                let sound = main
+                    && self
+                        .project
+                        .materials
+                        .videos
+                        .iter()
+                        .any(|m| m.id == segment.material_id && m.has_audio)
+                    && !links::is_detached(&self.project, track, segment);
                 let thumbs_h = if main {
-                    height - TITLE_H - 14.0
+                    height - TITLE_H - SOUND_STRIP_H
                 } else {
                     height - TITLE_H
                 };
@@ -2143,10 +3379,35 @@ impl Editor {
                         );
                     }
                 }
+                if sound {
+                    self.request_wave(&segment.material_id, cx);
+                    if let Some(wave) = self.timeline.media.wave(&segment.material_id) {
+                        let wave = Arc::clone(wave);
+                        let muted = track.muted || segment.volume <= 0.0;
+                        let src_start = source.start;
+                        body = body.child(
+                            canvas(
+                                |_, _, _| {},
+                                move |bounds, _, window, _| {
+                                    paint_wave(
+                                        window, bounds, &wave, src_start, speed, zoom, x0, lanes_w,
+                                        muted,
+                                    )
+                                },
+                            )
+                            .absolute()
+                            .left(px(0.0))
+                            .top(px(TITLE_H + thumbs_h))
+                            .w_full()
+                            .h(px(SOUND_STRIP_H)),
+                        );
+                    }
+                }
                 body = body.child(label(CLIP_VIDEO));
             }
             TrackKind::Audio => {
                 self.request_wave(&segment.material_id, cx);
+                let wave_h = (height - TITLE_H - 3.0).max(1.0);
                 if let Some(wave) = self.timeline.media.wave(&segment.material_id) {
                     let wave = Arc::clone(wave);
                     let muted = track.muted;
@@ -2165,10 +3426,32 @@ impl Editor {
                         .left(px(0.0))
                         .top(px(TITLE_H + 2.0))
                         .w_full()
-                        .h(px((height - TITLE_H - 3.0).max(1.0))),
+                        .h(px(wave_h)),
                     );
                 }
+                body = self.render_fades(body, segment, target, width);
                 body = body.child(label(AUDIO_TITLE));
+            }
+            TrackKind::Text => {
+                body = body.child(
+                    div()
+                        .absolute()
+                        .left(px(label_left))
+                        .top(px(0.0))
+                        .h_full()
+                        .max_w(px((width - label_left - 2.0).max(0.0)))
+                        .px(px(4.0))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(4.0))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_size(px(11.0))
+                        .text_color(rgb(TEXT))
+                        .child(Icon::new(IconName::Type).xsmall().text_color(rgb(TEXT)))
+                        .child(name.clone()),
+                );
             }
             _ => {
                 body = body.child(label(color));
@@ -2176,7 +3459,8 @@ impl Editor {
         }
 
         // The edges: a resize cursor where a press trims.
-        if !track.locked && self.timeline.tool == Tool::Select && width > 3.0 * EDGE_GRAB {
+        let editable = !track.locked && self.timeline.tool == Tool::Select;
+        if editable && width > 3.0 * EDGE_GRAB {
             body = body
                 .child(
                     div()
@@ -2208,6 +3492,46 @@ impl Editor {
                     .border_2()
                     .border_color(rgb(PLAYHEAD)),
             );
+        } else if hovered.is_some() && editable {
+            body = body.child(
+                div()
+                    .absolute()
+                    .left(px(0.0))
+                    .top(px(0.0))
+                    .size_full()
+                    .rounded(px(4.0))
+                    .border_1()
+                    .border_color(gpui::white().opacity(0.45)),
+            );
+        }
+        // A trim handle where the pointer is about to grab an edge, or on
+        // both edges of a selected clip, as CapCut draws them.
+        if editable && width > 3.0 * EDGE_GRAB {
+            let head = selected || hovered == Some(Zone::Head);
+            let tail = selected || hovered == Some(Zone::Tail);
+            let bar = |left: bool| {
+                let bar = div()
+                    .absolute()
+                    .top(px(height * 0.25))
+                    .w(px(3.0))
+                    .h(px(height * 0.5))
+                    .rounded(px(1.5))
+                    .bg(rgb(PLAYHEAD));
+                if left {
+                    bar.left(px(2.0))
+                } else {
+                    bar.right(px(2.0))
+                }
+            };
+            if head {
+                body = body.child(bar(true));
+            }
+            if tail {
+                body = body.child(bar(false));
+            }
+        }
+        if primary && !track.locked {
+            body = self.render_keyframes(body, segment, target, x0, height);
         }
         if track.locked {
             body = body.child(
@@ -2221,6 +3545,188 @@ impl Editor {
         }
         body.into_any_element()
     }
+
+    /// The selected clip's keyframe diamonds along its bottom edge, the
+    /// selected instant in the accent colour, a dragged one where it is
+    /// going.
+    fn render_keyframes(
+        &self,
+        body: gpui::Div,
+        segment: &Segment,
+        target: TimeRange,
+        x0: f32,
+        height: f32,
+    ) -> gpui::Div {
+        let mut instants = envelope::instants(segment);
+        let mut chosen = self
+            .timeline
+            .selected_keyframe
+            .as_ref()
+            .filter(|(id, _)| *id == segment.id)
+            .map(|(_, at)| *at);
+        if let Some(Drag::Keyframe {
+            segment_id,
+            from,
+            to,
+            ..
+        }) = &self.timeline.drag
+        {
+            if *segment_id == segment.id {
+                for at in instants.iter_mut() {
+                    if *at == *from {
+                        *at = *to;
+                    }
+                }
+                chosen = Some(*to);
+            }
+        }
+        if instants.is_empty() {
+            return body;
+        }
+        let points: Vec<(f32, bool)> = instants
+            .into_iter()
+            .filter(|t| *t <= target.duration)
+            .map(|t| (self.time_to_x(target.start + t) - x0, Some(t) == chosen))
+            .collect();
+        let y = height - DIAMOND_INSET;
+        body.child(
+            canvas(
+                |_, _, _| {},
+                move |bounds, _, window, _| {
+                    let r = DIAMOND / 2.0;
+                    for (x, chosen) in &points {
+                        let (cx, cy) = (bounds.origin.x + px(*x), bounds.origin.y + px(y));
+                        for (radius, color) in [
+                            (r + 1.0, rgb(0x101010)),
+                            (r, rgb(if *chosen { ACCENT } else { PLAYHEAD })),
+                        ] {
+                            let mut path = gpui::PathBuilder::fill();
+                            path.move_to(point(cx, cy - px(radius)));
+                            path.line_to(point(cx + px(radius), cy));
+                            path.line_to(point(cx, cy + px(radius)));
+                            path.line_to(point(cx - px(radius), cy));
+                            path.close();
+                            if let Ok(path) = path.build() {
+                                window.paint_path(path, color);
+                            }
+                        }
+                    }
+                },
+            )
+            .absolute()
+            .left(px(0.0))
+            .top(px(0.0))
+            .size_full(),
+        )
+    }
+
+    /// A sound clip's fades: the faded corners shaded, and the two handles
+    /// when the clip is selected or under the pointer.
+    fn render_fades(
+        &self,
+        body: gpui::Div,
+        segment: &Segment,
+        target: TimeRange,
+        width: f32,
+    ) -> gpui::Div {
+        let zoom = self.timeline.zoom;
+        let (mut fade_in, mut fade_out) = envelope::fades(segment);
+        if let Some(Drag::Fade {
+            segment_id,
+            side,
+            length,
+        }) = &self.timeline.drag
+        {
+            if *segment_id == segment.id {
+                match side {
+                    envelope::Side::In => fade_in = *length,
+                    envelope::Side::Out => fade_out = *length,
+                }
+            }
+        }
+        let _ = target;
+        let (in_px, out_px) = (fade_x(fade_in, zoom), fade_x(fade_out, zoom));
+        let mut body = body;
+        if in_px > 0.5 || out_px > 0.5 {
+            body = body.child(
+                canvas(
+                    |_, _, _| {},
+                    move |bounds, _, window, _| {
+                        let (ox, oy) = (bounds.origin.x, bounds.origin.y);
+                        let h = bounds.size.height;
+                        let w = bounds.size.width;
+                        let shade = gpui::black().opacity(0.45);
+                        if in_px > 0.5 {
+                            let mut path = gpui::PathBuilder::fill();
+                            path.move_to(point(ox, oy));
+                            path.line_to(point(ox + px(in_px), oy));
+                            path.line_to(point(ox, oy + h));
+                            path.close();
+                            if let Ok(path) = path.build() {
+                                window.paint_path(path, shade);
+                            }
+                        }
+                        if out_px > 0.5 {
+                            let mut path = gpui::PathBuilder::fill();
+                            path.move_to(point(ox + w - px(out_px), oy));
+                            path.line_to(point(ox + w, oy));
+                            path.line_to(point(ox + w, oy + h));
+                            path.close();
+                            if let Ok(path) = path.build() {
+                                window.paint_path(path, shade);
+                            }
+                        }
+                    },
+                )
+                .absolute()
+                .left(px(0.0))
+                .top(px(TITLE_H))
+                .w_full()
+                .bottom(px(0.0)),
+            );
+        }
+        if !self.shows_fades(&segment.id) || self.timeline.tool != Tool::Select {
+            return body;
+        }
+        let handle = |center: f32| {
+            div()
+                .absolute()
+                .left(px(center - FADE_HANDLE))
+                .top(px(FADE_HANDLE_Y - FADE_HANDLE))
+                .size(px(FADE_HANDLE * 2.0))
+                .rounded_full()
+                .border_1()
+                .border_color(rgb(0x101010))
+                .bg(rgb(PLAYHEAD))
+                .cursor_ew_resize()
+        };
+        body.child(handle(fade_handle_x(fade_in, zoom)))
+            .child(handle(width - fade_handle_x(fade_out, zoom)))
+    }
+}
+
+/// The right-click menu of the lanes: what can be done to the clips under
+/// and around the pointer. Every entry is an action, so its shortcut shows.
+fn clip_menu(
+    menu: gpui::component::menu::PopupMenu,
+    s: MenuState,
+) -> gpui::component::menu::PopupMenu {
+    let menu = menu
+        .menu_with_disabled("Split", Box::new(Split), !s.can_split)
+        .menu_with_disabled("Delete", Box::new(DeleteSelected), !s.clips)
+        .menu_with_disabled("Duplicate", Box::new(DuplicateClips), !s.clips)
+        .separator()
+        .menu_with_disabled("Copy", Box::new(CopyClips), !s.clips)
+        .menu_with_disabled("Cut", Box::new(CutClips), !s.clips)
+        .menu_with_disabled("Paste", Box::new(PasteClips), !s.can_paste)
+        .separator()
+        .menu_with_disabled("Detach audio", Box::new(DetachAudio), !s.can_detach)
+        .menu_with_disabled("Link", Box::new(LinkClips), !s.can_link)
+        .menu_with_disabled("Unlink", Box::new(UnlinkClips), !s.can_unlink)
+        .separator()
+        .menu_with_disabled("Reset speed", Box::new(ResetSpeed), !s.can_reset_speed);
+    menu.separator()
+        .menu("Select all", Box::new(SelectAllClips))
 }
 
 /// Bars rising from the bottom of an audio clip, one per two pixels, each the
@@ -2294,6 +3800,53 @@ mod tests {
         assert_eq!(ruler_label(90.0, 30.0), "01:30");
         assert_eq!(ruler_label(1.5, 30.0), "15f");
         assert_eq!(ruler_label(3725.0, 30.0), "1:02:05");
+    }
+
+    #[test]
+    fn a_transition_edge_sets_twice_its_distance_to_the_cut() {
+        // Half a second from the cut is a one-second transition.
+        assert_eq!(transition_drag(5_000_000, 5_500_000, 4_000_000), 1_000_000);
+        assert_eq!(transition_drag(5_000_000, 4_500_000, 4_000_000), 1_000_000);
+        // Never past what the clips allow, never shorter than two frames.
+        assert_eq!(transition_drag(5_000_000, 9_000_000, 4_000_000), 4_000_000);
+        assert_eq!(
+            transition_drag(5_000_000, 5_000_000, 4_000_000),
+            MIN_TRANSITION
+        );
+    }
+
+    #[test]
+    fn a_fade_handle_never_hangs_off_the_clip() {
+        assert_eq!(fade_handle_x(0, 60.0), FADE_HANDLE + 1.0);
+        assert_eq!(fade_handle_x(1_000_000, 60.0), 60.0);
+    }
+
+    #[test]
+    fn a_trimmed_edge_moves_as_far_whether_the_start_stays_or_not() {
+        let before = TimeRange::new(2_000_000, 4_000_000);
+        // A free head trim of half a second, and an anchored one.
+        let free = TimeRange::new(2_500_000, 3_500_000);
+        let anchored = TimeRange::new(2_000_000, 3_500_000);
+        assert_eq!(edge_shift(Edge::Head, before, free), 500_000);
+        assert_eq!(edge_shift(Edge::Head, before, anchored), 500_000);
+        let longer = TimeRange::new(2_000_000, 5_000_000);
+        assert_eq!(edge_shift(Edge::Tail, before, longer), 1_000_000);
+    }
+
+    #[test]
+    fn time_labels_read_like_the_player() {
+        assert_eq!(time_label(13_300_000, 30.0), "00:13:09");
+        assert_eq!(time_label(0, 30.0), "00:00:00");
+        assert_eq!(time_label(3_725_000_000, 30.0), "1:02:05:00");
+    }
+
+    #[test]
+    fn engine_refusals_read_as_what_happened() {
+        assert_eq!(
+            friendly("target range is occupied"),
+            "Another clip is in the way"
+        );
+        assert_eq!(friendly("speed must be positive"), "speed must be positive");
     }
 
     #[test]

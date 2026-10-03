@@ -119,6 +119,25 @@ when this landed. Until it does, an export of a project containing an imported
 pair sums that clip's audio twice. It is one call in
 `export/audio.rs::audio_path`'s caller, against the same document method.
 
+## The native app: CapCut's default on top (2026-10-03)
+
+The GPUI app does not split an import into two clips. It keeps CapCut's
+default — a video is one clip that plays its own sound, drawn as a strip under
+the filmstrip — and offers **Detach audio** on the clip's context menu, which
+builds exactly the pair this decision describes: a clip of the same material
+on an audio lane, linked to the picture. Everything above then holds for it.
+
+Detaching also sets the picture's volume to 0, in the same undo step. While
+the pair is linked that changes nothing audible (the picture defers to the
+audio lane), but after an **Unlink** it is what keeps the sound from playing
+twice: the result is a silent picture and an independent sound, which is what
+CapCut's detach leaves. The code is `crates/app/src/editor/timeline/links.rs`.
+
+The reason for not following the import rule in the app: the owner asked for
+CapCut's layout, and CapCut's main lane is a row of pictures with their sound
+inside them. Two lanes per import doubles the timeline's height for the common
+case of footage whose sound nobody touches.
+
 ## What would change our minds
 
 - **If linking ever needs parameters** — a named group, an offset, a lock icon

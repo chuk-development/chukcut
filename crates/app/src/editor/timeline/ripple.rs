@@ -194,10 +194,9 @@ pub(crate) fn insertion_index(track: &Track, moving: &str, centre: Micros) -> us
 /// Drop `segment_id` into the gapless `track` at `index` among the lane's
 /// other clips, and pack the lane from zero.
 ///
-/// The dropped clip first goes to a parking place past the end of everything,
-/// so the rest of the lane can close up or open without passing through it,
-/// and then to its slot. Every part is a plain `MoveSegment`, which is the
-/// batch shape `compose_edits` knows how to order.
+/// `batch::arrange` does the moving: it parks the clips first so none passes
+/// through another, and carries every moved clip's link partners by the same
+/// distance — which a plain batch cannot do for a clip that moves twice.
 pub(crate) fn drop_into_gapless(
     project: &Project,
     track_id: &str,
@@ -213,72 +212,18 @@ pub(crate) fn drop_into_gapless(
     if from.kind != track.kind {
         return Err("a clip can only move to a lane of its own kind".into());
     }
-
-    let mut order: Vec<&Segment> = track
+    let mut order: Vec<(String, Micros)> = track
         .segments
         .iter()
         .filter(|s| s.id != segment_id)
+        .map(|s| (s.id.clone(), s.target_range.duration))
         .collect();
-    order.insert(index.min(order.len()), moving);
-
-    let mut finals = Vec::with_capacity(order.len());
-    let mut at = 0;
-    for segment in &order {
-        finals.push((*segment, at));
-        at += segment.target_range.duration;
-    }
-    let packed_end = at;
-
-    let parking = track
-        .segments
-        .iter()
-        .chain(std::iter::once(moving))
-        .map(|s| s.target_range.end())
-        .max()
-        .unwrap_or(0)
-        .max(packed_end)
-        + 1_000_000;
-
-    let mut commands = Vec::new();
-    let final_start = finals
-        .iter()
-        .find(|(s, _)| s.id == segment_id)
-        .map(|(_, start)| *start)
-        .unwrap_or(0);
-    let unchanged = from.id == track.id && final_start == moving.target_range.start;
-    let mut moving_from = (from.id.clone(), moving.target_range.start);
-    if !unchanged {
-        commands.push(EditCommand::MoveSegment {
-            segment_id: segment_id.to_string(),
-            from_track: from.id.clone(),
-            to_track: track.id.clone(),
-            from_start: moving.target_range.start,
-            to_start: parking,
-        });
-        moving_from = (track.id.clone(), parking);
-    }
-    for (segment, start) in &finals {
-        if segment.id == segment_id || segment.target_range.start == *start {
-            continue;
-        }
-        commands.push(EditCommand::MoveSegment {
-            segment_id: segment.id.clone(),
-            from_track: track.id.clone(),
-            to_track: track.id.clone(),
-            from_start: segment.target_range.start,
-            to_start: *start,
-        });
-    }
-    if !unchanged {
-        commands.push(EditCommand::MoveSegment {
-            segment_id: segment_id.to_string(),
-            from_track: moving_from.0,
-            to_track: track.id.clone(),
-            from_start: moving_from.1,
-            to_start: final_start,
-        });
-    }
-    Ok(commands)
+    order.insert(
+        index.min(order.len()),
+        (segment_id.to_string(), moving.target_range.duration),
+    );
+    let places = super::batch::packed(track_id, &order);
+    super::batch::arrange(project, &places, &Default::default(), &[])
 }
 
 /// Move a clip out of a gapless lane to `to_start` on another lane, and close

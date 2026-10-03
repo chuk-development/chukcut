@@ -1979,11 +1979,11 @@ pointer, a scrollbar, a resizable split (42% of the window by default).
 
 - **The main track magnet is on by default**, as in CapCut. The first video
   lane stays gapless: delete, trim and Q/W ripple through it, a drag along it
-  reorders, a clip lifted off it leaves no hole. A reorder parks the dragged
-  clip past the end of everything first, so `compose_edits`' move ordering
-  never makes a clip pass through a neighbour. Known gap: a *linked* clip on
-  the main lane follows the park move, not the final one — the app creates no
-  links yet, so nothing reaches it.
+  reorders, a clip lifted off it leaves no hole. A reorder goes through
+  `timeline/batch.rs::arrange`, which parks every moving clip past the end of
+  everything and then places it, and moves link partners by each clip's net
+  distance itself. (`compose_edits` mirrors only the first move of a clip that
+  moves twice — the gap the first version had for linked clips on this lane.)
 - **Dropping above the video lanes or below the audio lanes makes a new lane;
   a move that empties an overlay lane removes it.** One undo step each.
 - **Filmstrips are one strip per material and zoom bucket** (a power of two of
@@ -1992,9 +1992,57 @@ pointer, a scrollbar, a resizable split (42% of the window by default).
 - **The app embeds `gpui::assets::AllAssets`** (the full Lucide set). The
   component default bundle lacks scissors, locks, magnets and most of a
   timeline's icons, and an icon whose SVG is missing draws as nothing, silently.
-- **Single-letter shortcuts (Q, W, M, P, N, A, B, S, Space) are bound with no
-  key context**, like the existing ones. A text field elsewhere in the window
-  may lose those letters to the timeline; scope them when one appears.
+- **The timeline's shortcuts are scoped `!Input`** (2026-10-03), like the
+  global ones in `main.rs`: Q, W, M, P, N, A, B and Ctrl+C/X/V/D/A belong to a
+  focused text field, not to the timeline.
+- **Selections** (2026-10-03, wave 2). Ctrl+click toggles, Shift+click takes
+  the run along a lane from the primary clip, a drag on empty lane space draws
+  a rubber band (a click there still seeks), Ctrl+A takes every clip on an
+  unlocked lane, Escape clears. `Editor::selected` stays the *primary* clip —
+  the one the inspector shows — and `TimelineState::selection` the whole set;
+  when another panel sets `selected` outside the set, the set becomes that
+  clip. Moving, trimming and deleting a selection is one undo step
+  (`batch::group_move` / `group_trim` / `group_delete`); with the magnet on
+  the main lane is packed again, and a selected sound linked to a packed
+  picture follows the picture, not the drag. The drag ghost is the drop's own
+  placement (`batch::group_places`).
+- **Clipboard.** Ctrl+C/X/V and Ctrl+D (`timeline/clipboard.rs`). Copying a
+  clip copies its link partners; paste lands at the playhead on the clip's
+  own lane, else the next free lane of its kind (never the main lane), else a
+  new lane, and never overlaps. On the magnetic main lane it is a ripple
+  insert at the nearest cut. Duplicate pastes right after the selection
+  without touching the clipboard. A pasted title gets its own material
+  (`text::commands::text_duplicate`), or editing one title would edit both.
+- **A video's sound is inside the clip until "Detach audio"**
+  (`timeline/links.rs`), CapCut's model on top of decision 0005: the import
+  still makes one clip, the main lane draws its sound as a strip under the
+  filmstrip, and detaching makes the 0005 pair — a linked clip of the same
+  material on an audio lane — and sets the picture's volume to 0 in the same
+  step, so a later Unlink leaves a silent picture and an independent sound
+  rather than the same sound twice. Right-click a clip for split, delete,
+  duplicate, copy, cut, paste, detach audio, link, unlink, reset speed and
+  select all. **No freeze frame**: the engine has no still-from-a-video
+  material, and `check_speed` refuses speed 0.
+- **Transitions draw as a badge over their cut**, as wide as the stretch they
+  cover. Click selects it (Del removes it); its ends change the length
+  symmetrically, clamped to `transitions::edit::allowed_duration`, through
+  `transitions_retime` on release.
+- **The primary clip shows its keyframe diamonds** along its bottom edge, one
+  per instant across every property but `Volume`. Click selects one and seeks
+  to it, a drag retimes every property keyed there (`MoveKeyframe`s, one
+  step), Del deletes the instant.
+- **Sound clips have CapCut's fade handles** at their top corners while
+  selected or hovered, the faded corners shaded. They read and write the
+  `Volume` envelope by the same pattern as the inspector's fade rows —
+  `timeline/envelope.rs` holds a copy of `inspector::fades`/`fade_command`;
+  change both together.
+- **A drop from the media panel shows a line at its start time** (snapped like
+  a dragged clip's head). It does not highlight a lane: which lane takes the
+  tile depends on its kind, and only the media panel knows what is dragged.
+  Exporting `assets::media::MediaDrag` would let the timeline draw the clip's
+  real ghost through `on_drag_move::<MediaDrag>`.
+- **A mouse wheel glides** (a third of the way per frame, on
+  `request_animation_frame`); a touchpad's pixel deltas scroll directly.
 - **To look at the app without touching the desktop**, run it on a private
   Xvfb with Mesa's software Vulkan:
   `Xvfb :77 -screen 0 1920x1080x24 &` then
