@@ -56,6 +56,6 @@ column current.
 | 3 | tracking | merged — no re-find after occlusion/leaving frame; motion tracking T1 (Rust KLT, track material + follows link, box select on the player, re-track, smoothing, bake to keyframes) per docs/research/ml-features.md | |
 | 3 | design-2 | apply the kit to timeline + inspector; in/out marks on the ruler; drop ghost with lane (export MediaDrag) | running (agent/design2) |
 | 4 | perf | readback cost, shared device or DMA-BUF to GPUI, decode-ahead, GPU text animator, export fps | running (agent/perf) |
-| 4 | glue | caption split, filler adapter, ripple-all on silence cut, freeze frame, follow-link validation, proxy policy, inline text edit | running (agent/glue) |
+| 4 | glue | caption split, filler adapter, ripple-all on silence cut, freeze frame, follow-link validation, proxy policy, inline text edit | done on agent/glue — the player does not switch to proxies yet (perf owns player.rs; seam `from_project_for_preview` + `proxy_generation()`); Ctrl+X deletes a tracked clip without the bake prompt; freeze length fixed at 3 s, orphaned stills not cleaned up |
 | 4 | QA | end-to-end tests over the command layer, a test pass over every panel, fixes | |
 | 4 | packaging | release build, desktop entry, icon, install script, README | |
