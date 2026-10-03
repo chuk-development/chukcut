@@ -417,3 +417,120 @@ fn a_moving_subject_is_kept_in_a_vertical_frame() {
         })
         .unwrap();
 }
+
+/// 1 s, 320×180: the left half black, the right half white.
+fn half_and_half() -> Option<PathBuf> {
+    generate(
+        "half-and-half.mp4",
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:size=160x180:rate=30:duration=1",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=white:size=160x180:rate=30:duration=1",
+            "-filter_complex",
+            "[0][1]hstack",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "10",
+            "-pix_fmt",
+            "yuv420p",
+        ],
+    )
+}
+
+/// The stabilised picture comes out of the compositor itself, in the preview
+/// and in the export alike: the crop window moves against the shake there,
+/// not only in the arithmetic.
+#[test]
+fn the_compositor_draws_a_stabilised_clip_through_its_window() {
+    use chukcut_engine::modules::analysis::store::{self, CameraPath, PathSample, Stabilise};
+    use chukcut_engine::modules::media::MediaSourceProvider;
+    use chukcut_engine::modules::render::{Compositor, SourceProvider};
+
+    let Some(ctx) = chukcut_engine::modules::gpu::render_context() else {
+        eprintln!("skipping: no GPU adapter on this machine");
+        return;
+    };
+    let Some(path) = half_and_half() else {
+        eprintln!("skipping: ffmpeg could not generate the fixture");
+        return;
+    };
+    let state = video_state(&path, (320, 180), 1_000_000);
+    let mut project = state.project.read().clone().unwrap();
+    // The picture "drifted" right by a tenth of the frame at 0.5 s and back:
+    // tripod strength puts the window 0.1 to the right of centre there,
+    // against the drift (the mean of the path is 0.1/3).
+    let samples = [(0, 0.0), (500_000, 0.1), (999_999, 0.0)]
+        .map(|(t, x)| PathSample {
+            t,
+            x,
+            y: 0.0,
+            a: 0.0,
+            cut: false,
+        })
+        .to_vec();
+    let (motion_id, motion) = store::new_entry(&CameraPath {
+        media_id: "v".into(),
+        analysed: TimeRange::new(0, 1_000_000),
+        aspect: 16.0 / 9.0,
+        samples,
+    });
+    let (stabilise_id, stabilise) = store::new_entry(&Stabilise {
+        motion_id: motion_id.clone(),
+        enabled: true,
+        strength: 1.0,
+        crop: Some(0.3),
+    });
+    project.materials.extras.insert(motion_id, motion);
+    project
+        .materials
+        .extras
+        .insert(stabilise_id.clone(), stabilise);
+    project.tracks[0].segments[0].extras.push(stabilise_id);
+
+    let compositor = Compositor::new(ctx);
+    let sources: Arc<dyn SourceProvider> = Arc::new(MediaSourceProvider::from_project(&project));
+    let frame = compositor
+        .render(&project, 500_000, (320, 180), sources.as_ref())
+        .expect("render");
+    // The window is 0.7 wide, centred at 0.5 - (0.1/3 - 0.1) = 0.567: it
+    // shows source 0.217..0.917, so the black-white edge (0.5) lands at
+    // (0.5 - 0.217) / 0.7 = 40 % of the width instead of 50 %.
+    let edge = (0..320u32)
+        .find(|&x| frame.pixel(x, 90)[0] > 128)
+        .expect("a white half");
+    assert!((edge as f32 / 320.0 - 0.405).abs() < 0.02, "edge at {edge}");
+
+    // Off, it is the plain picture again.
+    let mut plain = project.clone();
+    plain.tracks[0].segments[0].extras.clear();
+    let frame = compositor
+        .render(&plain, 500_000, (320, 180), sources.as_ref())
+        .expect("render");
+    let edge = (0..320u32)
+        .find(|&x| frame.pixel(x, 90)[0] > 128)
+        .expect("a white half");
+    assert!((edge as f32 / 320.0 - 0.5).abs() < 0.02, "edge at {edge}");
+
+    // The export path draws the same window.
+    let Ok(export) = compositor.render_nv12(&project, 500_000, (320, 180), sources.as_ref()) else {
+        eprintln!("skipping the export half: no RGBA to NV12 pass on this device");
+        return;
+    };
+    let luma = export.y();
+    let stride = export.y_stride;
+    let edge = (0..320usize)
+        .find(|&x| luma[90 * stride + x] > 128)
+        .expect("a white half in the export");
+    assert!(
+        (edge as f32 / 320.0 - 0.405).abs() < 0.02,
+        "export edge at {edge}"
+    );
+}
