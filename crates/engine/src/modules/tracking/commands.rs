@@ -22,6 +22,7 @@ use super::job::{self, Direction, TrackJob};
 use super::model::{FollowMode, TrackSample, TrackSettings, TrackingMaterial, FLAG_ANCHOR};
 use crate::modules::project::document::{Id, Micros, Project};
 use crate::modules::timeline::commands::EditResponse;
+use crate::modules::timeline::ops::EditCommand;
 use crate::shell::Channel;
 use crate::state::AppState;
 
@@ -374,6 +375,27 @@ pub fn tracking_detach(
 /// Replace the follow with keyframes on the overlay.
 pub fn tracking_bake(state: &Arc<AppState>, overlay_id: Id) -> Result<EditResponse, String> {
     apply(state, |p| edit::bake(p, &overlay_id))
+}
+
+/// Delete clips, baking every overlay that follows one of them to keyframes
+/// first, as one undo step. `delete` is what the delete gesture produced (the
+/// removals and any ripple), exactly as `timeline_apply_many` takes it;
+/// `deleted` names the clips going away, which decides who is baked.
+pub fn tracking_bake_and_delete(
+    state: &Arc<AppState>,
+    deleted: Vec<Id>,
+    delete: Vec<EditCommand>,
+    label: String,
+) -> Result<EditResponse, String> {
+    apply(state, |p| {
+        edit::bake_and_delete(p, &deleted, delete, &label)
+    })
+}
+
+/// The overlays that follow one of `deleted` and would stop moving if those
+/// clips went — what the delete prompt asks about.
+pub fn tracking_dependent_followers(project: &Project, deleted: &[Id]) -> Vec<Id> {
+    super::validate::dependent_followers(project, deleted)
 }
 
 /// Delete a track; its followers stay where they are at `at`.

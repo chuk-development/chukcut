@@ -143,3 +143,33 @@ pub fn timeline_redo(state: &Arc<AppState>) -> Result<EditResponse, String> {
     }
     respond(&state)
 }
+
+/// Hold the frame of `segment_id` at timeline time `at` for `duration` µs:
+/// cut the clip there, put the still in between, and push everything after it
+/// on the clip's lane and its linked lanes right. One undo step.
+///
+/// Blocking — it decodes a frame — so the app runs it off the UI thread. The
+/// project lock is held only to read what to decode and, afterwards, to apply
+/// the edit; never across the decode. The edit is built against the document
+/// as it is *after* the decode, so a change made meanwhile is either respected
+/// or refused, never overwritten.
+pub fn timeline_freeze_frame(
+    state: &Arc<AppState>,
+    segment_id: String,
+    at: Micros,
+    duration: Micros,
+) -> Result<EditResponse, String> {
+    let source = {
+        let guard = state.project.read();
+        let project = guard.as_ref().ok_or("no project is open")?;
+        super::freeze::freeze_source(project, &segment_id, at)?
+    };
+    let image = super::freeze::extract_frame(&source, &super::freeze::freeze_output_path())?;
+    {
+        let mut project_guard = state.project.write();
+        let project = project_guard.as_mut().ok_or("no project is open")?;
+        let command = super::freeze::freeze_frame_edit(project, &segment_id, at, duration, image)?;
+        state.history.write().apply(project, command)?;
+    }
+    respond(state)
+}

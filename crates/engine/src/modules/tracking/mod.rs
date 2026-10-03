@@ -28,6 +28,7 @@ pub mod job;
 pub mod klt;
 pub mod model;
 pub mod tracker;
+pub mod validate;
 
 pub use edit::TrackingCommand;
 pub use model::{

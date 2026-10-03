@@ -448,7 +448,7 @@ fn absorb_slivers(clip: TimeRange, cuts: Vec<TimeRange>) -> Vec<TimeRange> {
 }
 
 /// The lanes whose clips after `from` must move with the cut clip.
-fn rippled_lanes(project: &Project, segment_id: &str, from: Micros) -> BTreeSet<String> {
+pub(crate) fn rippled_lanes(project: &Project, segment_id: &str, from: Micros) -> BTreeSet<String> {
     let mut lanes = BTreeSet::new();
     let mut queue = vec![segment_id.to_string()];
     let mut seen = BTreeSet::new();

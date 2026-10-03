@@ -13,6 +13,9 @@ use chukcut_engine::modules::tracking::job::Direction;
 use chukcut_engine::modules::tracking::{
     FollowMode, TrackSample, TrackingMaterial, LOW_CONFIDENCE,
 };
+use gpui::component::button::{Button, ButtonVariants as _};
+use gpui::component::dialog::DialogFooter;
+use gpui::component::WindowExt as _;
 use gpui::{point, AnyElement, PathBuilder};
 
 use super::*;
@@ -328,6 +331,75 @@ impl Editor {
         } else {
             cx.notify();
         }
+    }
+
+    /// Delete pressed on a clip that overlays follow: offer to keep their
+    /// motion as keyframes before the clip goes. Returns whether the prompt
+    /// took over; when it did not, Delete goes ahead as usual.
+    pub(crate) fn offer_bake_before_delete(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let deleted = self.clips_to_delete();
+        let followers = tracking_commands::tracking_dependent_followers(&self.project, &deleted);
+        if followers.is_empty() {
+            return false;
+        }
+        self.pause();
+        let editor = cx.entity().downgrade();
+        let count = followers.len();
+        let message = if count == 1 {
+            "A clip follows an object in this video. Bake its motion to keyframes so it keeps \
+             moving after the video is deleted?"
+                .to_string()
+        } else {
+            format!(
+                "{count} clips follow an object in this video. Bake their motion to keyframes so \
+                 they keep moving after the video is deleted?"
+            )
+        };
+        window.open_dialog(cx, move |dialog, _, _| {
+            let (bake, plain) = (editor.clone(), editor.clone());
+            dialog
+                .w(px(460.0))
+                .title("Delete a tracked clip?")
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(TEXT_DIM))
+                        .child(message.clone()),
+                )
+                .footer(
+                    DialogFooter::new()
+                        .child(
+                            Button::new("tracked-delete-cancel")
+                                .label("Cancel")
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("tracked-delete-plain")
+                                .label("Delete")
+                                .on_click(move |_, window, cx| {
+                                    window.close_dialog(cx);
+                                    let _ =
+                                        plain.update(cx, |editor, cx| editor.delete_selection(cx));
+                                }),
+                        )
+                        .child(
+                            Button::new("tracked-delete-bake")
+                                .primary()
+                                .label("Bake and delete")
+                                .on_click(move |_, window, cx| {
+                                    window.close_dialog(cx);
+                                    let _ = bake.update(cx, |editor, cx| {
+                                        editor.delete_selection_baking(cx)
+                                    });
+                                }),
+                        ),
+                )
+        });
+        true
     }
 
     pub(crate) fn bake_track(&mut self, cx: &mut Context<Self>) {

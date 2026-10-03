@@ -9,6 +9,7 @@
 //! See `docs/architecture/timeline-editing.md`.
 
 pub mod commands;
+pub mod freeze;
 pub mod history;
 pub mod ops;
 

@@ -1689,6 +1689,8 @@ impl Project {
         // depends on two segments at once, so its checks live with the module
         // that knows the rule rather than being restated here.
         issues.extend(crate::modules::transitions::validate::issues(self));
+        // A follow link names a track and a clip that other edits can delete.
+        issues.extend(crate::modules::tracking::validate::issues(self));
 
         issues
     }
