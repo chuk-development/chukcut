@@ -504,6 +504,7 @@ impl Render for Editor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.scale = window.scale_factor();
         self.sync_window_title(window);
+        let (media_w, inspector_w) = side_widths(f32::from(window.viewport_size().width));
         div()
             .track_focus(&self.focus)
             .key_context("Editor")
@@ -567,9 +568,21 @@ impl Render for Editor {
                     .px(px(6.0))
                     .pt(px(6.0))
                     .min_h(px(0.0))
-                    .child(self.render_media(cx))
+                    .child(
+                        div()
+                            .w(px(media_w))
+                            .flex_none()
+                            .flex()
+                            .child(self.render_media(cx)),
+                    )
                     .child(self.render_preview(cx))
-                    .child(self.render_inspector(window, cx)),
+                    .child(
+                        div()
+                            .w(px(inspector_w))
+                            .flex_none()
+                            .flex()
+                            .child(self.render_inspector(window, cx)),
+                    ),
             )
             .child(self.render_timeline(window, cx))
     }

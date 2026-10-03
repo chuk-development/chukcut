@@ -212,7 +212,7 @@ impl Editor {
         };
 
         Panel::new("asset-panel")
-            .w(px(MEDIA_W))
+            .size_full()
             .flex_none()
             // The rail stands in for a header: CapCut's icon tabs, our glyphs.
             .header(

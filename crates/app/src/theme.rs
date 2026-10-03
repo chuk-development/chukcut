@@ -182,6 +182,28 @@ pub(crate) const R_LG: f32 = 12.0;
 
 pub(crate) const MEDIA_W: f32 = 640.0;
 pub(crate) const INSPECTOR_W: f32 = 590.0;
+/// The narrowest the player gets before the side panels give way: wide
+/// enough for its timecode, transport and view buttons on one line.
+pub(crate) const PLAYER_MIN_W: f32 = 510.0;
+/// The narrowest the inspector gets: a label, two number fields and the
+/// action column on one row.
+const INSPECTOR_MIN_W: f32 = 432.0;
+const MEDIA_MIN_W: f32 = 360.0;
+
+/// The asset panel's and the inspector's widths in a window `window_w`
+/// wide: their full widths while the player keeps `PLAYER_MIN_W`; below
+/// that both shrink in proportion, the inspector no narrower than its rows
+/// need, so a 1366 px laptop screen still has a usable player.
+pub(crate) fn side_widths(window_w: f32) -> (f32, f32) {
+    let spare = window_w - 4.0 * GUTTER - PLAYER_MIN_W;
+    if spare >= MEDIA_W + INSPECTOR_W {
+        return (MEDIA_W, INSPECTOR_W);
+    }
+    let ratio = (spare / (MEDIA_W + INSPECTOR_W)).max(0.0);
+    let inspector = (INSPECTOR_W * ratio).clamp(INSPECTOR_MIN_W, INSPECTOR_W);
+    let media = (spare - inspector).clamp(MEDIA_MIN_W, MEDIA_W);
+    (media.floor(), inspector.floor())
+}
 
 // --- motion --------------------------------------------------------------------
 
@@ -285,4 +307,22 @@ fn apply_colors(theme: &mut Theme) {
     c.warning = hsla(WARNING);
     c.danger = hsla(DANGER);
     c.info = hsla(INFO);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_full_hd_window_keeps_the_full_side_panels() {
+        assert_eq!(side_widths(1920.0), (MEDIA_W, INSPECTOR_W));
+    }
+
+    #[test]
+    fn a_laptop_window_keeps_a_usable_player_and_inspector() {
+        let (media, inspector) = side_widths(1366.0);
+        assert!(inspector >= INSPECTOR_MIN_W);
+        assert!(media >= MEDIA_MIN_W);
+        assert!(1366.0 - 4.0 * GUTTER - media - inspector >= PLAYER_MIN_W - 1.0);
+    }
 }

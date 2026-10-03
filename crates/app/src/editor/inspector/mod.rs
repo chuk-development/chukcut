@@ -1008,10 +1008,6 @@ impl Editor {
                 .into_any_element(),
             None => self.render_details(window, cx).into_any_element(),
         };
-        crate::ui::Panel::new("inspector")
-            .w(px(INSPECTOR_W))
-            .flex_none()
-            .h_full()
-            .child(body)
+        crate::ui::Panel::new("inspector").size_full().child(body)
     }
 }
