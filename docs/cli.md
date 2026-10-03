@@ -1070,4 +1070,7 @@ ffprobe -v error -count_frames -show_entries stream=nb_read_frames out.mp4
   `modules/timeline/gesture.rs`. It does not change a `Project` directly.
 - Tests: `cargo test -p chukcut-cli`. `tests/flow.rs` runs the binary on
   generated media and checks the export with ffprobe. `tests/mcp.rs` drives a
-  full MCP session over a pipe.
+  full MCP session over a pipe. `tests/coverage.rs` checks the later
+  operations (markers to cloud) in the saved project file. Its cloud test
+  uses an OpenAI-compatible stand-in server on 127.0.0.1, so no request leaves
+  the machine.

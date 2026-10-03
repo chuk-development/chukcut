@@ -523,3 +523,162 @@ fn the_new_operations_run_from_a_batch() {
         "the styled title was undone"
     );
 }
+
+/// A stand-in for an OpenAI-compatible server on 127.0.0.1: chat
+/// completions translate each line to "DE: <line>", and speech answers with
+/// `voice`, an MP3 file. Nothing leaves this machine.
+fn mock_openai(voice: Vec<u8>) -> u16 {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut request_line = String::new();
+            if reader.read_line(&mut request_line).is_err() {
+                continue;
+            }
+            let mut length = 0usize;
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                    break;
+                }
+                if let Some((k, v)) = line.split_once(':') {
+                    if k.eq_ignore_ascii_case("content-length") {
+                        length = v.trim().parse().unwrap_or(0);
+                    }
+                }
+            }
+            let mut body = vec![0; length];
+            let _ = reader.read_exact(&mut body);
+            let (kind, reply): (&str, Vec<u8>) = if request_line.contains("/chat/completions") {
+                let request: Value = serde_json::from_slice(&body).unwrap_or_default();
+                let lines: Vec<String> = request["messages"][1]["content"]
+                    .as_str()
+                    .and_then(|c| serde_json::from_str(c).ok())
+                    .unwrap_or_default();
+                let translated: Vec<String> = lines.iter().map(|l| format!("DE: {l}")).collect();
+                let answer = json!({"choices": [{"message": {"role": "assistant",
+                    "content": serde_json::to_string(&translated).unwrap()}}]});
+                ("application/json", answer.to_string().into_bytes())
+            } else if request_line.contains("/audio/speech") {
+                ("audio/mpeg", voice.clone())
+            } else {
+                ("text/plain", b"not found".to_vec())
+            };
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                reply.len()
+            );
+            let _ = stream.write_all(head.as_bytes());
+            let _ = stream.write_all(&reply);
+        }
+    });
+    port
+}
+
+/// Run with `--json`, without any proxy between the CLI and the mock.
+fn run_local(dir: &Path, args: &[&str]) -> Value {
+    let output = common::cli(dir)
+        .env_remove("http_proxy")
+        .env_remove("https_proxy")
+        .env_remove("HTTP_PROXY")
+        .env_remove("HTTPS_PROXY")
+        .env_remove("ALL_PROXY")
+        .env_remove("all_proxy")
+        .arg("--json")
+        .args(args)
+        .output()
+        .unwrap();
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|e| {
+        panic!(
+            "{args:?}: no JSON ({e}): {}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
+    assert_eq!(output.status.code(), Some(0), "{args:?}: {json}");
+    json["data"].clone()
+}
+
+#[test]
+fn translation_and_tts_work_against_a_local_mock_account() {
+    require_ffmpeg!();
+    let (dir, project, _, _) = with_card("cloud-mock");
+    let p = project.to_str().unwrap();
+    let mp3 = dir.join("voice.mp3");
+    ffmpeg(&[
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=300:duration=1.5",
+        mp3.to_str().unwrap(),
+    ]);
+    let port = mock_openai(std::fs::read(&mp3).unwrap());
+    let config = dir.join("xdg/config/chukcut");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("accounts.toml"),
+        format!(
+            "[[account]]\nid = \"mock\"\nkind = \"openai_compatible\"\nname = \"Mock\"\nbase_url = \"http://127.0.0.1:{port}/v1\"\ndefault_model = \"m\"\n"
+        ),
+    )
+    .unwrap();
+
+    let accounts = ok(&dir, &["catalog", "accounts"]);
+    assert_eq!(accounts[0]["id"], "mock");
+
+    let srt = dir.join("subs.srt");
+    std::fs::write(
+        &srt,
+        "1\n00:00:00,000 --> 00:00:01,000\nHello\n\n2\n00:00:01,500 --> 00:00:03,000\nGood night\n",
+    )
+    .unwrap();
+    ok(&dir, &["captions", "import", p, srt.to_str().unwrap()]);
+
+    let translated = run_local(
+        &dir,
+        &["cloud", "translate", p, "--to", "de", "--model", "m"],
+    );
+    assert_eq!(translated["lines"], 2);
+    let track = translated["track_id"].as_str().unwrap();
+    let doc = document(&project);
+    let lane = doc["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == track)
+        .unwrap();
+    assert_eq!(lane["segments"].as_array().unwrap().len(), 2);
+    let texts: Vec<&str> = doc["materials"]["texts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|t| t["content"].as_str())
+        .collect();
+    assert!(texts.contains(&"DE: Good night"), "{texts:?}");
+
+    let spoken = run_local(
+        &dir,
+        &[
+            "cloud",
+            "tts",
+            p,
+            "Hello there",
+            "--voice",
+            "alloy",
+            "--at",
+            "0.5",
+        ],
+    );
+    assert_eq!(spoken["material"]["kind"], "audio");
+    assert_eq!(spoken["clip"]["start"], 0.5);
+    assert_eq!(spoken["clip"]["kind"], "audio");
+    let path = PathBuf::from(spoken["path"].as_str().unwrap());
+    assert!(
+        path.starts_with(dir.join("xdg/data")),
+        "the voice goes under the data folder: {}",
+        path.display()
+    );
+}
