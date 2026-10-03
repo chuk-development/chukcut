@@ -30,6 +30,13 @@ pub(crate) mod icons {
         };
     }
     pub const RESET: &[u8] = crate::ui::icons::RESET.0;
+    // Kept for tabs that draw their own keyframe buttons (Effects).
+    #[allow(dead_code)]
+    pub const DIAMOND: &[u8] = crate::ui::icons::DIAMOND.0;
+    #[allow(dead_code)]
+    pub const DIAMOND_FILLED: &[u8] = crate::ui::icons::DIAMOND_FILLED.0;
+    #[allow(dead_code)]
+    pub const PREV: &[u8] = crate::ui::icons::CHEVRON_LEFT.0;
     pub const NEXT: &[u8] = crate::ui::icons::CHEVRON_RIGHT.0;
     pub const UP: &[u8] = crate::ui::icons::CHEVRON_UP.0;
     pub const DOWN: &[u8] = crate::ui::icons::CHEVRON_DOWN.0;
