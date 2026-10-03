@@ -6,7 +6,7 @@
 //! The inspector's Stabilise, Scenes, Auto reframe and Beats sections are in
 //! `inspector/analysis.rs`.
 
-use chukcut_engine::modules::analysis::commands::{self as analysis, Reframe};
+use chukcut_engine::modules::analysis::commands::{self as analysis, Reframe, SubjectCue};
 use chukcut_engine::modules::project::{Segment, TimeRange};
 use gpui::component::menu::PopupMenu;
 use gpui::{actions, AnyElement};
@@ -259,6 +259,7 @@ impl Editor {
             Reframe {
                 segment_ids: ids,
                 ratio,
+                subject: SubjectCue::Auto,
             },
             None,
         );

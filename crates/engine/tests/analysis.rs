@@ -10,7 +10,9 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 
-use chukcut_engine::modules::analysis::commands::{self as analysis, DetectScenes, Reframe};
+use chukcut_engine::modules::analysis::commands::{
+    self as analysis, DetectScenes, Reframe, SubjectCue,
+};
 use chukcut_engine::modules::analysis::frames::Walk;
 use chukcut_engine::modules::analysis::stabilise;
 use chukcut_engine::modules::project::document::{
@@ -381,6 +383,9 @@ fn a_moving_subject_is_kept_in_a_vertical_frame() {
         Reframe {
             segment_ids: vec!["clip".into()],
             ratio: Some((9, 16)),
+            // The fixture has no faces; saliency keeps the test free of
+            // the ML worker and of downloads.
+            subject: SubjectCue::Saliency,
         },
         None,
     )
