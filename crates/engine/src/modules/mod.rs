@@ -18,5 +18,6 @@ pub mod proxy;
 pub mod render;
 pub mod text;
 pub mod timeline;
+pub mod tracking;
 pub mod transitions;
 pub mod workspace;

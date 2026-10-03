@@ -340,6 +340,14 @@ pub struct MaterialPool {
     /// payoff [`TransitionMaterial`] records for the same choice.
     #[serde(default)]
     pub color_adjusts: Vec<ColorAdjustMaterial>,
+    /// Motion tracks: per-source-frame poses of one object in one video file.
+    /// See `modules::tracking`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trackings: Vec<crate::modules::tracking::TrackingMaterial>,
+    /// "Follows that track": referenced from the `extras` of the overlay that
+    /// follows, exactly like a colour adjustment. See `modules::tracking`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub follows: Vec<crate::modules::tracking::FollowMaterial>,
     /// Every link group id that some segment currently belongs to.
     ///
     /// ## Why linkage is on the segment and this is only a type tag

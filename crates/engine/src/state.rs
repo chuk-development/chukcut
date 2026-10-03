@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use crate::modules::project::{ConfigureCommand, Project};
 use crate::modules::timeline::ops::{self, EditCommand};
+use crate::modules::tracking::TrackingCommand;
 
 pub struct AppState {
     /// The open document. `None` before the first project is created or opened.
@@ -72,9 +73,13 @@ const MAX_DEPTH: usize = 500;
 /// editing a module another concern owns. What the user needs is that Ctrl+Z
 /// walks *all* of their edits in order, whichever kind each one was, and this
 /// enum is exactly that requirement as a type.
+///
+/// Tracking edits are the third kind for the same reason: they write pool
+/// categories no `EditCommand` reaches (`modules::tracking::edit`).
 enum DocumentCommand {
     Edit(EditCommand),
     Configure(ConfigureCommand),
+    Tracking(TrackingCommand),
 }
 
 impl DocumentCommand {
@@ -82,6 +87,7 @@ impl DocumentCommand {
         match self {
             Self::Edit(command) => command.apply(project),
             Self::Configure(command) => command.apply(project),
+            Self::Tracking(command) => command.apply(project),
         }
     }
 
@@ -89,6 +95,7 @@ impl DocumentCommand {
         match self {
             Self::Edit(command) => Self::Edit(command.invert()),
             Self::Configure(command) => Self::Configure(command.invert()),
+            Self::Tracking(command) => Self::Tracking(command.invert()),
         }
     }
 
@@ -96,6 +103,7 @@ impl DocumentCommand {
         match self {
             Self::Edit(command) => command.label(),
             Self::Configure(command) => command.label(),
+            Self::Tracking(command) => command.label(),
         }
     }
 }
@@ -143,6 +151,18 @@ impl DocumentHistory {
     ) -> Result<(), String> {
         command.apply(project)?;
         self.record(DocumentCommand::Configure(command));
+        Ok(())
+    }
+
+    /// Apply a tracking edit and record it on the same stack. All or nothing:
+    /// a refused tracking edit leaves the document as it was.
+    pub fn apply_tracking(
+        &mut self,
+        project: &mut Project,
+        command: TrackingCommand,
+    ) -> Result<(), String> {
+        command.apply(project)?;
+        self.record(DocumentCommand::Tracking(command));
         Ok(())
     }
 

@@ -1154,12 +1154,16 @@ impl Compositor {
             if let Some(instant) =
                 transitions::instant_for(track, &project.materials, segment, time)
             {
+                let from_segment =
+                    crate::modules::tracking::follow::resolve(project, instant.from.segment, time);
+                let to_segment =
+                    crate::modules::tracking::follow::resolve(project, instant.to.segment, time);
                 let from = self.quad(
                     canvas,
                     &project.materials,
                     size,
                     sources,
-                    instant.from.segment,
+                    &from_segment,
                     instant.from.kind,
                     instant.from.source_time,
                     time,
@@ -1170,7 +1174,7 @@ impl Compositor {
                     &project.materials,
                     size,
                     sources,
-                    instant.to.segment,
+                    &to_segment,
                     instant.to.kind,
                     instant.to.source_time,
                     time,
@@ -1212,13 +1216,16 @@ impl Compositor {
             let Some(source_time) = segment.source_time_at(time) else {
                 continue;
             };
+            // An overlay that follows a motion track is placed by the track;
+            // see `modules::tracking::follow`. Borrowed when it does not.
+            let resolved = crate::modules::tracking::follow::resolve(project, segment, time);
 
             let quad = self.quad(
                 canvas,
                 &project.materials,
                 size,
                 sources,
-                segment,
+                &resolved,
                 kind,
                 source_time,
                 time,
