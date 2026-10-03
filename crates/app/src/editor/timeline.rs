@@ -276,6 +276,7 @@ struct MenuState {
     can_reset_speed: bool,
     can_freeze: bool,
     analysis: super::analysis::MenuFlags,
+    audio: super::audio_tools::MenuFlags,
 }
 
 /// One lane as drawn: where it is, in lanes-local pixels.
@@ -2140,6 +2141,7 @@ impl Editor {
             }),
             can_freeze: self.freeze_target().is_some(),
             analysis: self.analysis_flags(),
+            audio: self.audio_menu_flags(),
         }
     }
 
@@ -2309,40 +2311,41 @@ impl Editor {
 
     /// Register the timeline's actions on the editor's root element.
     pub(super) fn timeline_actions(&self, root: gpui::Div, cx: &mut Context<Self>) -> gpui::Div {
-        root.on_action(
-            cx.listener(|this, _: &DeleteLeft, _, cx| this.trim_to_playhead(Edge::Head, cx)),
-        )
-        .on_action(
-            cx.listener(|this, _: &DeleteRight, _, cx| this.trim_to_playhead(Edge::Tail, cx)),
-        )
-        .on_action(cx.listener(|this, _: &ToggleMarker, _, cx| this.toggle_marker(cx)))
-        .on_action(cx.listener(|this, _: &ToggleMagnet, _, cx| {
-            this.timeline.magnet = !this.timeline.magnet;
-            cx.notify();
-        }))
-        .on_action(cx.listener(|this, _: &ToggleSnapping, _, cx| {
-            this.timeline.snapping = !this.timeline.snapping;
-            cx.notify();
-        }))
-        .on_action(cx.listener(|this, _: &ZoomToFit, _, cx| this.zoom_to_fit(cx)))
-        .on_action(cx.listener(|this, _: &SelectTool, _, cx| this.set_tool(Tool::Select, cx)))
-        .on_action(cx.listener(|this, _: &BladeTool, _, cx| this.set_tool(Tool::Blade, cx)))
-        .on_action(cx.listener(|this, _: &CopyClips, _, cx| {
-            this.copy_selection(cx);
-        }))
-        .on_action(cx.listener(|this, _: &CutClips, window, cx| this.cut_selection(window, cx)))
-        .on_action(cx.listener(|this, _: &PasteClips, _, cx| this.paste_clipboard(cx)))
-        .on_action(cx.listener(|this, _: &DuplicateClips, _, cx| this.duplicate_selection(cx)))
-        .on_action(cx.listener(|this, _: &SelectAllClips, _, cx| this.select_all(cx)))
-        .on_action(cx.listener(|this, _: &ClearSelection, _, cx| {
-            this.clear_selection();
-            cx.notify();
-        }))
-        .on_action(cx.listener(|this, _: &DetachAudio, _, cx| this.detach_audio(cx)))
-        .on_action(cx.listener(|this, _: &LinkClips, _, cx| this.link_selection(cx)))
-        .on_action(cx.listener(|this, _: &UnlinkClips, _, cx| this.unlink_selection(cx)))
-        .on_action(cx.listener(|this, _: &ResetSpeed, _, cx| this.reset_speed(cx)))
-        .on_action(cx.listener(|this, _: &FreezeFrame, _, cx| this.freeze_frame(cx)))
+        self.audio_tool_actions(root, cx)
+            .on_action(
+                cx.listener(|this, _: &DeleteLeft, _, cx| this.trim_to_playhead(Edge::Head, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &DeleteRight, _, cx| this.trim_to_playhead(Edge::Tail, cx)),
+            )
+            .on_action(cx.listener(|this, _: &ToggleMarker, _, cx| this.toggle_marker(cx)))
+            .on_action(cx.listener(|this, _: &ToggleMagnet, _, cx| {
+                this.timeline.magnet = !this.timeline.magnet;
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &ToggleSnapping, _, cx| {
+                this.timeline.snapping = !this.timeline.snapping;
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &ZoomToFit, _, cx| this.zoom_to_fit(cx)))
+            .on_action(cx.listener(|this, _: &SelectTool, _, cx| this.set_tool(Tool::Select, cx)))
+            .on_action(cx.listener(|this, _: &BladeTool, _, cx| this.set_tool(Tool::Blade, cx)))
+            .on_action(cx.listener(|this, _: &CopyClips, _, cx| {
+                this.copy_selection(cx);
+            }))
+            .on_action(cx.listener(|this, _: &CutClips, window, cx| this.cut_selection(window, cx)))
+            .on_action(cx.listener(|this, _: &PasteClips, _, cx| this.paste_clipboard(cx)))
+            .on_action(cx.listener(|this, _: &DuplicateClips, _, cx| this.duplicate_selection(cx)))
+            .on_action(cx.listener(|this, _: &SelectAllClips, _, cx| this.select_all(cx)))
+            .on_action(cx.listener(|this, _: &ClearSelection, _, cx| {
+                this.clear_selection();
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &DetachAudio, _, cx| this.detach_audio(cx)))
+            .on_action(cx.listener(|this, _: &LinkClips, _, cx| this.link_selection(cx)))
+            .on_action(cx.listener(|this, _: &UnlinkClips, _, cx| this.unlink_selection(cx)))
+            .on_action(cx.listener(|this, _: &ResetSpeed, _, cx| this.reset_speed(cx)))
+            .on_action(cx.listener(|this, _: &FreezeFrame, _, cx| this.freeze_frame(cx)))
     }
 
     // --- media -----------------------------------------------------------------------
@@ -2627,7 +2630,9 @@ impl Editor {
             .child(
                 tool_button("marker", IconName::Bookmark, "Marker", "m")
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_marker(cx))),
-            );
+            )
+            .child(separator())
+            .child(self.record_button(cx));
 
         let right = div()
             .flex()
@@ -4073,6 +4078,7 @@ fn clip_menu(
         .separator()
         .menu_with_disabled("Reset speed", Box::new(ResetSpeed), !s.can_reset_speed);
     let menu = super::analysis::analysis_menu(menu, s.analysis);
+    let menu = super::audio_tools::audio_menu(menu, s.audio);
     menu.separator()
         .menu("Select all", Box::new(SelectAllClips))
 }

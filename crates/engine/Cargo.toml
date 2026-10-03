@@ -83,6 +83,18 @@ ebur128 = "0.1.10"
 # DeepFilterNet or FFmpeg's arnndn: docs/decisions/0015-voice-cleanup-engine.md.
 nnnoiseless = { version = "0.5.2", default-features = false }
 
+# --- audio tools (modules/audiofx) ---------------------------------------------
+#
+# Pitch-preserving time stretch and pitch shift: Signalsmith Stretch (MIT), a
+# header-only C++ library built by `cc`, behind a thin binding. It follows a
+# speed curve because every `process` call may take a different number of
+# input frames per output frame. Why this and not a WSOLA of our own or
+# Rubber Band (GPL, and a much larger build): docs/decisions/0021-audio-time-stretch.md.
+signalsmith-stretch = "0.1.3"
+# The FFT for the robot voice (phase-zeroing resynthesis). Already in the tree
+# through the app; this only names it.
+realfft = "3.5"
+
 # --- the effect runtime (modules/effects) ------------------------------------
 #
 # The Lua VM effect scripts run in. `lua54` rather than LuaJIT because the

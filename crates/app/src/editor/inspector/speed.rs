@@ -424,12 +424,7 @@ impl Editor {
                     .text_color(rgb(TEXT_MUTED))
                     .child("Click to add a point, drag to move it, right-click to remove it."),
             )
-            .child(
-                div()
-                    .text_size(px(TEXT_CAPTION))
-                    .text_color(rgb(WARNING))
-                    .child("The clip's sound is muted while it plays on a curve."),
-            )
+            .child(self.pitch_switch(cx))
             .into_any_element()
     }
 

@@ -58,6 +58,7 @@ actions!(
 mod accounts;
 mod analysis;
 mod assets;
+mod audio_tools;
 mod captions;
 mod cloud;
 mod export;
@@ -133,6 +134,8 @@ pub struct Editor {
     tracking: tracking::TrackingUi,
     /// Scene, stabilisation, beat and reframe jobs (`analysis.rs`).
     analysis: analysis::AnalysisUi,
+    /// Ducking jobs and the voiceover take (`audio_tools.rs`).
+    audio_tools: audio_tools::AudioToolsUi,
     _ticker: Task<()>,
 }
 
@@ -197,6 +200,7 @@ impl Editor {
             captions,
             tracking: Default::default(),
             analysis: Default::default(),
+            audio_tools: Default::default(),
             _ticker: ticker,
         };
         // Hardware encoder detection opens each device and encodes a test
@@ -260,6 +264,7 @@ impl Editor {
         changed |= self.expire_status();
         changed |= self.poll_tracking(cx);
         changed |= self.poll_analysis(cx);
+        changed |= self.poll_voiceover(cx);
         if let Some(frame) = self.player.take(self.clock.position()) {
             if let Some(old) = self.frame.replace(frame.image) {
                 // A frame is uploaded into the window's atlas when drawn; drop

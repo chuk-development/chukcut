@@ -99,23 +99,37 @@ pub fn plan(project: &Project) -> Vec<PlannedSegment> {
             if project.sound_is_on_a_linked_lane(track, segment) {
                 continue;
             }
-            // A clip on a speed curve is muted: there is no pitch-preserving
-            // stretch to follow a ramp with. `modules::speed`, "Sound".
-            if project.materials.speed_curve_of(segment).is_some() {
-                continue;
-            }
             let Some(path) = audio_path(project, segment) else {
                 continue;
             };
             // Voice cleanup: a denoised file and a normalising gain, resolved
             // exactly as the export mixer resolves them.
             let effective = crate::modules::voice::effective_source(project, segment, path);
+            let mut path = effective.path;
+            let mut source_start = segment.source_range.start.max(0);
+            let mut speed = sane_speed(segment.speed);
+            // A pitch-preserving speed change, a speed curve or an effect
+            // stack: play the render the export computes for the same clip,
+            // from the cache. Until it lands, the clip plays as it did before
+            // `audiofx` existed — at its constant speed, dry — except on a
+            // curve, which that path cannot follow and which stays silent.
+            if let Some(spec) = crate::modules::audiofx::spec_for(project, segment, &path) {
+                match crate::modules::audiofx::cache::ready_or_request(&segment.id, &spec) {
+                    Some(cached) => {
+                        path = cached.to_string_lossy().into_owned();
+                        source_start = 0;
+                        speed = 1.0;
+                    }
+                    None if spec.curve.is_some() => continue,
+                    None => {}
+                }
+            }
             planned.push(PlannedSegment {
                 segment_id: segment.id.clone(),
-                path: effective.path,
+                path,
                 target: segment.target_range,
-                source_start: segment.source_range.start.max(0),
-                speed: sane_speed(segment.speed),
+                source_start,
+                speed,
                 gain: finite_or(segment.volume, 1.0)
                     * finite_or(track.volume, 1.0)
                     * effective.gain,
@@ -184,6 +198,7 @@ pub fn soft_limit(sample: f32) -> f32 {
 /// An open decoder and when it was last used.
 struct OpenReader {
     segment_id: Id,
+    path: String,
     reader: Box<dyn ClipReader>,
     used: u64,
 }
@@ -240,8 +255,15 @@ impl TimelineMixer {
     /// Adopt a new project snapshot. Decoders for segments that survived the
     /// edit are kept — a trim should not cost a reopen of every file.
     pub fn set_plan(&mut self, plan: Vec<PlannedSegment>) {
-        let live: HashSet<&Id> = plan.iter().map(|p| &p.segment_id).collect();
-        self.readers.retain(|open| live.contains(&open.segment_id));
+        // A decoder survives when its segment still reads the same file. A
+        // clip whose processed render just landed reads a new one, and its
+        // old decoder would otherwise keep playing the dry sound.
+        let live: HashSet<(&Id, &str)> = plan
+            .iter()
+            .map(|p| (&p.segment_id, p.path.as_str()))
+            .collect();
+        self.readers
+            .retain(|open| live.contains(&(&open.segment_id, open.path.as_str())));
         self.broken.clear();
         self.plan = plan;
     }
@@ -397,6 +419,7 @@ impl TimelineMixer {
                 }
                 self.readers.push(OpenReader {
                     segment_id: planned.segment_id.clone(),
+                    path: planned.path.clone(),
                     reader,
                     used: tick,
                 });

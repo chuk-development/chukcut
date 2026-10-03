@@ -4,7 +4,6 @@ use chukcut_engine::modules::render::layout::{crop_extent, crop_uv, fit_size};
 use gpui::component::scroll::ScrollableElement;
 use gpui::component::slider::Slider;
 use gpui::component::switch::Switch;
-use gpui::component::Disableable;
 use gpui::AnyElement;
 
 use super::controls::*;
@@ -127,7 +126,7 @@ impl Editor {
                 effects::EFFECTS => (None, self.effects_tab(&segment, window, cx), None),
                 text_style::TEXT_TAB => (None, self.text_style_tab(&segment, window, cx), None),
                 AUDIO | BASIC => (None, self.audio_basic(window, cx), None),
-                VOICE => (None, not_yet("Voice changer"), None),
+                VOICE => (None, self.voice_changer(window, cx), None),
                 TRACKING => (None, self.tracking_tab(&segment, window, cx), None),
                 SPEED => {
                     let names = ["Standard", "Curve", "Speed effects"];
@@ -404,6 +403,14 @@ impl Editor {
         .render(self.collapsed("Basic"), rows, cx);
         let mut sections = vec![basic];
         sections.extend(self.voice_sections(&segment, cx));
+        // A video clip's sound has no Voice changer tab of its own.
+        if self
+            .selected_segment()
+            .is_some_and(|(_, s)| self.clip_kind(s) != ClipKind::Audio)
+        {
+            sections.push(self.voice_changer(window, cx));
+        }
+        sections.extend(self.audio_fx_sections(window, cx));
         sections.push(self.beats_section(&segment, cx));
         div()
             .flex()
@@ -510,21 +517,7 @@ impl Editor {
                     .child(duration_box),
             );
 
-        let pitch = label_row(
-            "Change audio pitch",
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_2()
-                .child(
-                    div()
-                        .text_size(px(TEXT_CAPTION))
-                        .text_color(rgb(TEXT_MUTED))
-                        .child("Not in the engine yet"),
-                )
-                .child(Switch::new("speed-pitch").checked(false).disabled(true)),
-        );
+        let pitch = self.pitch_switch(cx);
 
         let curved = self.project.materials.speed_curve_of(segment).is_some();
         div()

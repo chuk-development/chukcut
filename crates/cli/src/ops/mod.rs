@@ -9,6 +9,7 @@
 
 pub mod analysis;
 pub mod audio;
+pub mod audiofx;
 pub mod cloud;
 pub mod delivery;
 pub mod frame;
@@ -205,6 +206,14 @@ operations!(
     audio::NormalizeArgs,
     audio::DenoiseArgs,
     audio::LoudnessArgs,
+    audiofx::AudioEffectAddArgs,
+    audiofx::AudioEffectSetArgs,
+    audiofx::AudioEffectRemoveArgs,
+    audiofx::AudioEffectsArgs,
+    audiofx::VoiceArgs,
+    audiofx::AudioPitchArgs,
+    audiofx::DuckArgs,
+    audiofx::RecordArgs,
     markers::MarkerAddArgs,
     markers::MarkerSetArgs,
     markers::MarkerRemoveArgs,

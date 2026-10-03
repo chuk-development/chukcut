@@ -328,7 +328,7 @@ impl Operation for RedoArgs {
 /// `speed_presets`, cloud `accounts`, mask shapes (`masks`) or `blend` modes.
 #[derive(Debug, Clone, Args, Deserialize, JsonSchema)]
 pub struct CatalogArgs {
-    /// effects, transitions, animations, grade, presets, hardware, models, luts, fonts,
+    /// effects, audio, transitions, animations, grade, presets, hardware, models, luts, fonts,
     /// title_styles, title_templates, layouts, speed_presets, accounts, masks or blend.
     pub kind: String,
 }
@@ -339,6 +339,9 @@ impl CatalogArgs {
         let kind = self.kind.trim().to_ascii_lowercase();
         let data = match kind.as_str() {
             "effects" => json!(fx::commands::fx_catalog()),
+            "audio" | "audio_effects" => {
+                json!(chukcut_engine::modules::audiofx::commands::audiofx_catalog())
+            }
             "transitions" => json!(transitions::commands::transitions_catalog()),
             "animations" => json!(motion::commands::motion_catalog()),
             "grade" => json!(summary::grade_controls()
@@ -366,7 +369,7 @@ impl CatalogArgs {
             "accounts" => super::cloud::accounts_catalog(),
             other => {
                 return Err(CliError::usage(format!(
-                    "there is no catalog called {other:?}; choose effects, transitions, animations, grade, presets, hardware, models, luts, fonts, title_styles, title_templates, layouts, speed_presets, accounts, masks or blend"
+                    "there is no catalog called {other:?}; choose effects, audio, transitions, animations, grade, presets, hardware, models, luts, fonts, title_styles, title_templates, layouts, speed_presets, accounts, masks or blend"
                 )))
             }
         };

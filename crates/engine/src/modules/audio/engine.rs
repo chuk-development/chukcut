@@ -325,6 +325,7 @@ struct Filling {
     position: i64,
     seen_seek: u64,
     seen_project: u64,
+    seen_renders: u64,
     was_playing: bool,
     retry_at: Option<Instant>,
     stereo: Vec<f32>,
@@ -341,6 +342,7 @@ impl Filling {
             position: 0,
             seen_seek: 0,
             seen_project: 0,
+            seen_renders: 0,
             was_playing: false,
             retry_at: None,
             stereo: Vec::new(),
@@ -447,8 +449,12 @@ fn pump(shared: &Arc<Shared>, state: &mut Filling) -> bool {
     };
 
     let generation = shared.project_generation.load(Ordering::Acquire);
-    if generation != state.seen_project {
+    // A clip's processed render landing in the cache changes what the plan
+    // reads (`audiofx::cache`), exactly as an edit would.
+    let renders = crate::modules::audiofx::cache::generation();
+    if generation != state.seen_project || renders != state.seen_renders {
         state.seen_project = generation;
+        state.seen_renders = renders;
         let planned = shared
             .project
             .lock()
