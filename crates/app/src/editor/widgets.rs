@@ -41,12 +41,3 @@ pub(crate) fn timecode(time: Micros, fps: f64) -> String {
     let frames = ((total.fract()) * fps).floor() as i64;
     format!("{minutes:02}:{seconds:02}:{frames:02}")
 }
-
-pub(crate) fn clock_label(seconds: f32) -> String {
-    let whole = seconds.floor() as i64;
-    if seconds.fract() > 0.0 {
-        format!("{:02}:{:02}.5", whole / 60, whole % 60)
-    } else {
-        format!("{:02}:{:02}", whole / 60, whole % 60)
-    }
-}

@@ -59,6 +59,7 @@ mod export;
 mod inspector;
 mod preview;
 mod timeline;
+pub(crate) use timeline::key_bindings as timeline_key_bindings;
 mod title_bar;
 mod widgets;
 
@@ -66,19 +67,6 @@ use crate::theme::*;
 use widgets::*;
 
 // --- state -------------------------------------------------------------------
-
-enum Drag {
-    Scrub,
-    Clip {
-        segment_id: String,
-        kind: TrackKind,
-        grab: Micros,
-        origin_track: String,
-        origin_start: Micros,
-        track: String,
-        start: Micros,
-    },
-}
 
 pub struct Editor {
     state: Arc<AppState>,
@@ -97,14 +85,10 @@ pub struct Editor {
     scale: f32,
 
     selected: Option<String>,
-    /// Timeline zoom, in pixels per second.
-    zoom: f32,
-    scroll_x: f32,
-    drag: Option<Drag>,
     status: Option<SharedString>,
 
     viewer: Rc<Cell<Bounds<Pixels>>>,
-    timeline: Rc<Cell<Bounds<Pixels>>>,
+    timeline: timeline::TimelineState,
     /// The newest progress message of a running export, written from the
     /// export thread and read by [`Self::tick`].
     export_progress: Arc<parking_lot::Mutex<Option<ExportProgress>>>,
@@ -152,12 +136,9 @@ impl Editor {
             last_request: None,
             scale: window.scale_factor(),
             selected: None,
-            zoom: 60.0,
-            scroll_x: 0.0,
-            drag: None,
             status: None,
             viewer: Rc::new(Cell::new(Bounds::default())),
-            timeline: Rc::new(Cell::new(Bounds::default())),
+            timeline: timeline::TimelineState::new(cx),
             export_progress: Arc::new(parking_lot::Mutex::new(None)),
             _ticker: ticker,
         };
@@ -352,8 +333,7 @@ impl Editor {
         let Some(id) = self.selected.take() else {
             return;
         };
-        let command = edits::remove(&self.project, &id);
-        self.apply(command, cx);
+        self.remove_clip(&id, cx);
     }
 
     fn on_undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
@@ -465,11 +445,6 @@ impl Editor {
         self.seek(self.clock.position() + frames * interval);
     }
 
-    fn zoom_by(&mut self, factor: f32, cx: &mut Context<Self>) {
-        self.zoom = (self.zoom * factor).clamp(2.0, 2000.0);
-        cx.notify();
-    }
-
     // --- drawing --------------------------------------------------------------------
 
     fn material_name(&self, material_id: &str) -> String {
@@ -554,6 +529,7 @@ impl Render for Editor {
             }))
             .on_action(cx.listener(|this, _: &ZoomIn, _, cx| this.zoom_by(1.4, cx)))
             .on_action(cx.listener(|this, _: &ZoomOut, _, cx| this.zoom_by(1.0 / 1.4, cx)))
+            .map(|root| self.timeline_actions(root, cx))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .size_full()
@@ -578,7 +554,7 @@ impl Render for Editor {
                     .child(self.render_preview(cx))
                     .child(self.render_inspector(cx)),
             )
-            .child(self.render_timeline(cx))
+            .child(self.render_timeline(window, cx))
     }
 }
 
