@@ -289,6 +289,14 @@ impl SourceProfile {
         self.width.max(self.height)
     }
 
+    /// Whether a proxy would be meaningfully smaller than the source — the
+    /// clause of [`decide`] that holds regardless of decode cost, and the only
+    /// one the "Always" policy keeps.
+    pub fn worth_shrinking(&self) -> bool {
+        let (width, height) = self.proxy_size();
+        self.long_side() as f64 / width.max(height).max(1) as f64 >= MIN_SHRINK
+    }
+
     /// The size a proxy of this source would be: the long side capped at
     /// [`PROXY_LONG_SIDE`], aspect preserved, both dimensions even.
     ///
@@ -383,8 +391,7 @@ pub fn decide(profile: &SourceProfile, measured: Option<f64>) -> Decision {
     // Nothing to gain. Checked first because it is the one clause that is true
     // regardless of how expensive the file is: a proxy that is not smaller than
     // the source is a slower copy of it.
-    let shrink = profile.long_side() as f64 / target_width.max(target_height).max(1) as f64;
-    if shrink < MIN_SHRINK {
+    if !profile.worth_shrinking() {
         decision.reason = format!(
             "{}×{} is already close to the {PROXY_LONG_SIDE}-pixel proxy size, \
              so a proxy would not be meaningfully smaller",

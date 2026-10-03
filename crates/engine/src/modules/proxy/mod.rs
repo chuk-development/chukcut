@@ -52,6 +52,7 @@ pub mod cache;
 pub mod commands;
 pub mod decision;
 pub mod generate;
+pub mod policy;
 pub mod queue;
 pub mod switch;
 
@@ -61,6 +62,7 @@ mod tests;
 pub use cache::{CacheStats, ProxyCache, ProxyEntry, SourceKey};
 pub use decision::{decide, CodecClass, Decision, SourceProfile};
 pub use generate::{generate, plan, GeneratedProxy, ProxySpec};
+pub use policy::{decide_with_policy, ProxyPolicy};
 pub use queue::{
     EnqueueOutcome, FfmpegTranscoder, FnSink, ProxyEvent, ProxyJobView, ProxyProgressSink,
     ProxyQueue, ProxyStage, ProxyState, QueueStatus, Transcoder,

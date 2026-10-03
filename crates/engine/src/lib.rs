@@ -27,6 +27,10 @@ pub fn init() {
         }
     }
 
+    // The proxy policy and the cache limit. Also the startup cache trim, on a
+    // thread of its own.
+    modules::workspace::commands::workspace_settings_apply(&modules::workspace::Settings::load());
+
     // Until this was registered the exporter mixed a valid but silent audio
     // track, because no implementation of its `AudioSource` seam existed.
     modules::export::job::register_audio_source(std::sync::Arc::new(FileAudioSource));
