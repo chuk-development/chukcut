@@ -36,6 +36,7 @@ mod controls;
 mod details;
 mod grading;
 mod tracking;
+mod voice;
 
 pub(super) use details::SettingsForm;
 

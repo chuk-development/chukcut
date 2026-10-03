@@ -64,6 +64,7 @@ mod preview;
 mod settings;
 mod shell;
 mod shortcuts;
+mod silence;
 mod timeline;
 pub(crate) use playback::key_bindings as playback_key_bindings;
 pub(crate) use shell::{quit, startup, Shell};

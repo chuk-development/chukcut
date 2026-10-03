@@ -23,6 +23,7 @@ recommend anything is a survey, and surveys are in `../research/`.
 | [0012](0012-animation-as-parameters.md) | Animations are parameters relative to the clip (In/Out/Combo, text animator, punch-in zoom), not baked keyframes, so they survive trims and splits | Decided 2026-10-03 |
 | [0013](0013-local-transcription-with-whisper-cpp.md) | Offline captions run whisper.cpp through whisper-rs (feature `local-whisper`, CUDA opt-in), not candle: word timestamps, CPU speed, quantised models | Decided 2026-10-03 |
 | [0014](0014-motion-tracks-are-materials-followed-by-link.md) | Motion tracks are materials; an overlay follows one through a link the compositor resolves via the tracked clip's source time, so trims, slips and speed changes keep it on the object | Decided 2026-10-03 |
+| [0015](0015-voice-cleanup-engine.md) | Voice cleanup runs RNNoise (nnnoiseless, BSD-3) into a cached WAV both mixers read; loudness via ebur128 with a true-peak limiter on export | Decided 2026-10-03 |
 
 Decisions already recorded elsewhere, because they predate this directory:
 

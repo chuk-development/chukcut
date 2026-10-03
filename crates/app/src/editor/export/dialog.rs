@@ -61,6 +61,8 @@ pub(crate) struct ExportDialog {
     /// The editor's progress slot, so the title bar keeps reporting when the
     /// dialog is closed after the export finishes.
     editor_progress: Slot,
+    /// The mix's loudness, measured on request.
+    mix_meter: Entity<super::loudness::MixMeter>,
     _subscriptions: Vec<Subscription>,
     _poll: Option<Task<()>>,
 }
@@ -119,7 +121,9 @@ impl ExportDialog {
         })
         .detach();
 
+        let mix_meter = cx.new(|_| super::loudness::MixMeter::new(Arc::clone(&state)));
         Self {
+            mix_meter,
             editor,
             state,
             project,
@@ -558,7 +562,17 @@ impl ExportDialog {
         .child(Self::row(
             "Format",
             self.picker("export-audio-format", audio_rates, !audio_on, cx),
-        ));
+        ))
+        .child(Self::row(
+            "Loudness",
+            self.picker(
+                "export-loudness",
+                super::loudness::picks(c.loudness_target),
+                !audio_on,
+                cx,
+            ),
+        ))
+        .child(Self::row("Mix now", self.mix_meter.clone()));
 
         div()
             .id("export-settings")
