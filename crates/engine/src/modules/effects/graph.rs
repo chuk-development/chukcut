@@ -606,10 +606,18 @@ fn build_pass(
         super::glsl::Stage::Vertex,
         &vertex_path,
     )?;
-    let fragment = shader::compile(
+    // A pass that blends straight alpha (`SRC_ALPHA` on colour) into the
+    // 8-bit sRGB target gets a fragment shader that premultiplies, and the
+    // blender then multiplies by one: NVIDIA rounds the source alpha factor of
+    // an `Rgba8UnormSrgb` target to 1/255 first, which draws faint alpha in
+    // steps. The same fix as the compositor's quad (d9d86dd).
+    let straight =
+        pass.blend.enabled && blend_factor(&pass.blend.src_color) == wgpu::BlendFactor::SrcAlpha;
+    let fragment = shader::compile_with(
         &pkg.read_to_string(&fragment_path)?,
         super::glsl::Stage::Fragment,
         &fragment_path,
+        straight,
     )?;
 
     let device = ctx.device();
@@ -734,7 +742,11 @@ fn build_pass(
 
     let blend = pass.blend.enabled.then(|| wgpu::BlendState {
         color: wgpu::BlendComponent {
-            src_factor: blend_factor(&pass.blend.src_color),
+            src_factor: if fragment.premultiplied {
+                wgpu::BlendFactor::One
+            } else {
+                blend_factor(&pass.blend.src_color)
+            },
             dst_factor: blend_factor(&pass.blend.dst_color),
             operation: wgpu::BlendOperation::Add,
         },
@@ -1198,6 +1210,165 @@ mod tests {
             off[0] > strong[0],
             "at zero intensity the frame should be closer to the input, \
              got {off:?} against {strong:?}"
+        );
+    }
+
+    fn copy_dir(from: &std::path::Path, to: &std::path::Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for entry in std::fs::read_dir(from).unwrap() {
+            let path = entry.unwrap().path();
+            let target = to.join(path.file_name().unwrap());
+            if path.is_dir() {
+                copy_dir(&path, &target);
+            } else {
+                std::fs::copy(&path, &target).unwrap();
+            }
+        }
+    }
+
+    /// The tint fixture with its last pass blending straight alpha
+    /// (`SRC_ALPHA, ONE_MINUS_SRC_ALPHA`) and drawing white whose alpha grows
+    /// across the frame in steps smaller than 1/255.
+    fn faint_alpha_package() -> std::path::PathBuf {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/test-scratch/effects-faint-alpha");
+        let _ = std::fs::remove_dir_all(&dir);
+        copy_dir(&fixture(), &dir);
+        let xshader = dir.join("AmazingFeature/xshader/tint.xshader");
+        let text = std::fs::read_to_string(&xshader).unwrap();
+        let (head, tint) = text.split_at(text.find("name: Tint").unwrap());
+        let tint = tint
+            .replacen("blendEnable: false", "blendEnable: true", 1)
+            .replacen(
+                "srcColorBlendFactor: {__class: BlendFactor, value: ONE}",
+                "srcColorBlendFactor: {__class: BlendFactor, value: SRC_ALPHA}",
+                1,
+            )
+            .replacen(
+                "dstColorBlendFactor: {__class: BlendFactor, value: ZERO}",
+                "dstColorBlendFactor: {__class: BlendFactor, value: ONE_MINUS_SRC_ALPHA}",
+                1,
+            );
+        std::fs::write(&xshader, format!("{head}{tint}")).unwrap();
+        // Every uniform the script sets stays declared and read, so the
+        // material binds exactly as it does for the real shader.
+        std::fs::write(
+            dir.join("AmazingFeature/xshader/tint.frag"),
+            "precision highp float;\n\
+             varying vec2 uv0;\n\
+             uniform sampler2D inputImageTexture;\n\
+             uniform sampler2D desaturatedTexture;\n\
+             uniform float u_intensity;\n\
+             uniform float u_time;\n\
+             uniform vec3 u_tint;\n\
+             void main()\n\
+             {\n\
+                 vec4 base = texture2D(inputImageTexture, uv0);\n\
+                 vec4 grey = texture2D(desaturatedTexture, uv0);\n\
+                 float unused = 0.0 * (base.r + grey.r + u_intensity + u_time + u_tint.x);\n\
+                 float alpha = (floor(gl_FragCoord.x) + 1.0) * (0.37 / 255.0);\n\
+                 gl_FragColor = vec4(vec3(1.0 + unused), alpha);\n\
+             }\n",
+        )
+        .unwrap();
+        dir
+    }
+
+    fn read_row(ctx: &RenderContext, texture: &PooledTexture) -> Vec<[u8; 4]> {
+        let (width, height) = (texture.width(), texture.height());
+        let padded = (width * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+            * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let buffer = ctx.device().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("test row readback"),
+            size: (padded * height) as u64,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut encoder = ctx
+            .device()
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        encoder.copy_texture_to_buffer(
+            texture.texture().as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        ctx.queue().submit(Some(encoder.finish()));
+        let slice = buffer.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        ctx.device()
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
+        rx.recv().unwrap().unwrap();
+        let row = {
+            let view = slice.get_mapped_range().unwrap();
+            view[..(width * 4) as usize]
+                .chunks_exact(4)
+                .map(|p| [p[0], p[1], p[2], p[3]])
+                .collect()
+        };
+        buffer.unmap();
+        row
+    }
+
+    fn srgb_encode(linear: f32) -> f32 {
+        if linear <= 0.003_130_8 {
+            linear * 12.92
+        } else {
+            1.055 * linear.powf(1.0 / 2.4) - 0.055
+        }
+    }
+
+    /// A package pass that blends straight alpha draws faint alpha as the
+    /// arithmetic says: white at alpha `a` over transparent black is `a` of
+    /// light, sRGB-encoded. Before the pass premultiplied in its shader,
+    /// NVIDIA rounded `a` to 1/255 first and drew steps (1.4/255 came out as
+    /// 13 instead of 18).
+    #[test]
+    fn a_straight_alpha_pass_draws_faint_alpha_without_steps() {
+        let Some(ctx) = crate::modules::render::test_context() else {
+            eprintln!("no GPU adapter; skipping");
+            return;
+        };
+        eprintln!("adapter: {}", ctx.adapter_info().name);
+        let package = EffectPackage::open(faint_alpha_package()).unwrap();
+        let mut chain = EffectChain::load(Arc::clone(&ctx), &package).unwrap();
+        let size = (48u32, 4u32);
+        let input = solid_input(&ctx, size, [255, 0, 0, 255]);
+        let view = input.create_view(&Default::default());
+        let output = chain.render(&view, size, 0.0, 0.0).unwrap();
+        let row = read_row(&ctx, &output);
+        let mut wrong = Vec::new();
+        for (x, pixel) in row.iter().enumerate() {
+            let alpha = (x as f32 + 1.0) * (0.37 / 255.0);
+            let want = (srgb_encode(alpha) * 255.0).round() as i32;
+            for channel in &pixel[..3] {
+                if (*channel as i32 - want).abs() > 1 {
+                    wrong.push(format!(
+                        "x {x}: alpha {:.2}/255 drew {pixel:?}, want {want}",
+                        alpha * 255.0
+                    ));
+                    break;
+                }
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "faint alpha drawn in steps:\n{}",
+            wrong.join("\n")
         );
     }
 
