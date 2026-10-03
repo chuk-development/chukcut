@@ -2405,6 +2405,36 @@ pointer, a scrollbar, a resizable split (42% of the window by default).
   tracked clip, so after the delete there is nothing left to bake. Only the
   Delete key / menu / toolbar ask; **Ctrl+X does not** (it deletes plainly).
 
+## Analysis: scenes, stabilisation, beats, auto reframe (2026-10-03)
+
+`modules/analysis` (decision 0018). Clip menu: Detect scenes, Split at scene
+changes, Stabilise, Detect beats, Auto-cut to beat, Snap cuts to beats, Auto
+reframe, Reframe project to 9:16 / 16:9, Cancel analysis. Inspector: Video tab
+Stabilise (on/off, Light/Medium/Strong/Tripod, crop Auto/5/10/20 %), Scene
+detection, Auto reframe; Audio tab Beats (tempo, auto-cut every 1/2/4 beats,
+snap). Progress shows in the title bar's status line. Scene changes (white
+lines) and beats (yellow ticks) are drawn on clips and are snap targets.
+
+- **Measured** (debug build, optimised profile, this machine): scene detection
+  0.9 s and stabilisation 9.5 s for a 6 s 1080p clip; beats well under a second
+  for 10 s of audio.
+- **`testsrc2` is a bad fixture for camera motion.** Its sweeping diagonal line
+  crosses every colour bar and carries most of the frame's corners, so a
+  global-motion fit reads it as a camera roll of ~0.1° per frame. The
+  stabilisation test shakes a *still* frame of it with a disc moving across.
+  The estimator takes a shift consensus first, then fits the similarity on the
+  agreeing points only, for the same reason on real footage.
+- **The analysis cache** is `~/.cache/chukcut/analysis/<sha256>.json`, keyed by
+  path, size, mtime, range and an algorithm tag. Bump the tag
+  (`ALGORITHM` in `scenes.rs` / `stabilise.rs`) when the output changes, or
+  tests read stale results.
+- **Rough:** stabilisation ignores zoom (scale change) in the camera path; a
+  clip extended beyond what was analysed holds the edge correction (the
+  inspector says so); orphaned analysis entries stay in the pool; reframe has
+  no face/person detector yet (saliency only), so two people talking are
+  framed by whoever moves more; the menu's Auto-cut uses every beat (the
+  Audio tab chooses 1/2/4).
+
 ## The log file, and what an export writes into it
 
 Until 2026-07-26 the app logged to stdout and nowhere else, which is fine when
