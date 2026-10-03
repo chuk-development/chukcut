@@ -545,11 +545,12 @@ impl Editor {
             .map(|row| self.project.tracks[row.track].id.clone());
         // A drop snaps like a dragged clip's head: to cuts, the playhead and
         // markers.
+        // Otherwise on a frame boundary, so the clip's edges sit on the grid.
         let time = self.x_to_time(x);
         let time = self
             .snap(&[time], &[])
             .map(|(shift, _)| time + shift)
-            .unwrap_or(time);
+            .unwrap_or_else(|| nearest_frame_time(time, self.project.fps));
         Some((time, lane))
     }
 
@@ -1365,6 +1366,9 @@ impl Editor {
                     if let Some((shift, point)) = self.snap(&[start, start + duration], &exclude) {
                         start = (start + shift).max(floor);
                         self.timeline.snap = Some(point);
+                    } else {
+                        // Off any snap target, the head lands on a frame.
+                        start = nearest_frame_time(start, self.project.fps).max(floor);
                     }
                     new_lane = false;
                     // A selection changes lanes only when it all sits on one.
@@ -1425,6 +1429,9 @@ impl Editor {
                 if let Some((shift, point)) = self.snap(&[to], &exclude) {
                     to += shift;
                     self.timeline.snap = Some(point);
+                } else {
+                    // Off any snap target, the edge lands on a frame.
+                    to = nearest_frame_time(to, self.project.fps);
                 }
                 let Some((target, source)) = self.live_trim(&segment_id, edge, to, ripple) else {
                     return;
