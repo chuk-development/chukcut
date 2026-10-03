@@ -22,5 +22,6 @@ pub mod render;
 pub mod speech;
 pub mod text;
 pub mod timeline;
+pub mod tracking;
 pub mod transitions;
 pub mod workspace;

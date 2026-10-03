@@ -71,6 +71,7 @@ pub(crate) use shortcuts::key_bindings as shortcut_key_bindings;
 use shortcuts::{NewProject, OpenSettings, ShowShortcuts};
 pub(crate) use timeline::key_bindings as timeline_key_bindings;
 mod title_bar;
+mod tracking;
 mod widgets;
 
 use crate::theme::*;
@@ -114,6 +115,8 @@ pub struct Editor {
     shell: lifecycle::ShellState,
     /// The Captions tab: transcription, caption editing and styling.
     captions: captions::CaptionsPanel,
+    /// Motion tracking: the box on the player and the running analysis.
+    tracking: tracking::TrackingUi,
     _ticker: Task<()>,
 }
 
@@ -174,6 +177,7 @@ impl Editor {
             preview,
             shell,
             captions,
+            tracking: Default::default(),
             _ticker: ticker,
         };
         // Hardware encoder detection opens each device and encodes a test
@@ -203,6 +207,7 @@ impl Editor {
             self.status = Some(export::export_status(&progress).into());
             changed = true;
         }
+        changed |= self.poll_tracking(cx);
         if let Some(frame) = self.player.take() {
             if let Some(old) = self.frame.replace(frame.image) {
                 // A frame is uploaded into the window's atlas when drawn; drop

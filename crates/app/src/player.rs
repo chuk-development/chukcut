@@ -97,6 +97,10 @@ impl Drop for Player {
 
 /// Which media a provider was built for. A provider holds open decoders, so
 /// it is rebuilt only when the set of files changes, not on every edit.
+///
+/// Text materials are in the key too, content and style: the provider keeps
+/// its own copy of each, so a text added or edited after it was built would
+/// otherwise draw as missing media, or as its old words.
 fn material_key(project: &Project) -> Vec<(String, String)> {
     let pool = &project.materials;
     let mut key: Vec<(String, String)> = pool

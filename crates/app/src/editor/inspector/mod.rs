@@ -35,6 +35,7 @@ mod clip;
 mod controls;
 mod details;
 mod grading;
+mod tracking;
 
 pub(super) use details::SettingsForm;
 
