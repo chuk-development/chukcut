@@ -24,6 +24,7 @@ column current.
   capture with `DISPLAY=:NN import -window root shot.png`; drive with
   `DISPLAY=:NN xdotool …`. Never touch the owner's display `:1`, never press
   Space (audio goes to the real speakers). Pick a unique NN per agent.
+- GPU tests: run them on the real GPU AND on lavapipe (`VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json`); results differ (NVIDIA rounds alpha in the blender).
 - Build with `memguard-allow 12G cargo build -p chukcut -j 4`; gates:
   `cargo fmt --all`, `cargo clippy -p chukcut`, `cargo test -p chukcut`,
   `cargo test -p chukcut-engine -j 4 --lib` (plus integration tests when the
@@ -79,4 +80,6 @@ column current.
 9. **Keyboard shortcut editor** and presets (CapCut / Premiere layouts).
 10. **Project templates** (CapCut-style templates: placeholders for media + preset text/animations).
 11. **Intel/VAAPI verification** on the owner's laptop: run `tests/every_card.rs` and the player bench there.
+12. **Premultiply in the remaining straight-alpha pipelines** — `transitions/render.rs:268` and `fx/render.rs:468` still use `ALPHA_BLENDING`; on NVIDIA an 8-bit sRGB target rounds source alpha to 1/255 before blending (found and fixed for the quad pipeline in d9d86dd: soft mask edges and low opacities were drawn in steps).
+13. **Run GPU tests on both adapters** — `test_context()` takes the default adapter. Agents testing on lavapipe missed the NVIDIA alpha rounding; run engine GPU tests once on the real GPU and once with `VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json`.
 
