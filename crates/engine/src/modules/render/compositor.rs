@@ -77,7 +77,17 @@ struct QuadUniform {
     /// placeholder. Gated like `color_active`, and also how a missing LUT
     /// file renders the clip untouched.
     lut_active: u32,
-    _pad: u32,
+    /// The extended grade's live stages, [`super::grade::feature`] bits.
+    features: u32,
+    tone: [f32; 4],
+    tone2: [f32; 4],
+    detail: [f32; 4],
+    vignette: [f32; 4],
+    lift: [f32; 4],
+    gain: [f32; 4],
+    gamma: [f32; 4],
+    offset: [f32; 4],
+    hsl: [[f32; 4]; 8],
 }
 
 // `#[repr(C)]`, every field a `f32` array, no padding: the definition of a
@@ -286,6 +296,10 @@ pub struct Compositor {
     /// Path → uploaded 3D LUT, revalidated by mtime per lookup. Runtime state
     /// only — the document stores nothing but the path.
     luts: super::lut::LutCache,
+    /// What binding 4 gets when the segment has no tone curves.
+    curve_placeholder: wgpu::TextureView,
+    /// Curve points → baked tables. See [`super::grade::CurveCache`].
+    curves: super::grade::CurveCache,
     vertices: wgpu::Buffer,
     indices: wgpu::Buffer,
     /// Per-draw uniforms, addressed with dynamic offsets. Grown, never shrunk —
@@ -429,6 +443,18 @@ impl Compositor {
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Float { filterable: false },
                         view_dimension: wgpu::TextureViewDimension::D3,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // The clip's baked tone curves, likewise always bound and
+                // read with `textureLoad` only; see `curve_at` in `quad.wgsl`.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
                         multisampled: false,
                     },
                     count: None,
@@ -579,6 +605,24 @@ impl Compositor {
         });
         let lut_placeholder = lut_placeholder.create_view(&wgpu::TextureViewDescriptor::default());
 
+        // The dead curve binding, for the same reason.
+        let curve_placeholder = device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("chukcut curve placeholder"),
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba32Float,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
         let vertices = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("chukcut quad vertices"),
             size: std::mem::size_of_val(&QUAD_VERTICES) as u64,
@@ -612,6 +656,8 @@ impl Compositor {
             chroma_placeholder,
             lut_placeholder,
             luts: super::lut::LutCache::default(),
+            curve_placeholder,
+            curves: super::grade::CurveCache::default(),
             vertices,
             indices,
             uniforms: Mutex::new(Scratch::default()),
@@ -896,6 +942,7 @@ impl Compositor {
                 // dead values are a sane identity domain.
                 None => ([0.0, 0.0, 0.0, 0.0], [1.0, 1.0, 1.0, 2.0]),
             };
+            let grade = &quad.grade;
             let block = QuadUniform {
                 mvp: quad.placement.mvp,
                 crop: quad.placement.crop,
@@ -909,7 +956,16 @@ impl Compositor {
                 turns: quad.frame.turns % 4,
                 color_active: u32::from(quad.color.is_some()),
                 lut_active: u32::from(quad.lut.is_some()),
-                _pad: 0,
+                features: grade.features,
+                tone: grade.tone,
+                tone2: grade.tone2,
+                detail: grade.detail,
+                vignette: grade.vignette,
+                lift: grade.lift,
+                gain: grade.gain,
+                gamma: grade.gamma,
+                offset: grade.offset,
+                hsl: grade.hsl,
             };
             self.ctx.queue().write_buffer(
                 uniform_buffer,
@@ -1079,6 +1135,15 @@ impl Compositor {
                             .as_ref()
                             .map(|(lut, _)| &lut.view)
                             .unwrap_or(&self.lut_placeholder),
+                    ),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(
+                        quad.curves
+                            .as_ref()
+                            .map(|curves| &curves.view)
+                            .unwrap_or(&self.curve_placeholder),
                     ),
                 },
             ],
@@ -1322,6 +1387,25 @@ impl Compositor {
                     .map(|gpu| (gpu, lut.intensity.min(1.0)))
             });
 
+        // The extended grade. Packed once here; the stages at rest carry no
+        // feature bit and the shader skips them.
+        let mut grade = adjust
+            .map(|adjust| super::grade::GradeBlock::new(&adjust.grade))
+            .unwrap_or_default();
+        if lut.as_ref().is_some_and(|(lut, _)| lut.one_d) {
+            grade.features |= super::grade::feature::LUT_1D;
+        }
+        // Grain is reseeded per frame from the timeline time, never from a
+        // clock or a counter: the preview and the export render the same
+        // instant and must draw the same grain.
+        grade.detail[3] = ((time / 1000).rem_euclid(1 << 16)) as f32;
+        let curves = adjust
+            .filter(|adjust| !adjust.grade.curves.is_identity())
+            .map(|adjust| self.curves.get(&self.ctx, &adjust.grade.curves));
+        if curves.is_some() {
+            grade.features |= super::grade::feature::CURVES;
+        }
+
         let slot = draws.slots as u32;
         draws.slots += 1;
         Ok(Some(QuadDraw {
@@ -1329,6 +1413,8 @@ impl Compositor {
             placement,
             color,
             lut,
+            grade,
+            curves,
             slot,
         }))
     }
@@ -1455,6 +1541,10 @@ struct QuadDraw {
     /// LUT, its intensity is 0, or its file is missing or malformed — all of
     /// which render the clip without a look rather than failing.
     lut: Option<(std::sync::Arc<super::lut::GpuLut>, f32)>,
+    /// The extended grade, packed; `features` 0 when nothing in it is live.
+    grade: super::grade::GradeBlock,
+    /// The baked tone curves, when the clip has any.
+    curves: Option<std::sync::Arc<super::grade::GpuCurves>>,
     slot: u32,
 }
 
@@ -2944,6 +3034,7 @@ mod tests {
             saturation: adjust[2],
             temperature: adjust[3],
             lut: None,
+            grade: Default::default(),
         };
         project.materials.color_adjusts.push(material);
         project.tracks[0].segments[0].extras.push("grade".into());
@@ -3526,6 +3617,14 @@ mod tests {
                 }
             }
         }
+    }
+
+    // The extended grade's pixel tests, in their own file for length. An
+    // `include!` rather than `#[path]`, because a `#[path]` inside an inline
+    // module resolves under `compositor/tests/`, a directory that does not
+    // exist.
+    mod grade_tests {
+        include!("grade_tests.rs");
     }
 
     #[test]

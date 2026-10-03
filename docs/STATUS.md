@@ -1622,10 +1622,10 @@ Basic · Voice changer · Speed for sound. Every edit is an engine command.
   is no longer what is shown.
 - **Plain-key shortcuts carry the context `!Input`** (`main.rs`). Without it,
   typing "s" into any text field split the clip and Backspace deleted it.
-- Not in the engine, drawn disabled: blend modes, tint, highlights, shadows,
-  whites, blacks, brilliance, sharpen, clarity, grain, fade, vignette, LUT
-  picking (a LUT already on a clip is shown), pitch, animations, masks, HSL,
-  curves, colour wheels, voice changer, stabilise and the other AI sections.
+- Not in the engine, drawn disabled: blend modes, pitch, animations, masks,
+  voice changer, stabilise and the other AI sections. The whole Adjust tab
+  works since the colour grading below; Brilliance was dropped from it for
+  Exposure and Vibrance.
 - Driving the window with `xdotool`: compute the window id into a variable
   and check it. A helper that also printed a path made `--window` garbage, and
   a drag then silently did nothing, which looked like a GPUI drag bug.
@@ -1657,6 +1657,65 @@ Don't save leaves it alone and deletes the working copy.
   does not draw them yet (`Editor::play_range` is there for it).
 - File dialogs need xdg-desktop-portal; on a bare Xvfb they fail, so Open…
   and Save as were not exercised there.
+
+## Colour grading (2026-10-03)
+
+The Adjust tab is complete: Basic, HSL, Curves and Colour wheels, plus `.cube`
+LUTs (3D and 1D) with a library. Everything runs in `quad.wgsl`, so the
+preview, both export tiers and transition layers get the same pixels.
+
+- **Model.** One new field, `ColorAdjustMaterial::grade`
+  (`project/grade.rs`), skipped on save when at rest. Old projects open with
+  the grade at rest and save byte-identical; a test pins that. Units are
+  meanings, not slider positions: exposure in stops, most controls `-1..1`,
+  curves as `[x, y]` points (empty = identity), wheels as a puck in the unit
+  disc plus luma. Decision 0007 has an addendum.
+- **Order of operations** is written once, in `render/grade.rs`: sharpen,
+  clarity (measured) and exposure in linear light on the source; clarity,
+  tint, the original four sliders, whites/blacks, shadows/highlights, wheels,
+  HSL, vibrance, curves, LUT and fade in encoded space; vignette and grain in
+  linear light after. Each stage has a bit in `QuadUniform::features`. A clip
+  at rest takes the old shader path; `an_extended_grade_at_rest_changes_no_byte`
+  asserts full-frame byte equality on both decode paths.
+- **Tests compare against a CPU reference**, `grade::reference_encoded`, on
+  both decode paths, per stage and all at once
+  (`render/grade_tests.rs`, ±3 code values; the slack is the quantised
+  readback the input is taken from). Two deliberate shader mutations both
+  failed the suite. The neighbourhood stages (sharpen, clarity) are tested
+  structurally: a flat source does not move, an edge gains contrast.
+- **Preview/export parity** over a frame with every stage live, grain and
+  vignette included, both decode paths: 2×2 block means agree within 4 code
+  values (grain is per pixel and NV12 chroma is per 2×2 block).
+- **Grain** is a PCG hash of the output pixel and the frame time in ms. No
+  clock, no counter: the preview and the export must draw the same grain.
+- **Curves** bake into a 1024×1 `Rgba32Float` table (r, g, b, master),
+  cached by the points' bits. The table is within 0.01 code value of the
+  exact monotone cubic. Fritsch–Carlson, so a curve never dips between
+  rising points.
+- **1D LUTs** fold into the same 3D texture binding as cubes, rows of 1024
+  entries in one slice, so up to 65536 entries fit under the device's width
+  limit. `LUT_1D_INPUT_RANGE` / `LUT_3D_INPUT_RANGE` are read as the domain.
+  A file with both a 1D and a 3D table is refused by name. Identity LUTs
+  (3D 33 and 65, 1D 2 and 4096) move no pixel by more than one code value.
+- **LUT library**: `inspector_lut_import` validates and copies into
+  `$XDG_DATA_HOME/chukcut/luts` (`workspace::paths::luts_dir`, a new data
+  root — not the cache, so "clear cache" never takes a look away). Same file
+  twice is one entry; a name clash gets "Name 2". Errors name the file and the
+  line.
+- **Commands**: `inspector_set_grade` (whole grade), `_set_grade_control`
+  (any single control by `GradeControl`), `_set_curve`, `_set_wheel`,
+  `_set_lut`, `_reset_grade` (by section), `_lut_library`, `_lut_import`. All
+  funnel into `edit::set_grade_command`: validate, clamp, canonicalise, mint,
+  swap. `inspector_set_color` keeps the extended grade, so a filter preset no
+  longer wipes a drawn curve. Apply to all shares the material; paste carries
+  the grade as values (`ClipAttributes::grade`).
+- **UI** (`app/.../inspector/grading.rs`): curve editor and wheels are GPUI
+  canvases. Their move/up listeners are registered on *every* paint, not only
+  mid-drag: a press, its moves and its release can all arrive before the next
+  frame, and a missed release left the drag stuck.
+- Not done: a per-clip "Save as preset", Auto adjust / Colour match, and a
+  hue-vs-hue curve. The `Import LUT…` button uses the desktop file portal,
+  which does not exist under Xvfb; the import itself is covered by tests.
 
 ## Not built yet
 

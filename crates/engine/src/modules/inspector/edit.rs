@@ -37,6 +37,7 @@ use crate::modules::project::document::{
     new_id, source_duration_for, ColorAdjustMaterial, Crop, LutRef, Micros, Project, Segment,
     TimeRange, TrackKind, Transform,
 };
+use crate::modules::project::grade::{CurveChannel, Grade, Wheel, WheelKind};
 use crate::modules::timeline::ops::EditCommand;
 
 /// The values of a colour edit as the panel sends them: no id, because the
@@ -51,19 +52,6 @@ pub struct ColorEdit {
     /// existed still deserialises.
     #[serde(default)]
     pub lut: Option<LutRef>,
-}
-
-impl ColorEdit {
-    /// Identity means "nothing at all": scalars at rest *and* no look. A
-    /// grade with only a LUT is a real grade — the identity-is-absence rule
-    /// applies to the material, not to each half separately.
-    fn is_identity(&self) -> bool {
-        self.brightness == 0.0
-            && self.contrast == 1.0
-            && self.saturation == 1.0
-            && self.temperature == 0.0
-            && self.lut.is_none()
-    }
 }
 
 /// The remove + insert pair described in the module docs, for a segment with
@@ -168,17 +156,14 @@ fn crop_key(crop: &Option<Crop>) -> Option<[u32; 4]> {
     })
 }
 
-/// The edit that sets a segment's colour adjustment, or clears it.
+/// The edit that sets a segment's four original colour sliders and its LUT,
+/// or clears its whole grade.
 ///
-/// Returns the material to add to the pool — `None` when the edit only
-/// detaches — alongside the command. The caller pushes the material *before*
-/// applying the command, exactly the ordering `text_add` documents: a segment
-/// must never, even between two writes, reference a material the pool does not
-/// hold.
-///
-/// An identity `color` is treated as clearing: a grade that changes nothing
-/// and no grade at all must be the same document, or "reset" leaves residue
-/// behind in every saved file.
+/// The extended grade (tone, HSL, curves, wheels — [`Grade`]) is carried
+/// over from the clip's current material untouched: a caller that only knows
+/// the four sliders, like the filter presets, must not wipe the curves the
+/// user drew. `None` still clears everything, the way "no filter" means no
+/// grade. See [`set_grade_command`] for the rest of the contract.
 pub fn set_color_command(
     project: &Project,
     segment_id: &str,
@@ -187,49 +172,271 @@ pub fn set_color_command(
     let (_, current) = project
         .segment(segment_id)
         .ok_or_else(|| format!("unknown segment {segment_id}"))?;
+    let grade = project
+        .materials
+        .color_adjust_of(current)
+        .map(|m| m.grade.clone())
+        .unwrap_or_default();
+    let edit = color.map(|c| GradeEdit {
+        brightness: c.brightness,
+        contrast: c.contrast,
+        saturation: c.saturation,
+        temperature: c.temperature,
+        lut: c.lut,
+        grade,
+    });
+    set_grade_command(project, segment_id, edit)
+}
 
-    let color = color.filter(|c| !c.is_identity());
-    if let Some(c) = &color {
-        for (name, value) in [
-            ("brightness", c.brightness),
-            ("contrast", c.contrast),
-            ("saturation", c.saturation),
-            ("temperature", c.temperature),
-        ] {
-            if !value.is_finite() {
-                return Err(format!("{name} must be a finite number"));
-            }
-        }
-        if let Some(lut) = &c.lut {
-            if !lut.intensity.is_finite() {
-                return Err("LUT intensity must be a finite number".into());
-            }
-            if lut.path.trim().is_empty() {
-                return Err("a LUT needs a file".into());
-            }
+/// A clip's whole grade as the panel sends it: the four original sliders,
+/// the look, and the extended [`Grade`]. No id, because the material
+/// identity is minted here, not chosen by the caller.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct GradeEdit {
+    #[serde(default)]
+    pub brightness: f32,
+    #[serde(default = "one")]
+    pub contrast: f32,
+    #[serde(default = "one")]
+    pub saturation: f32,
+    #[serde(default)]
+    pub temperature: f32,
+    #[serde(default)]
+    pub lut: Option<LutRef>,
+    #[serde(default)]
+    pub grade: Grade,
+}
+
+fn one() -> f32 {
+    1.0
+}
+
+impl Default for GradeEdit {
+    fn default() -> Self {
+        Self::identity()
+    }
+}
+
+impl GradeEdit {
+    /// No grade at all.
+    pub fn identity() -> Self {
+        Self {
+            brightness: 0.0,
+            contrast: 1.0,
+            saturation: 1.0,
+            temperature: 0.0,
+            lut: None,
+            grade: Grade::default(),
         }
     }
 
+    /// The values of `material`, or the identity for an ungraded clip.
+    pub fn of(material: Option<&ColorAdjustMaterial>) -> Self {
+        material.map_or_else(Self::identity, |m| Self {
+            brightness: m.brightness,
+            contrast: m.contrast,
+            saturation: m.saturation,
+            temperature: m.temperature,
+            lut: m.lut.clone(),
+            grade: m.grade.clone(),
+        })
+    }
+
+    /// The values of the grade on `segment_id` as the document holds it now.
+    pub fn of_segment(project: &Project, segment_id: &str) -> Result<Self, String> {
+        let (_, segment) = project
+            .segment(segment_id)
+            .ok_or_else(|| format!("unknown segment {segment_id}"))?;
+        Ok(Self::of(project.materials.color_adjust_of(segment)))
+    }
+
+    /// Identity means "nothing at all": every control at rest *and* no look.
+    pub fn is_identity(&self) -> bool {
+        self.brightness == 0.0
+            && self.contrast == 1.0
+            && self.saturation == 1.0
+            && self.temperature == 0.0
+            && self.lut.is_none()
+            && self.grade.is_identity()
+    }
+
+    /// The edit with `section` back at rest and everything else kept.
+    pub fn reset(mut self, section: GradeSection) -> Self {
+        let rest = Grade::default();
+        match section {
+            GradeSection::All => return Self::identity(),
+            GradeSection::Basic => {
+                let keep = (self.grade.hsl, self.grade.curves.clone(), self.grade.wheels);
+                self = Self {
+                    lut: self.lut,
+                    ..Self::identity()
+                };
+                (self.grade.hsl, self.grade.curves, self.grade.wheels) = keep;
+            }
+            GradeSection::Lut => self.lut = None,
+            GradeSection::Hsl => self.grade.hsl = rest.hsl,
+            GradeSection::Curves => self.grade.curves = rest.curves,
+            GradeSection::Wheels => self.grade.wheels = rest.wheels,
+        }
+        self
+    }
+}
+
+/// One panel section, for "reset this section".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GradeSection {
+    /// Every slider of the Basic tab; the LUT stays.
+    Basic,
+    Lut,
+    Hsl,
+    Curves,
+    Wheels,
+    All,
+}
+
+/// Every single-number control of the grading panel, by name.
+///
+/// This is how a CLI, an MCP client or a slider addresses one control
+/// without knowing the shape of [`GradeEdit`]: read the current values, set
+/// one control, send the whole edit. Values are in document units (see
+/// `project::grade`), not slider positions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GradeControl {
+    Brightness,
+    Contrast,
+    Saturation,
+    Temperature,
+    LutIntensity,
+    Exposure,
+    Tint,
+    Highlights,
+    Shadows,
+    Whites,
+    Blacks,
+    Vibrance,
+    Sharpen,
+    Clarity,
+    VignetteAmount,
+    VignetteMidpoint,
+    VignetteFeather,
+    Grain,
+    Fade,
+    /// One of the eight HSL bands, `0..8` in `HSL_BANDS` order.
+    HslHue(u8),
+    HslSaturation(u8),
+    HslLuminance(u8),
+    WheelX(WheelKind),
+    WheelY(WheelKind),
+    WheelLuma(WheelKind),
+}
+
+impl GradeControl {
+    /// The control's current value in `edit`.
+    pub fn get(self, edit: &GradeEdit) -> f32 {
+        let g = &edit.grade;
+        let band = |i: u8| g.hsl.bands[(i as usize).min(7)];
+        match self {
+            Self::Brightness => edit.brightness,
+            Self::Contrast => edit.contrast,
+            Self::Saturation => edit.saturation,
+            Self::Temperature => edit.temperature,
+            Self::LutIntensity => edit.lut.as_ref().map_or(1.0, |l| l.intensity),
+            Self::Exposure => g.exposure,
+            Self::Tint => g.tint,
+            Self::Highlights => g.highlights,
+            Self::Shadows => g.shadows,
+            Self::Whites => g.whites,
+            Self::Blacks => g.blacks,
+            Self::Vibrance => g.vibrance,
+            Self::Sharpen => g.sharpen,
+            Self::Clarity => g.clarity,
+            Self::VignetteAmount => g.vignette.amount,
+            Self::VignetteMidpoint => g.vignette.midpoint,
+            Self::VignetteFeather => g.vignette.feather,
+            Self::Grain => g.grain,
+            Self::Fade => g.fade,
+            Self::HslHue(i) => band(i).hue,
+            Self::HslSaturation(i) => band(i).saturation,
+            Self::HslLuminance(i) => band(i).luminance,
+            Self::WheelX(k) => g.wheels.get(k).x,
+            Self::WheelY(k) => g.wheels.get(k).y,
+            Self::WheelLuma(k) => g.wheels.get(k).luma,
+        }
+    }
+
+    /// `edit` with this control set to `value`. Range limits are applied
+    /// when the edit is committed, not here, so a caller can read back what
+    /// it asked for until then.
+    pub fn set(self, edit: &mut GradeEdit, value: f32) {
+        let g = &mut edit.grade;
+        match self {
+            Self::Brightness => edit.brightness = value,
+            Self::Contrast => edit.contrast = value,
+            Self::Saturation => edit.saturation = value,
+            Self::Temperature => edit.temperature = value,
+            Self::LutIntensity => {
+                if let Some(lut) = edit.lut.as_mut() {
+                    lut.intensity = value;
+                }
+            }
+            Self::Exposure => g.exposure = value,
+            Self::Tint => g.tint = value,
+            Self::Highlights => g.highlights = value,
+            Self::Shadows => g.shadows = value,
+            Self::Whites => g.whites = value,
+            Self::Blacks => g.blacks = value,
+            Self::Vibrance => g.vibrance = value,
+            Self::Sharpen => g.sharpen = value,
+            Self::Clarity => g.clarity = value,
+            Self::VignetteAmount => g.vignette.amount = value,
+            Self::VignetteMidpoint => g.vignette.midpoint = value,
+            Self::VignetteFeather => g.vignette.feather = value,
+            Self::Grain => g.grain = value,
+            Self::Fade => g.fade = value,
+            Self::HslHue(i) => g.hsl.bands[(i as usize).min(7)].hue = value,
+            Self::HslSaturation(i) => g.hsl.bands[(i as usize).min(7)].saturation = value,
+            Self::HslLuminance(i) => g.hsl.bands[(i as usize).min(7)].luminance = value,
+            Self::WheelX(k) => g.wheels.get_mut(k).x = value,
+            Self::WheelY(k) => g.wheels.get_mut(k).y = value,
+            Self::WheelLuma(k) => g.wheels.get_mut(k).luma = value,
+        }
+    }
+
+    /// The control's value at rest.
+    pub fn rest(self) -> f32 {
+        Self::get(self, &GradeEdit::identity())
+    }
+}
+
+/// The edit that sets a segment's whole grade, or clears it.
+///
+/// Returns the material to add to the pool — `None` when the edit only
+/// detaches — alongside the command. The caller pushes the material *before*
+/// applying the command, exactly the ordering `text_add` documents: a segment
+/// must never, even between two writes, reference a material the pool does not
+/// hold.
+///
+/// An identity edit is treated as clearing: a grade that changes nothing
+/// and no grade at all must be the same document, or "reset" leaves residue
+/// behind in every saved file. Every value is brought into its documented
+/// range on the way in ([`Grade::normalized`]), so the document never holds
+/// a value the renderer would have to second-guess.
+pub fn set_grade_command(
+    project: &Project,
+    segment_id: &str,
+    edit: Option<GradeEdit>,
+) -> Result<(Option<ColorAdjustMaterial>, EditCommand), String> {
+    let (_, current) = project
+        .segment(segment_id)
+        .ok_or_else(|| format!("unknown segment {segment_id}"))?;
+
+    let material = mint_grade(edit)?;
     let had_adjust = project.materials.color_adjust_of(current).is_some();
-    if color.is_none() && !had_adjust {
+    if material.is_none() && !had_adjust {
         return Err("the clip has no colour adjustment to remove".into());
     }
-
-    let material = color.map(|c| {
-        let mut material = ColorAdjustMaterial::identity();
-        material.brightness = c.brightness;
-        material.contrast = c.contrast;
-        material.saturation = c.saturation;
-        material.temperature = c.temperature;
-        // Intensity is clamped rather than refused: the document's contract
-        // is 0..1 and a slider cannot exceed it, so anything outside is a
-        // caller rounding artefact, not an intent.
-        material.lut = c.lut.map(|lut| LutRef {
-            path: lut.path,
-            intensity: lut.intensity.clamp(0.0, 1.0),
-        });
-        material
-    });
     let new_id = material.as_ref().map(|m| m.id.clone());
 
     let materials = &project.materials;
@@ -245,6 +452,116 @@ pub fn set_color_command(
     })?;
 
     Ok((material, command))
+}
+
+/// Validate an edit and mint its material; `None` for an identity edit.
+fn mint_grade(edit: Option<GradeEdit>) -> Result<Option<ColorAdjustMaterial>, String> {
+    let Some(edit) = edit else {
+        return Ok(None);
+    };
+    for (name, value) in [
+        ("brightness", edit.brightness),
+        ("contrast", edit.contrast),
+        ("saturation", edit.saturation),
+        ("temperature", edit.temperature),
+    ] {
+        if !value.is_finite() {
+            return Err(format!("{name} must be a finite number"));
+        }
+    }
+    if let Some(lut) = &edit.lut {
+        if !lut.intensity.is_finite() {
+            return Err("LUT intensity must be a finite number".into());
+        }
+        if lut.path.trim().is_empty() {
+            return Err("a LUT needs a file".into());
+        }
+    }
+    if let Some(name) = edit.grade.non_finite_field() {
+        return Err(format!("{name} must be a finite number"));
+    }
+    let grade = edit.grade.normalized();
+    // Intensity is clamped rather than refused: the document's contract
+    // is 0..1 and a slider cannot exceed it, so anything outside is a
+    // caller rounding artefact, not an intent.
+    let lut = edit.lut.map(|lut| LutRef {
+        path: lut.path,
+        intensity: lut.intensity.clamp(0.0, 1.0),
+    });
+    let normalized = GradeEdit { lut, grade, ..edit };
+    if normalized.is_identity() {
+        return Ok(None);
+    }
+    let mut material = ColorAdjustMaterial::identity();
+    material.brightness = normalized.brightness;
+    material.contrast = normalized.contrast;
+    material.saturation = normalized.saturation;
+    material.temperature = normalized.temperature;
+    material.lut = normalized.lut;
+    material.grade = normalized.grade;
+    Ok(Some(material))
+}
+
+/// The edit that sets one control of a segment's grade, keeping the rest.
+pub fn grade_control_command(
+    project: &Project,
+    segment_id: &str,
+    control: GradeControl,
+    value: f32,
+) -> Result<(Option<ColorAdjustMaterial>, EditCommand), String> {
+    let mut edit = GradeEdit::of_segment(project, segment_id)?;
+    if control == GradeControl::LutIntensity && edit.lut.is_none() {
+        return Err("the clip has no LUT".into());
+    }
+    control.set(&mut edit, value);
+    set_grade_command(project, segment_id, Some(edit))
+}
+
+/// The edit that replaces one tone curve's points, keeping the rest.
+pub fn curve_command(
+    project: &Project,
+    segment_id: &str,
+    channel: CurveChannel,
+    points: Vec<[f32; 2]>,
+) -> Result<(Option<ColorAdjustMaterial>, EditCommand), String> {
+    let mut edit = GradeEdit::of_segment(project, segment_id)?;
+    *edit.grade.curves.get_mut(channel) = points;
+    set_grade_command(project, segment_id, Some(edit))
+}
+
+/// The edit that sets one colour wheel — puck and luma together, which is
+/// what one drag of the puck changes.
+pub fn wheel_command(
+    project: &Project,
+    segment_id: &str,
+    kind: WheelKind,
+    wheel: Wheel,
+) -> Result<(Option<ColorAdjustMaterial>, EditCommand), String> {
+    let mut edit = GradeEdit::of_segment(project, segment_id)?;
+    *edit.grade.wheels.get_mut(kind) = wheel;
+    set_grade_command(project, segment_id, Some(edit))
+}
+
+/// The edit that attaches, swaps or removes the clip's LUT, keeping the
+/// rest of the grade.
+pub fn lut_command(
+    project: &Project,
+    segment_id: &str,
+    lut: Option<LutRef>,
+) -> Result<(Option<ColorAdjustMaterial>, EditCommand), String> {
+    let mut edit = GradeEdit::of_segment(project, segment_id)?;
+    edit.lut = lut;
+    set_grade_command(project, segment_id, Some(edit))
+}
+
+/// The edit that puts one panel section back at rest.
+pub fn reset_grade_command(
+    project: &Project,
+    segment_id: &str,
+    section: GradeSection,
+) -> Result<(Option<ColorAdjustMaterial>, EditCommand), String> {
+    let edit = GradeEdit::of_segment(project, segment_id)?.reset(section);
+    set_grade_command(project, segment_id, Some(edit))
 }
 
 // ---------------------------------------------------------------------------
@@ -270,6 +587,10 @@ pub struct ClipAttributes {
     pub crop: Option<Crop>,
     #[serde(default)]
     pub color: Option<ColorEdit>,
+    /// The extended grade of the copied clip. Only read alongside `color`:
+    /// a clipboard from before it existed pastes the four sliders alone.
+    #[serde(default)]
+    pub grade: Option<Grade>,
 }
 
 /// The edit that applies `attributes` to every clip in `targets`.
@@ -301,41 +622,16 @@ pub fn paste_attributes_command(
     }
     let crop = normalize_crop(attributes.crop)?;
 
-    // The same validation and identity-is-absence rule as `set_color_command`:
+    // The same validation and identity-is-absence rule as `set_grade_command`:
     // an identity grade on the source means the targets end up ungraded.
-    let color = attributes.color.clone().filter(|c| !c.is_identity());
-    if let Some(c) = &color {
-        for (name, value) in [
-            ("brightness", c.brightness),
-            ("contrast", c.contrast),
-            ("saturation", c.saturation),
-            ("temperature", c.temperature),
-        ] {
-            if !value.is_finite() {
-                return Err(format!("{name} must be a finite number"));
-            }
-        }
-        if let Some(lut) = &c.lut {
-            if !lut.intensity.is_finite() {
-                return Err("LUT intensity must be a finite number".into());
-            }
-            if lut.path.trim().is_empty() {
-                return Err("a LUT needs a file".into());
-            }
-        }
-    }
-    let material = color.map(|c| {
-        let mut material = ColorAdjustMaterial::identity();
-        material.brightness = c.brightness;
-        material.contrast = c.contrast;
-        material.saturation = c.saturation;
-        material.temperature = c.temperature;
-        material.lut = c.lut.map(|lut| LutRef {
-            path: lut.path,
-            intensity: lut.intensity.clamp(0.0, 1.0),
-        });
-        material
-    });
+    let material = mint_grade(attributes.color.clone().map(|c| GradeEdit {
+        brightness: c.brightness,
+        contrast: c.contrast,
+        saturation: c.saturation,
+        temperature: c.temperature,
+        lut: c.lut,
+        grade: attributes.grade.clone().unwrap_or_default(),
+    }))?;
     let color_id = material.as_ref().map(|m| m.id.clone());
 
     // Targets in document order, each once, so the composite a given paste
@@ -683,7 +979,7 @@ mod tests {
     use crate::modules::project::document::{CanvasConfig, Track, TrackKind};
     use crate::modules::timeline::History;
 
-    fn project_with_clip() -> (Project, String) {
+    pub(super) fn project_with_clip() -> (Project, String) {
         let mut project = Project::new("t", CanvasConfig::default(), 30.0);
         let mut track = Track::new(TrackKind::Video, "V1");
         let segment = Segment {
@@ -1031,7 +1327,7 @@ mod tests {
     // Paste attributes
     // -----------------------------------------------------------------------
 
-    fn attributes() -> ClipAttributes {
+    pub(super) fn attributes() -> ClipAttributes {
         ClipAttributes {
             transform: Transform {
                 position: [0.2, -0.1],
@@ -1056,6 +1352,7 @@ mod tests {
                 temperature: 0.3,
                 lut: None,
             }),
+            grade: None,
         }
     }
 
@@ -1316,7 +1613,7 @@ mod speed_tests {
 
     /// Two clips back to back on one video lane, each with its sound linked
     /// on an audio lane.
-    fn two_linked_clips() -> (Project, [String; 4]) {
+    pub(super) fn two_linked_clips() -> (Project, [String; 4]) {
         let mut project = Project::new("t", CanvasConfig::default(), 30.0);
         let mut video = Track::new(TrackKind::Video, "V1");
         let mut audio = Track::new(TrackKind::Audio, "A1");
@@ -1462,5 +1759,291 @@ mod speed_tests {
 
         history.undo(&mut project).unwrap();
         assert_eq!(serde_json::to_string(&project.tracks).unwrap(), graded);
+    }
+}
+
+#[cfg(test)]
+mod grade_tests {
+    use super::speed_tests::two_linked_clips;
+    use super::tests::{attributes, project_with_clip};
+    use super::*;
+    use crate::modules::timeline::History;
+
+    // -----------------------------------------------------------------------
+    // The extended grade
+    // -----------------------------------------------------------------------
+
+    /// Apply a grade builder's result the way the command layer does.
+    fn commit(
+        project: &mut Project,
+        history: &mut History,
+        build: impl FnOnce(&Project) -> Result<(Option<ColorAdjustMaterial>, EditCommand), String>,
+    ) {
+        let (material, command) = build(project).expect("the edit builds");
+        if let Some(material) = material {
+            project.materials.color_adjusts.push(material);
+        }
+        history.apply(project, command).expect("the edit applies");
+    }
+
+    fn grade_of(project: &Project, id: &str) -> GradeEdit {
+        GradeEdit::of_segment(project, id).unwrap()
+    }
+
+    /// Every single-number control sets exactly its own field, lands on the
+    /// undo stack, and undoes back to the bytes before it — the contract the
+    /// panel, a CLI and an MCP client all rely on.
+    #[test]
+    fn every_grade_control_sets_its_field_and_undoes_exactly() {
+        let mut controls = vec![
+            GradeControl::Brightness,
+            GradeControl::Contrast,
+            GradeControl::Saturation,
+            GradeControl::Temperature,
+            GradeControl::Exposure,
+            GradeControl::Tint,
+            GradeControl::Highlights,
+            GradeControl::Shadows,
+            GradeControl::Whites,
+            GradeControl::Blacks,
+            GradeControl::Vibrance,
+            GradeControl::Sharpen,
+            GradeControl::Clarity,
+            GradeControl::VignetteAmount,
+            GradeControl::VignetteMidpoint,
+            GradeControl::VignetteFeather,
+            GradeControl::Grain,
+            GradeControl::Fade,
+        ];
+        for band in 0..8 {
+            controls.push(GradeControl::HslHue(band));
+            controls.push(GradeControl::HslSaturation(band));
+            controls.push(GradeControl::HslLuminance(band));
+        }
+        for kind in WheelKind::ALL {
+            controls.push(GradeControl::WheelX(kind));
+            controls.push(GradeControl::WheelY(kind));
+            controls.push(GradeControl::WheelLuma(kind));
+        }
+
+        for control in controls {
+            let (mut project, id) = project_with_clip();
+            let mut history = History::new();
+            // Something else graded first, so "keeps the rest" is tested.
+            commit(&mut project, &mut history, |p| {
+                grade_control_command(p, &id, GradeControl::Fade, 0.25)
+            });
+            if control == GradeControl::Fade {
+                commit(&mut project, &mut history, |p| {
+                    grade_control_command(p, &id, GradeControl::Tint, 0.1)
+                });
+            }
+            let before = serde_json::to_string(&project.tracks).unwrap();
+            let value = control.rest() + 0.375;
+            commit(&mut project, &mut history, |p| {
+                grade_control_command(p, &id, control, value)
+            });
+            let after = grade_of(&project, &id);
+            assert!(
+                (control.get(&after) - value).abs() < 1e-6,
+                "{control:?} reads back {}",
+                control.get(&after)
+            );
+            let mut expected = GradeEdit::identity();
+            GradeControl::Fade.set(&mut expected, 0.25);
+            if control == GradeControl::Fade {
+                GradeControl::Tint.set(&mut expected, 0.1);
+            }
+            control.set(&mut expected, value);
+            assert_eq!(after, expected, "{control:?} touched another field");
+
+            history.undo(&mut project).unwrap();
+            assert_eq!(
+                serde_json::to_string(&project.tracks).unwrap(),
+                before,
+                "{control:?} did not undo exactly"
+            );
+        }
+    }
+
+    #[test]
+    fn grade_values_are_clamped_and_nonsense_refused() {
+        let (project, id) = project_with_clip();
+        let (material, _) = grade_control_command(&project, &id, GradeControl::Tint, 7.0).unwrap();
+        assert_eq!(material.unwrap().grade.tint, 1.0);
+        assert!(grade_control_command(&project, &id, GradeControl::Clarity, f32::NAN).is_err());
+        assert!(
+            grade_control_command(&project, &id, GradeControl::LutIntensity, 0.5).is_err(),
+            "a LUT intensity without a LUT"
+        );
+        let (material, _) = wheel_command(
+            &project,
+            &id,
+            WheelKind::Gain,
+            Wheel {
+                x: 2.0,
+                y: 0.0,
+                luma: 0.0,
+            },
+        )
+        .unwrap();
+        assert_eq!(material.unwrap().grade.wheels.gain.x, 1.0);
+    }
+
+    /// Curves are stored canonical — sorted, clamped, and an identity curve
+    /// as the empty list — so drawing a curve back to the diagonal removes
+    /// the whole grade rather than leaving an inert one behind.
+    #[test]
+    fn curves_store_canonically_and_a_diagonal_clears() {
+        let (mut project, id) = project_with_clip();
+        let mut history = History::new();
+        commit(&mut project, &mut history, |p| {
+            curve_command(
+                p,
+                &id,
+                CurveChannel::Red,
+                vec![[1.0, 1.0], [0.5, 0.7], [-1.0, 0.0]],
+            )
+        });
+        assert_eq!(
+            grade_of(&project, &id).grade.curves.red,
+            vec![[0.0, 0.0], [0.5, 0.7], [1.0, 1.0]]
+        );
+        let (material, command) = curve_command(
+            &project,
+            &id,
+            CurveChannel::Red,
+            vec![[0.0, 0.0], [1.0, 1.0]],
+        )
+        .unwrap();
+        assert!(material.is_none(), "the identity curve minted a grade");
+        history.apply(&mut project, command).unwrap();
+        let (_, segment) = project.segment(&id).unwrap();
+        assert!(project.materials.color_adjust_of(segment).is_none());
+    }
+
+    /// The four-slider path — the filter presets use it — keeps the rest of
+    /// the grade, and `None` still clears all of it.
+    #[test]
+    fn the_four_slider_edit_keeps_the_extended_grade() {
+        let (mut project, id) = project_with_clip();
+        let mut history = History::new();
+        commit(&mut project, &mut history, |p| {
+            grade_control_command(p, &id, GradeControl::HslHue(3), 0.5)
+        });
+        commit(&mut project, &mut history, |p| {
+            set_color_command(
+                p,
+                &id,
+                Some(ColorEdit {
+                    brightness: 0.1,
+                    contrast: 1.0,
+                    saturation: 1.0,
+                    temperature: 0.0,
+                    lut: None,
+                }),
+            )
+        });
+        let grade = grade_of(&project, &id);
+        assert_eq!(grade.brightness, 0.1);
+        assert_eq!(grade.grade.hsl.bands[3].hue, 0.5);
+
+        commit(&mut project, &mut history, |p| {
+            set_color_command(p, &id, None)
+        });
+        assert!(grade_of(&project, &id).is_identity());
+    }
+
+    #[test]
+    fn resetting_a_section_keeps_the_others() {
+        let (mut project, id) = project_with_clip();
+        let mut history = History::new();
+        let mut edit = GradeEdit::identity();
+        edit.brightness = 0.2;
+        edit.lut = Some(LutRef {
+            path: "/looks/a.cube".into(),
+            intensity: 0.5,
+        });
+        edit.grade.exposure = 0.5;
+        edit.grade.hsl.bands[0].saturation = -0.3;
+        edit.grade.curves.master = vec![[0.0, 0.1], [1.0, 1.0]];
+        edit.grade.wheels.lift.x = 0.2;
+        commit(&mut project, &mut history, |p| {
+            set_grade_command(p, &id, Some(edit.clone()))
+        });
+
+        for section in [
+            GradeSection::Basic,
+            GradeSection::Lut,
+            GradeSection::Hsl,
+            GradeSection::Curves,
+            GradeSection::Wheels,
+        ] {
+            let (material, _) = reset_grade_command(&project, &id, section).unwrap();
+            let after = GradeEdit::of(material.as_ref());
+            let basic_rest = after.brightness == 0.0 && after.grade.exposure == 0.0;
+            assert_eq!(basic_rest, section == GradeSection::Basic, "{section:?}");
+            assert_eq!(
+                after.lut.is_none(),
+                section == GradeSection::Lut,
+                "{section:?}"
+            );
+            assert_eq!(
+                after.grade.hsl == Default::default(),
+                section == GradeSection::Hsl,
+                "{section:?}"
+            );
+            assert_eq!(
+                after.grade.curves.is_identity(),
+                section == GradeSection::Curves,
+                "{section:?}"
+            );
+            assert_eq!(
+                after.grade.wheels == Default::default(),
+                section == GradeSection::Wheels,
+                "{section:?}"
+            );
+        }
+        let (material, _) = reset_grade_command(&project, &id, GradeSection::All).unwrap();
+        assert!(material.is_none());
+    }
+
+    /// "Apply to all" shares the whole material, so the extended grade
+    /// travels with it; paste carries it as values.
+    #[test]
+    fn apply_to_all_and_paste_carry_the_extended_grade() {
+        let (mut project, [v1, _, v2, _]) = two_linked_clips();
+        project
+            .materials
+            .videos
+            .push(crate::modules::project::document::VideoMaterial {
+                id: "m".into(),
+                path: "/nonexistent/m.mp4".into(),
+                width: 640,
+                height: 480,
+                duration: 10_000_000,
+                fps: 30.0,
+                has_audio: true,
+                rotation: 0,
+            });
+        let mut history = History::new();
+        commit(&mut project, &mut history, |p| {
+            curve_command(p, &v1, CurveChannel::Blue, vec![[0.0, 0.2], [1.0, 1.0]])
+        });
+        let command = apply_color_to_all_command(&project, &v1).unwrap();
+        history.apply(&mut project, command).unwrap();
+        assert_eq!(
+            grade_of(&project, &v2).grade.curves.blue,
+            vec![[0.0, 0.2], [1.0, 1.0]]
+        );
+
+        let mut attributes = attributes();
+        let mut grade = Grade::default();
+        grade.vibrance = 0.4;
+        attributes.grade = Some(grade);
+        let (material, _) = paste_attributes_command(&project, &attributes, &[v2]).unwrap();
+        let material = material.unwrap();
+        assert_eq!(material.grade.vibrance, 0.4);
+        assert_eq!(material.brightness, 0.1);
     }
 }

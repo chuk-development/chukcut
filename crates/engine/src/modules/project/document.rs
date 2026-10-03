@@ -794,6 +794,14 @@ pub struct ColorAdjustMaterial {
     /// look", the identity-is-absence rule the scalars follow.
     #[serde(default)]
     pub lut: Option<LutRef>,
+    /// Everything past the four scalars and the look: tone, presence,
+    /// effects, HSL, curves and wheels. See [`super::grade::Grade`].
+    ///
+    /// Skipped when it is the identity, so a material nobody graded past the
+    /// original sliders saves byte-identical to one written before this
+    /// field existed — and an old file reads it back as the identity.
+    #[serde(default, skip_serializing_if = "super::grade::Grade::is_identity")]
+    pub grade: super::grade::Grade,
 }
 
 /// A reference to a .cube LUT file on disk.
@@ -824,6 +832,7 @@ impl ColorAdjustMaterial {
             saturation: 1.0,
             temperature: 0.0,
             lut: None,
+            grade: super::grade::Grade::default(),
         }
     }
 
@@ -848,7 +857,7 @@ impl ColorAdjustMaterial {
     /// grade that shifts an untouched clip by one code value is a regression
     /// for every existing project.
     pub fn is_identity(&self) -> bool {
-        self.scalars_are_identity() && self.lut.is_none()
+        self.scalars_are_identity() && self.lut.is_none() && self.grade.is_identity()
     }
 
     /// The first field that is not a finite number, by name. Same contract as
@@ -867,6 +876,9 @@ impl ColorAdjustMaterial {
         }
         if self.lut.as_ref().is_some_and(|l| !l.intensity.is_finite()) {
             return Some("LUT intensity");
+        }
+        if self.grade.non_finite_field().is_some() {
+            return Some("grade");
         }
         None
     }

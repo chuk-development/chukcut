@@ -1,8 +1,9 @@
 //! .cube LUT files: parsing, a reference sampler, and the GPU cache.
 //!
-//! A `.cube` file (Adobe/Iridas) is a text file describing a 3D look-up
-//! table: `LUT_3D_SIZE N` followed by `N³` RGB triples, red varying fastest.
-//! This module owns everything about them:
+//! A `.cube` file (Adobe/Iridas) is a text file describing a look-up table:
+//! either a 3D cube, `LUT_3D_SIZE N` followed by `N³` RGB triples with red
+//! varying fastest, or a 1D table, `LUT_1D_SIZE N` followed by `N` triples,
+//! one curve per channel. This module owns everything about them:
 //!
 //! - [`parse`] turns the text into a [`Cube`], failing with a message that
 //!   names the offending line — files found in the wild carry comments, CRLF
@@ -34,6 +35,14 @@ use parking_lot::Mutex;
 
 use super::context::RenderContext;
 
+/// The largest `LUT_1D_SIZE` accepted. 65536 is a 16-bit table, the largest
+/// any grading tool writes.
+const MAX_1D_SIZE: u32 = 65536;
+
+/// Row width a 1D table is folded to on the GPU, so a 65536-entry table is a
+/// 1024 x 64 texture rather than one over the device's width limit.
+pub const LUT_1D_ROW: u32 = 1024;
+
 /// The largest `LUT_3D_SIZE` accepted. 65 is the biggest size in common use;
 /// 256 is far beyond it and still only a 256 MB upload, but anything larger
 /// is a malformed file, not a look.
@@ -43,7 +52,9 @@ const MAX_SIZE: u32 = 256;
 #[derive(Debug, Clone, PartialEq)]
 pub struct Cube {
     pub title: Option<String>,
-    /// Edge length `N`; the table has `N³` entries.
+    /// Whether this is a 1D table (one curve per channel) rather than a cube.
+    pub one_d: bool,
+    /// Entry count per axis: `N³` entries for a cube, `N` for a 1D table.
     pub size: u32,
     pub domain_min: [f32; 3],
     pub domain_max: [f32; 3],
@@ -54,9 +65,21 @@ pub struct Cube {
 }
 
 impl Cube {
-    /// Trilinear lookup, the arithmetic `quad.wgsl`'s `sample_lut` mirrors.
+    /// The lookup `quad.wgsl` mirrors: trilinear in a cube (`sample_lut`),
+    /// per-channel linear in a 1D table (`sample_lut_1d`).
     pub fn sample(&self, rgb: [f32; 3]) -> [f32; 3] {
         let n = self.size as usize;
+        if self.one_d {
+            let mut out = [0f32; 3];
+            for (c, slot) in out.iter_mut().enumerate() {
+                let span = self.domain_max[c] - self.domain_min[c];
+                let coord = ((rgb[c] - self.domain_min[c]) / span).clamp(0.0, 1.0) * (n - 1) as f32;
+                let i = (coord.floor() as usize).min(n - 2);
+                let t = coord - i as f32;
+                *slot = self.data[i][c] + (self.data[i + 1][c] - self.data[i][c]) * t;
+            }
+            return out;
+        }
         let mut base = [0usize; 3];
         let mut t = [0f32; 3];
         for c in 0..3 {
@@ -87,6 +110,7 @@ impl Cube {
 pub fn parse(text: &str) -> Result<Cube, String> {
     let mut title = None;
     let mut size: Option<u32> = None;
+    let mut size_1d: Option<u32> = None;
     let mut domain_min = [0f32; 3];
     let mut domain_max = [1f32; 3];
     let mut data: Vec<[f32; 3]> = Vec::new();
@@ -120,13 +144,34 @@ pub fn parse(text: &str) -> Result<Cube, String> {
                         "line {line_no}: LUT_3D_SIZE must be between 2 and {MAX_SIZE}, got {n}"
                     ));
                 }
-                data.reserve((n as usize).pow(3));
+                // Capped: a declared size is a promise from an untrusted
+                // file, and the count check at the end is what enforces it.
+                data.reserve((n as usize).pow(3).min(1 << 20));
                 size = Some(n);
             }
             "LUT_1D_SIZE" => {
-                return Err(format!(
-                    "line {line_no}: this is a 1D LUT; only 3D LUTs (LUT_3D_SIZE) are supported"
-                ));
+                let n: u32 = words
+                    .next()
+                    .ok_or_else(|| format!("line {line_no}: LUT_1D_SIZE needs a number"))?
+                    .parse()
+                    .map_err(|_| format!("line {line_no}: LUT_1D_SIZE is not a whole number"))?;
+                if !(2..=MAX_1D_SIZE).contains(&n) {
+                    return Err(format!(
+                        "line {line_no}: LUT_1D_SIZE must be between 2 and {MAX_1D_SIZE}, got {n}"
+                    ));
+                }
+                size_1d = Some(n);
+            }
+            // Resolve's spelling of a domain that is the same on every
+            // channel: `LUT_1D_INPUT_RANGE 0.0 1.0`.
+            "LUT_1D_INPUT_RANGE" | "LUT_3D_INPUT_RANGE" => {
+                let lo = words.next().and_then(|w| w.parse::<f32>().ok());
+                let hi = words.next().and_then(|w| w.parse::<f32>().ok());
+                let (Some(lo), Some(hi)) = (lo, hi) else {
+                    return Err(format!("line {line_no}: {keyword} needs two numbers"));
+                };
+                domain_min = [lo; 3];
+                domain_max = [hi; 3];
             }
             "DOMAIN_MIN" | "DOMAIN_MAX" => {
                 let triple = parse_triple(&mut words)
@@ -167,11 +212,27 @@ pub fn parse(text: &str) -> Result<Cube, String> {
         }
     }
 
-    let size = size.ok_or("the file never declares LUT_3D_SIZE")?;
-    let expected = (size as usize).pow(3);
+    let (one_d, size) =
+        match (size, size_1d) {
+            (Some(_), Some(_)) => return Err(
+                "the file declares both LUT_1D_SIZE and LUT_3D_SIZE; a 1D shaper in front of a \
+                 cube is not supported"
+                    .into(),
+            ),
+            (Some(n), None) => (false, n),
+            (None, Some(n)) => (true, n),
+            (None, None) => {
+                return Err("the file declares neither LUT_3D_SIZE nor LUT_1D_SIZE".into());
+            }
+        };
+    let (keyword, expected) = if one_d {
+        ("LUT_1D_SIZE", size as usize)
+    } else {
+        ("LUT_3D_SIZE", (size as usize).pow(3))
+    };
     if data.len() != expected {
         return Err(format!(
-            "LUT_3D_SIZE {size} promises {expected} entries, the file has {}",
+            "{keyword} {size} promises {expected} entries, the file has {}",
             data.len()
         ));
     }
@@ -183,6 +244,7 @@ pub fn parse(text: &str) -> Result<Cube, String> {
 
     Ok(Cube {
         title,
+        one_d,
         size,
         domain_min,
         domain_max,
@@ -205,24 +267,39 @@ fn parse_triple<'a>(words: &mut impl Iterator<Item = &'a str>) -> Option<[f32; 3
 /// A cube on the device, plus what the shader needs to address it.
 pub struct GpuLut {
     pub view: wgpu::TextureView,
+    /// A 1D table folded into rows of [`LUT_1D_ROW`], rather than a cube.
+    pub one_d: bool,
     pub size: u32,
     pub domain_min: [f32; 3],
     pub domain_max: [f32; 3],
 }
 
 /// Upload `cube` as an `Rgba32Float` 3D texture (alpha unused, set to 1).
+///
+/// A 1D table goes into the same kind of texture — one binding, one bind
+/// group layout — folded into rows of [`LUT_1D_ROW`] entries in a single
+/// slice; entry `i` sits at `(i % row, i / row, 0)`, which `sample_lut_1d`
+/// in `quad.wgsl` reads back.
 pub fn upload(ctx: &RenderContext, cube: &Cube) -> GpuLut {
     let n = cube.size;
-    let mut texels: Vec<f32> = Vec::with_capacity(cube.data.len() * 4);
+    let (width, height, depth) = if cube.one_d {
+        let width = n.min(LUT_1D_ROW);
+        (width, n.div_ceil(width), 1)
+    } else {
+        (n, n, n)
+    };
+    let mut texels: Vec<f32> = Vec::with_capacity((width * height * depth) as usize * 4);
     for [r, g, b] in &cube.data {
         texels.extend_from_slice(&[*r, *g, *b, 1.0]);
     }
+    // A folded 1D table's last row is padded; the padding is never read.
+    texels.resize((width * height * depth) as usize * 4, 0.0);
     let texture = ctx.device().create_texture(&wgpu::TextureDescriptor {
         label: Some("chukcut lut"),
         size: wgpu::Extent3d {
-            width: n,
-            height: n,
-            depth_or_array_layers: n,
+            width,
+            height,
+            depth_or_array_layers: depth,
         },
         mip_level_count: 1,
         sample_count: 1,
@@ -241,17 +318,18 @@ pub fn upload(ctx: &RenderContext, cube: &Cube) -> GpuLut {
         bytemuck::cast_slice(&texels),
         wgpu::TexelCopyBufferLayout {
             offset: 0,
-            bytes_per_row: Some(n * 16),
-            rows_per_image: Some(n),
+            bytes_per_row: Some(width * 16),
+            rows_per_image: Some(height),
         },
         wgpu::Extent3d {
-            width: n,
-            height: n,
-            depth_or_array_layers: n,
+            width,
+            height,
+            depth_or_array_layers: depth,
         },
     );
     GpuLut {
         view: texture.create_view(&wgpu::TextureViewDescriptor::default()),
+        one_d: cube.one_d,
         size: n,
         domain_min: cube.domain_min,
         domain_max: cube.domain_max,
@@ -317,6 +395,17 @@ impl LutCache {
 /// file.
 #[cfg(test)]
 pub mod fixtures {
+    /// `LUT_1D_SIZE n` whose entry at `x` (`0..1`) is `f(x)` per channel.
+    pub fn table_text(n: u32, f: impl Fn(f32) -> [f32; 3]) -> String {
+        let mut out = format!("LUT_1D_SIZE {n}\n");
+        let last = (n - 1) as f32;
+        for i in 0..n {
+            let [r, g, b] = f(i as f32 / last);
+            out.push_str(&format!("{r} {g} {b}\n"));
+        }
+        out
+    }
+
     /// `LUT_3D_SIZE n` identity: every entry is its own grid coordinate.
     pub fn identity_cube(n: u32) -> String {
         cube_text(n, |r, g, b| [r, g, b])
@@ -387,9 +476,26 @@ mod tests {
     }
 
     #[test]
-    fn a_1d_lut_is_refused_with_a_reason() {
+    fn a_1d_lut_parses_and_samples_per_channel() {
+        // Red squared at 3 points, green inverted, blue untouched.
+        let text = "TITLE \"curve\"\nLUT_1D_SIZE 3\n0 1 0\n0.25 0.5 0.5\n1 0 1\n";
+        let cube = parse(text).expect("parses");
+        assert!(cube.one_d);
+        assert_eq!(cube.size, 3);
+        let out = cube.sample([0.75, 0.25, 0.75]);
+        for (actual, wanted) in out.iter().zip([0.625, 0.75, 0.75]) {
+            assert!((actual - wanted).abs() < 1e-6, "{out:?}");
+        }
+        // The count is checked against N, not N cubed.
         let error = parse("LUT_1D_SIZE 4\n0 0 0\n").unwrap_err();
-        assert!(error.contains("1D"), "{error}");
+        assert!(error.contains("LUT_1D_SIZE 4 promises 4"), "{error}");
+        // Both kinds in one file is refused by name.
+        let error = parse("LUT_1D_SIZE 2\nLUT_3D_SIZE 2\n").unwrap_err();
+        assert!(error.contains("both"), "{error}");
+        // Resolve's input range keyword sets the domain.
+        let cube = parse("LUT_1D_INPUT_RANGE 0 2\nLUT_1D_SIZE 2\n0 0 0\n1 1 1\n").unwrap();
+        assert_eq!(cube.domain_max, [2.0; 3]);
+        assert!((cube.sample([1.0, 1.0, 1.0])[0] - 0.5).abs() < 1e-6);
     }
 
     #[test]
@@ -402,6 +508,9 @@ mod tests {
 
         let error = parse("0 0 0\n").unwrap_err();
         assert!(error.contains("LUT_3D_SIZE"), "{error}");
+
+        let error = parse("LUT_3D_SIZE 300\n").unwrap_err();
+        assert!(error.contains("between 2"), "{error}");
 
         let error = parse("LUT_3D_SIZE 1\n0 0 0\n").unwrap_err();
         assert!(error.contains("between 2"), "{error}");

@@ -292,6 +292,7 @@ fn grade_and_lut(project: &mut Project, lut: &std::path::Path) {
             path: lut.to_string_lossy().into_owned(),
             intensity: 0.8,
         }),
+        grade: Default::default(),
     });
     for track in &mut project.tracks {
         for segment in &mut track.segments {

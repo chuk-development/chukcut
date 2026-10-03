@@ -73,6 +73,18 @@ Two sub-decisions worth naming:
   `grade+lut` rows, and the whole pass is behind `lut_active`, so clips
   without a look pay nothing.
 
+## Addendum, 2026-10-03: the extended grade is one field on the same material
+
+Tone, presence, effects, HSL, curves and colour wheels went onto
+`ColorAdjustMaterial` as one nested field, `grade: Grade`
+(`project/grade.rs`), for the reason the LUT did: one gesture family, one
+uniform block, one order of operations (`render/grade.rs`). It is
+`#[serde(default, skip_serializing_if = "Grade::is_identity")]`, so files
+without it open unchanged and files that never use it save unchanged. The
+mint-and-swap undo covers it with no new command variant. Curves are stored
+canonical (sorted, clamped, identity as the empty list) so "reset" leaves no
+residue, the rule the scalars already follow.
+
 ## What would change our minds
 
 When `timeline/ops.rs` is free to grow `SetCrop` / `SetColorAdjust` variants,

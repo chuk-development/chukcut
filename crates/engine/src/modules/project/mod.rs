@@ -17,6 +17,7 @@ pub mod autosave;
 pub mod commands;
 pub mod configure;
 pub mod document;
+pub mod grade;
 pub mod migrate;
 pub mod recovery;
 
