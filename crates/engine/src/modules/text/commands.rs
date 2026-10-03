@@ -26,7 +26,10 @@
 //!   for precisely this shape of edit. It is not here because
 //!   `timeline/ops.rs` was owned by other work when this landed.
 //!
-//! Both paths schedule an autosave, so neither is lost to a restart.
+//! [`text_set_content`] is the undoable path for the words alone: one
+//! `EditCommand::SetTextMaterial` per finished edit.
+//!
+//! All paths schedule an autosave, so none is lost to a restart.
 
 use std::sync::Arc;
 
@@ -133,6 +136,28 @@ pub fn text_set(state: &Arc<AppState>, material: TextMaterial) -> Result<EditRes
     respond(&state)
 }
 
+/// Change the words of a title, as one undo step.
+///
+/// Unlike [`text_set`], this goes through the history as
+/// `EditCommand::SetTextMaterial`: it is what a finished edit sends (the
+/// timeline's inline editor commits once, on Enter or a click elsewhere), not
+/// what each keystroke sends. Only the content changes; the style stays.
+pub fn text_set_content(
+    state: &Arc<AppState>,
+    material_id: &str,
+    content: &str,
+) -> Result<EditResponse, String> {
+    let before = state
+        .with_project(|p| p.materials.text(material_id).cloned())?
+        .ok_or_else(|| format!("no title with the id {material_id}"))?;
+    let mut after = before.clone();
+    after.content = content.to_string();
+    crate::modules::timeline::commands::timeline_apply(
+        state,
+        crate::modules::timeline::ops::EditCommand::SetTextMaterial { before, after },
+    )
+}
+
 /// Copy a title's material under a fresh id and return that id.
 ///
 /// What a pasted or duplicated title needs: two clips naming one material
@@ -181,6 +206,35 @@ fn respond(state: &AppState) -> Result<EditResponse, String> {
 mod tests {
     use super::*;
     use crate::modules::project::document::{CanvasConfig, Project};
+
+    /// A title's new words are one undo step, and undo brings the old ones
+    /// back with the style untouched.
+    #[test]
+    fn setting_a_titles_content_is_one_undo_step() {
+        let state = AppState::new();
+        let mut project = Project::new("t", CanvasConfig::default(), 30.0);
+        let mut original = super::edit::default_material(&project, Some("Hello".into()));
+        original.font_size = 77.0;
+        let id = original.id.clone();
+        project.materials.texts.push(original);
+        *state.project.write() = Some(project);
+
+        let content = |state: &Arc<AppState>| {
+            state
+                .with_project(|p| p.materials.text(&id).cloned())
+                .unwrap()
+                .unwrap()
+        };
+        let response = text_set_content(&state, &id, "Hello\nworld").expect("set");
+        assert!(response.can_undo);
+        assert_eq!(content(&state).content, "Hello\nworld");
+        assert_eq!(content(&state).font_size, 77.0);
+
+        crate::modules::timeline::commands::timeline_undo(&state).expect("undo");
+        assert_eq!(content(&state).content, "Hello");
+        assert!(!state.history.read().can_undo());
+        assert!(text_set_content(&state, "nope", "x").is_err());
+    }
 
     /// A duplicated title is a second, equal material under its own id, so a
     /// pasted title can be edited without editing the one it came from.
