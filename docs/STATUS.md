@@ -2085,8 +2085,22 @@ pointer, a scrollbar, a resizable split (42% of the window by default).
   step, so a later Unlink leaves a silent picture and an independent sound
   rather than the same sound twice. Right-click a clip for split, delete,
   duplicate, copy, cut, paste, detach audio, link, unlink, reset speed and
-  select all. **No freeze frame**: the engine has no still-from-a-video
-  material, and `check_speed` refuses speed 0.
+  select all, and freeze frame.
+- **Freeze frame** (right-click a video clip under the playhead;
+  `timeline::freeze`, command `timeline_freeze_frame`). Not a speed-0 clip
+  (`check_speed` refuses it) but a still: the frame at the playhead is
+  decoded from the original file (software, off the UI thread, no project
+  lock held) into a PNG under `paths::freeze_frames_dir()` —
+  `$XDG_DATA_HOME/chukcut/freeze-frames`, not the cache, because the project
+  references it. The edit is one `Composite`: `AddMaterial` (image), the
+  `split_at`, right-to-left `MoveSegment`s of everything from the cut on the
+  clip's lane and its linked lanes (`silence::cut::rippled_lanes`, the same
+  rule as silence cutting: music on other lanes stays), then the still in the
+  gap. The still carries the clip's crop and its *animated* transform at the
+  playhead, no keyframes, and the clip's colour/effect extras. Undo leaves
+  the PNG on disk on purpose, so redo still has it; nothing collects orphaned
+  stills yet. Default length 3 s (`freeze::DEFAULT_FREEZE`); there is no UI
+  to choose another.
 - **Transitions draw as a badge over their cut**, as wide as the stretch they
   cover. Click selects it (Del removes it); its ends change the length
   symmetrically, clamped to `transitions::edit::allowed_duration`, through
@@ -2114,6 +2128,25 @@ pointer, a scrollbar, a resizable split (42% of the window by default).
   `xdotool` and `import -window` on `:77` can then click, drag and capture
   freely. It is slow (pointer moves lag), and do not press Space there: the
   audio still goes to the real speakers.
+
+## Motion tracking: broken follow links and deleting the tracked clip
+
+- **A follow link is broken** when its tracking material is gone, or its
+  named clip is gone *and* no clip of the tracked file is left on the
+  timeline (`tracking::validate::link_status`; any clip of the file stands in,
+  as `follow::target_segment` does at render time). `Project::validate` warns
+  once per follower clip; the inspector's Tracking tab shows "Target missing"
+  with only "Stop following". The link is kept, so undoing the delete brings
+  the motion back.
+- **Delete on a tracked clip asks first** ("Bake and delete" / "Delete" /
+  "Cancel") when an overlay follows it by name, or follows a track of the
+  same file (`validate::dependent_followers`, deliberately broad). "Bake and
+  delete" is `tracking_bake_and_delete`: one `TrackingCommand::Composite` of
+  every `bake` followed by the delete gesture's own commands run through
+  `compose_edits`, `mirror_linked_edits` and `detach_broken_transitions` —
+  one undo step. The bakes must come first: a follow is evaluated through the
+  tracked clip, so after the delete there is nothing left to bake. Only the
+  Delete key / menu / toolbar ask; **Ctrl+X does not** (it deletes plainly).
 
 ## The log file, and what an export writes into it
 
