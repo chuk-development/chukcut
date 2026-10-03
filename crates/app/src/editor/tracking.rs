@@ -37,6 +37,9 @@ pub(crate) struct TrackingUi {
         gpui::Entity<gpui::component::slider::SliderState>,
         gpui::Subscription,
     )>,
+    /// The smoothing slider is being dragged: the panel must not snap it
+    /// back to the document's value until it is released.
+    pub(crate) smoothing_drag: bool,
 }
 
 /// A box being drawn over the video.
@@ -537,7 +540,11 @@ fn path_shapes(
         }
         let time = target.target_range.start
             + ((sample.t - source.start) as f64 / target.speed.max(1e-3) as f64) as Micros;
-        let Some(p) = source_to_canvas(project, target, time, [sample.x, sample.y]) else {
+        // The path the follower takes, so smoothing shows on it.
+        let (x, y) = track
+            .pose_at(sample.t)
+            .map_or((sample.x, sample.y), |pose| (pose.x, pose.y));
+        let Some(p) = source_to_canvas(project, target, time, [x, y]) else {
             continue;
         };
         if sample.is_lost() {

@@ -186,7 +186,8 @@ impl Editor {
 
         let slider = self.smoothing_slider(window, cx);
         let smoothing = track.settings.smoothing.clamp(0.0, 1.0) * 100.0;
-        if (slider.read(cx).value().end() - smoothing).abs() > 0.5 {
+        if !self.tracking.smoothing_drag && (slider.read(cx).value().end() - smoothing).abs() > 0.5
+        {
             slider.update(cx, |state, cx| state.set_value(smoothing, window, cx));
         }
 
@@ -284,8 +285,10 @@ impl Editor {
         let subscription = cx.subscribe_in(
             &slider,
             window,
-            |this: &mut Editor, _, event: &SliderEvent, _, cx| {
-                if let SliderEvent::Release(value) = event {
+            |this: &mut Editor, _, event: &SliderEvent, _, cx| match event {
+                SliderEvent::Change(_) => this.tracking.smoothing_drag = true,
+                SliderEvent::Release(value) => {
+                    this.tracking.smoothing_drag = false;
                     this.set_track_smoothing(value.end() / 100.0, cx);
                 }
             },
