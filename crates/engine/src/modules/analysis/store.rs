@@ -74,6 +74,14 @@ pub struct PathSample {
     pub y: f32,
     /// Rotation in degrees, clockwise on screen.
     pub a: f32,
+    /// The first frame of a new shot: the path is smoothed on each side of
+    /// it separately, so a cut never pulls the frames before it.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub cut: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// The camera path of a stretch of a file.

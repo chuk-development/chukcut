@@ -31,6 +31,7 @@ use serde::{Deserialize, Serialize};
 use super::cache;
 use super::frames::{luma, walk, Walk};
 use super::jobs::JobContext;
+use super::scenes::{self, Scores, Signature};
 use super::store::{self, CameraPath, PathSample, Stabilise};
 use crate::modules::project::document::{
     AnimatableProperty, Crop, Id, Micros, Project, Segment, TimeRange,
@@ -46,7 +47,7 @@ const MAX_POINTS: usize = 240;
 /// Cells the frame is split into for picking corners, columns × rows.
 const GRID: (usize, usize) = (6, 4);
 /// Bump when [`measure`] changes what it writes.
-const ALGORITHM: &str = "camera-path-v3";
+const ALGORITHM: &str = "camera-path-v4";
 /// The most a clip is zoomed in to hide moving edges, as a fraction cropped.
 pub const MAX_CROP: f32 = 0.3;
 
@@ -173,6 +174,11 @@ pub fn measure(job: &Walk, media_id: &str, ctx: Option<&JobContext>) -> Result<C
     let estimator = MotionEstimator::default();
     let mut samples: Vec<PathSample> = Vec::new();
     let mut previous: Option<Pyramid> = None;
+    let mut signature: Option<Signature> = None;
+    let mut scores = Scores {
+        fps: job.fps,
+        ..Default::default()
+    };
     let mut aspect = 16.0 / 9.0;
     let (mut x, mut y, mut a) = (0.0f32, 0.0f32, 0.0f32);
     walk(job, ctx, (0.0, 1.0), |frame| {
@@ -183,6 +189,12 @@ pub fn measure(job: &Walk, media_id: &str, ctx: Option<&JobContext>) -> Result<C
             data: luma(&frame.rgba),
         };
         let pyramid = MotionEstimator::pyramid(gray);
+        let next = Signature::of(&frame.rgba, frame.width, frame.height);
+        scores.times.push(frame.pts);
+        scores
+            .scores
+            .push(signature.as_ref().map_or(0.0, |p| next.distance(p)));
+        signature = Some(next);
         if let Some(prev) = &previous {
             if let Some(motion) = estimator.estimate(prev, &pyramid) {
                 x += motion.tx / frame.width as f32;
@@ -195,12 +207,18 @@ pub fn measure(job: &Walk, media_id: &str, ctx: Option<&JobContext>) -> Result<C
             x,
             y,
             a,
+            cut: false,
         });
         previous = Some(pyramid);
         Ok(())
     })?;
     if samples.is_empty() {
         return Err("the clip has no frames to analyse".into());
+    }
+    for i in scenes::detect(&scores, 0.5) {
+        if let Some(sample) = samples.get_mut(i) {
+            sample.cut = true;
+        }
     }
     let path = CameraPath {
         media_id: media_id.to_string(),
@@ -232,9 +250,23 @@ fn sigma_seconds(strength: f32) -> Option<f32> {
     (strength < 0.999).then(|| 0.04 * 60f32.powf(strength))
 }
 
-/// The correction at every sample of `path` for `strength`.
+/// The correction at every sample of `path` for `strength`, smoothed within
+/// each shot: a cut is a jump no camera made, and smoothing across it would
+/// drag the frames on both sides towards each other.
 pub fn corrections(path: &CameraPath, strength: f32) -> Vec<Correction> {
     let samples = &path.samples;
+    let mut out = Vec::with_capacity(samples.len());
+    let mut start = 0;
+    for i in 1..=samples.len() {
+        if i == samples.len() || samples[i].cut {
+            out.extend(shot_corrections(&samples[start..i], strength));
+            start = i;
+        }
+    }
+    out
+}
+
+fn shot_corrections(samples: &[PathSample], strength: f32) -> Vec<Correction> {
     let n = samples.len();
     if n == 0 {
         return Vec::new();
@@ -502,6 +534,7 @@ mod tests {
                     x,
                     y: -x * 0.5,
                     a: 0.0,
+                    cut: false,
                 })
                 .collect(),
         }
@@ -532,6 +565,15 @@ mod tests {
             let step = pair[1] - pair[0];
             assert!((step - 0.2 / 119.0).abs() < 0.004, "step {step}");
         }
+    }
+
+    #[test]
+    fn a_cut_splits_the_smoothing() {
+        // Two still shots whose paths sit far apart: each is its own mean.
+        let mut p = path(&[0.0, 0.0, 0.0, 0.3, 0.3, 0.3]);
+        p.samples[3].cut = true;
+        let c = corrections(&p, 1.0);
+        assert!(c.iter().all(|c| c.x.abs() < 1e-6), "{c:?}");
     }
 
     #[test]

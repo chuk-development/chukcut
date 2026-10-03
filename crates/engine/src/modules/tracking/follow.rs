@@ -99,6 +99,11 @@ fn clamped_source_time(segment: &Segment, time: Micros) -> Micros {
 /// The quad matrix of `segment` at `time`, ignoring opacity: a clip faded to
 /// nothing still has a place on the canvas, and its followers keep theirs.
 fn segment_matrix(project: &Project, segment: &Segment, time: Micros) -> Option<Mat4> {
+    // A stabilised clip is drawn through a moving crop window; the object is
+    // where the stabilised picture shows it (`modules::analysis::stabilise`).
+    let stabilised =
+        crate::modules::analysis::stabilise::resolve(project, Cow::Borrowed(segment), time);
+    let segment: &Segment = &stabilised;
     let video = project.materials.video(&segment.material_id)?;
     let mut transform = animated_transform(segment, time);
     transform.opacity = 1.0;
