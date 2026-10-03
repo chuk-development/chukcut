@@ -112,6 +112,8 @@ const F_CLARITY: u32 = 512u;
 const F_VIGNETTE: u32 = 1024u;
 const F_GRAIN: u32 = 2048u;
 const F_LUT_1D: u32 = 4096u;
+// The source holds premultiplied colour (a compound clip's nested render).
+const F_PREMULTIPLIED: u32 = 8192u;
 // The stages that run in encoded space, between `linear_to_srgb` and its
 // inverse. Any of them (or the original grade, or a LUT) opens that bracket.
 const F_ENCODED: u32 = 766u;
@@ -639,6 +641,11 @@ fn shade(in: VertexOutput) -> vec4<f32> {
         texel = vec4<f32>(srgb_to_linear(rgb), 1.0);
     } else {
         texel = textureSample(source_texture, source_sampler, in.uv);
+        // A nested render is premultiplied; everything below wants straight
+        // colour, and `fs_premultiplied` multiplies it back in once.
+        if ((quad.features & F_PREMULTIPLIED) != 0u && texel.a > 0.0) {
+            texel = vec4<f32>(texel.rgb / texel.a, texel.a);
+        }
     }
     // The chroma key, on the footage as shot: before any grade, in encoded
     // colour. Spill comes out of what stays; the alpha waits for the masks.

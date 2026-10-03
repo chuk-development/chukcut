@@ -128,6 +128,17 @@ pub struct Project {
     /// `timeline/ops.rs` re-sort after every mutation.
     #[serde(default)]
     pub markers: Vec<Marker>,
+
+    /// Which sequence `tracks` and `markers` are: the main timeline unless the
+    /// user made more timelines or opened a compound clip. The others are
+    /// parked in `MaterialPool::sequences`. Not written while it is the main
+    /// timeline, so a project with one timeline saves as it always did.
+    /// See `modules::sequence`.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::modules::sequence::ActiveSequence::is_default"
+    )]
+    pub sequence: crate::modules::sequence::ActiveSequence,
 }
 
 /// One of the fixed marker colours.
@@ -186,6 +197,7 @@ impl Project {
             materials: MaterialPool::default(),
             tracks: Vec::new(),
             markers: Vec::new(),
+            sequence: Default::default(),
         }
     }
 
@@ -386,6 +398,11 @@ pub struct MaterialPool {
     /// [`super::compositing::CompositingMaterial`]. Skipped when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub compositing: Vec<super::compositing::CompositingMaterial>,
+    /// Timelines and compound clips that are not the one being edited. A
+    /// segment whose material is one of these is a compound clip. See
+    /// `modules::sequence`. Skipped when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sequences: Vec<crate::modules::sequence::Sequence>,
     /// Every link group id that some segment currently belongs to.
     ///
     /// ## Why linkage is on the segment and this is only a type tag
@@ -571,9 +588,20 @@ impl MaterialPool {
             Some(MaterialKind::Image)
         } else if self.text(id).is_some() {
             Some(MaterialKind::Text)
+        } else if self.sequence(id).is_some() {
+            Some(MaterialKind::Sequence)
         } else {
             None
         }
+    }
+
+    /// A parked sequence: a timeline that is not open, or a compound clip's
+    /// contents.
+    pub fn sequence(&self, id: &str) -> Option<&crate::modules::sequence::Sequence> {
+        if self.sequences.is_empty() {
+            return None;
+        }
+        self.sequences.iter().find(|s| s.id == id)
     }
 }
 
@@ -584,6 +612,8 @@ pub enum MaterialKind {
     Audio,
     Image,
     Text,
+    /// Another sequence of the project: the segment is a compound clip.
+    Sequence,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2197,6 +2227,8 @@ impl Project {
         issues.extend(crate::modules::transitions::validate::issues(self));
         // A follow link names a track and a clip that other edits can delete.
         issues.extend(crate::modules::tracking::validate::issues(self));
+        // Parked timelines and compound clips: their lanes, cycles, depth.
+        issues.extend(crate::modules::sequence::validate(self));
 
         issues
     }

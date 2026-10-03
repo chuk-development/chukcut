@@ -1,7 +1,7 @@
 # Project format
 
 A project is one JSON file: `<name>.chukcut`. The authoritative definition is
-`src-tauri/src/modules/project/document.rs`; this document explains the choices
+`crates/engine/src/modules/project/document.rs`; this document explains the choices
 behind it.
 
 ## Lineage
@@ -81,6 +81,26 @@ only at the edges — the renderer, the exporter, the ruler labels.
   ]
 }
 ```
+
+## Timelines and compound clips
+
+A project holds several **sequences** — timelines and compound clips. The one
+being edited is `tracks` and `markers` above, and `sequence` says which one it
+is (and, inside a compound clip, the path of sequences entered on the way).
+The others are parked in `materials.sequences`, each with its own lanes and
+markers. A segment whose `material_id` names a sequence is a **compound
+clip**; its `source_range` is a range of that sequence's time.
+
+```jsonc
+"sequence": { "id": "4f1…", "name": "Compound clip 1", "kind": "compound",
+              "slot": 1, "path": ["main"] },
+"materials": { …, "sequences": [
+  { "id": "main", "name": "Timeline 01", "kind": "timeline",
+    "tracks": [ … ], "markers": [ … ] } ] }
+```
+
+A file with one timeline has neither key: the main timeline's id is `main`
+and its name "Timeline 01" when nothing says otherwise. Decision 0022.
 
 ## The two ranges
 
