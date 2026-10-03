@@ -49,17 +49,22 @@ fn main() {
     }
 
     application()
-        .with_assets(gpui::assets::Assets)
+        // The whole Lucide set (~1 MB), not the 101 component icons: every
+        // panel picks its own icons, and a missing one renders as nothing.
+        .with_assets(gpui::assets::AllAssets)
         .run(move |cx: &mut App| {
             // GPUI Component's widgets, then our colours over its dark theme.
             gpui::init(cx);
             theme::apply(cx);
+            // Plain keys are shortcuts only while no text field has focus;
+            // in the asset search or a name field they are typing.
+            const TYPING: Option<&str> = Some("!Input");
             cx.bind_keys([
-                KeyBinding::new("space", PlayPause, None),
-                KeyBinding::new("s", Split, None),
+                KeyBinding::new("space", PlayPause, TYPING),
+                KeyBinding::new("s", Split, TYPING),
                 KeyBinding::new("ctrl-b", Split, None),
-                KeyBinding::new("delete", DeleteSelected, None),
-                KeyBinding::new("backspace", DeleteSelected, None),
+                KeyBinding::new("delete", DeleteSelected, TYPING),
+                KeyBinding::new("backspace", DeleteSelected, TYPING),
                 KeyBinding::new("ctrl-z", Undo, None),
                 KeyBinding::new("ctrl-shift-z", Redo, None),
                 KeyBinding::new("ctrl-y", Redo, None),
@@ -67,10 +72,10 @@ fn main() {
                 KeyBinding::new("ctrl-o", Open, None),
                 KeyBinding::new("ctrl-s", Save, None),
                 KeyBinding::new("ctrl-e", Export, None),
-                KeyBinding::new("left", StepBack, None),
-                KeyBinding::new("right", StepForward, None),
-                KeyBinding::new("home", GoToStart, None),
-                KeyBinding::new("end", GoToEnd, None),
+                KeyBinding::new("left", StepBack, TYPING),
+                KeyBinding::new("right", StepForward, TYPING),
+                KeyBinding::new("home", GoToStart, TYPING),
+                KeyBinding::new("end", GoToEnd, TYPING),
                 KeyBinding::new("ctrl-=", ZoomIn, None),
                 KeyBinding::new("ctrl--", ZoomOut, None),
                 KeyBinding::new("ctrl-q", Quit, None),
