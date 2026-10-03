@@ -456,6 +456,39 @@ fn pip_tile_in(dir: &Path, size: (u32, u32)) -> Result<PathBuf, String> {
     })
 }
 
+// ---------------------------------------------------------------------------
+// Looks
+// ---------------------------------------------------------------------------
+
+/// The tile of a colour look: the day sample through the `.cube` at
+/// `lut_path`, by the same LUT path a graded clip takes. Keyed on the file's
+/// size and time, so a look rewritten by a new version redraws.
+pub fn look_tile(lut_path: &str, size: (u32, u32)) -> Result<PathBuf, String> {
+    look_tile_in(&tiles_dir(), lut_path, size)
+}
+
+fn look_tile_in(dir: &Path, lut_path: &str, size: (u32, u32)) -> Result<PathBuf, String> {
+    let meta = std::fs::metadata(lut_path).map_err(|e| format!("cannot read {lut_path}: {e}"))?;
+    let stamp = format!("{:?}-{}", meta.modified().ok(), meta.len());
+    let key = hash(&[include_str!("../render/lut.rs"), lut_path, &stamp]);
+    let path = dir.join(format!("{key:016x}-look-{}x{}.png", size.0, size.1));
+    cached(path, || {
+        let mut p = sample_project(size);
+        let mut track = Track::new(TrackKind::Video, "Main");
+        let mut segment = clip("s", "sample-day", 0, 1_000_000);
+        let mut grade = crate::modules::project::document::ColorAdjustMaterial::identity();
+        grade.lut = Some(crate::modules::project::document::LutRef {
+            path: lut_path.to_string(),
+            intensity: 1.0,
+        });
+        segment.extras.push(grade.id.clone());
+        p.materials.color_adjusts.push(grade);
+        track.segments.push(segment);
+        p.tracks.push(track);
+        draw(&p, 0)
+    })
+}
+
 /// Remove every cached tile. They are redrawn on demand.
 pub fn clear() -> std::io::Result<()> {
     let dir = tiles_dir();
@@ -516,6 +549,37 @@ mod tests {
                 .unwrap()
         };
         assert_eq!(modified(), modified());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_look_tile_is_the_sample_through_the_look() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/fx-tile-test")
+            .join(format!("looks-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        if compositor().is_err() {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        }
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::modules::library::looks::install(&dir).unwrap();
+        let looks = crate::modules::library::looks::installed(&dir);
+        let mono = looks.iter().find(|l| l.name == "Mono").unwrap();
+        let warm = looks.iter().find(|l| l.name == "Warm Sun").unwrap();
+        let size = (112, 70);
+        let grey = image::open(look_tile_in(&dir, &mono.path, size).unwrap())
+            .unwrap()
+            .to_rgba8();
+        assert_eq!(grey.dimensions(), size);
+        // Black and white through the compositor's LUT path: no colour left.
+        assert!(grey
+            .pixels()
+            .all(|p| p[0].abs_diff(p[1]) <= 2 && p[1].abs_diff(p[2]) <= 2));
+        let warm = image::open(look_tile_in(&dir, &warm.path, size).unwrap())
+            .unwrap()
+            .to_rgba8();
+        assert_ne!(grey.into_raw(), warm.into_raw());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

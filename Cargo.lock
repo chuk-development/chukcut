@@ -999,6 +999,7 @@ dependencies = [
  "parley",
  "pollster 1.0.1",
  "rayon",
+ "resvg 0.46.0",
  "serde",
  "serde_json",
  "serde_yaml_ng",

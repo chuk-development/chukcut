@@ -120,6 +120,10 @@ serde_yaml_ng = "0.10"
 kurbo = "0.13.1"
 zeno = "0.3.3"
 skrifa = "0.45.1"
+# Sticker and icon SVGs (Fluent Flat, Iconify) to PNG in `modules/library`.
+# The version GPUI already links, without default features, so it adds no
+# second copy to the build.
+resvg = { version = "0.46", default-features = false }
 
 # --- cloud accounts and captions (modules/cloud, modules/speech) -------------
 #
