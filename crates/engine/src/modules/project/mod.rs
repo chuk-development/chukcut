@@ -17,9 +17,11 @@ pub mod autosave;
 pub mod commands;
 pub mod configure;
 pub mod document;
+pub mod effects;
 pub mod grade;
 pub mod migrate;
 pub mod recovery;
 
 pub use configure::{ConfigureCommand, ProjectConfig};
 pub use document::*;
+pub use effects::{EffectMaterial, EffectValue};

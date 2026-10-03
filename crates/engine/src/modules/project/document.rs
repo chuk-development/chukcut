@@ -340,6 +340,14 @@ pub struct MaterialPool {
     /// payoff [`TransitionMaterial`] records for the same choice.
     #[serde(default)]
     pub color_adjusts: Vec<ColorAdjustMaterial>,
+    /// Built-in effects, referenced from a clip's `extras` (the effect sees
+    /// that clip) or as the material of a clip on an effect lane (the effect
+    /// sees everything beneath it). See [`super::effects::EffectMaterial`].
+    ///
+    /// Skipped when empty, so a project that never uses an effect saves
+    /// byte-identical to one written before effects existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effects: Vec<super::effects::EffectMaterial>,
     /// Every link group id that some segment currently belongs to.
     ///
     /// ## Why linkage is on the segment and this is only a type tag
@@ -436,6 +444,27 @@ impl MaterialPool {
     /// the first, because rendering *a* grade beats rendering none.
     pub fn color_adjust_of(&self, segment: &Segment) -> Option<&ColorAdjustMaterial> {
         segment.extras.iter().find_map(|id| self.color_adjust(id))
+    }
+
+    pub fn effect(&self, id: &str) -> Option<&super::effects::EffectMaterial> {
+        self.effects.iter().find(|m| m.id == id)
+    }
+
+    /// Whether `segment` is an effect clip: its material is an effect, so it
+    /// applies to what is composited beneath it rather than drawing a
+    /// picture of its own.
+    pub fn is_effect_clip(&self, segment: &Segment) -> bool {
+        self.effect(&segment.material_id).is_some()
+    }
+
+    /// Every effect applied by `segment`, in application order: an effect
+    /// clip's own material first, then each id in `extras` that resolves as
+    /// an effect.
+    pub fn effects_of(&self, segment: &Segment) -> Vec<&super::effects::EffectMaterial> {
+        self.effect(&segment.material_id)
+            .into_iter()
+            .chain(segment.extras.iter().filter_map(|id| self.effect(id)))
+            .collect()
     }
 
     /// The transition `segment` is entered through, if it has one.
@@ -1272,7 +1301,7 @@ impl KeyframeTrack {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Keyframe {
     /// Relative to the segment start.
     pub time: Micros,
@@ -1452,7 +1481,9 @@ impl Project {
                 // a normal state a user can be in — the clip draws as missing,
                 // the preview composites a placeholder, and undo makes it whole
                 // again. An error would brand every such document as corrupt.
-                if self.materials.kind_of(&seg.material_id).is_none() {
+                if self.materials.kind_of(&seg.material_id).is_none()
+                    && !self.materials.is_effect_clip(seg)
+                {
                     outside.push(ValidationIssue {
                         severity: Severity::Warning,
                         message: format!("segment references unknown material {}", seg.material_id),
