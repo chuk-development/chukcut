@@ -817,9 +817,6 @@ impl Editor {
                 .rounded_md()
                 .cursor_pointer()
                 .text_lg()
-                // Named, so every emoji is the colour glyph: through the UI
-                // font's fallback some come out as flat outlines.
-                .font_family("Noto Color Emoji")
                 .hover(|s| s.bg(rgb(BORDER)))
                 .on_click(
                     cx.listener(move |this, _, window, cx| this.insert_emoji(emoji, window, cx)),

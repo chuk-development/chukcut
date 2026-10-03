@@ -1678,7 +1678,16 @@ Measured: `cargo run -p chukcut-engine --features local-whisper --example
 captions -- jfk.wav --local tiny` transcribes the 11 s JFK sample with correct
 word times in 3.7 s in a debug build at load 30.
 
-Known gaps: the timeline's own split (S) duplicates a caption's text into both
+**The player's provider did not see new titles.** `player.rs` keeps one
+`MediaSourceProvider` while the set of files is unchanged (it holds open
+decoders), but the provider copies text materials by value — so any title or
+caption added after the first frame was drawn as the red offline placeholder,
+and a retyped one kept its old pixels. `MediaSourceProvider::sync_texts` now
+runs before every preview frame and drops the cached upload of a changed title.
+
+Known gaps: the emoji *picker* is drawn by GPUI, which shows some emoji as
+monochrome outlines (the caption itself is colour, drawn by our rasteriser);
+the timeline's own split (S) duplicates a caption's text into both
 halves — the panel's "Split at playhead" divides the words properly; a font
 from an online library has a hook (any family registered with the text
 renderer shows up in the font list) but no library yet; the drag frame on the
