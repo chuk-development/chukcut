@@ -2432,8 +2432,8 @@ lines) and beats (yellow ticks) are drawn on clips and are snap targets.
   clip extended beyond what was analysed holds the edge correction (the
   inspector says so); orphaned analysis entries stay in the pool; reframe has
   no face/person detector yet (saliency only), so two people talking are
-  framed by whoever moves more; the menu's Auto-cut uses every beat (the
-  Audio tab chooses 1/2/4).
+  framed by whoever moves more; the menu's Auto-cut uses the "every n beats"
+  choice last made in the Audio tab (every beat until then).
 
 ## The log file, and what an export writes into it
 
