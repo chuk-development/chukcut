@@ -234,7 +234,10 @@ fn init_engine(verbose: u8) {
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => return usage_error(error),
+    };
     init_engine(cli.verbose);
     let printer = output::Printer::new(cli.json);
 
@@ -259,6 +262,31 @@ fn main() -> ExitCode {
             ExitCode::from(error.kind.exit_code())
         }
     }
+}
+
+/// clap's own errors, as JSON too when `--json` was asked for: a script that
+/// reads stdout must get its answer there whatever went wrong.
+fn usage_error(error: clap::Error) -> ExitCode {
+    use clap::error::ErrorKind as K;
+    if matches!(
+        error.kind(),
+        K::DisplayHelp | K::DisplayVersion | K::DisplayHelpOnMissingArgumentOrSubcommand
+    ) {
+        error.exit();
+    }
+    if std::env::args().any(|a| a == "--json") {
+        let text = error.render().to_string();
+        let message = text
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .trim_start_matches("error: ")
+            .to_string();
+        output::Printer::new(true).failure(&CliError::usage(message));
+        return ExitCode::from(error::ErrorKind::Usage.exit_code());
+    }
+    let _ = error.print();
+    ExitCode::from(error::ErrorKind::Usage.exit_code())
 }
 
 /// Open, run, save.
