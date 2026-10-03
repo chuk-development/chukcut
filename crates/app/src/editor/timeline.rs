@@ -3549,7 +3549,16 @@ impl Editor {
         } else {
             1.0
         };
-        if let Some(curve) = self.project.materials.speed_curve_of(segment) {
+        let curve = self.project.materials.speed_curve_of(segment);
+        // Thumbnails and the waveform step through the source at one rate; on
+        // a curve the clip's average is the closest single one.
+        let speed = match curve {
+            Some(_) => {
+                segment.source_range.duration as f32 / segment.target_range.duration.max(1) as f32
+            }
+            None => speed,
+        };
+        if let Some(curve) = curve {
             let label = curve.preset.map_or("Curve", |p| p.label());
             name = format!("{label} · {name}");
         } else if (speed - 1.0).abs() > 1e-3 {

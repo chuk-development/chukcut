@@ -2077,8 +2077,10 @@ the playhead is in with two Bézier handles to drag. Decision 0018.
   tab says so. No frame blending or motion blur in slow sections: blending
   needs two source frames per output frame, and the sequential decoder would
   seek backwards for the earlier one on every frame — a measured 25–200 ms per
-  seek. It wants a two-frame cache in the provider first. The timeline's slip
-  edit is not curve-aware. Effect parameters have no easing picker yet (the
+  seek. It wants a two-frame cache in the provider first. A slip of a curved
+  clip changes its length (another stretch of curve is under it); the app has
+  no slip gesture yet, and a `TrimSegment` that keeps the length is refused.
+  Thumbnails and the waveform of a curved clip step at its average speed. Effect parameters have no easing picker yet (the
   engine eases them; the Effects tab writes linear keys).
 
 ## Not built yet

@@ -52,8 +52,9 @@ link partners (one shared curve) and the moves of the clips after it.
   constant rate per clip and there is no pitch-preserving stretch; a voice
   sliding through octaves inside one ramp is not usable. The Curve tab says so.
 - A slip edit of a curved clip changes how long it plays, because a different
-  stretch of the curve is under it. The timeline's slip is not curve-aware
-  yet; trims are.
+  stretch of the curve is under it. The app has no slip gesture yet; when it
+  gets one it has to recompute the length through the curve. Trims already
+  do (`TimeMap::retimed_source`).
 - Points outside the clip's current source window (after a trim) are kept but
   not shown in the editor.
 
