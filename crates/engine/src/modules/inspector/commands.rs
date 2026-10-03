@@ -124,6 +124,39 @@ pub fn inspector_rename_clip(
     respond(&state)
 }
 
+/// Play a clip — and every clip linked to it — at `speed`, keeping the part
+/// of the file it shows: 2x halves its length on the timeline, and the clips
+/// after it on the same lanes move up. One undo step. See
+/// `edit::set_speed_command`.
+pub fn inspector_set_speed(
+    state: &Arc<AppState>,
+    segment_id: String,
+    speed: f32,
+) -> Result<EditResponse, String> {
+    {
+        let mut guard = state.project.write();
+        let project = guard.as_mut().ok_or("no project is open")?;
+        let command = edit::set_speed_command(project, &segment_id, speed)?;
+        state.history.write().apply(project, command)?;
+    }
+    respond(&state)
+}
+
+/// Give every other picture clip the grade of `segment_id`, as one undo step.
+/// See `edit::apply_color_to_all_command`.
+pub fn inspector_apply_color_to_all(
+    state: &Arc<AppState>,
+    segment_id: String,
+) -> Result<EditResponse, String> {
+    {
+        let mut guard = state.project.write();
+        let project = guard.as_mut().ok_or("no project is open")?;
+        let command = edit::apply_color_to_all_command(project, &segment_id)?;
+        state.history.write().apply(project, command)?;
+    }
+    respond(&state)
+}
+
 /// What the panel wants to know about a .cube file before attaching it.
 #[derive(serde::Serialize)]
 pub struct LutInfo {
