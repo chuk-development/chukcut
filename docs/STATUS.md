@@ -1753,7 +1753,7 @@ has the model.
   carries on in a fresh target. All in the frame's one command encoder. A
   frame with no live effect takes the old path exactly. Lengths are
   fractions of the frame's shorter side, so preview and export match.
-- **Tests** (`fx/render_tests.rs`, 25): blur, pixelate, RGB split, every
+- **Tests** (`fx/render_tests.rs`, 24, plus an ignored measurement): blur, pixelate, RGB split, every
   mirror mode, letterbox, shake, gate weave, light sweep, grain and the
   frame against CPU references written from the same description; glow,
   bloom, halation, zoom blur, kaleidoscope, glitch and VHS structurally
