@@ -9,15 +9,17 @@ use std::time::Duration;
 use chukcut_engine::modules::export::hwaccel::{self, HwEncoder};
 use gpui::assets::IconName as Lucide;
 use gpui::component::button::{Button, ButtonVariants as _};
-use gpui::component::checkbox::Checkbox;
 use gpui::component::input::{Input, InputEvent, InputState};
 use gpui::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui::component::progress::Progress;
-use gpui::component::{Disableable as _, Icon, Sizable as _, WindowExt as _};
+use gpui::component::{Disableable as _, Sizable as _, WindowExt as _};
 use gpui::{AnyElement, Entity, Subscription, WeakEntity};
 
 use super::settings::{self, Bitrate, Codec, ExportChoices, Format, Resolution};
 use super::*;
+use crate::ui::{
+    icons, Badge, IconButton, IconSrc, PropertyRow, Section, SectionHeader, SegmentedTabs, Tone,
+};
 
 type Slot = Arc<parking_lot::Mutex<Option<ExportProgress>>>;
 
@@ -330,37 +332,33 @@ impl ExportDialog {
     }
 
     fn row(label: &'static str, control: impl IntoElement) -> impl IntoElement {
-        div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_3()
-            .min_h(px(32.0))
-            .child(
-                div()
-                    .w(px(104.0))
-                    .flex_none()
-                    .text_sm()
-                    .text_color(rgb(TEXT_DIM))
-                    .child(label),
-            )
+        PropertyRow::new(SharedString::from(format!("export-row-{label}")), label)
+            .no_actions()
             .child(div().flex_1().min_w(px(0.0)).child(control))
     }
 
-    fn section(title: &'static str) -> gpui::Div {
-        div()
-            .pt_2()
-            .mt_1()
-            .border_t_1()
-            .border_color(rgb(BORDER))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_2()
-            .text_sm()
-            .font_weight(gpui::FontWeight::SEMIBOLD)
-            .text_color(rgb(TEXT))
-            .child(title)
+    /// A segmented choice that writes the pick into the dialog's choices.
+    fn segments<T: Copy + PartialEq + 'static>(
+        &self,
+        id: &'static str,
+        options: &[T],
+        current: T,
+        label: impl Fn(T) -> &'static str,
+        apply: impl Fn(&mut ExportChoices, T) + 'static,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let selected = options.iter().position(|o| *o == current).unwrap_or(0);
+        let options = options.to_vec();
+        let dialog = cx.entity().downgrade();
+        SegmentedTabs::new(id, options.iter().map(|o| label(*o)), selected).on_select(
+            move |index, _, cx| {
+                let pick = options[index];
+                let _ = dialog.update(cx, |dialog, cx| {
+                    apply(&mut dialog.choices, pick);
+                    cx.notify();
+                });
+            },
+        )
     }
 
     fn render_cover(&self, cx: &App) -> impl IntoElement {
@@ -377,43 +375,38 @@ impl ExportDialog {
         div()
             .w(px(332.0))
             .flex_none()
-            .p_4()
+            .p(px(20.0))
             .flex()
             .flex_col()
             .items_center()
-            .gap_2()
+            .justify_center()
+            .gap(px(10.0))
+            .bg(rgb(PANEL))
+            .border_r_1()
+            .border_color(rgb(HAIRLINE))
             .child(
                 div()
                     .relative()
                     .w(px(w))
                     .h(px(h))
-                    .rounded_md()
+                    .rounded(px(R_MD))
                     .overflow_hidden()
-                    .bg(rgb(0x000000))
+                    .bg(rgb(VIEWER))
+                    .border_1()
+                    .border_color(rgb(BORDER))
                     .children(frame.map(|frame| img(frame).size_full()))
                     .child(
                         div()
                             .absolute()
                             .top(px(8.0))
                             .left(px(8.0))
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap_1()
-                            .px_1p5()
-                            .py_0p5()
-                            .rounded_sm()
-                            .bg(gpui::hsla(0.0, 0.0, 0.0, 0.55))
-                            .text_xs()
-                            .text_color(rgb(TEXT))
-                            .child(Icon::new(Lucide::Image).size(px(12.0)))
-                            .child("Cover"),
+                            .child(Badge::new("Cover").tone(Tone::OnMedia).icon(Lucide::Image)),
                     ),
             )
             .child(
                 div()
-                    .text_xs()
-                    .text_color(rgb(TEXT_DIM))
+                    .text_size(px(TEXT_CAPTION))
+                    .text_color(rgb(TEXT_MUTED))
                     .child("The frame at the playhead"),
             )
     }
@@ -424,47 +417,6 @@ impl ExportDialog {
         let output = c.output_path();
         let exists = output.exists();
 
-        let resolutions = Resolution::ALL
-            .into_iter()
-            .map(|r| -> Pick {
-                let (w, h) = r.size_for(self.project.canvas.width, self.project.canvas.height);
-                (
-                    format!("{} · {w}×{h}", r.label()).into(),
-                    r == c.resolution,
-                    Rc::new(move |c: &mut ExportChoices| c.resolution = r),
-                )
-            })
-            .collect();
-        let bitrates = Bitrate::ALL
-            .into_iter()
-            .map(|b| -> Pick {
-                (
-                    b.label().into(),
-                    b == c.bitrate,
-                    Rc::new(move |c: &mut ExportChoices| c.bitrate = b),
-                )
-            })
-            .collect();
-        let codecs = Codec::ALL
-            .into_iter()
-            .map(|codec| -> Pick {
-                (
-                    codec.label().into(),
-                    codec == c.codec,
-                    Rc::new(move |c: &mut ExportChoices| c.codec = codec),
-                )
-            })
-            .collect();
-        let formats = Format::ALL
-            .into_iter()
-            .map(|f| -> Pick {
-                (
-                    f.label().into(),
-                    f == c.format,
-                    Rc::new(move |c: &mut ExportChoices| c.format = f),
-                )
-            })
-            .collect();
         let rates = settings::FRAME_RATES
             .into_iter()
             .map(|(rate, label)| -> Pick {
@@ -490,118 +442,151 @@ impl ExportDialog {
             .flex()
             .flex_row()
             .items_center()
-            .gap_2()
+            .gap(px(6.0))
             .child(
                 div()
                     .flex_1()
                     .min_w(px(0.0))
-                    .h(px(28.0))
-                    .px_2()
+                    .h(px(CONTROL_H))
+                    .px(px(8.0))
                     .flex()
                     .items_center()
-                    .rounded_md()
-                    .bg(rgb(PANEL_RAISED))
+                    .rounded(px(R_SM))
+                    .bg(rgb(WELL))
+                    .border_1()
+                    .border_color(rgb(BORDER))
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_ellipsis()
-                    .text_sm()
+                    .text_size(px(TEXT_LABEL))
                     .text_color(rgb(TEXT))
                     .child(settings::display_path(&c.directory)),
             )
             .child(
-                Button::new("export-folder")
-                    .icon(Lucide::FolderOpen)
-                    .outline()
-                    .small()
+                IconButton::new("export-folder", Lucide::FolderOpen)
                     .tooltip("Choose a folder")
                     .on_click(cx.listener(|this, _, _, cx| this.choose_folder(cx))),
             );
 
+        let encoder = match self.encoder() {
+            None => Badge::new("Detecting…"),
+            Some(Some(_)) => Badge::new(self.encoder_label()).tone(Tone::Accent),
+            Some(None) => Badge::new(self.encoder_label()),
+        };
+
+        let resolution = self.segments(
+            "export-resolution",
+            &Resolution::ALL,
+            c.resolution,
+            Resolution::label,
+            |c, r| c.resolution = r,
+            cx,
+        );
+        let bitrate = self.segments(
+            "export-bitrate",
+            &Bitrate::ALL,
+            c.bitrate,
+            Bitrate::label,
+            |c, b| c.bitrate = b,
+            cx,
+        );
+        let codec = self.segments(
+            "export-codec",
+            &Codec::ALL,
+            c.codec,
+            Codec::label,
+            |c, codec| c.codec = codec,
+            cx,
+        );
+        let format = self.segments(
+            "export-format",
+            &Format::ALL,
+            c.format,
+            Format::label,
+            |c, f| c.format = f,
+            cx,
+        );
+
         let audio_on = c.audio;
+        let video = Section::new(
+            "export-video",
+            SectionHeader::new("export-video-header", "Video"),
+        )
+        .child(Self::row("Resolution", resolution))
+        .child(Self::row("Bitrate", bitrate))
+        .when(c.bitrate == Bitrate::Custom, |section| {
+            section.child(Self::row(
+                "Mbit/s",
+                div()
+                    .w(px(120.0))
+                    .child(Input::new(&self.custom_bitrate).small()),
+            ))
+        })
+        .child(Self::row("Codec", codec))
+        .child(Self::row("Format", div().flex().child(format)))
+        .child(Self::row(
+            "Frame rate",
+            self.picker("export-fps", rates, false, cx),
+        ))
+        .child(Self::row("Encoder", div().flex().child(encoder)))
+        .child(Self::row(
+            "Colour space",
+            div()
+                .text_size(px(TEXT_LABEL))
+                .text_color(rgb(TEXT_MUTED))
+                .child(format!("Rec. 709 SDR · {width}×{height}")),
+        ));
+        let dialog = cx.entity().downgrade();
+        let audio = Section::new(
+            "export-audio",
+            SectionHeader::new("export-audio-header", "Audio").enable(
+                audio_on,
+                move |checked, _, cx| {
+                    let _ = dialog.update(cx, |this, cx| {
+                        this.choices.audio = checked;
+                        cx.notify();
+                    });
+                },
+            ),
+        )
+        .border_b_0()
+        .child(Self::row(
+            "Format",
+            self.picker("export-audio-format", audio_rates, !audio_on, cx),
+        ));
+
         div()
             .id("export-settings")
             .flex_1()
             .min_w(px(0.0))
             .h_full()
             .overflow_y_scroll()
-            .p_4()
+            .px(px(20.0))
+            .py(px(16.0))
             .flex()
             .flex_col()
-            .gap_2()
+            .gap(px(8.0))
             .children(
                 self.notice
                     .clone()
-                    .map(|notice| div().text_sm().text_color(rgb(0xe0a84a)).child(notice)),
+                    .map(|notice| div().flex().child(Badge::new(notice).tone(Tone::Warning))),
             )
             .child(Self::row("Name", Input::new(&self.name).small()))
             .child(Self::row("Export to", folder))
             .when(exists, |column| {
                 column.child(
-                    div()
-                        .pl(px(116.0))
-                        .text_xs()
-                        .text_color(rgb(0xe0a84a))
-                        .child(format!(
+                    div().pl(px(crate::ui::LABEL_W + 12.0)).flex().child(
+                        Badge::new(format!(
                             "{} exists and will be replaced",
                             file_name(&output.to_string_lossy())
-                        )),
+                        ))
+                        .tone(Tone::Warning),
+                    ),
                 )
             })
-            .child(Self::section("Video"))
-            .child(Self::row(
-                "Resolution",
-                self.picker("export-resolution", resolutions, false, cx),
-            ))
-            .child(Self::row(
-                "Bitrate",
-                self.picker("export-bitrate", bitrates, false, cx),
-            ))
-            .when(c.bitrate == Bitrate::Custom, |column| {
-                column.child(Self::row(
-                    "Mbit/s",
-                    Input::new(&self.custom_bitrate).small(),
-                ))
-            })
-            .child(Self::row(
-                "Codec",
-                self.picker("export-codec", codecs, false, cx),
-            ))
-            .child(Self::row(
-                "Format",
-                self.picker("export-format", formats, false, cx),
-            ))
-            .child(Self::row(
-                "Frame rate",
-                self.picker("export-fps", rates, false, cx),
-            ))
-            .child(Self::row(
-                "Encoder",
-                div()
-                    .text_sm()
-                    .text_color(rgb(TEXT))
-                    .child(self.encoder_label()),
-            ))
-            .child(Self::row(
-                "Colour space",
-                div()
-                    .text_sm()
-                    .text_color(rgb(TEXT_DIM))
-                    .child(format!("Rec. 709 SDR · {width}×{height}")),
-            ))
-            .child(
-                Self::section("Audio").child(
-                    Checkbox::new("export-audio")
-                        .checked(audio_on)
-                        .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                            this.choices.audio = *checked;
-                            cx.notify();
-                        })),
-                ),
-            )
-            .child(Self::row(
-                "Format",
-                self.picker("export-audio-format", audio_rates, !audio_on, cx),
-            ))
+            .child(div().h(px(4.0)))
+            .child(video)
+            .child(audio)
     }
 
     fn render_progress(&self) -> impl IntoElement {
@@ -648,18 +633,30 @@ impl ExportDialog {
                     div()
                         .flex()
                         .flex_col()
-                        .gap_2()
+                        .gap(px(12.0))
+                        .child(
+                            div()
+                                .font_family(FONT_MONO)
+                                .text_size(px(28.0))
+                                .text_color(rgb(TEXT))
+                                .child(format!("{:.0}%", fraction * 100.0)),
+                        )
                         .child(
                             Progress::new("export-progress")
                                 .color(rgb(ACCENT))
                                 .value(fraction * 100.0),
                         )
-                        .child(div().text_sm().text_color(rgb(TEXT)).child(detail))
                         .child(
                             div()
-                                .text_xs()
+                                .font_family(FONT_MONO)
+                                .text_size(px(TEXT_LABEL))
                                 .text_color(rgb(TEXT_DIM))
-                                .child(format!("Encoder: {encoder}")),
+                                .child(detail),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .child(Badge::new(encoder.clone()).tone(Tone::Accent)),
                         )
                         .into_any_element(),
                 )
@@ -673,24 +670,31 @@ impl ExportDialog {
                 div()
                     .flex()
                     .flex_col()
-                    .gap_2()
+                    .gap(px(12.0))
                     .child(
                         div()
                             .flex()
                             .flex_row()
                             .items_center()
-                            .gap_2()
-                            .text_color(rgb(ACCENT))
-                            .child(Icon::new(Lucide::CircleCheck).size(px(18.0)))
+                            .gap(px(8.0))
+                            .child(IconSrc::from(Lucide::CircleCheck).svg(18.0, rgb(SUCCESS)))
                             .child(
                                 div()
-                                    .text_sm()
+                                    .font_family(FONT_MONO)
+                                    .text_size(px(TEXT_LABEL))
+                                    .text_color(rgb(TEXT_DIM))
                                     .child(format!("{frames} frames in {seconds:.1} s")),
                             ),
                     )
                     .child(
                         div()
-                            .text_sm()
+                            .px(px(10.0))
+                            .py(px(8.0))
+                            .rounded(px(R_SM))
+                            .bg(rgb(WELL))
+                            .border_1()
+                            .border_color(rgb(BORDER))
+                            .text_size(px(TEXT_LABEL))
                             .text_color(rgb(TEXT))
                             .child(settings::display_path(path)),
                     )
@@ -699,8 +703,14 @@ impl ExportDialog {
             Phase::Failed(message) => (
                 "Export failed".into(),
                 div()
-                    .text_sm()
-                    .text_color(rgb(0xe5484d))
+                    .px(px(10.0))
+                    .py(px(8.0))
+                    .rounded(px(R_SM))
+                    .bg(with_alpha(DANGER, 0.1))
+                    .border_1()
+                    .border_color(with_alpha(DANGER, 0.4))
+                    .text_size(px(TEXT_LABEL))
+                    .text_color(rgb(DANGER))
                     .child(message.clone())
                     .into_any_element(),
             ),
@@ -709,14 +719,14 @@ impl ExportDialog {
         div()
             .flex_1()
             .min_w(px(0.0))
-            .p_4()
-            .pt(px(48.0))
+            .px(px(28.0))
             .flex()
             .flex_col()
-            .gap_3()
+            .justify_center()
+            .gap(px(16.0))
             .child(
                 div()
-                    .text_lg()
+                    .text_size(px(TEXT_DISPLAY))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(rgb(TEXT))
                     .child(title),
@@ -784,22 +794,22 @@ impl ExportDialog {
         div()
             .h(px(56.0))
             .flex_none()
-            .px_4()
+            .px(px(20.0))
             .flex()
             .flex_row()
             .items_center()
-            .gap_2()
+            .gap(px(8.0))
             .border_t_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(HAIRLINE))
             .child(
                 div()
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap_2()
-                    .text_sm()
+                    .gap(px(8.0))
+                    .text_size(px(TEXT_LABEL))
                     .text_color(rgb(TEXT_DIM))
-                    .child(Icon::new(Lucide::Film).size(px(16.0)))
+                    .child(icons::glyph(icons::MEDIA, 16.0, rgb(TEXT_MUTED)))
                     .child(summary),
             )
             .child(div().flex_1())
@@ -819,16 +829,28 @@ impl Render for ExportDialog {
             .text_color(rgb(TEXT))
             .child(
                 div()
-                    .h(px(40.0))
+                    .h(px(52.0))
                     .flex_none()
-                    .px_4()
+                    .px(px(20.0))
                     .flex()
+                    .flex_row()
                     .items_center()
+                    .gap(px(10.0))
                     .border_b_1()
-                    .border_color(rgb(BORDER))
-                    .text_sm()
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child(format!("Export – {}", self.project.name)),
+                    .border_color(rgb(HAIRLINE))
+                    .child(icons::glyph(icons::EXPORT, 18.0, rgb(ACCENT)))
+                    .child(
+                        div()
+                            .text_size(px(TEXT_DISPLAY))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child("Export"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(TEXT_BODY))
+                            .text_color(rgb(TEXT_MUTED))
+                            .child(self.project.name.clone()),
+                    ),
             )
             .child(
                 div()
