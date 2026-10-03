@@ -665,17 +665,13 @@ impl Editor {
     // --- files ----------------------------------------------------------------
 
     fn import_subtitles(&mut self, cx: &mut Context<Self>) {
-        let picked = cx.prompt_for_paths(PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: false,
-            prompt: Some("Import subtitles (.srt, .vtt)".into()),
-        });
-        cx.spawn(async move |this, cx| match picked.await {
-            Ok(Ok(Some(paths))) => {
-                let Some(path) = paths.into_iter().next() else {
-                    return;
-                };
+        let mut request = FileRequest::open("Import subtitles", Filter::Subtitles);
+        if let Some(dir) = files::project_dir(self.state.project_path.read().as_deref()) {
+            request = request.starting_in(dir);
+        }
+        let picked = files::choose_one(request, cx);
+        cx.spawn(async move |this, cx| {
+            if let Some(path) = picked.await {
                 let _ = this.update(cx, |editor, cx| {
                     let replace = editor.captions.settings.replace;
                     let result = caption_commands::captions_import(
@@ -699,27 +695,19 @@ impl Editor {
                     }
                 });
             }
-            Ok(Err(error)) => {
-                let _ = this.update(cx, |editor, cx| editor.dialog_failed(error, cx));
-            }
-            _ => {}
         })
         .detach();
     }
 
     fn export_subtitles(&mut self, format: SubtitleFormat, cx: &mut Context<Self>) {
-        let directory = self
-            .state
-            .project_path
-            .read()
-            .as_ref()
-            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-            .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
-            .unwrap_or_else(|| PathBuf::from("."));
         let name = format!("{}.{}", self.project.name, format.extension());
-        let picked = cx.prompt_for_new_path(&directory, Some(&name));
+        let mut request = FileRequest::save("Export subtitles", Filter::Subtitles, name);
+        if let Some(dir) = files::project_dir(self.state.project_path.read().as_deref()) {
+            request = request.starting_in(dir);
+        }
+        let picked = files::choose_one(request, cx);
         cx.spawn(async move |this, cx| {
-            let Ok(Ok(Some(path))) = picked.await else {
+            let Some(path) = picked.await else {
                 return;
             };
             let _ = this.update(cx, |editor, cx| {

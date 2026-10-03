@@ -361,8 +361,31 @@ pub(crate) fn duration_label(duration: Micros) -> String {
     }
 }
 
-/// The folder new exports go to: `~/Videos` when it exists, else home.
+/// Where the folder of the last export is kept: one path, plain text.
+fn last_directory_file() -> PathBuf {
+    chukcut_engine::modules::workspace::paths::config_root().join("last-export-folder")
+}
+
+/// Keep `directory` as the folder the next export starts in.
+pub(crate) fn remember_directory(directory: &Path) {
+    let file = last_directory_file();
+    if let Some(parent) = file.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    // Losing this costs one click in the next export; not worth an error.
+    let _ = std::fs::write(file, directory.to_string_lossy().as_bytes());
+}
+
+/// The folder new exports go to: the last one used when it still exists,
+/// else `~/Videos` when it exists, else home.
 pub(crate) fn default_directory() -> PathBuf {
+    let last = std::fs::read_to_string(last_directory_file())
+        .map(|text| PathBuf::from(text.trim()))
+        .ok()
+        .filter(|path| path.is_absolute() && path.is_dir());
+    if let Some(last) = last {
+        return last;
+    }
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));

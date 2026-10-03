@@ -307,25 +307,11 @@ impl Shell {
     }
 
     fn browse(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let picked = cx.prompt_for_paths(PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: false,
-            prompt: Some("Open project".into()),
-        });
-        cx.spawn_in(window, async move |this, cx| match picked.await {
-            Ok(Ok(Some(paths))) => {
-                if let Some(path) = paths.into_iter().next() {
-                    let _ =
-                        this.update_in(cx, |shell, window, cx| shell.open_path(path, window, cx));
-                }
+        let picked = files::choose_one(FileRequest::open("Open project", Filter::Projects), cx);
+        cx.spawn_in(window, async move |this, cx| {
+            if let Some(path) = picked.await {
+                let _ = this.update_in(cx, |shell, window, cx| shell.open_path(path, window, cx));
             }
-            Ok(Err(error)) => {
-                let _ = this.update(cx, |shell, cx| {
-                    shell.home_notice(format!("File dialog failed: {error}"), cx)
-                });
-            }
-            _ => {}
         })
         .detach();
     }

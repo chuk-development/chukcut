@@ -26,8 +26,8 @@ use chukcut_engine::state::AppState;
 use gpui::prelude::*;
 use gpui::{
     actions, canvas, div, img, px, rgb, App, Bounds, Context, FocusHandle, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, Point, RenderImage,
-    ScrollWheelEvent, SharedString, Task, Window,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, RenderImage, ScrollWheelEvent,
+    SharedString, Task, Window,
 };
 
 use crate::edits;
@@ -61,6 +61,7 @@ mod assets;
 mod captions;
 mod cloud;
 mod export;
+mod files;
 mod font_picker;
 mod home;
 mod inspector;
@@ -82,6 +83,7 @@ mod tracking;
 mod widgets;
 
 use crate::theme::*;
+use files::{FileRequest, Filter};
 use widgets::*;
 
 // --- state -------------------------------------------------------------------
@@ -454,20 +456,11 @@ impl Editor {
     }
 
     fn on_import(&mut self, _: &Import, _: &mut Window, cx: &mut Context<Self>) {
-        let picked = cx.prompt_for_paths(PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: true,
-            prompt: Some("Import".into()),
-        });
-        cx.spawn(async move |this, cx| match picked.await {
-            Ok(Ok(Some(paths))) => {
+        let picked = files::choose(FileRequest::open_many("Import", Filter::Media), cx);
+        cx.spawn(async move |this, cx| {
+            if let Some(paths) = picked.await {
                 let _ = this.update(cx, |editor, cx| editor.import_to_library(paths, cx));
             }
-            Ok(Err(error)) => {
-                let _ = this.update(cx, |editor, cx| editor.dialog_failed(error, cx));
-            }
-            _ => {}
         })
         .detach();
     }
@@ -477,30 +470,7 @@ impl Editor {
     }
 
     fn on_save(&mut self, _: &Save, _: &mut Window, cx: &mut Context<Self>) {
-        if self.state.project_path.read().is_some() {
-            self.save_to(None, cx);
-            return;
-        }
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("."));
-        let name = format!("{}.chukcut", self.project.name);
-        let picked = cx.prompt_for_new_path(&home, Some(&name));
-        cx.spawn(async move |this, cx| {
-            let Ok(Ok(Some(path))) = picked.await else {
-                return;
-            };
-            let _ = this.update(cx, |editor, cx| editor.save_to(Some(path), cx));
-        })
-        .detach();
-    }
-
-    /// A file dialog that could not be opened — on Linux usually a missing
-    /// or broken xdg-desktop-portal — is said out loud, never swallowed.
-    fn dialog_failed(&mut self, error: anyhow::Error, cx: &mut Context<Self>) {
-        tracing::error!(%error, "the file dialog could not be opened");
-        self.status = Some(format!("File dialog failed: {error}").into());
-        cx.notify();
+        self.save_interactively(cx).detach();
     }
 
     fn step(&mut self, frames: i64) {

@@ -206,6 +206,7 @@ impl ExportDialog {
         });
         match export_commands::export_start(&self.state, request, channel) {
             Ok(job_id) => {
+                settings::remember_directory(&self.choices.directory);
                 self.phase = Phase::Running {
                     job_id,
                     encoder,
@@ -283,20 +284,15 @@ impl ExportDialog {
     }
 
     fn choose_folder(&mut self, cx: &mut Context<Self>) {
-        let picked = cx.prompt_for_paths(PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: false,
-            prompt: Some("Export here".into()),
-        });
+        let request =
+            FileRequest::folder("Export here").starting_in(self.choices.directory.clone());
+        let picked = files::choose_one(request, cx);
         cx.spawn(async move |this, cx| {
-            if let Ok(Ok(Some(paths))) = picked.await {
-                if let Some(directory) = paths.into_iter().next() {
-                    let _ = this.update(cx, |dialog, cx| {
-                        dialog.choices.directory = directory;
-                        cx.notify();
-                    });
-                }
+            if let Some(directory) = picked.await {
+                let _ = this.update(cx, |dialog, cx| {
+                    dialog.choices.directory = directory;
+                    cx.notify();
+                });
             }
         })
         .detach();
