@@ -65,6 +65,7 @@ fn loud_title(id: &str) -> TextMaterial {
             blur: 8.0,
         }),
         background: None,
+        caption: None,
     }
 }
 
@@ -582,6 +583,7 @@ fn every_field_of_a_title_round_trips_through_a_save() {
             blur: 11.25,
         }),
         background: Some([0.0, 0.0, 0.0, 0.6]),
+        caption: None,
     };
     let project = project_with_title(material.clone());
 

@@ -108,6 +108,28 @@ kurbo = "0.13.1"
 zeno = "0.3.3"
 skrifa = "0.45.1"
 
+# --- cloud accounts and captions (modules/cloud, modules/speech) -------------
+#
+# A blocking HTTP client, because the engine has no async runtime and every
+# request runs on a `shell::spawn_blocking` thread anyway. Rustls with bundled
+# roots, so nothing depends on the system's OpenSSL. See
+# docs/research/integrations.md §7.1.
+ureq = "2.12"
+# Model downloads are verified against a pinned SHA-256.
+sha2 = "0.10"
+# `secrets.toml` and `accounts.toml`.
+toml = "0.8"
+# Local transcription: whisper.cpp, built from source by `whisper-rs-sys` with
+# CMake. Optional because that build costs a few minutes once; the app turns it
+# on. `local-whisper-cuda` adds the CUDA backend and needs `nvcc`. See
+# docs/decisions/0012-local-transcription-with-whisper-cpp.md.
+whisper-rs = { version = "0.16", optional = true }
+
+[features]
+default = []
+local-whisper = ["dep:whisper-rs"]
+local-whisper-cuda = ["local-whisper", "whisper-rs/cuda"]
+
 # The escape hatch under wgpu, for the one thing WebGPU has no concept of:
 # allocating a buffer whose memory can be exported as a DMA-BUF file descriptor,
 # so the VAAPI encoder can read what the compositor wrote instead of being handed

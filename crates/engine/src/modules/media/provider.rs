@@ -561,9 +561,13 @@ impl MediaSourceProvider {
         ctx: &RenderContext,
         material_id: &str,
         material: &TextMaterial,
+        source_time: Micros,
         size: (u32, u32),
     ) -> anyhow::Result<SourceFrame> {
         let size = (size.0.max(1), size.1.max(1));
+        if crate::modules::captions::karaoke::is_animated(material) {
+            return self.karaoke_frame(ctx, material_id, material, source_time, size);
+        }
         // A title does not vary with time, so any cached upload at the right
         // size is valid whatever instant was asked for. The size check is what
         // stops an export reusing the preview's smaller raster, which would be
@@ -578,6 +582,41 @@ impl MediaSourceProvider {
         let rastered = TextRenderer::shared().rasterize_material(material, size, scale);
         let frame = upload_rgba(ctx, &rastered.pixels, rastered.width, rastered.height);
         self.store(material_id, 0, &frame);
+        Ok(frame)
+    }
+
+    /// A karaoke caption: the same title with the spoken word lit, which makes
+    /// it the one kind of text that changes with time.
+    ///
+    /// It changes only when the lit word does, so the upload is cached per
+    /// word under a key of its own. The plain material id is never stored for
+    /// it, which keeps the time-blind cache check at the top of `frame` from
+    /// answering with whichever word happened to be drawn first.
+    fn karaoke_frame(
+        &self,
+        ctx: &RenderContext,
+        material_id: &str,
+        material: &TextMaterial,
+        source_time: Micros,
+        size: (u32, u32),
+    ) -> anyhow::Result<SourceFrame> {
+        let (request, lit) = crate::modules::captions::karaoke::request_at(material, source_time);
+        let key = match lit {
+            Some(index) => format!("{material_id}\u{1}karaoke-{index}"),
+            None => format!("{material_id}\u{1}karaoke"),
+        };
+        if let Some(cached) = self.textures.lock().get(&key) {
+            if (cached.frame.width, cached.frame.height) == size {
+                return Ok(cached.frame.clone());
+            }
+        }
+        let scale = size.0 as f32 / self.canvas.0 as f32;
+        let rastered = TextRenderer::shared().rasterize(
+            &request,
+            &crate::modules::text::RasterOptions::canvas(size.0, size.1).with_scale(scale),
+        );
+        let frame = upload_rgba(ctx, &rastered.pixels, rastered.width, rastered.height);
+        self.store(&key, 0, &frame);
         Ok(frame)
     }
 }
@@ -638,7 +677,13 @@ impl SourceProvider for MediaSourceProvider {
                 self.image_frame(ctx, request.material_id, path).map(Some)
             }
             MaterialSource::Text(material) => self
-                .text_frame(ctx, request.material_id, material, request.max_size)
+                .text_frame(
+                    ctx,
+                    request.material_id,
+                    material,
+                    request.source_time,
+                    request.max_size,
+                )
                 .map(Some),
         }
     }
@@ -943,6 +988,7 @@ mod tests {
             stroke_color: [0.0, 0.0, 0.0, 1.0],
             shadow: None,
             background: None,
+            caption: None,
         });
         let provider = MediaSourceProvider::from_project(&project);
 

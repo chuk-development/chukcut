@@ -96,6 +96,7 @@ fn seed_project() -> Project {
         stroke_color: [0.0, 0.0, 0.0, 1.0],
         shadow: None,
         background: None,
+        caption: None,
     });
 
     for (index, kind) in [TrackKind::Video, TrackKind::Video, TrackKind::Audio]

@@ -51,6 +51,19 @@ pub struct TextRequest {
     pub background_padding: Option<f32>,
     /// Corner radius of the background box, in pixels at scale 1.
     pub background_radius: f32,
+    /// Paint one byte range of `content` in another colour — the word being
+    /// spoken in a karaoke caption. Time is not a property of a text layer, so
+    /// the caller decides which range is lit at which instant; see
+    /// `captions::karaoke`.
+    pub highlight: Option<TextHighlight>,
+}
+
+/// A byte range of the content painted in its own fill colour.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextHighlight {
+    pub range: std::ops::Range<usize>,
+    /// Straight sRGB, 0..1, like [`TextRequest::color`].
+    pub color: [f32; 4],
 }
 
 impl TextRequest {
@@ -97,6 +110,7 @@ impl Default for TextRequest {
             letter_spacing: 0.0,
             background_padding: None,
             background_radius: 0.0,
+            highlight: None,
         }
     }
 }
