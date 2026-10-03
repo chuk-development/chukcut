@@ -34,3 +34,5 @@ Decisions already recorded elsewhere, because they predate this directory:
   `../architecture/preview-pipeline.md`.
 - **All document mutation goes through invertible edit commands** —
   `../architecture/timeline-editing.md`.
+| [0019](0019-analysis-without-a-model-results-in-the-document.md) | Scene detection, stabilisation, beats and reframe run on our own Rust code without a model; results live in the document as tagged extras in source time | Decided 2026-10-03 |
+| [0018](0018-speed-curves-anchored-to-source-time.md) | Speed curves are pool materials anchored to source time; one TimeMap maps timeline↔source everywhere | Decided 2026-10-03 |

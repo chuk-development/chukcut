@@ -54,6 +54,7 @@ actions!(
 );
 
 mod accounts;
+mod analysis;
 mod assets;
 mod captions;
 mod cloud;
@@ -121,6 +122,8 @@ pub struct Editor {
     captions: captions::CaptionsPanel,
     /// Motion tracking: the box on the player and the running analysis.
     tracking: tracking::TrackingUi,
+    /// Scene, stabilisation, beat and reframe jobs (`analysis.rs`).
+    analysis: analysis::AnalysisUi,
     _ticker: Task<()>,
 }
 
@@ -182,6 +185,7 @@ impl Editor {
             shell,
             captions,
             tracking: Default::default(),
+            analysis: Default::default(),
             _ticker: ticker,
         };
         // Hardware encoder detection opens each device and encodes a test
@@ -242,6 +246,7 @@ impl Editor {
             changed = true;
         }
         changed |= self.poll_tracking(cx);
+        changed |= self.poll_analysis(cx);
         if let Some(frame) = self.player.take(self.clock.position()) {
             if let Some(old) = self.frame.replace(frame.image) {
                 // A frame is uploaded into the window's atlas when drawn; drop
@@ -591,6 +596,7 @@ impl Render for Editor {
             .on_action(cx.listener(|this, _: &ZoomOut, _, cx| this.zoom_by(1.0 / 1.4, cx)))
             .map(|root| self.timeline_actions(root, cx))
             .map(|root| self.playback_actions(root, cx))
+            .map(|root| self.analysis_actions(root, cx))
             .on_action(
                 cx.listener(|this, _: &NewProject, window, cx| this.request_home(window, cx)),
             )

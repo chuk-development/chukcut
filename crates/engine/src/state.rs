@@ -82,6 +82,13 @@ enum DocumentCommand {
     Edit(EditCommand),
     Configure(ConfigureCommand),
     Tracking(TrackingCommand),
+    /// Several of the above as one undo step, applied in order — a project
+    /// setting and the timeline edit that goes with it, as auto reframe's
+    /// "switch to 9:16 and fill it" (`modules::analysis`).
+    Sequence {
+        label: String,
+        commands: Vec<DocumentCommand>,
+    },
 }
 
 impl DocumentCommand {
@@ -90,6 +97,18 @@ impl DocumentCommand {
             Self::Edit(command) => command.apply(project),
             Self::Configure(command) => command.apply(project),
             Self::Tracking(command) => command.apply(project),
+            Self::Sequence { commands, .. } => {
+                for (done, command) in commands.iter().enumerate() {
+                    if let Err(error) = command.apply(project) {
+                        // All or nothing: take back the parts that landed.
+                        for applied in commands[..done].iter().rev() {
+                            let _ = applied.invert().apply(project);
+                        }
+                        return Err(error);
+                    }
+                }
+                Ok(())
+            }
         }
     }
 
@@ -98,6 +117,10 @@ impl DocumentCommand {
             Self::Edit(command) => Self::Edit(command.invert()),
             Self::Configure(command) => Self::Configure(command.invert()),
             Self::Tracking(command) => Self::Tracking(command.invert()),
+            Self::Sequence { label, commands } => Self::Sequence {
+                label: label.clone(),
+                commands: commands.iter().rev().map(Self::invert).collect(),
+            },
         }
     }
 
@@ -106,6 +129,7 @@ impl DocumentCommand {
             Self::Edit(command) => command.label(),
             Self::Configure(command) => command.label(),
             Self::Tracking(command) => command.label(),
+            Self::Sequence { label, .. } => label.clone(),
         }
     }
 }
@@ -165,6 +189,29 @@ impl DocumentHistory {
     ) -> Result<(), String> {
         command.apply(project)?;
         self.record(DocumentCommand::Tracking(command));
+        Ok(())
+    }
+
+    /// Apply a project-settings edit and then a timeline edit as **one** undo
+    /// step labelled `label`. All or nothing.
+    pub fn apply_configure_and_edit(
+        &mut self,
+        project: &mut Project,
+        configure: ConfigureCommand,
+        edit: EditCommand,
+        label: String,
+    ) -> Result<(), String> {
+        let edit = ops::mirror_linked_edits(project, edit);
+        let edit = ops::detach_broken_transitions(project, edit);
+        let command = DocumentCommand::Sequence {
+            label,
+            commands: vec![
+                DocumentCommand::Configure(configure),
+                DocumentCommand::Edit(edit),
+            ],
+        };
+        command.apply(project)?;
+        self.record(command);
         Ok(())
     }
 

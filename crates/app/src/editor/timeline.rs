@@ -275,6 +275,7 @@ struct MenuState {
     can_unlink: bool,
     can_reset_speed: bool,
     can_freeze: bool,
+    analysis: super::analysis::MenuFlags,
 }
 
 /// One lane as drawn: where it is, in lanes-local pixels.
@@ -724,6 +725,7 @@ impl Editor {
     fn snap_points(&self, exclude: &[String]) -> Vec<Micros> {
         let mut points = vec![0, self.clock.position()];
         points.extend(self.project.markers.iter().map(|m| m.time));
+        points.extend(super::analysis::snap_points(&self.project));
         for track in &self.project.tracks {
             for segment in &track.segments {
                 if !exclude.contains(&segment.id) {
@@ -2124,6 +2126,7 @@ impl Editor {
                 })
             }),
             can_freeze: self.freeze_target().is_some(),
+            analysis: self.analysis_flags(),
         }
     }
 
@@ -3857,6 +3860,7 @@ impl Editor {
                 body = body.child(bar(false));
             }
         }
+        body = body.children(self.analysis_marks(segment, target, width, height, TITLE_H, zoom));
         if primary && !track.locked {
             body = self.render_keyframes(body, segment, target, x0, height);
         }
@@ -4053,6 +4057,7 @@ fn clip_menu(
         .menu_with_disabled("Unlink", Box::new(UnlinkClips), !s.can_unlink)
         .separator()
         .menu_with_disabled("Reset speed", Box::new(ResetSpeed), !s.can_reset_speed);
+    let menu = super::analysis::analysis_menu(menu, s.analysis);
     menu.separator()
         .menu("Select all", Box::new(SelectAllClips))
 }
