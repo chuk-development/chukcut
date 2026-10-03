@@ -10,7 +10,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use super::analyse::{envelope_from_file, Envelope};
-use super::cut::remove_ranges;
+use super::cut::remove_ranges_in_sync;
 use super::detect::{detect, suggest_threshold, SilenceParams};
 use super::filler::{filler_cuts, word_timings};
 use crate::modules::project::document::{Micros, TimeRange};
@@ -120,16 +120,21 @@ pub fn silence_filler_cuts(
 
 /// Remove `cuts` (source time) from `segment_id` and its linked partners and
 /// close the gaps — one undo step. `label` is what the undo menu says.
+///
+/// With `keep_in_sync` (the panel's default) every other unlocked lane —
+/// captions, music, overlays, titles — ripples across each removed stretch
+/// too, so captions stay on their words; see `cut::remove_ranges_in_sync`.
 pub fn silence_remove(
     state: &Arc<AppState>,
     segment_id: String,
     cuts: Vec<TimeRange>,
     label: String,
+    keep_in_sync: bool,
 ) -> Result<EditResponse, String> {
     {
         let mut guard = state.project.write();
         let project = guard.as_mut().ok_or("no project is open")?;
-        let plan = remove_ranges(project, &segment_id, &cuts, &label)?;
+        let plan = remove_ranges_in_sync(project, &segment_id, &cuts, &label, keep_in_sync)?;
         state.history.write().apply(project, plan.command)?;
     }
     crate::modules::voice::commands::respond(state)

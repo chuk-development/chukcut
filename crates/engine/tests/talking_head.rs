@@ -172,7 +172,14 @@ fn pauses_are_found_where_they_are_and_cut_as_one_undo_step() {
     assert!(near(cut.start, 1_600_000), "cut starts at {}", cut.start);
     assert!(near(cut.end(), 2_900_000), "cut ends at {}", cut.end());
 
-    silence_remove(&state, segment, cuts.clone(), "Remove silences".into()).expect("apply");
+    silence_remove(
+        &state,
+        segment,
+        cuts.clone(),
+        "Remove silences".into(),
+        false,
+    )
+    .expect("apply");
     let after = state.with_project(|p| p.duration()).unwrap();
     assert_eq!(after, duration - cut.duration);
     let pieces = state.with_project(|p| p.tracks[0].segments.len()).unwrap();

@@ -28,6 +28,6 @@ pub mod detect;
 pub mod filler;
 
 pub use analyse::{envelope_from_file, envelope_from_pcm, Envelope};
-pub use cut::{remove_ranges, CutPlan};
+pub use cut::{remove_ranges, remove_ranges_in_sync, CutPlan};
 pub use detect::{detect, suggest_threshold, Method, SilenceParams};
 pub use filler::{filler_cuts, is_filler, register_word_timings, TimedWord, WordTimings};

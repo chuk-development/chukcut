@@ -45,12 +45,42 @@ pub struct CutPlan {
 }
 
 /// The edit that removes `cuts` — ranges in the clip's **source** time — from
-/// segment `segment_id` and its linked partners, and closes the gaps.
+/// segment `segment_id` and its linked partners, and closes the gaps on their
+/// lanes only. See [`remove_ranges_in_sync`] for the variant that keeps every
+/// other lane in step too.
 pub fn remove_ranges(
     project: &Project,
     segment_id: &str,
     cuts: &[TimeRange],
     label: &str,
+) -> Result<CutPlan, String> {
+    remove_ranges_in_sync(project, segment_id, cuts, label, false)
+}
+
+/// [`remove_ranges`], and with `everything` set, every unlocked lane ripples
+/// across each removed stretch as well — "Keep everything in sync".
+///
+/// What that means per clip on another lane, with `f(t)` the timeline instant
+/// `t` lands on once the cuts are closed:
+///
+/// - after the cuts, or between them: moved to `f(start)`;
+/// - a **text** clip (title or caption) a cut runs through: shortened to
+///   `f(start)..f(end)`, and a caption's words are re-timed through `f`, so
+///   each word stays on the sound that says it and one caption stays one
+///   caption;
+/// - any **other** clip a cut runs through (music, an overlay): cut the same
+///   way the clip itself is — split at the cut's edges, the inside removed —
+///   because "in sync" means everything after the cut plays against the same
+///   frame of the take it did before;
+/// - a clip entirely inside a cut goes, like a sliver.
+///
+/// Locked lanes stay where they are: a lock means the lane takes no edits.
+pub fn remove_ranges_in_sync(
+    project: &Project,
+    segment_id: &str,
+    cuts: &[TimeRange],
+    label: &str,
+    everything: bool,
 ) -> Result<CutPlan, String> {
     let (track, segment) = project
         .segment(segment_id)
@@ -147,14 +177,29 @@ pub fn remove_ranges(
         }
     }
 
-    // 3. Close the gaps on every lane that has to stay in sync with the clip.
-    let lanes = rippled_lanes(project, segment_id, clip.start);
     let shift = |t: Micros| -> Micros {
         timeline
             .iter()
             .map(|c| (t.min(c.end()) - c.start).max(0))
             .sum()
     };
+
+    // 2b. Keep everything in sync: every other unlocked lane loses the same
+    //     stretches, before anything moves.
+    let mut lanes = rippled_lanes(project, segment_id, clip.start);
+    if everything {
+        for command in sync_other_lanes(&sim, &timeline, &shift)? {
+            record(&mut sim, command)?;
+        }
+        lanes.extend(
+            sim.tracks
+                .iter()
+                .filter(|t| !t.locked)
+                .map(|t| t.id.clone()),
+        );
+    }
+
+    // 3. Close the gaps on every lane that has to stay in sync with the clip.
     let mut moves: Vec<(Micros, String, String)> = Vec::new();
     for track in sim.tracks.iter().filter(|t| lanes.contains(&t.id)) {
         for s in &track.segments {
@@ -177,7 +222,9 @@ pub fn remove_ranges(
                 to_start: from_start - shift(from_start),
             },
         )
-        .map_err(|error| format!("the cuts would make clips overlap on a linked lane ({error})"))?;
+        .map_err(|error| {
+            format!("the cuts would make clips overlap on a rippled lane ({error})")
+        })?;
     }
 
     Ok(CutPlan {
@@ -187,6 +234,157 @@ pub fn remove_ranges(
         },
         removed,
         cuts: timeline.len(),
+    })
+}
+
+/// The edits that take the timeline stretches `cuts` out of every unlocked
+/// clip that overlaps one — splitting, removing, or (text) shortening and
+/// re-timing — leaving the moves to the caller. See [`remove_ranges_in_sync`].
+fn sync_other_lanes(
+    project: &Project,
+    cuts: &[TimeRange],
+    shift: &dyn Fn(Micros) -> Micros,
+) -> Result<Vec<EditCommand>, String> {
+    let landing = |t: Micros| t - shift(t);
+    let overlaps = |s: &crate::modules::project::document::Segment| {
+        cuts.iter()
+            .any(|c| s.target_range.start < c.end() && c.start < s.target_range.end())
+    };
+    let mut sim = project.clone();
+    let mut commands = Vec::new();
+    let mut record = |sim: &mut Project, command: EditCommand| -> Result<(), String> {
+        command.apply(sim)?;
+        commands.push(command);
+        Ok(())
+    };
+
+    // Text first: shortened in place, never split.
+    let texts: Vec<String> = sim
+        .tracks
+        .iter()
+        .filter(|t| !t.locked)
+        .flat_map(|t| &t.segments)
+        .filter(|s| overlaps(s) && sim.materials.text(&s.material_id).is_some())
+        .map(|s| s.id.clone())
+        .collect();
+    for id in texts {
+        let Some((track, segment)) = sim.segment(&id) else {
+            continue;
+        };
+        let start = landing(segment.target_range.start);
+        let duration = landing(segment.target_range.end()) - start;
+        if duration < MIN_KEEP {
+            let index = track.segments.iter().position(|s| s.id == id).unwrap_or(0);
+            let command = EditCommand::RemoveSegment {
+                track_id: track.id.clone(),
+                segment: segment.clone(),
+                index,
+            };
+            record(&mut sim, command)?;
+            continue;
+        }
+        let segment = segment.clone();
+        // Text runs at speed 1, so the source shortens with the timeline.
+        let after_source = TimeRange::new(segment.source_range.start, duration);
+        let trim = EditCommand::TrimSegment {
+            segment_id: id.clone(),
+            before_target: segment.target_range,
+            before_source: segment.source_range,
+            after_target: TimeRange::new(segment.target_range.start, duration),
+            after_source,
+        };
+        record(&mut sim, trim)?;
+        if let Some(retimed) = retime_caption(&sim, &segment, start, &landing) {
+            record(&mut sim, retimed)?;
+        }
+    }
+
+    // Everything else is cut like the clip: split at every edge inside it,
+    // then remove what lies inside a cut. Splitting a linked clip splits its
+    // partners too, so later lanes find theirs already cut. The text clips
+    // shortened above are left out: until the moves they still sit over the
+    // cuts in the old times, and would be cut a second time.
+    let is_text = |sim: &Project, s: &crate::modules::project::document::Segment| {
+        sim.materials.text(&s.material_id).is_some()
+    };
+    let edges: BTreeSet<Micros> = cuts.iter().flat_map(|c| [c.start, c.end()]).collect();
+    for at in edges {
+        loop {
+            let piece = sim
+                .tracks
+                .iter()
+                .filter(|t| !t.locked)
+                .flat_map(|t| &t.segments)
+                .find(|s| {
+                    s.target_range.start < at
+                        && at < s.target_range.end()
+                        && overlaps(s)
+                        && !is_text(&sim, s)
+                })
+                .map(|s| s.id.clone());
+            let Some(piece) = piece else { break };
+            let split = split_at(&sim, &piece, at)?;
+            record(&mut sim, split)?;
+        }
+    }
+    loop {
+        let doomed = sim.tracks.iter().filter(|t| !t.locked).find_map(|t| {
+            t.segments
+                .iter()
+                .position(|s| {
+                    !is_text(&sim, s)
+                        && cuts.iter().any(|c| {
+                            s.target_range.start >= c.start && s.target_range.end() <= c.end()
+                        })
+                })
+                .map(|index| (t.id.clone(), index, t.segments[index].clone()))
+        });
+        let Some((track_id, index, segment)) = doomed else {
+            break;
+        };
+        record(
+            &mut sim,
+            EditCommand::RemoveSegment {
+                track_id,
+                segment,
+                index,
+            },
+        )?;
+    }
+    Ok(commands)
+}
+
+/// A caption's words re-timed for a clip that will start at `start` once the
+/// cuts close: every word through `landing`, back into the clip's source time.
+fn retime_caption(
+    project: &Project,
+    segment: &crate::modules::project::document::Segment,
+    start: Micros,
+    landing: &dyn Fn(Micros) -> Micros,
+) -> Option<EditCommand> {
+    let material = project.materials.text(&segment.material_id)?;
+    let caption = material.caption.as_ref()?;
+    let shared = project
+        .tracks
+        .iter()
+        .flat_map(|t| &t.segments)
+        .filter(|s| s.material_id == material.id)
+        .count()
+        > 1;
+    if caption.words.is_empty() || shared {
+        return None;
+    }
+    let source = segment.source_range.start;
+    let to_timeline = |w: Micros| w - source + segment.target_range.start;
+    let to_source = |t: Micros| landing(t) - start + source;
+    let mut after = material.clone();
+    for word in &mut after.caption.as_mut()?.words {
+        word.start = to_source(to_timeline(word.start));
+        word.end = to_source(to_timeline(word.end)).max(word.start);
+    }
+    (after != *material).then(|| EditCommand::SetTextMaterial {
+        before: material.clone(),
+        after,
     })
 }
 
@@ -484,5 +682,124 @@ mod tests {
         let kf = &tail.keyframes[0].keyframes;
         // Rebased onto the tail piece, which starts six seconds into the take.
         assert_eq!(kf.last().unwrap().time, 4 * S);
+    }
+
+    fn named(p: &Project, name: &str) -> Vec<(Micros, Micros, Micros)> {
+        lane(p, p.tracks.iter().position(|t| t.name == name).unwrap())
+    }
+
+    /// The take of [`project`], with captions over it made before the cut.
+    fn captioned() -> Project {
+        use crate::modules::captions::{edit, CaptionStyle, Cue, TimedWord};
+        let w = |text: &str, a: Micros, b: Micros| TimedWord {
+            text: text.into(),
+            start: a,
+            end: b,
+        };
+        let mut p = project();
+        let cues = [
+            Cue {
+                words: vec![w("one", S / 2, S)],
+                ..Cue::new(S / 2, 3 * S / 2, "one")
+            },
+            Cue {
+                words: vec![
+                    w("two", 16 * S / 10, 19 * S / 10),
+                    w("three", 32 * S / 10, 36 * S / 10),
+                ],
+                ..Cue::new(16 * S / 10, 4 * S, "two three")
+            },
+            Cue {
+                words: vec![w("gone", 63 * S / 10, 7 * S)],
+                ..Cue::new(62 * S / 10, 78 * S / 10, "gone")
+            },
+            Cue {
+                words: vec![w("four", 86 * S / 10, 9 * S)],
+                ..Cue::new(85 * S / 10, 95 * S / 10, "four")
+            },
+        ];
+        let style = CaptionStyle::default_for(&p.canvas);
+        let placed = edit::place(&p, &cues, &style, edit::PlaceOptions::default()).unwrap();
+        p.materials.texts.extend(placed.materials);
+        placed.command.apply(&mut p).unwrap();
+        p
+    }
+
+    #[test]
+    fn keeping_everything_in_sync_ripples_captions_and_music_in_one_step() {
+        use crate::modules::captions::edit::cues;
+        let mut p = captioned();
+        let before = serde_json::to_value(&p).unwrap();
+        let cuts = [TimeRange::new(2 * S, S), TimeRange::new(6 * S, 2 * S)];
+        let plan = remove_ranges_in_sync(&p, "take-v", &cuts, "Remove silences", true).unwrap();
+        let mut history = History::new();
+        history.apply(&mut p, plan.command).unwrap();
+        let errors: Vec<_> = p
+            .validate()
+            .into_iter()
+            .filter(|i| i.severity == crate::modules::project::document::Severity::Error)
+            .collect();
+        assert!(errors.is_empty(), "{errors:?}");
+
+        // The take is cut as without the option.
+        assert_eq!(named(&p, "V1")[3], (7 * S, 5 * S, 20 * S));
+        // The music lost the same stretches and closed up with the take.
+        assert_eq!(
+            named(&p, "A2"),
+            vec![(0, 2 * S, 0), (2 * S, 3 * S, 3 * S), (5 * S, 12 * S, 8 * S)]
+        );
+        // Every caption word sits where its sound now is; the one inside a
+        // pause went with it.
+        let words: Vec<(String, Micros, Micros)> = cues(&p)
+            .into_iter()
+            .flat_map(|c| c.words)
+            .map(|w| (w.text, w.start, w.end))
+            .collect();
+        assert_eq!(
+            words,
+            vec![
+                ("one".into(), S / 2, S),
+                ("two".into(), 16 * S / 10, 19 * S / 10),
+                ("three".into(), 22 * S / 10, 26 * S / 10),
+                ("four".into(), 56 * S / 10, 6 * S),
+            ]
+        );
+        let texts: Vec<(Micros, Micros)> = cues(&p).iter().map(|c| (c.start, c.end)).collect();
+        assert_eq!(
+            texts,
+            vec![
+                (S / 2, 3 * S / 2),
+                (16 * S / 10, 3 * S),
+                (55 * S / 10, 65 * S / 10)
+            ]
+        );
+
+        // One undo gives everything back, byte for byte.
+        history.undo(&mut p).unwrap();
+        assert_eq!(serde_json::to_value(&p).unwrap(), before);
+    }
+
+    #[test]
+    fn without_sync_other_lanes_stay_put() {
+        let mut p = captioned();
+        let captions_before = named(&p, crate::modules::captions::edit::LANE_NAME);
+        let plan =
+            remove_ranges_in_sync(&p, "take-v", &[TimeRange::new(2 * S, S)], "Cut", false).unwrap();
+        History::new().apply(&mut p, plan.command).unwrap();
+        assert_eq!(
+            named(&p, crate::modules::captions::edit::LANE_NAME),
+            captions_before
+        );
+        assert_eq!(named(&p, "A2"), vec![(0, 20 * S, 0)]);
+    }
+
+    #[test]
+    fn a_locked_lane_does_not_ripple_even_in_sync() {
+        let mut p = captioned();
+        p.tracks.iter_mut().find(|t| t.name == "A2").unwrap().locked = true;
+        let plan =
+            remove_ranges_in_sync(&p, "take-v", &[TimeRange::new(2 * S, S)], "Cut", true).unwrap();
+        History::new().apply(&mut p, plan.command).unwrap();
+        assert_eq!(named(&p, "A2"), vec![(0, 20 * S, 0)]);
     }
 }
