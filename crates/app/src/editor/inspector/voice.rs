@@ -107,7 +107,7 @@ impl Editor {
                 "Loudness",
                 div()
                     .font_family(FONT_MONO)
-                    .text_xs()
+                    .text_size(px(TEXT_LABEL))
                     .text_color(rgb(TEXT))
                     .child(readout),
             ));

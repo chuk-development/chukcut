@@ -73,10 +73,10 @@ fn wheel_title(kind: WheelKind) -> &'static str {
 
 fn channel_colour(channel: CurveChannel) -> u32 {
     match channel {
-        CurveChannel::Master => 0xe6e6e6,
-        CurveChannel::Red => 0xe24c4c,
-        CurveChannel::Green => 0x4cc35a,
-        CurveChannel::Blue => 0x4c7de2,
+        CurveChannel::Master => CURVE_MASTER,
+        CurveChannel::Red => CURVE_RED,
+        CurveChannel::Green => CURVE_GREEN,
+        CurveChannel::Blue => CURVE_BLUE,
     }
 }
 
@@ -290,18 +290,21 @@ impl Editor {
         let picker = div()
             .id("lut-picker")
             .w(px(220.0))
-            .h(px(26.0))
-            .px_2()
+            .h(px(CONTROL_H))
+            .px(px(8.0))
             .flex()
             .flex_row()
             .items_center()
             .justify_between()
-            .rounded(px(4.0))
-            .bg(rgb(0x1d1d1d))
+            .rounded(px(R_SM))
+            .bg(rgb(WELL))
             .border_1()
-            .border_color(rgb(if open { ACCENT } else { 0x333333 }))
+            .border_color(rgb(if open { ACCENT } else { BORDER }))
+            .when(!open, |this| {
+                this.hover(|style| style.border_color(rgb(BORDER_STRONG)))
+            })
             .cursor_pointer()
-            .text_xs()
+            .text_size(px(TEXT_LABEL))
             .text_color(rgb(if current.is_some() { TEXT } else { TEXT_DIM }))
             .on_click(cx.listener(|this, _, _, cx| {
                 let grading = &mut this.inspector.grading;
@@ -350,9 +353,9 @@ impl Editor {
                 .px_2()
                 .flex()
                 .items_center()
-                .rounded(px(3.0))
+                .rounded(px(R_XS))
                 .cursor_pointer()
-                .text_xs()
+                .text_size(px(TEXT_LABEL))
                 .text_color(rgb(if active { ACCENT } else { TEXT }))
                 .hover(|style| style.bg(rgb(PANEL_RAISED)))
                 .child(label)
@@ -361,8 +364,10 @@ impl Editor {
             .flex()
             .flex_col()
             .p_1()
-            .rounded(px(4.0))
-            .bg(rgb(0x1d1d1d))
+            .rounded(px(R_SM))
+            .bg(rgb(OVERLAY))
+            .border_1()
+            .border_color(rgb(BORDER))
             .child(
                 item("lut-none".into(), "None".into(), selected.is_none())
                     .on_click(cx.listener(|this, _, _, cx| this.choose_lut(None, cx))),
@@ -386,8 +391,8 @@ impl Editor {
                 div()
                     .px_2()
                     .py_1()
-                    .text_xs()
-                    .text_color(rgb(TEXT_DIM))
+                    .text_size(px(TEXT_CAPTION))
+                    .text_color(rgb(TEXT_MUTED))
                     .child("The LUT library is empty."),
             );
         }
@@ -493,7 +498,7 @@ impl Editor {
                     .rounded_full()
                     .border_2()
                     .border_color(if selected {
-                        rgb(0xffffff).into()
+                        rgb(TEXT).into()
                     } else {
                         gpui::transparent_black()
                     })
@@ -510,15 +515,15 @@ impl Editor {
                             .size(px(16.0))
                             .rounded_full()
                             .bg(band_colour(i))
-                            .when(touched, |this| this.border_1().border_color(rgb(0xffffff))),
+                            .when(touched, |this| this.border_1().border_color(rgb(TEXT))),
                     )
             }));
         let rows = vec![
             label_row(
                 HSL_BANDS[band as usize].0,
                 div()
-                    .text_xs()
-                    .text_color(rgb(TEXT_DIM))
+                    .text_size(px(TEXT_CAPTION))
+                    .text_color(rgb(TEXT_MUTED))
                     .child("Hue · Saturation · Luminance"),
             ),
             swatches.into_any_element(),
@@ -591,7 +596,7 @@ impl Editor {
                             .size(px(16.0))
                             .rounded_full()
                             .bg(rgb(channel_colour(c)))
-                            .when(edited, |this| this.border_2().border_color(rgb(0x1d1d1d))),
+                            .when(edited, |this| this.border_2().border_color(rgb(WELL))),
                     )
             }));
 
@@ -604,10 +609,10 @@ impl Editor {
             .w(px(CURVE_PX))
             .h(px(CURVE_PX))
             .flex_none()
-            .rounded(px(4.0))
-            .bg(rgb(0x1a1a1a))
+            .rounded(px(R_SM))
+            .bg(rgb(WELL))
             .border_1()
-            .border_color(rgb(0x333333))
+            .border_color(rgb(BORDER))
             .cursor_crosshair()
             .on_mouse_down(
                 MouseButton::Left,
@@ -655,8 +660,8 @@ impl Editor {
             tabs.into_any_element(),
             editor_box.into_any_element(),
             div()
-                .text_xs()
-                .text_color(rgb(TEXT_DIM))
+                .text_size(px(TEXT_CAPTION))
+                .text_color(rgb(TEXT_MUTED))
                 .child("Click to add a point, drag to move it, right-click to remove it.")
                 .into_any_element(),
         ];
@@ -883,7 +888,8 @@ impl Editor {
                     .items_center()
                     .child(
                         div()
-                            .text_xs()
+                            .text_size(px(TEXT_LABEL))
+                            .font_weight(gpui::FontWeight::MEDIUM)
                             .text_color(rgb(TEXT))
                             .child(wheel_title(kind)),
                     )
@@ -980,7 +986,7 @@ fn paint_curve(
             line.move_to(at(a.0, a.1));
             line.line_to(at(z.0, z.1));
             if let Ok(path) = line.build() {
-                window.paint_path(path, rgb(0x2c2c2c));
+                window.paint_path(path, rgb(HAIRLINE));
             }
         }
     }
@@ -988,7 +994,7 @@ fn paint_curve(
     diagonal.move_to(at(0.0, 0.0));
     diagonal.line_to(at(1.0, 1.0));
     if let Ok(path) = diagonal.build() {
-        window.paint_path(path, rgb(0x3a3a3a));
+        window.paint_path(path, rgb(BORDER));
     }
 
     let trace = |window: &mut Window, points: &[[f32; 2]], colour: Hsla, width: f32| {
@@ -1018,7 +1024,7 @@ fn paint_curve(
     trace(window, points, rgb(colour).into(), 2.0);
     for p in points {
         let centre = at(p[0], p[1]);
-        window.paint_quad(disc(centre, 4.5, rgb(0x1a1a1a)));
+        window.paint_quad(disc(centre, 4.5, rgb(WELL)));
         window.paint_quad(ring(centre, 4.5, rgb(colour), 1.5));
     }
 }
@@ -1052,19 +1058,19 @@ fn paint_wheel(window: &mut Window, b: Bounds<Pixels>, wheel: Wheel) {
     // colour further out".
     for k in 0..12 {
         let radius = r * (1.0 - k as f32 / 12.0);
-        window.paint_quad(disc(centre, radius, rgb(0x2a2a2a).opacity(0.14)));
+        window.paint_quad(disc(centre, radius, rgb(OVERLAY).opacity(0.14)));
     }
-    window.paint_quad(ring(centre, r, rgb(0x1a1a1a), 1.0));
+    window.paint_quad(ring(centre, r, rgb(PANEL), 1.0));
     // Cross-hair at the neutral centre.
     for (dx, dy) in [(1.0, 0.0), (0.0, 1.0)] {
         let mut line = PathBuilder::stroke(px(1.0));
         line.move_to(point(px(cx0 - 6.0 * dx), px(cy0 - 6.0 * dy)));
         line.line_to(point(px(cx0 + 6.0 * dx), px(cy0 + 6.0 * dy)));
         if let Ok(path) = line.build() {
-            window.paint_path(path, rgb(0x9a9a9a));
+            window.paint_path(path, rgb(TEXT_DIM));
         }
     }
     let puck = point(px(cx0 + wheel.x * r), px(cy0 - wheel.y * r));
-    window.paint_quad(disc(puck, 6.0, rgb(0x1a1a1a).opacity(0.6)));
-    window.paint_quad(ring(puck, 6.0, rgb(0xffffff), 2.0));
+    window.paint_quad(disc(puck, 6.0, rgb(PANEL).opacity(0.6)));
+    window.paint_quad(ring(puck, 6.0, rgb(TEXT), 2.0));
 }

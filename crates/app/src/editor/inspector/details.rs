@@ -65,22 +65,11 @@ impl Editor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let header = div()
-            .h(px(40.0))
-            .flex_none()
-            .px_3()
-            .flex()
-            .items_center()
-            .border_b_1()
-            .border_color(rgb(BG))
-            .text_sm()
-            .font_weight(gpui::FontWeight::MEDIUM)
-            .text_color(rgb(ACCENT))
-            .child(if self.inspector.settings.is_some() {
-                "Project settings"
-            } else {
-                "Details"
-            });
+        let header = crate::ui::PanelHeader::new().title(if self.inspector.settings.is_some() {
+            "Project settings"
+        } else {
+            "Details"
+        });
 
         let (body, footer) = if self.inspector.settings.is_some() {
             (self.settings_body(cx), self.settings_footer(cx))
@@ -102,35 +91,23 @@ impl Editor {
                     .overflow_y_scrollbar()
                     .child(body),
             )
-            .child(
-                div()
-                    .flex_none()
-                    .h(px(44.0))
-                    .px_3()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_end()
-                    .gap_2()
-                    .border_t_1()
-                    .border_color(rgb(BG))
-                    .child(footer),
-            )
+            .child(panel_footer(footer))
             .into_any_element()
     }
 
     fn details_body(&self) -> AnyElement {
         let row = |label: &'static str, value: String| {
             div()
+                .min_h(px(ROW_H))
                 .flex()
                 .flex_row()
-                .gap_4()
-                .py(px(7.0))
+                .items_center()
+                .gap(px(16.0))
                 .child(
                     div()
                         .w(px(140.0))
                         .flex_none()
-                        .text_xs()
+                        .text_size(px(TEXT_LABEL))
                         .text_color(rgb(TEXT_DIM))
                         .child(label),
                 )
@@ -138,7 +115,10 @@ impl Editor {
                     div()
                         .flex_1()
                         .min_w(px(0.0))
-                        .text_xs()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_size(px(TEXT_LABEL))
                         .text_color(rgb(TEXT))
                         .child(value),
                 )
@@ -158,8 +138,9 @@ impl Editor {
         div()
             .flex()
             .flex_col()
-            .px_3()
-            .py_2()
+            .gap(px(2.0))
+            .px(px(PAD))
+            .py(px(8.0))
             .child(row("Name", self.project.name.clone()))
             .child(row("Path", path))
             .child(row("Colour space", "Rec.709 SDR".into()))
@@ -171,7 +152,7 @@ impl Editor {
                 "Proxy",
                 "Automatic, for footage too heavy to play".into(),
             ))
-            .child(div().my_2().h(px(1.0)).bg(rgb(0x333333)))
+            .child(div().my(px(8.0)).h(px(1.0)).bg(rgb(HAIRLINE)))
             .child(row("Timeline name", "Timeline 01".into()))
             .child(row(
                 "Aspect ratio",
@@ -223,14 +204,19 @@ impl Editor {
         let text = |state: &Entity<InputState>, width: f32| {
             div()
                 .w(px(width))
-                .h(px(28.0))
+                .h(px(CONTROL_H))
                 .flex()
                 .items_center()
-                .rounded(px(4.0))
-                .bg(rgb(0x1d1d1d))
+                .rounded(px(R_SM))
+                .bg(rgb(WELL))
                 .border_1()
-                .border_color(rgb(0x333333))
-                .child(Input::new(state).appearance(false).small().text_xs())
+                .border_color(rgb(BORDER))
+                .child(
+                    Input::new(state)
+                        .appearance(false)
+                        .xsmall()
+                        .text_size(px(TEXT_LABEL)),
+                )
         };
         let presets = |items: Vec<(String, AnyElement)>| {
             div()
@@ -289,14 +275,14 @@ impl Editor {
                 .flex()
                 .flex_row()
                 .items_start()
-                .gap_4()
+                .gap(px(16.0))
                 .py(px(6.0))
                 .child(
                     div()
                         .w(px(120.0))
                         .pt(px(6.0))
                         .flex_none()
-                        .text_xs()
+                        .text_size(px(TEXT_LABEL))
                         .text_color(rgb(TEXT_DIM))
                         .child(label),
                 )
@@ -306,8 +292,8 @@ impl Editor {
         div()
             .flex()
             .flex_col()
-            .px_3()
-            .py_2()
+            .px(px(PAD))
+            .py(px(8.0))
             .child(row("Name", text(&form.name, 300.0).into_any_element()))
             .child(row(
                 "Aspect ratio",
@@ -321,7 +307,12 @@ impl Editor {
                     .items_center()
                     .gap_2()
                     .child(text(&form.width, 90.0))
-                    .child(div().text_xs().text_color(rgb(TEXT_DIM)).child("×"))
+                    .child(
+                        div()
+                            .text_size(px(TEXT_LABEL))
+                            .text_color(rgb(TEXT_MUTED))
+                            .child("×"),
+                    )
                     .child(text(&form.height, 90.0))
                     .into_any_element(),
             ))
@@ -335,10 +326,16 @@ impl Editor {
                     .child(presets(fps_buttons))
                     .into_any_element(),
             ))
-            .child(div().pt_3().text_xs().text_color(rgb(TEXT_DIM)).child(
-                "Changing the frame rate moves nothing: clips keep their times, \
+            .child(
+                div()
+                    .pt_3()
+                    .text_size(px(TEXT_CAPTION))
+                    .text_color(rgb(TEXT_MUTED))
+                    .child(
+                        "Changing the frame rate moves nothing: clips keep their times, \
                          only playback and export change.",
-            ))
+                    ),
+            )
             .into_any_element()
     }
 
@@ -407,15 +404,18 @@ fn preset_chip(
     div()
         .id(id.into())
         .h(px(24.0))
-        .px_2()
+        .px(px(8.0))
         .flex()
         .items_center()
-        .rounded(px(4.0))
+        .rounded(px(R_SM))
         .bg(rgb(PANEL_RAISED))
-        .text_xs()
-        .text_color(rgb(TEXT))
+        .border_1()
+        .border_color(rgb(HAIRLINE))
+        .text_size(px(TEXT_LABEL))
+        .font_family(FONT_MONO)
+        .text_color(rgb(TEXT_DIM))
         .cursor_pointer()
-        .hover(|style| style.bg(rgb(BORDER)))
+        .hover(|style| style.bg(rgb(OVERLAY)).text_color(rgb(TEXT)))
         .on_click(on_click)
         .child(label.into())
 }

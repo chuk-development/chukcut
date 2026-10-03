@@ -77,6 +77,19 @@ glyphs! {
     /// Export a file.
     EXPORT = r#"<path d="M12 15.5V4.5M7.5 9L12 4.5 16.5 9"/><path d="M5 14v3.5A2 2 0 0 0 7 19.5h10a2 2 0 0 0 2-2V14"/>"#;
     PLUS = r#"<path d="M12 5.5v13M5.5 12h13"/>"#;
+
+    /// Timeline: split at the playhead — two clip halves around a cut.
+    SPLIT = r#"<path d="M9 5H5.5v14H9"/><path d="M15 5h3.5v14H15"/><path d="M12 3v18"/>"#;
+    /// Timeline: delete from the clip's start to the playhead.
+    DELETE_LEFT = r#"<path d="M9 5H5.5v14H9" stroke-dasharray="2 3"/><path d="M15 5h3.5v14H15"/><path d="M12 3v18"/>"#;
+    /// Timeline: delete from the playhead to the clip's end.
+    DELETE_RIGHT = r#"<path d="M9 5H5.5v14H9"/><path d="M15 5h3.5v14H15" stroke-dasharray="2 3"/><path d="M12 3v18"/>"#;
+    /// Timeline: snapping — two clips meeting on a guide.
+    SNAP = r#"<path d="M12 3v18"/><rect x="3" y="7.5" width="6" height="9" rx="1.5"/><rect x="15" y="7.5" width="6" height="9" rx="1.5"/>"#;
+    /// Timeline: a transition between two clips.
+    TRANSITION = r#"<path d="M4 6l7.5 6L4 18z"/><path d="M20 6l-7.5 6 7.5 6z"/>"#;
+    /// Timeline: zoom so the whole edit fits.
+    ZOOM_FIT = r#"<path d="M4 8.5V6a2 2 0 0 1 2-2h2.5M15.5 4H18a2 2 0 0 1 2 2v2.5M20 15.5V18a2 2 0 0 1-2 2h-2.5M8.5 20H6a2 2 0 0 1-2-2v-2.5"/><path d="M7.5 12h9M10 9.5L7.5 12l2.5 2.5M14 9.5l2.5 2.5-2.5 2.5"/>"#;
 }
 
 /// Anything the kit can draw as an icon: one of ours, or a Lucide glyph.

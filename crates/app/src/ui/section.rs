@@ -70,6 +70,13 @@ impl SectionHeader {
         self
     }
 
+    /// An enable checkbox that shows a state but cannot be changed here.
+    pub(crate) fn checked(mut self, enabled: bool) -> Self {
+        self.enabled = Some(enabled);
+        self.on_enable = None;
+        self
+    }
+
     pub(crate) fn on_reset(
         mut self,
         handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
@@ -99,7 +106,7 @@ impl RenderOnce for SectionHeader {
             let on_enable = self.on_enable.clone();
             Checkbox::new(SharedString::from(format!("{id}-enable")))
                 .checked(enabled)
-                .disabled(disabled)
+                .disabled(disabled || on_enable.is_none())
                 .on_click(move |checked: &bool, window, cx| {
                     if let Some(on_enable) = &on_enable {
                         on_enable(*checked, window, cx);

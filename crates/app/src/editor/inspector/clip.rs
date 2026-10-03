@@ -166,20 +166,7 @@ impl Editor {
                     .overflow_y_scrollbar()
                     .child(body),
             )
-            .children(footer.map(|footer| {
-                div()
-                    .flex_none()
-                    .h(px(44.0))
-                    .px_3()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_end()
-                    .gap_2()
-                    .border_t_1()
-                    .border_color(rgb(BG))
-                    .child(footer)
-            }))
+            .children(footer.map(panel_footer))
             .into_any_element()
     }
 
@@ -244,13 +231,15 @@ impl Editor {
                 "Mode",
                 div()
                     .w(px(160.0))
-                    .h(px(26.0))
-                    .px_2()
+                    .h(px(CONTROL_H))
+                    .px(px(8.0))
                     .flex()
                     .items_center()
-                    .rounded(px(4.0))
-                    .bg(rgb(0x1d1d1d))
-                    .text_xs()
+                    .rounded(px(R_SM))
+                    .bg(rgb(WELL))
+                    .border_1()
+                    .border_color(rgb(HAIRLINE))
+                    .text_size(px(TEXT_LABEL))
                     .text_color(rgb(DISABLED))
                     .child("Normal"),
             ),
@@ -286,12 +275,12 @@ impl Editor {
 
     fn align_buttons(&self, cx: &mut Context<Self>) -> AnyElement {
         let buttons = [
-            (Align::Left, icons::ALIGN_LEFT),
-            (Align::HCenter, icons::ALIGN_HCENTER),
-            (Align::Right, icons::ALIGN_RIGHT),
-            (Align::Top, icons::ALIGN_TOP),
-            (Align::VCenter, icons::ALIGN_VCENTER),
-            (Align::Bottom, icons::ALIGN_BOTTOM),
+            (Align::Left, icons::ALIGN_LEFT, "Align left"),
+            (Align::HCenter, icons::ALIGN_HCENTER, "Centre horizontally"),
+            (Align::Right, icons::ALIGN_RIGHT, "Align right"),
+            (Align::Top, icons::ALIGN_TOP, "Align top"),
+            (Align::VCenter, icons::ALIGN_VCENTER, "Centre vertically"),
+            (Align::Bottom, icons::ALIGN_BOTTOM, "Align bottom"),
         ];
         div()
             .flex()
@@ -300,24 +289,20 @@ impl Editor {
                 div()
                     .flex()
                     .flex_row()
-                    .gap_1()
-                    .p(px(3.0))
-                    .rounded(px(4.0))
-                    .bg(rgb(0x1d1d1d))
-                    .children(buttons.into_iter().enumerate().map(|(i, (align, data))| {
-                        div()
-                            .id(("align", i))
-                            .w(px(30.0))
-                            .h(px(22.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(3.0))
-                            .cursor_pointer()
-                            .hover(|style| style.bg(rgb(PANEL_RAISED)))
-                            .on_click(cx.listener(move |this, _, _, cx| this.align(align, cx)))
-                            .child(icon(data, 15.0, TEXT))
-                    })),
+                    .gap(px(2.0))
+                    .p(px(2.0))
+                    .rounded(px(R_SM + 1.0))
+                    .bg(rgb(WELL))
+                    .border_1()
+                    .border_color(rgb(HAIRLINE))
+                    .children(buttons.into_iter().enumerate().map(
+                        |(i, (align, data, tooltip))| {
+                            crate::ui::IconButton::new(("align", i), crate::ui::Glyph(data))
+                                .small()
+                                .tooltip(tooltip)
+                                .on_click(cx.listener(move |this, _, _, cx| this.align(align, cx)))
+                        },
+                    )),
             )
             .into_any_element()
     }
@@ -447,15 +432,21 @@ impl Editor {
                         .w(px(24.0))
                         .flex()
                         .justify_center()
-                        .text_size(px(10.0))
-                        .text_color(rgb(TEXT_DIM))
+                        .text_size(px(TEXT_BADGE))
+                        .font_family(FONT_MONO)
+                        .text_color(rgb(TEXT_MUTED))
                         .child(format!("{knot}x"))
                 }));
         let speed_row = div()
             .flex()
             .flex_col()
             .gap(px(4.0))
-            .child(div().text_xs().text_color(rgb(TEXT)).child("Speed"))
+            .child(
+                div()
+                    .text_size(px(TEXT_LABEL))
+                    .text_color(rgb(TEXT_DIM))
+                    .child("Speed"),
+            )
             .child(
                 div()
                     .flex()
@@ -483,7 +474,12 @@ impl Editor {
             .flex()
             .flex_col()
             .gap(px(4.0))
-            .child(div().text_xs().text_color(rgb(TEXT)).child("Duration"))
+            .child(
+                div()
+                    .text_size(px(TEXT_LABEL))
+                    .text_color(rgb(TEXT_DIM))
+                    .child("Duration"),
+            )
             .child(
                 div()
                     .flex()
@@ -492,7 +488,8 @@ impl Editor {
                     .gap_3()
                     .child(
                         div()
-                            .text_xs()
+                            .text_size(px(TEXT_LABEL))
+                            .font_family(FONT_MONO)
                             .text_color(rgb(TEXT_DIM))
                             .child(format!("{original:.1}s")),
                     )
@@ -502,8 +499,8 @@ impl Editor {
                             .flex()
                             .flex_row()
                             .items_center()
-                            .child(div().flex_1().h(px(1.0)).bg(rgb(0x555555)))
-                            .child(icon(icons::NEXT, 12.0, 0x777777).ml(px(-5.0))),
+                            .child(div().flex_1().h(px(1.0)).bg(rgb(BORDER_STRONG)))
+                            .child(icon(icons::NEXT, 12.0, TEXT_MUTED).ml(px(-5.0))),
                     )
                     .child(duration_box),
             );
@@ -517,8 +514,8 @@ impl Editor {
                 .gap_2()
                 .child(
                     div()
-                        .text_xs()
-                        .text_color(rgb(DISABLED))
+                        .text_size(px(TEXT_CAPTION))
+                        .text_color(rgb(TEXT_MUTED))
                         .child("Not in the engine yet"),
                 )
                 .child(Switch::new("speed-pitch").checked(false).disabled(true)),
@@ -527,9 +524,9 @@ impl Editor {
         div()
             .flex()
             .flex_col()
-            .gap_4()
-            .px_3()
-            .py_3()
+            .gap(px(16.0))
+            .px(px(PAD))
+            .py(px(PAD))
             .child(speed_row)
             .child(duration_row)
             .child(pitch)
