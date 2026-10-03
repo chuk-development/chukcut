@@ -34,12 +34,15 @@ mod animation;
 mod clip;
 mod controls;
 mod details;
+mod easing;
 mod effects;
 mod grading;
+mod speed;
 mod tracking;
 mod voice;
 
 pub(super) use details::SettingsForm;
+pub(super) use easing::{easing_submenu, EasingTarget};
 
 // --- state -----------------------------------------------------------------------
 
@@ -67,6 +70,10 @@ pub(crate) struct Inspector {
     effects: effects::EffectsPanel,
     /// The Animation tab's hover, sliders and drags.
     animation: animation::AnimationTab,
+    /// The Speed tab's curve editor.
+    speed: speed::SpeedTab,
+    /// The keyframe easing graph.
+    easing: easing::EasingState,
 }
 
 /// The widgets behind one property: a number box and, for most, a slider.
@@ -130,6 +137,10 @@ pub(crate) enum Prop {
     /// the same preview-then-commit machinery as a slider drag.
     Curve(CurveChannel),
     WheelPuck(WheelKind),
+    /// A point of the speed curve being dragged.
+    SpeedCurve,
+    /// A handle of the keyframe easing graph being dragged.
+    Easing,
 }
 
 /// The fixed facts about a [`Prop`].
@@ -207,6 +218,8 @@ impl Prop {
             Prop::WheelLuma(_) => colour("Luminance", -100.0),
             Prop::Curve(_) => spec("Curve", 0.0, 1.0, 0.01, 0.0, 2, "", false),
             Prop::WheelPuck(_) => spec("Wheel", 0.0, 1.0, 0.01, 0.0, 2, "", false),
+            Prop::SpeedCurve => spec("Speed curve", 0.0, 1.0, 0.01, 0.0, 2, "", false),
+            Prop::Easing => spec("Easing", 0.0, 1.0, 0.01, 0.0, 2, "", false),
         }
     }
 
@@ -783,7 +796,14 @@ impl Editor {
             .segment(&segment_id)
             .map(|(_, s)| self.prop_value(prop, s));
         let tiny = 0.5 * 10f32.powi(-(spec.decimals as i32));
-        if current.is_some_and(|c| (c - value).abs() < tiny) {
+        // Under a speed curve the constant speed is dormant, so setting the
+        // value it already holds still means something: leave the curve.
+        let curved = matches!(prop, Prop::Speed | Prop::Duration)
+            && self
+                .project
+                .segment(&segment_id)
+                .is_some_and(|(_, s)| self.project.materials.speed_curve_of(s).is_some());
+        if !curved && current.is_some_and(|c| (c - value).abs() < tiny) {
             self.refresh(cx);
             return;
         }

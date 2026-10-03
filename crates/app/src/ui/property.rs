@@ -26,6 +26,15 @@ pub(crate) enum KeyMark {
     OnKey,
 }
 
+/// What a right-click on a diamond opens (the keyframe's easing menu).
+pub(crate) type SlotMenu = Rc<
+    dyn Fn(
+        gpui::component::menu::PopupMenu,
+        &mut Window,
+        &mut gpui::Context<gpui::component::menu::PopupMenu>,
+    ) -> gpui::component::menu::PopupMenu,
+>;
+
 /// The keyframe controls of a row: previous, the diamond, next.
 #[derive(IntoElement)]
 pub(crate) struct KeyframeSlot {
@@ -35,6 +44,7 @@ pub(crate) struct KeyframeSlot {
     on_toggle: Option<OnClick>,
     on_prev: Option<OnClick>,
     on_next: Option<OnClick>,
+    menu: Option<SlotMenu>,
 }
 
 impl KeyframeSlot {
@@ -46,7 +56,14 @@ impl KeyframeSlot {
             on_toggle: None,
             on_prev: None,
             on_next: None,
+            menu: None,
         }
+    }
+
+    /// A right-click menu on the diamond.
+    pub(crate) fn context_menu(mut self, menu: SlotMenu) -> Self {
+        self.menu = Some(menu);
+        self
     }
 
     pub(crate) fn enabled(mut self, enabled: bool) -> Self {
@@ -137,13 +154,26 @@ impl RenderOnce for KeyframeSlot {
                 self.enabled && animated,
                 self.on_prev,
             ))
-            .child(action(
-                format!("{id}-key").into(),
-                diamond,
-                color,
-                self.enabled,
-                self.on_toggle,
-            ))
+            .child({
+                let key = action(
+                    format!("{id}-key").into(),
+                    diamond,
+                    color,
+                    self.enabled,
+                    self.on_toggle,
+                );
+                match self.menu.filter(|_| self.enabled && animated) {
+                    Some(menu) => {
+                        use gpui::component::menu::ContextMenuExt as _;
+                        div()
+                            .id(SharedString::from(format!("{id}-key-menu")))
+                            .child(key)
+                            .context_menu(move |m, window, cx| menu(m, window, cx))
+                            .into_any_element()
+                    }
+                    None => key.into_any_element(),
+                }
+            })
             .child(action(
                 format!("{id}-next").into(),
                 icons::CHEVRON_RIGHT,

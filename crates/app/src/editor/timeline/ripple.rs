@@ -87,6 +87,45 @@ pub(crate) fn trimmed(
     }
 }
 
+/// [`trimmed`] for a clip that may play on a speed curve: the same limits and
+/// clamps, with the source edges found through the curve
+/// (`project::speed::TimeMap::retimed_source`) instead of a constant speed.
+pub(crate) fn trimmed_in(
+    project: &Project,
+    segment: &Segment,
+    edge: Edge,
+    to: Micros,
+    limit: Option<Micros>,
+    anchored: bool,
+) -> (TimeRange, TimeRange) {
+    let map = project.materials.time_map(segment);
+    if !map.is_curved() {
+        return trimmed(segment, edge, to, limit, anchored);
+    }
+    let target = segment.target_range;
+    match edge {
+        Edge::Head => {
+            // Where the start of the material would play: a negative offset.
+            let earliest = target.start + map.offset_of_f(0).ceil() as Micros;
+            let earliest = if anchored { earliest } else { earliest.max(0) };
+            let to = to.clamp(earliest, target.end() - MIN_CLIP);
+            let duration = target.end() - to;
+            let source = map.retimed_source(TimeRange::new(to, duration));
+            let start = if anchored { target.start } else { to };
+            (TimeRange::new(start, duration), source)
+        }
+        Edge::Tail => {
+            let mut latest = Micros::MAX;
+            if let Some(limit) = limit {
+                latest = target.start + map.offset_of_f(limit).floor() as Micros;
+            }
+            let to = to.clamp(target.start + MIN_CLIP, latest.max(target.start + MIN_CLIP));
+            let new = TimeRange::new(target.start, to - target.start);
+            (new, map.retimed_source(new))
+        }
+    }
+}
+
 /// A trim, and with `ripple` every later clip on the lane shifted by however
 /// much the clip's end moved, so the lane keeps its spacing.
 pub(crate) fn trim(

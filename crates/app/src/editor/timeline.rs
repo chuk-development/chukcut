@@ -878,6 +878,40 @@ impl Editor {
             .map(|(t, _)| (id.to_string(), t))
     }
 
+    /// The keyframes of the diamond under a window point, for the easing
+    /// submenu: every property keyed at that instant, with the easing of the
+    /// first.
+    fn keyframe_easing_target(
+        &self,
+        position: Point<Pixels>,
+    ) -> Option<(
+        super::inspector::EasingTarget,
+        chukcut_engine::modules::project::Easing,
+    )> {
+        let (x, y) = self.lanes_local(position);
+        let (segment_id, at) = self.keyframe_hit(x, y)?;
+        let (_, segment) = self.project.segment(&segment_id)?;
+        let keyed: Vec<_> = segment
+            .keyframes
+            .iter()
+            .filter_map(|t| {
+                t.keyframes
+                    .iter()
+                    .find(|k| k.time == at)
+                    .map(|k| (t.property, k.easing))
+            })
+            .collect();
+        let current = keyed.first()?.1;
+        Some((
+            super::inspector::EasingTarget {
+                segment_id,
+                time: at,
+                properties: keyed.into_iter().map(|(p, _)| p).collect(),
+            },
+            current,
+        ))
+    }
+
     /// Whether a sound clip shows its fade handles: when it is selected or
     /// under the pointer, as CapCut shows them.
     fn shows_fades(&self, segment_id: &str) -> bool {
@@ -1227,7 +1261,14 @@ impl Editor {
         // On the magnetic main lane a head trim keeps the clip's start; the
         // lane closes up behind it.
         let anchored = edge == Edge::Head && self.timeline.magnet && self.is_main_track(&track.id);
-        Some(ripple::trimmed(segment, edge, to, limit, anchored))
+        Some(ripple::trimmed_in(
+            &self.project,
+            segment,
+            edge,
+            to,
+            limit,
+            anchored,
+        ))
     }
 
     pub(super) fn on_mouse_move(
@@ -2172,8 +2213,14 @@ impl Editor {
         let ripple = self.timeline.magnet && self.is_main_track(&track.id);
         let limit = ripple::source_limit(&self.project, &segment.material_id);
         let start = segment.target_range.start;
-        let (target, source) =
-            ripple::trimmed(segment, edge, at, limit, ripple && edge == Edge::Head);
+        let (target, source) = ripple::trimmed_in(
+            &self.project,
+            segment,
+            edge,
+            at,
+            limit,
+            ripple && edge == Edge::Head,
+        );
         let commands = ripple::trim(&self.project, &id, target, source, ripple);
         let label = match edge {
             Edge::Head => "Delete left",
@@ -3445,8 +3492,23 @@ impl Editor {
                 let focus = self.focus.clone();
                 move |menu, window, cx| {
                     let position = window.mouse_position();
-                    let state = editor.update(cx, |editor, cx| editor.context_target(position, cx));
-                    clip_menu(menu.action_context(focus.clone()), state)
+                    let (keyframe, state) = editor.update(cx, |editor, cx| {
+                        let keyframe = editor.keyframe_easing_target(position);
+                        (keyframe, editor.context_target(position, cx))
+                    });
+                    let menu = clip_menu(menu.action_context(focus.clone()), state);
+                    match keyframe {
+                        // A diamond under the pointer: its easing, too.
+                        Some((target, current)) => super::inspector::easing_submenu(
+                            menu,
+                            editor.downgrade(),
+                            target,
+                            current,
+                            window,
+                            cx,
+                        ),
+                        None => menu,
+                    }
                 }
             })
     }
@@ -3484,7 +3546,10 @@ impl Editor {
         } else {
             1.0
         };
-        if (speed - 1.0).abs() > 1e-3 {
+        if let Some(curve) = self.project.materials.speed_curve_of(segment) {
+            let label = curve.preset.map_or("Curve", |p| p.label());
+            name = format!("{label} · {name}");
+        } else if (speed - 1.0).abs() > 1e-3 {
             name = format!("{speed:.1}x · {name}");
         }
         let linked = self.project.materials.link_of(segment).is_some();

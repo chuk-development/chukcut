@@ -95,7 +95,7 @@ fn editable(points: &[[f32; 2]]) -> Vec<[f32; 2]> {
     }
 }
 
-fn local(bounds: Bounds<Pixels>, position: Point<Pixels>) -> (f32, f32) {
+pub(super) fn local(bounds: Bounds<Pixels>, position: Point<Pixels>) -> (f32, f32) {
     let w = f32::from(bounds.size.width).max(1.0);
     let h = f32::from(bounds.size.height).max(1.0);
     (
@@ -105,7 +105,7 @@ fn local(bounds: Bounds<Pixels>, position: Point<Pixels>) -> (f32, f32) {
 }
 
 /// A filled circle as a fully rounded quad.
-fn disc(
+pub(super) fn disc(
     centre: Point<Pixels>,
     radius: f32,
     colour: impl Into<gpui::Background>,
@@ -123,7 +123,7 @@ fn disc(
     )
 }
 
-fn ring(
+pub(super) fn ring(
     centre: Point<Pixels>,
     radius: f32,
     colour: impl Into<Hsla>,
