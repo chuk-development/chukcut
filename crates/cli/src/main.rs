@@ -26,6 +26,7 @@ use serde_json::{json, Value};
 use error::{CliError, CliResult};
 use ops::audio::*;
 use ops::look::*;
+use ops::mask::*;
 use ops::project::*;
 use ops::render::*;
 use ops::timeline::*;
@@ -99,6 +100,12 @@ enum Command {
     /// Add, change or remove effects.
     #[command(subcommand)]
     Effect(EffectCommand),
+    /// Add, change or remove a clip's shape masks.
+    Mask(On<MaskArgs>),
+    /// Key a colour out of a clip (green screen).
+    ChromaKey(On<ChromaKeyArgs>),
+    /// Set how a clip blends with the lanes beneath it, and its opacity.
+    Blend(On<BlendArgs>),
     /// Give a clip an In, Out or Combo animation preset.
     Animate(On<AnimateArgs>),
     /// Animate a title's letters, words or lines.
@@ -327,6 +334,9 @@ fn dispatch(command: Command, dry: bool, ctx: &Ctx) -> CliResult<(&'static str, 
         Command::Trim(o) => on(o, dry, ctx),
         Command::Set(o) => on(o, dry, ctx),
         Command::Grade(o) => on(o, dry, ctx),
+        Command::Mask(o) => on(o, dry, ctx),
+        Command::ChromaKey(o) => on(o, dry, ctx),
+        Command::Blend(o) => on(o, dry, ctx),
         Command::Effect(EffectCommand::Add(o)) => on(o, dry, ctx),
         Command::Effect(EffectCommand::Set(o)) => on(o, dry, ctx),
         Command::Effect(EffectCommand::Remove(o)) => on(o, dry, ctx),

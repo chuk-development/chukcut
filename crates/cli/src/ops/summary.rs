@@ -156,6 +156,9 @@ pub fn clip(project: &Project, track_index: usize, clip_index: usize, segment: &
     if let Some(crop) = segment.crop {
         out.insert("crop".into(), json!(crop));
     }
+    if let Some(m) = pool.compositing_of(segment) {
+        out.insert("compositing".into(), super::mask::describe(m));
+    }
     if let Some(text) = pool.text(&segment.material_id) {
         out.insert(
             "text".into(),

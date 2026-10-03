@@ -323,10 +323,11 @@ impl Operation for RedoArgs {
 
 /// List what the engine offers: `effects`, `transitions`, `animations`,
 /// `grade` controls, export `presets` and `hardware` encoders, caption
-/// transcription `models`, `luts` in the library, or `fonts`.
+/// transcription `models`, `luts` in the library, `fonts`, mask shapes
+/// (`masks`) or `blend` modes.
 #[derive(Debug, Clone, Args, Deserialize, JsonSchema)]
 pub struct CatalogArgs {
-    /// effects, transitions, animations, grade, presets, hardware, models, luts or fonts.
+    /// effects, transitions, animations, grade, presets, hardware, models, luts, fonts, masks or blend.
     pub kind: String,
 }
 
@@ -350,9 +351,15 @@ impl CatalogArgs {
             }),
             "luts" => json!(inspector::commands::inspector_lut_library()),
             "fonts" => json!(pollster::block_on(text::commands::text_fonts())?),
+            "masks" => json!({
+                "shapes": chukcut_engine::modules::project::compositing::MaskShape::NAMES,
+                "ops": chukcut_engine::modules::project::compositing::MaskOp::NAMES,
+                "params": chukcut_engine::modules::project::compositing::MASK_PARAMS,
+            }),
+            "blend" => json!(chukcut_engine::modules::project::compositing::BlendMode::NAMES),
             other => {
                 return Err(CliError::usage(format!(
-                    "there is no catalog called {other:?}; choose effects, transitions, animations, grade, presets, hardware, models, luts or fonts"
+                    "there is no catalog called {other:?}; choose effects, transitions, animations, grade, presets, hardware, models, luts, fonts, masks or blend"
                 )))
             }
         };

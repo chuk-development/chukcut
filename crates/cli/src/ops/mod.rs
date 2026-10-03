@@ -9,6 +9,7 @@
 
 pub mod audio;
 pub mod look;
+pub mod mask;
 pub mod project;
 pub mod render;
 pub mod summary;
@@ -179,6 +180,9 @@ operations!(
     look::TransitionAddArgs,
     look::TransitionRemoveArgs,
     look::TrackArgs,
+    mask::MaskArgs,
+    mask::ChromaKeyArgs,
+    mask::BlendArgs,
     audio::CaptionsTranscribeArgs,
     audio::CaptionsImportArgs,
     audio::CaptionsExportArgs,
