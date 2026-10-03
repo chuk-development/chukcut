@@ -496,6 +496,26 @@ fn friendly(error: &str) -> String {
     }
 }
 
+/// A point in time as the player writes it: `mm:ss:ff`, hours in front once
+/// there are any.
+fn time_label(time: Micros, fps: f64) -> String {
+    let fps = if fps > 0.0 { fps } else { 30.0 };
+    let frames = (time.max(0) as f64 / 1_000_000.0 * fps).round() as i64;
+    let per_second = fps.round().max(1.0) as i64;
+    let (seconds, frame) = (frames / per_second, frames % per_second);
+    if seconds >= 3600 {
+        format!(
+            "{}:{:02}:{:02}:{:02}",
+            seconds / 3600,
+            seconds / 60 % 60,
+            seconds % 60,
+            frame
+        )
+    } else {
+        format!("{:02}:{:02}:{:02}", seconds / 60, seconds % 60, frame)
+    }
+}
+
 // --- the editor's timeline ------------------------------------------------------------
 
 impl Editor {
@@ -2261,6 +2281,11 @@ impl Editor {
             slider.update(cx, |state, cx| state.set_value(slider_value, window, cx));
         }
 
+        // A drop ends the drag without a mouse-up reaching the editor.
+        if !cx.has_active_drag() {
+            self.timeline.drop_hover = None;
+        }
+
         // A wheel scroll glides the rest of the way, a third per frame.
         if let Some(target) = self.timeline.scroll_target {
             let gap = target - self.timeline.scroll_x;
@@ -2716,6 +2741,41 @@ impl Editor {
             }),
             _ => None,
         };
+        // A dragged clip's link partners go along in time on their own lanes,
+        // as the drop will move them.
+        let partner_shift: Option<(Vec<String>, Micros)> = match &self.timeline.drag {
+            Some(Drag::Clip {
+                segment_id,
+                moved: true,
+                start,
+                origin_start,
+                group,
+                ..
+            }) => {
+                let mut moving = group.clone();
+                moving.push(segment_id.clone());
+                let groups: Vec<&String> = moving
+                    .iter()
+                    .filter_map(|id| self.project.link_group_of(id))
+                    .collect();
+                let partners: Vec<String> = self
+                    .project
+                    .tracks
+                    .iter()
+                    .flat_map(|t| t.segments.iter())
+                    .filter(|s| !moving.contains(&s.id))
+                    .filter(|s| {
+                        self.project
+                            .materials
+                            .link_of(s)
+                            .is_some_and(|g| groups.contains(&g))
+                    })
+                    .map(|s| s.id.clone())
+                    .collect();
+                (!partners.is_empty()).then_some((partners, start - origin_start))
+            }
+            _ => None,
+        };
         for row in rows {
             let track = &project.tracks[row.track];
             lanes.push(
@@ -2779,6 +2839,16 @@ impl Editor {
                     }) if *segment_id == segment.id => {
                         target = *live_target;
                         source = *live_source;
+                    }
+                    Some(Drag::Clip { .. })
+                        if partner_shift
+                            .as_ref()
+                            .is_some_and(|(ids, _)| ids.contains(&segment.id)) =>
+                    {
+                        if let Some((_, shift)) = &partner_shift {
+                            target.start = (target.start + shift).max(0);
+                            dragged = true;
+                        }
                     }
                     Some(Drag::Trim { group, .. })
                         if group.iter().any(|m| m.segment_id == segment.id) =>
@@ -2943,39 +3013,23 @@ impl Editor {
             );
         }
 
-        // A tile from the media panel held over the lanes: the lane it
-        // would land on, and where.
-        if let Some((at, lane)) = self
+        // A tile from the media panel held over the lanes: where it would
+        // start. Only the time — the tile's kind decides its lane, and the
+        // media panel, not the timeline, knows what is being dragged.
+        if let Some((at, _)) = self
             .timeline
             .drop_hover
             .and_then(|position| self.drop_target(position))
         {
             let x = self.time_to_x(at);
-            let row = lane.as_deref().and_then(|id| self.row_of(id));
-            if let Some(row) = &row {
-                overlay.push(
-                    div()
-                        .absolute()
-                        .left(px(0.0))
-                        .top(px(row.top))
-                        .w_full()
-                        .h(px(row.height))
-                        .border_1()
-                        .border_color(rgb(ACCENT))
-                        .bg(rgb(ACCENT).opacity(0.08))
-                        .into_any_element(),
-                );
-            }
-            let (line_top, line_h) = row
-                .map(|row| (row.top - 4.0, row.height + 8.0))
-                .unwrap_or((RULER_H, lanes_h - RULER_H - SCROLLBAR_H));
+            let top = RULER_H + 2.0;
             overlay.push(
                 div()
                     .absolute()
                     .left(px(x - 1.0))
-                    .top(px(line_top))
+                    .top(px(top))
                     .w(px(3.0))
-                    .h(px(line_h))
+                    .h(px((lanes_h - SCROLLBAR_H - top).max(0.0)))
                     .rounded(px(1.0))
                     .bg(rgb(ACCENT))
                     .into_any_element(),
@@ -2984,13 +3038,13 @@ impl Editor {
                 div()
                     .absolute()
                     .left(px(x + 4.0))
-                    .top(px(line_top - 2.0))
+                    .top(px(top))
                     .px(px(4.0))
                     .rounded(px(3.0))
                     .bg(rgb(ACCENT))
                     .text_size(px(10.0))
                     .text_color(rgb(0x0b1214))
-                    .child(ruler_label(at as f64 / 1_000_000.0, self.project.fps))
+                    .child(time_label(at, self.project.fps))
                     .into_any_element(),
             );
         }
@@ -3762,6 +3816,13 @@ mod tests {
     fn a_fade_handle_never_hangs_off_the_clip() {
         assert_eq!(fade_handle_x(0, 60.0), FADE_HANDLE + 1.0);
         assert_eq!(fade_handle_x(1_000_000, 60.0), 60.0);
+    }
+
+    #[test]
+    fn time_labels_read_like_the_player() {
+        assert_eq!(time_label(13_300_000, 30.0), "00:13:09");
+        assert_eq!(time_label(0, 30.0), "00:00:00");
+        assert_eq!(time_label(3_725_000_000, 30.0), "1:02:05:00");
     }
 
     #[test]
