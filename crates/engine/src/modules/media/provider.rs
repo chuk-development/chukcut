@@ -82,7 +82,9 @@ struct CachedTexture {
 /// four times the conversion cost and four times the upload bandwidth for
 /// pixels nobody will see.
 struct OpenDecoder {
-    decoder: VideoDecoder,
+    /// Its own lock, so two clips decode in parallel; one decoder is still
+    /// strictly one thread at a time, because it is a demuxer position.
+    decoder: Mutex<VideoDecoder>,
     height: u32,
 }
 
@@ -238,7 +240,10 @@ pub struct MediaSourceProvider {
     /// One decoder per material. `VideoDecoder` is `Send` but not `Sync`, so
     /// the whole map sits behind a mutex; two threads seeking one demuxer
     /// would fight over its read position anyway.
-    decoders: Mutex<HashMap<Id, OpenDecoder>>,
+    decoders: Mutex<HashMap<Id, Arc<OpenDecoder>>>,
+    /// Set once any frame came back as an imported decoder surface. See
+    /// [`Self::hands_out_decoder_surfaces`].
+    mapped: std::sync::atomic::AtomicBool,
 }
 
 impl MediaSourceProvider {
@@ -288,8 +293,28 @@ impl MediaSourceProvider {
             forced,
             placeholder: Mutex::new(None),
             decoders: Mutex::new(HashMap::new()),
+            mapped: std::sync::atomic::AtomicBool::new(false),
             textures: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Decode each video from its proxy, where the proxy cache has one.
+    ///
+    /// For the preview only. The export builds its provider without this, and
+    /// `proxy::switch` refuses a proxy path on that side as well. The display
+    /// size stays the original's, so a clip is framed the same either way —
+    /// the proxy is only smaller, and the compositor scales it up.
+    pub fn with_preview_proxies(mut self) -> Self {
+        let queue = crate::modules::proxy::ProxyQueue::shared();
+        for source in self.sources.values_mut() {
+            if let MaterialSource::Video { path, .. } = source {
+                if let Some(proxy) = queue.lookup(path) {
+                    tracing::debug!(original = %path.display(), proxy = %proxy.display(), "previewing from a proxy");
+                    *path = proxy;
+                }
+            }
+        }
+        self
     }
 
     /// The flat field a clip composites as when its media is gone — removed
@@ -348,6 +373,80 @@ impl MediaSourceProvider {
         *self.placeholder.lock() = None;
     }
 
+    /// Decode every video clip visible at `time` now, one thread per clip, so
+    /// the render that asks for them next finds them in the texture cache.
+    ///
+    /// This is the player's decode-ahead. It runs while the previous frame is
+    /// still on the GPU or being read back, so a frame costs the slowest clip's
+    /// decode rather than the sum of every clip's decode plus the readback.
+    /// Exactly the requests `Compositor::collect_draws` makes for an ordinary
+    /// clip — same material, same source time, same size — so they hit. A clip
+    /// inside a transition window is left to the render: its source times come
+    /// from the transition, and guessing them wrong would cost a seek.
+    pub fn prefetch_clips(
+        &self,
+        ctx: &RenderContext,
+        project: &Project,
+        time: Micros,
+        size: (u32, u32),
+    ) {
+        let mut wanted: Vec<(&str, Micros)> = Vec::new();
+        for (track, segment) in render::visible_segments(project, time) {
+            if project.materials.kind_of(&segment.material_id) != Some(MaterialKind::Video) {
+                continue;
+            }
+            if crate::modules::transitions::instant_for(track, &project.materials, segment, time)
+                .is_some()
+            {
+                continue;
+            }
+            let Some(source_time) = segment.source_time_at(time) else {
+                continue;
+            };
+            // One position per decoder: the same file twice on screen is
+            // decoded twice by the render anyway, and prefetching both would
+            // make its one demuxer seek back and forth.
+            if wanted.iter().any(|(id, _)| *id == segment.material_id) {
+                continue;
+            }
+            wanted.push((&segment.material_id, source_time));
+        }
+        let fetch = |&(material_id, source_time): &(&str, Micros)| {
+            let request = SourceRequest {
+                material_id,
+                kind: MaterialKind::Video,
+                source_time,
+                segment_id: "",
+                max_size: size,
+            };
+            if let Err(error) = self.frame(ctx, &request) {
+                // The render will ask again and report it properly.
+                tracing::debug!(material_id, %error, "decode-ahead failed");
+            }
+        };
+        match wanted.as_slice() {
+            [] => {}
+            [one] => fetch(one),
+            [first, rest @ ..] => std::thread::scope(|scope| {
+                for clip in rest {
+                    scope.spawn(move || fetch(clip));
+                }
+                fetch(first);
+            }),
+        }
+    }
+
+    /// Whether a frame this provider handed out may still be a decoder's own
+    /// surface (VAAPI, imported as DMA-BUF) rather than a copy.
+    ///
+    /// Such a frame goes back to the decoder's pool when it is dropped, while
+    /// the GPU may still be sampling it. A caller that decodes the next frame
+    /// before the GPU has finished the last one must wait for the GPU first
+    /// when this is true.
+    pub fn hands_out_decoder_surfaces(&self) -> bool {
+        self.mapped.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Number of materials this provider can serve, for diagnostics.
     pub fn len(&self) -> usize {
         self.sources.len()
@@ -391,30 +490,43 @@ impl MediaSourceProvider {
         source_time: Micros,
         want_height: u32,
     ) -> anyhow::Result<SourceFrame> {
-        let mut decoders = self.decoders.lock();
-
         // Reopen when the caller now wants meaningfully more resolution than
         // the open decoder produces — going from a preview to an export, in
         // practice. Shrinking is not worth a reopen: downscaling on the GPU is
         // nearly free next to a seek.
-        let stale = decoders
-            .get(material_id)
-            .is_some_and(|open| want_height as f32 > open.height as f32 * REOPEN_RATIO);
-        if stale {
-            decoders.remove(material_id);
-        }
-
-        let open = match decoders.get_mut(material_id) {
+        //
+        // The map lock is held only to find the decoder, never while it
+        // decodes, so the decode-ahead (`prefetch`) can run every clip's
+        // decoder at once.
+        let found = {
+            let mut decoders = self.decoders.lock();
+            let stale = decoders
+                .get(material_id)
+                .is_some_and(|open| want_height as f32 > open.height as f32 * REOPEN_RATIO);
+            if stale {
+                decoders.remove(material_id);
+            }
+            decoders.get(material_id).cloned()
+        };
+        let open = match found {
             Some(open) => open,
             None => {
                 let wanted = self.forced.unwrap_or_else(|| acceleration(ctx));
                 let decoder = VideoDecoder::open_scaled_with(path, want_height, wanted)?;
                 let height = decoder.output_size().1;
-                decoders
-                    .entry(material_id.to_string())
-                    .or_insert(OpenDecoder { decoder, height })
+                let opened = Arc::new(OpenDecoder {
+                    decoder: Mutex::new(decoder),
+                    height,
+                });
+                Arc::clone(
+                    self.decoders
+                        .lock()
+                        .entry(material_id.to_string())
+                        .or_insert(opened),
+                )
             }
         };
+        let mut decoder = open.decoder.lock();
 
         // The mapped path first, when the decoder is actually on the GPU. Each
         // mapped frame pins a VA surface out of a fixed pool, so the *previous*
@@ -437,12 +549,12 @@ impl MediaSourceProvider {
         // NVDEC frames have no DMA-BUF export, so a CUDA decoder goes straight
         // to the copying path below rather than failing a map per frame.
         if matches!(
-            open.decoder.acceleration(),
+            decoder.acceleration(),
             Acceleration::Auto | Acceleration::Vaapi
         ) {
             self.textures.lock().remove(material_id);
             let started = std::time::Instant::now();
-            match open.decoder.seek_and_map(source_time) {
+            match decoder.seek_and_map(source_time) {
                 Ok(mapped) => {
                     let decode_micros = started.elapsed().as_micros();
                     let import_started = std::time::Instant::now();
@@ -453,10 +565,12 @@ impl MediaSourceProvider {
                             decoded = format_args!("{}x{}", frame.width, frame.height),
                             decode_ms = decode_micros as f64 / 1000.0,
                             import_ms = import_started.elapsed().as_micros() as f64 / 1000.0,
-                            path = ?open.decoder.acceleration(),
+                            path = ?decoder.acceleration(),
                             "mapped source frame",
                         );
-                        drop(decoders);
+                        drop(decoder);
+                        self.mapped
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
                         self.store(material_id, source_time, &frame);
                         return Ok(frame);
                     }
@@ -484,11 +598,11 @@ impl MediaSourceProvider {
         // never runs. Before the first frame `Auto` might still turn out to be
         // NVDEC, so it is tried then too; a software frame refuses cheaply.
         if matches!(
-            open.decoder.acceleration(),
+            decoder.acceleration(),
             Acceleration::Auto | Acceleration::Cuda
         ) {
             let started = std::time::Instant::now();
-            match open.decoder.seek_and_download_nv12(source_time) {
+            match decoder.seek_and_download_nv12(source_time) {
                 Ok(planes) => {
                     let decode_micros = started.elapsed().as_micros();
                     let upload_started = std::time::Instant::now();
@@ -499,10 +613,10 @@ impl MediaSourceProvider {
                         decoded = format_args!("{}x{}", planes.width, planes.height),
                         decode_ms = decode_micros as f64 / 1000.0,
                         upload_ms = upload_started.elapsed().as_micros() as f64 / 1000.0,
-                        path = ?open.decoder.acceleration(),
+                        path = ?decoder.acceleration(),
                         "downloaded NV12 source frame",
                     );
-                    drop(decoders);
+                    drop(decoder);
                     self.store(material_id, source_time, &frame);
                     return Ok(frame);
                 }
@@ -517,7 +631,7 @@ impl MediaSourceProvider {
         }
 
         let started = std::time::Instant::now();
-        let decoded = open.decoder.seek_and_decode(source_time)?;
+        let decoded = decoder.seek_and_decode(source_time)?;
         let decode_micros = started.elapsed().as_micros();
 
         let upload_started = std::time::Instant::now();
@@ -537,12 +651,12 @@ impl MediaSourceProvider {
             // this a session where the hardware quietly refused looks identical
             // in the log to one where it worked, and the only symptom is the
             // millisecond count.
-            path = ?open.decoder.acceleration(),
+            path = ?decoder.acceleration(),
             "decoded source frame"
         );
         // Drop the decoder lock before touching the texture cache; the two are
         // independent and holding both invites a lock-order bug later.
-        drop(decoders);
+        drop(decoder);
 
         self.store(material_id, source_time, &frame);
         Ok(frame)
@@ -646,6 +760,10 @@ impl MediaSourceProvider {
 }
 
 impl SourceProvider for MediaSourceProvider {
+    fn prefetch(&self, ctx: &RenderContext, project: &Project, time: Micros, size: (u32, u32)) {
+        self.prefetch_clips(ctx, project, time, size);
+    }
+
     fn frame(
         &self,
         ctx: &RenderContext,

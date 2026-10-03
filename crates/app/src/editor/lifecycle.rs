@@ -299,6 +299,7 @@ impl Editor {
     pub(crate) fn apply_settings(&mut self, settings: &Settings, cx: &mut Context<Self>) {
         self.shell.settings = settings.clone();
         self.preview.quality = super::settings::quality_for_scale(settings.preview_scale());
+        self.consider_proxies();
         // A new size is a new request.
         self.last_request = None;
         cx.notify();

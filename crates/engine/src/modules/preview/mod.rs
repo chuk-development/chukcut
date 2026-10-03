@@ -98,6 +98,7 @@ pub mod commands;
 pub mod encoder;
 pub mod error;
 pub mod ladder;
+pub mod player;
 pub mod probe;
 pub mod server;
 pub mod session;

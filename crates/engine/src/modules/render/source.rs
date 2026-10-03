@@ -227,6 +227,18 @@ pub trait SourceProvider: Send + Sync {
         ctx: &RenderContext,
         request: &SourceRequest<'_>,
     ) -> anyhow::Result<Option<SourceFrame>>;
+
+    /// Get ready for a render of `project` at `time`: decode whatever it will
+    /// ask for, in parallel where the provider can. A hint, never required —
+    /// the default does nothing and `frame` still answers every request.
+    fn prefetch(
+        &self,
+        _ctx: &RenderContext,
+        _project: &crate::modules::project::Project,
+        _time: crate::modules::project::Micros,
+        _size: (u32, u32),
+    ) {
+    }
 }
 
 impl<T: SourceProvider + ?Sized> SourceProvider for &T {

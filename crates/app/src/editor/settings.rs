@@ -403,7 +403,7 @@ impl SettingsDialog {
             vec![
                 row(
                     "Proxy media",
-                    Some("Small stand-ins for footage too heavy to play, built in the background after import. Automatic picks the heavy files; the export always uses the originals. The player does not switch to proxies yet."),
+                    Some("Small stand-ins for footage too heavy to play; the export always uses the originals. Automatic makes them for footage this machine cannot decode in time, such as 4K HEVC."),
                     policy,
                 ),
                 row("Proxies on disk", None, proxies),

@@ -136,7 +136,10 @@ impl HwAccel {
     pub fn upload_format(self) -> ffmpeg_next::format::Pixel {
         use ffmpeg_next::format::Pixel;
         match self {
-            HwAccel::Vaapi | HwAccel::Qsv => Pixel::NV12,
+            // NVENC takes system-memory NV12 as its native input. Asking for it
+            // is what lets the export convert on the GPU and read back 1.5
+            // bytes a pixel instead of 4 plus a swscale pass on the CPU.
+            HwAccel::Vaapi | HwAccel::Qsv | HwAccel::Nvenc => Pixel::NV12,
             _ => Pixel::YUV420P,
         }
     }

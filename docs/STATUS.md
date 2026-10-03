@@ -81,8 +81,10 @@ Judge performance from a release build only.
      cut whose source offset was a rounded frame time showed the frame before —
      a duplicated frame at the cut. `project::SAMPLE_SLACK` (10 µs) fixes the
      export and the app's preview.
-2. **Shared GPU device with GPUI** so preview frames never leave the GPU
-   (`docs/research/GPUI_SPIKE.md`, path (a); needs the engine on GPUI's wgpu).
+2. **Shared GPU texture with GPUI** so preview frames never leave the GPU.
+   Investigated 2026-10-03: needs a patched GPUI either way; the plan (DMA-BUF
+   import, no wgpu alignment) is `docs/research/gpui-shared-texture.md`. The
+   readback path is now asynchronous and BGRA (see "Perf" below).
 3. **Port the UI the webview had:** inspector, export dialog, text,
    transitions, trim handles, thumbnails and waveforms on clips, settings.
 4. **CLI and MCP server** over the command layer (`crates/cli`).
@@ -303,6 +305,116 @@ bug), and its audio is **not** silent.
   decode and catches every container whose header or trailer moves. Both the
   thumbnail and waveform caches share that one function on purpose, so a single
   edit invalidates everything derived from a file at once.
+
+## Perf: the native preview and the export, measured (2026-10-03)
+
+RTX 3060 (NVIDIA 5xx, Vulkan, NVDEC/NVENC), 16 threads. **No Intel GPU in this
+machine**, so every VAAPI path below is unchanged and unmeasured here — run
+`tests/every_card.rs` and the harness on an Intel box before trusting it there.
+
+Reproduce (headless, never opens a window, generates its media under
+`crates/engine/target/player-bench/`):
+
+```bash
+cargo run --release -p chukcut-engine --example player_bench            # stages + playback
+cargo run --release -p chukcut-engine --example player_bench -- --quick
+cargo run --release -p chukcut-engine --example player_bench -- --only export   # 60 s export
+```
+
+Projects: 1 layer = one clip; 3 = the clip graded (contrast, saturation,
+vignette, grain) + a graded picture-in-picture + a title; 5 = those + a second
+picture-in-picture + a title animated letter by letter over its whole span.
+"4K" is a 4K HEVC main clip rendered at 3840×2160 (a 4K fullscreen viewer);
+"4K in 960x540" is the same project in an ordinary viewer.
+
+### What a preview frame cost, and where (ms per frame, serial)
+
+Before (commit `8b7ff30`, the old `player.rs`: blocking readback, CPU swizzle,
+CPU text animator over the whole frame). **Measured at load 38** — other agents
+were compiling — so the absolute numbers are inflated; the shape is the point.
+
+| | sources | composite | readback | swizzle | UI upload | render ceiling |
+|---|---:|---:|---:|---:|---:|---:|
+| 1080p, 1 layer | 6.65 | 1.06 | 14.02 | 3.36 | 18.28 | 40 fps |
+| 1080p, 5 layers | 31.34 | 0.64 | 4.53 | 2.94 | 4.98 | 25 fps |
+| 4K, 1 layer | 29.58 | 0.35 | 50.11 | 12.97 | 59.60 | 11 fps |
+| 4K, 5 layers | **175.44** | 0.56 | 48.10 | 12.02 | 59.13 | **4 fps** |
+| 4K in 960×540, 5 layers | 40.44 | 1.37 | 2.10 | 0.33 | 0.37 | 23 fps |
+
+After, at load 8 (both arms in one process, so the old arm also has the new
+text animator — that is why its 4K/5-layer sources are 13 ms, not 175):
+
+| | old: sources / readback+swizzle / total | new: sources / readback / total |
+|---|---:|---:|
+| 1080p, 1 layer | 1.53 / 2.17 / 4.41 ms | 1.48 / 1.38 / 3.54 ms |
+| 1080p, 5 layers | 4.63 / 2.62 / 8.00 ms | 4.35 / 2.04 / 7.16 ms |
+| 4K, 1 layer | 5.02 / 8.38 / 16.65 ms | 5.52 / 6.76 / 16.73 ms |
+| 4K, 5 layers | 13.18 / 10.95 / 28.23 ms | 16.64 / 10.33 / 34.56 ms |
+
+Read it as: on a quiet machine the serial cost of one frame barely moved,
+because nothing was slow except the text animator; **what changed is overlap
+and robustness**. Playback, 4 s real time at 30 fps, frames that reached the
+screen of 120:
+
+| | load 36, old | load 36, new | load 8, old | load 8, new |
+|---|---:|---:|---:|---:|
+| 1080p, 5 layers | 110 (lag 1.2 fr) | 113 (lag 0.0) | 120 (lag 0.0) | 120 (lag 0.0) |
+| 4K, 1 layer | 43 (lag 3.0) | **68** (lag 0.8) | 119 (lag 0.8) | 120 (lag 0.0) |
+| 4K, 3 layers | 62 | 73 | 119 (lag 0.8) | 120 (lag 0.0) |
+| 4K, 5 layers | 27 | 27 | 119 (lag 1.0) | 120 (lag 0.0) |
+| 4K in 960×540, 5 layers | 102 | **117** | 101 | **112** |
+
+"Lag" is how many frames behind the audio clock the picture on screen was. The
+old player showed the frame it was asked for one render-latency late — always
+behind the sound by up to a frame at 4K; the new one renders ahead and shows
+each frame on its instant.
+
+### What changed in the preview
+
+- **`render::readback::BgraReadback`**: a compute pass packs the target into
+  tight BGRA rows (no 256-byte padding, no CPU swizzle), a ring of three
+  mapped buffers reused per size, `map_async` collected later. Byte-exact
+  against `render_frame` (test).
+- **`preview::player::FramePlayer`** (engine, headless, benchmarked) replaces
+  the app's render loop: render-ahead of 4 frames on the audio clock, late
+  frames skipped by measured latency instead of queued, latest-wins scrubbing
+  with in-flight frames thrown away, an edit invalidates the ring.
+- **Decode-ahead**: `SourceProvider::prefetch` decodes every visible clip of the
+  next frame in parallel (one thread per clip; decoders now have one lock each)
+  on a helper thread while the current frame is read back. Waits for the GPU
+  first when the provider hands out VAAPI surfaces, which go back to the
+  decoder's pool on drop.
+- **Copying a 4K frame out of the mapped buffer costs ~5 ms** (31.6 MB; memory
+  bandwidth, on a quiet machine). Under load 36 the same copy measured 46 ms.
+  A `mallopt` that kept frame buffers off `mmap` was tried and A/B'd four times
+  at load 10: no difference, so it was not kept. At 4K the copy and GPUI's own
+  re-upload are now the largest items; only the shared texture removes them.
+- **Text animator**: `text::animate::compose_region` composes only the box the
+  glyphs and backdrop reach and uploads only that into a GPU-cleared texture.
+  It had zeroed and walked a frame-sized `f32` buffer per frame: **127–175 ms
+  of a 4K frame, now ~3**.
+- **Proxies**: `proxy_consider(path, policy)` on import, project open and a
+  settings change; `Auto` builds for footage the decision rule says will not
+  decode in time (4K HEVC; not 1080p H.264). The player previews from the
+  proxy (`with_preview_proxies`) and picks up a finished one on its next
+  request; the export never sees one (`proxy::switch`).
+- **Not done**: GPUI still re-uploads every frame (a new frame-sized atlas
+  texture each time). `docs/research/gpui-shared-texture.md` has the measured
+  path and the plan (DMA-BUF into a patched GPUI renderer).
+
+### Export, 60 s of 1080p, the 5-layer project (1800 frames)
+
+| | before | after |
+|---|---:|---:|
+| `h264_nvenc` | 51.9 fps (load 11) | **135.1 fps** (load 9) |
+| `libx264` | 39.2 fps (load 11) | 47.4 fps (load 9) |
+
+Three changes: NVENC now asks for NV12 (`HwAccel::upload_format`), so the
+export converts on the GPU and reads back 1.5 bytes a pixel instead of RGBA
+plus a CPU swscale (this is the bulk of it); the text animator above; and
+`prefetch` decodes the frame's clips in parallel. NVENC zero-copy (CUDA frames
+from a Vulkan export) is not attempted: it needs CUDA–Vulkan interop, and the
+NV12 readback is ~1.2 ms a frame. Captions were not in the measured project.
 
 ## The benchmark suite
 
