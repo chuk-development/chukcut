@@ -126,17 +126,20 @@ pub(super) fn render_list(items: &[QueueItem], cx: &mut Context<ExportDialog>) -
                                 cx.notify();
                             }))
                     } else {
-                        IconButton::new(SharedString::from(format!("q-cancel-{id}")), Lucide::X)
-                            .small()
-                            .tooltip(if running {
-                                "Stop this export"
-                            } else {
-                                "Skip this export"
-                            })
-                            .on_click(cx.listener(move |_, _, _, cx| {
-                                export_commands::export_queue_cancel(&stop);
-                                cx.notify();
-                            }))
+                        IconButton::new(
+                            SharedString::from(format!("q-cancel-{id}-{running}")),
+                            Lucide::X,
+                        )
+                        .small()
+                        .tooltip(if running {
+                            "Stop this export"
+                        } else {
+                            "Skip this export"
+                        })
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            export_commands::export_queue_cancel(&stop);
+                            cx.notify();
+                        }))
                     }),
             )
             .when(running, |row| {
