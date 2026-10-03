@@ -123,7 +123,9 @@ impl Editor {
             0 => self.render_auto_captions(cx).into_any_element(),
             1 => self.render_caption_list(cx).into_any_element(),
             2 => self.render_caption_style(cx).into_any_element(),
-            _ => self.render_caption_files(cx).into_any_element(),
+            3 => self.render_caption_files(cx).into_any_element(),
+            // `editor/cloud/translate.rs`.
+            _ => self.render_translate_captions(cx),
         };
         div()
             .id("captions-tab")

@@ -31,7 +31,13 @@ use super::*;
 pub(crate) use overlay::CaptionDrag;
 
 /// The tab's category column, in order.
-pub(crate) const CATEGORIES: &[&str] = &["Auto captions", "Captions", "Style", "Import & export"];
+pub(crate) const CATEGORIES: &[&str] = &[
+    "Auto captions",
+    "Captions",
+    "Style",
+    "Import & export",
+    "Translate",
+];
 
 /// A transcription running on its own thread.
 pub(crate) struct Job {

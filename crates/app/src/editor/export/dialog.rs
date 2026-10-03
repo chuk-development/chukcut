@@ -63,6 +63,10 @@ pub(crate) struct ExportDialog {
     editor_progress: Slot,
     /// The mix's loudness, measured on request.
     mix_meter: Entity<super::loudness::MixMeter>,
+    /// What the licences of online media on the timeline ask (`licences.rs`).
+    licences: chukcut_engine::modules::cloud::credits::LicenceSummary,
+    /// The credits file written after the export, if one was due.
+    credits: Option<PathBuf>,
     _subscriptions: Vec<Subscription>,
     _poll: Option<Task<()>>,
 }
@@ -124,6 +128,8 @@ impl ExportDialog {
         let mix_meter = cx.new(|_| super::loudness::MixMeter::new(Arc::clone(&state)));
         Self {
             mix_meter,
+            licences: chukcut_engine::modules::cloud::credits::summary(&project),
+            credits: None,
             editor,
             state,
             project,
@@ -235,6 +241,8 @@ impl ExportDialog {
                     .unwrap_or_else(|| self.choices.output_path());
                 // Captions as a sidecar file, when the Captions tab asks for it.
                 crate::editor::captions::after_export(&self.state, &path);
+                // Credits for stock and generated media that need them.
+                self.credits = super::licences::after_export(&self.state, &path);
                 self.phase = Phase::Done {
                     path,
                     frames: progress.total_frames,
@@ -590,6 +598,7 @@ impl ExportDialog {
                     .clone()
                     .map(|notice| div().flex().child(Badge::new(notice).tone(Tone::Warning))),
             )
+            .children(super::licences::summary(&self.licences))
             .child(Self::row(
                 "Name",
                 Input::new(&self.name).small().text_size(px(TEXT_LABEL)),
@@ -720,6 +729,7 @@ impl ExportDialog {
                             .text_color(rgb(TEXT))
                             .child(settings::display_path(path)),
                     )
+                    .children(self.credits.as_deref().map(super::licences::credits_line))
                     .into_any_element(),
             ),
             Phase::Failed(message) => (

@@ -17,7 +17,7 @@ use gpui::component::button::Button;
 use gpui::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui::component::switch::Switch;
 use gpui::component::{Icon, Sizable as _, WindowExt as _};
-use gpui::{AnyElement, WeakEntity};
+use gpui::{AnyElement, Entity, WeakEntity};
 
 use super::preview::PreviewQuality;
 use super::*;
@@ -111,6 +111,8 @@ pub(crate) struct SettingsDialog {
     log_file: Option<String>,
     /// The last thing that went wrong, shown at the top.
     notice: Option<SharedString>,
+    /// Cloud accounts: `editor/accounts.rs`.
+    accounts: Entity<super::accounts::AccountsSettings>,
 }
 
 impl SettingsDialog {
@@ -138,6 +140,7 @@ impl SettingsDialog {
             log_dir: logs.directory,
             log_file: logs.file,
             notice: None,
+            accounts: cx.new(super::accounts::AccountsSettings::new),
         };
         dialog.measure_cache(cx);
         dialog
@@ -488,6 +491,7 @@ impl Render for SettingsDialog {
             .child(self.render_general(cx))
             .child(self.render_playback(cx))
             .child(self.render_storage(cx))
+            .child(self.accounts.clone())
             .child(self.render_hardware())
             .child(self.render_logs())
     }

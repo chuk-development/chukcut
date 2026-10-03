@@ -422,7 +422,7 @@ pub fn cloud_translate_captions(
     }
     // Read what to translate, then let go of the lock: the request can take
     // seconds and the project must stay editable meanwhile.
-    let (cues, style) = state.with_project(|project| {
+    let (cues, style, canvas_height) = state.with_project(|project| {
         let lane = caption_edit::caption_lane(project).map(|t| t.id.clone());
         let clips: Vec<_> = caption_edit::clips(project)
             .into_iter()
@@ -440,7 +440,7 @@ pub fn cloud_translate_captions(
             .into_iter()
             .map(|c| Cue::new(c.start, c.end, c.text))
             .collect();
-        (cues, style)
+        (cues, style, project.canvas.height)
     })?;
     if cues.is_empty() {
         return Err("there are no captions to translate; add captions first".to_string());
@@ -448,7 +448,7 @@ pub fn cloud_translate_captions(
     let lines: Vec<String> = cues.iter().map(|c| c.text.clone()).collect();
     let translated =
         super::translator(store, account_id, chat_model)?.translate(&lines, &target, source)?;
-    translated_lane(state, cues, translated, style, &target)
+    translated_lane(state, cues, translated, style, canvas_height, &target)
 }
 
 fn translated_lane(
@@ -456,14 +456,24 @@ fn translated_lane(
     cues: Vec<Cue>,
     translated: Vec<String>,
     mut style: CaptionStyle,
+    canvas_height: u32,
     target: &str,
 ) -> Result<Translated, String> {
+    // Clear the tallest original caption: its lines at the font size, plus a
+    // gap, in the transform's units (1 is half the canvas height).
+    let lines = cues
+        .iter()
+        .map(|c| c.text.lines().count().max(1))
+        .max()
+        .unwrap_or(1) as f32;
+    let half = (canvas_height.max(2) / 2) as f32;
+    let lift = (lines * style.font_size * 1.3 + style.font_size * 0.6) / half;
     let cues: Vec<Cue> = cues
         .into_iter()
         .zip(translated)
         .map(|(cue, text)| Cue::new(cue.start, cue.end, text))
         .collect();
-    style.position[1] = (style.position[1] + 0.16).min(0.95);
+    style.position[1] = (style.position[1] + lift.max(0.08)).min(0.95);
     // A translation carries no word timing; karaoke on it would light words
     // at made-up times.
     style.highlight = None;
@@ -638,6 +648,51 @@ mod tests {
         assert_eq!(generated.origin.licence.commercial, Commercial::Yes);
         assert_eq!(generated.origin.model, "music_v1");
         assert_eq!(generated.origin.title, "Upbeat lofi");
+    }
+
+    #[test]
+    fn captions_are_translated_onto_a_lane_of_their_own() {
+        use crate::modules::captions::commands::{captions_add, captions_list};
+        use crate::modules::project::{CanvasConfig, Project};
+
+        let state = AppState::new();
+        *state.project.write() = Some(Project::new("t", CanvasConfig::default(), 30.0));
+        let cues = [
+            Cue::new(0, 1_000_000, "Hello"),
+            Cue::new(1_000_000, 2_000_000, "two\nlines"),
+        ];
+        captions_add(&state, &cues, None, PlaceOptions::default()).unwrap();
+
+        let server = test_server::serve(vec![(
+            200,
+            "application/json",
+            br#"{"translations":[{"text":"Hallo"},{"text":"zwei\nZeilen"}]}"#.to_vec(),
+        )]);
+        let store = CloudStore::at(scratch("commands-translate"));
+        let id = account(&store, ProviderKind::Deepl, &server.url, "k");
+        let done = cloud_translate_captions(&state, &store, &id, "de", None, "").unwrap();
+        assert_eq!(done.lines, 2);
+
+        let project = state.project.read().clone().unwrap();
+        let lane = project.track(&done.track_id).unwrap();
+        assert_eq!(lane.name, "Captions (German)");
+        assert_eq!(lane.segments.len(), 2);
+        assert_eq!(lane.segments[1].target_range.start, 1_000_000);
+        let all = captions_list(&state).unwrap();
+        assert!(all.iter().any(|c| c.text == "Hallo"));
+        // The original lane is untouched, and one undo takes the new one away.
+        assert!(all.iter().any(|c| c.text == "Hello"));
+        crate::modules::timeline::commands::timeline_undo(&state).unwrap();
+        assert!(state
+            .project
+            .read()
+            .as_ref()
+            .unwrap()
+            .track(&done.track_id)
+            .is_none());
+        let sent = server.requests.lock().unwrap()[0].clone();
+        let body: serde_json::Value = serde_json::from_slice(&sent.body).unwrap();
+        assert_eq!(body["text"][1], "two\nlines");
     }
 
     #[test]
