@@ -38,6 +38,7 @@ mod details;
 mod easing;
 mod effects;
 mod grading;
+mod masks;
 mod speed;
 mod text_style;
 mod tracking;
@@ -78,6 +79,8 @@ pub(crate) struct Inspector {
     easing: easing::EasingState,
     /// The Text tab's words field and colour pickers.
     text: text_style::TextTab,
+    /// Masks, chroma key and blend: sliders, drags, the eyedropper.
+    masks: masks::MasksPanel,
 }
 
 /// The widgets behind one property: a number box and, for most, a slider.
@@ -1077,6 +1080,7 @@ impl Editor {
     ) -> impl IntoElement {
         self.inspector.text.begin_frame();
         self.inspector.effects.begin_frame();
+        self.inspector.masks.begin_frame();
         let body = match self.selected_segment().map(|(_, s)| self.clip_kind(s)) {
             Some(kind) => self
                 .render_inspector_clip(kind, window, cx)

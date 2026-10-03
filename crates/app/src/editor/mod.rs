@@ -312,7 +312,8 @@ impl Editor {
         self.last_request = Some(key);
         // Just inside the frame, like the export: see `SAMPLE_SLACK`.
         self.player.request(
-            Arc::clone(&self.project),
+            // The document, or a copy showing the selected clip's matte.
+            self.preview_project(),
             self.generation,
             time + chukcut_engine::modules::project::SAMPLE_SLACK,
             size,

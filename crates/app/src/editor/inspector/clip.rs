@@ -112,10 +112,11 @@ impl Editor {
                 VIDEO => {
                     let names = ["Basic", "Remove background", "Mask", "Retouch"];
                     let current = sub(self, VIDEO, names[0]);
-                    let body = if current == "Basic" {
-                        self.video_basic(&segment, kind, window, cx)
-                    } else {
-                        not_yet(current)
+                    let body = match current {
+                        "Basic" => self.video_basic(&segment, kind, window, cx),
+                        "Mask" => self.mask_tab(&segment, window, cx),
+                        "Remove background" => self.remove_background_tab(&segment, window, cx),
+                        _ => not_yet(current),
                     };
                     (
                         Some(sub_tabs(VIDEO, &names, current, cx).into_any_element()),
@@ -240,27 +241,13 @@ impl Editor {
         .render(self.collapsed("Transform"), transform_rows, cx);
 
         let blend_rows = vec![
-            label_row(
-                "Mode",
-                div()
-                    .w(px(160.0))
-                    .h(px(CONTROL_H))
-                    .px(px(8.0))
-                    .flex()
-                    .items_center()
-                    .rounded(px(R_SM))
-                    .bg(rgb(WELL))
-                    .border_1()
-                    .border_color(rgb(HAIRLINE))
-                    .text_size(px(TEXT_LABEL))
-                    .text_color(rgb(DISABLED))
-                    .child("Normal"),
-            ),
+            label_row("Mode", self.blend_mode_control(segment, cx)),
             self.slider_row(Prop::Opacity, segment, window, cx),
         ];
         let blend = Section {
             on_reset: Some(Box::new(|this: &mut Editor, cx| {
-                this.reset_prop(Prop::Opacity, cx)
+                this.reset_prop(Prop::Opacity, cx);
+                this.reset_blend_mode(cx);
             })),
             ..Section::new("Blend")
         }

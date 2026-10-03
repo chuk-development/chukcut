@@ -74,6 +74,7 @@ pub(crate) fn icon(data: &'static [u8], size: f32, color: u32) -> Icon {
 }
 
 /// Text colour of a control that does nothing yet.
+#[allow(dead_code)]
 pub(crate) const DISABLED: u32 = TEXT_DISABLED;
 
 /// A small square icon button: the kit's, with a resting tint.
