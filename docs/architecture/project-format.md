@@ -102,8 +102,13 @@ Trimming the left edge moves both starts. Sliding the clip moves only
 changes make the durations differ by the speed factor:
 `source_range.duration = target_range.duration × speed`.
 
-`Segment::source_time_at()` is the one function that maps between them; nothing
-else should do the arithmetic.
+A clip on a **speed curve** (`MaterialPool::speed_curves`, referenced from
+`extras`) instead has `target_range.duration` = the curve's integral of
+`1 / speed` over `source_range`, and its `speed` is dormant. Decision 0018.
+
+`MaterialPool::time_map(segment)` is the one function that maps between them,
+curve or not; nothing else should do the arithmetic. (`Segment::source_time_at()`
+predates curves and ignores them.)
 
 ## Normalized transforms
 
