@@ -77,8 +77,9 @@ The result is 19.7 s on 8 lanes (`chukcut-cli info _scratch/demo/showcase.chukcu
 | export | | own **export preset** "Showcase" (TikTok, CRF 19) | `preset save`, `export --preset user_showcase --sidecar srt` |
 
 The export: 591 frames (19.7 s at 30 fps), H.264 1080x1920 and AAC,
--14.3 LUFS integrated, 25.9 MB. On this machine the software encoder took
-58 s, and `--hardware auto` (NVENC) 18 s. Frames from the export match
+-14.3 LUFS integrated, about 26 MB. On this machine the software encoder
+took 23 s on a quiet machine and 58 s under load, and `--hardware auto`
+(NVENC) 18 s under load. Frames from the export match
 `render-frame` and the app's player.
 
 ## A tour of the app
