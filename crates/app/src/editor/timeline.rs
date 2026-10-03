@@ -3458,6 +3458,20 @@ impl Editor {
             }
         }
 
+        // A clip with a keyframe-free animation: an accent dot at the end of
+        // its title strip (motion agent).
+        if self.project.materials.animation_of(segment).is_some() && width > 24.0 {
+            body = body.child(
+                div()
+                    .absolute()
+                    .right(px(5.0))
+                    .top(px((TITLE_H - 6.0) / 2.0))
+                    .size(px(6.0))
+                    .rounded_full()
+                    .bg(rgb(ACCENT)),
+            );
+        }
+
         // The edges: a resize cursor where a press trims.
         let editable = !track.locked && self.timeline.tool == Tool::Select;
         if editable && width > 3.0 * EDGE_GRAB {

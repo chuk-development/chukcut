@@ -160,6 +160,39 @@ pub fn place_quad(
     })
 }
 
+/// Narrow a placed quad to the part of it `reveal` keeps.
+///
+/// `reveal` is `[x0, y0, x1, y1]` as fractions of the clip's own rectangle,
+/// y down — what a wipe animation produces. The kept part stays exactly where
+/// it was on the canvas and shows exactly the texels it showed: the quad is
+/// shrunk in its local space (before rotation and flips) and the UV rectangle
+/// with it, so a wipe follows a rotated or mirrored clip. `None` when nothing
+/// is left to draw.
+pub fn reveal(placement: QuadPlacement, reveal: [f32; 4]) -> Option<QuadPlacement> {
+    let x0 = reveal[0].clamp(0.0, 1.0);
+    let y0 = reveal[1].clamp(0.0, 1.0);
+    let x1 = reveal[2].clamp(0.0, 1.0);
+    let y1 = reveal[3].clamp(0.0, 1.0);
+    if !(x1 > x0 && y1 > y0) {
+        return None;
+    }
+    // The unit quad is ±0.5 with +y up and v = 0 at the top edge.
+    let centre = Vec3::new(-0.5 + (x0 + x1) * 0.5, 0.5 - (y0 + y1) * 0.5, 0.0);
+    let local = Mat4::from_translation(centre) * Mat4::from_scale(Vec3::new(x1 - x0, y1 - y0, 1.0));
+    let mvp = Mat4::from_cols_array(&placement.mvp) * local;
+    let [u0, v0, u1, v1] = placement.crop;
+    Some(QuadPlacement {
+        mvp: mvp.to_cols_array(),
+        crop: [
+            u0 + (u1 - u0) * x0,
+            v0 + (v1 - v0) * y0,
+            u0 + (u1 - u0) * x1,
+            v0 + (v1 - v0) * y1,
+        ],
+        opacity: placement.opacity,
+    })
+}
+
 /// Whether a track contributes pixels.
 ///
 /// `hidden` is the visibility switch. `muted` deliberately is *not*: it silences
@@ -215,6 +248,23 @@ mod tests {
 
     fn close(a: f32, b: f32) -> bool {
         (a - b).abs() < 1e-4
+    }
+
+    #[test]
+    fn a_reveal_keeps_the_kept_part_where_it_was() {
+        let full = place_quad((1000, 1000), (1000, 1000), &Transform::default(), None).unwrap();
+        let left = reveal(full, [0.0, 0.0, 0.5, 1.0]).unwrap();
+        // The left half of the clip: its right edge is now the canvas centre
+        // and it samples the left half of the texture.
+        let right_edge = corner(&left.mvp, 0.5, 0.0);
+        let left_edge = corner(&left.mvp, -0.5, 0.0);
+        assert!(close(right_edge.x, 0.0) && close(left_edge.x, -1.0));
+        assert_eq!(left.crop, [0.0, 0.0, 0.5, 1.0]);
+        let top = reveal(full, [0.0, 0.0, 1.0, 0.25]).unwrap();
+        assert!(close(corner(&top.mvp, 0.0, -0.5).y, 0.5));
+        assert_eq!(top.crop, [0.0, 0.0, 1.0, 0.25]);
+        assert!(reveal(full, [0.5, 0.0, 0.5, 1.0]).is_none());
+        assert_eq!(reveal(full, [0.0, 0.0, 1.0, 1.0]), Some(full));
     }
 
     #[test]

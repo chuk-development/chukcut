@@ -12,6 +12,7 @@ pub mod export;
 pub mod gpu;
 pub mod inspector;
 pub mod media;
+pub mod motion;
 pub mod preview;
 pub mod project;
 pub mod proxy;

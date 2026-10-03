@@ -130,15 +130,7 @@ impl Editor {
                         footer,
                     )
                 }
-                ANIMATION => {
-                    let names = ["In", "Out", "Combo"];
-                    let current = sub(self, ANIMATION, names[0]);
-                    (
-                        Some(sub_tabs(ANIMATION, &names, current, cx).into_any_element()),
-                        not_yet(&format!("{current} animations")),
-                        None,
-                    )
-                }
+                ANIMATION => self.animation_tab(&segment, kind, window, cx),
                 _ => {
                     let names = ["Basic", "HSL", "Curves", "Colour wheels", "Mask"];
                     let current = sub(self, ADJUST, names[0]);

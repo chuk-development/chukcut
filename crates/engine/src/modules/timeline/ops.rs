@@ -11,6 +11,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::modules::motion;
+use crate::modules::project::AnimationMaterial;
 use crate::modules::project::{
     source_duration_for, speed_slack, AnimatableProperty, AudioMaterial, Easing, ImageMaterial,
     Keyframe, KeyframeTrack, Marker, Micros, Project, Segment, TimeRange, Track, Transform,
@@ -233,6 +235,17 @@ pub enum EditCommand {
         material: PoolMaterial,
         index: usize,
     },
+    /// Give a segment a keyframe-free animation, change it, or take it away.
+    ///
+    /// Both sides carry the whole `AnimationMaterial`, for the reason
+    /// `AddTransition` carries the whole transition: undo has to put back
+    /// exactly what was there. `None` on one side is "no animation". The body
+    /// is `motion::edit::set`, which also keeps the pool in step.
+    SetAnimation {
+        segment_id: String,
+        before: Option<AnimationMaterial>,
+        after: Option<AnimationMaterial>,
+    },
     /// Several commands that undo as one unit, applied in order.
     Composite {
         label: String,
@@ -448,6 +461,11 @@ impl EditCommand {
                     "Edit marker".into()
                 }
             }
+            EditCommand::SetAnimation { before, after, .. } => match (before, after) {
+                (None, Some(_)) => "Add animation".into(),
+                (Some(_), None) => "Remove animation".into(),
+                _ => "Change animation".into(),
+            },
             EditCommand::Composite { label, .. } => label.clone(),
         }
     }
@@ -963,6 +981,12 @@ impl EditCommand {
                 add_pool_material(project, material, *index)
             }
 
+            EditCommand::SetAnimation {
+                segment_id,
+                before,
+                after,
+            } => motion::edit::set(project, segment_id, before.as_ref(), after.as_ref()),
+
             EditCommand::Composite { commands, .. } => {
                 for (i, cmd) in commands.iter().enumerate() {
                     if let Err(e) = cmd.apply(project) {
@@ -1175,6 +1199,15 @@ impl EditCommand {
                 material: material.clone(),
                 index: *index,
             },
+            EditCommand::SetAnimation {
+                segment_id,
+                before,
+                after,
+            } => EditCommand::SetAnimation {
+                segment_id: segment_id.clone(),
+                before: after.clone(),
+                after: before.clone(),
+            },
             EditCommand::Composite { label, commands } => EditCommand::Composite {
                 label: label.clone(),
                 // Undoing a composite means undoing its parts in reverse.
@@ -1284,9 +1317,16 @@ pub fn split_at(project: &Project, segment_id: &str, at: Micros) -> Result<EditC
             Err(error) if index == 0 => return Err(error),
             Err(_) => continue,
         };
-        right_halves.push(split.right_id);
         commands.push(split.trim);
         commands.push(split.insert);
+        if let Some((_, original)) = project.segment(target) {
+            commands.extend(motion::edit::split_commands(
+                project,
+                original,
+                &split.right_id,
+            ));
+        }
+        right_halves.push(split.right_id);
     }
 
     // Both halves of a cut pair need a group, and it has to be a new one: the
@@ -1356,8 +1396,13 @@ fn split_one(project: &Project, segment_id: &str, at: Micros) -> Result<SplitHal
     // right half is a new clip, and if it kept the group it would be a third
     // member of a pair. The caller gives the right halves a group of their own
     // once it knows how many there are.
+    // An animation is re-issued per half by `motion::edit::split_commands`
+    // (the entrance stays left, the exit goes right), so the clone drops the
+    // shared reference here.
     right.extras.retain(|id| {
-        project.materials.transition(id).is_none() && !project.materials.links.contains(id)
+        project.materials.transition(id).is_none()
+            && !project.materials.links.contains(id)
+            && project.materials.animation(id).is_none()
     });
 
     // The right half keeps only the animation that describes *its* frames.

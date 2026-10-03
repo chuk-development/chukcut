@@ -13,6 +13,7 @@
 //!
 //! See `docs/architecture/project-format.md`.
 
+pub mod animation;
 pub mod autosave;
 pub mod commands;
 pub mod configure;
@@ -21,5 +22,6 @@ pub mod grade;
 pub mod migrate;
 pub mod recovery;
 
+pub use animation::*;
 pub use configure::{ConfigureCommand, ProjectConfig};
 pub use document::*;

@@ -30,6 +30,7 @@ use gpui::{Entity, Focusable, Subscription};
 
 use super::*;
 
+mod animation;
 mod clip;
 mod controls;
 mod details;
@@ -59,6 +60,8 @@ pub(crate) struct Inspector {
     settings: Option<SettingsForm>,
     /// The Adjust tab's own state: HSL band, curve and wheel drags, LUT list.
     grading: grading::GradingState,
+    /// The Animation tab's hover, sliders and drags.
+    animation: animation::AnimationTab,
 }
 
 /// The widgets behind one property: a number box and, for most, a slider.
