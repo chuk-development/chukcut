@@ -8,6 +8,7 @@
 
 pub mod analysis;
 pub mod audio;
+pub mod audiofx;
 pub mod captions;
 pub mod cloud;
 pub mod effects;

@@ -23,10 +23,11 @@
 //!
 //! Three multipliers reach a sample: the segment's `volume`, its `Volume`
 //! keyframe track if it has one, and the track's `volume`. Speed is not a gain
-//! but it changes which samples are read — a segment at 2x consumes twice the
-//! source duration, and resampling that back to the target length moves the
-//! pitch up, which is what a naive speed change does and what users expect
-//! until a time-stretcher exists.
+//! but it changes which samples are read. A clip at a constant speed with
+//! "Change audio pitch" on is read faster and resampled here (the pitch moves,
+//! as a tape's would); every other speed change, a speed curve, and a clip
+//! with audio effects is rendered by `modules::audiofx` — the same function
+//! the preview's cached render comes from — and mixed at speed 1.
 //!
 //! The sum is kept in `f32` with no headroom management and clamped once, at
 //! the end. Normalizing instead would mean two exports of nearly identical
@@ -229,11 +230,6 @@ pub fn mix_timeline(
             if project.sound_is_on_a_linked_lane(track, segment) {
                 continue;
             }
-            // Muted on a speed curve, as in the preview mixer.
-            if project.materials.speed_curve_of(segment).is_some() {
-                continue;
-            }
-
             // A speed factor changes how much source a segment consumes; the
             // document keeps both ranges, but `source_range.duration` is the
             // authority and speed is what maps between them.
@@ -248,6 +244,45 @@ pub fn mix_timeline(
             // Voice cleanup swaps in a denoised file and adds a normalising
             // gain; the preview mixer resolves it the same way.
             let effective = crate::modules::voice::effective_source(project, segment, path);
+            let channel_count = channels.max(1) as usize;
+            let track_gain = finite_or(track.volume, 1.0);
+            let volume_track = segment
+                .keyframes
+                .iter()
+                .find(|k| k.property == AnimatableProperty::Volume);
+            let base = finite_or(segment.volume, 1.0) * track_gain * effective.gain;
+            let gain_at = |frame: usize| match volume_track {
+                None => base,
+                Some(track) => {
+                    // Keyframe times are relative to the segment start, so
+                    // the offset is the frame's position inside the segment,
+                    // not on the timeline.
+                    let offset = micros_for(frame, sample_rate);
+                    base * track
+                        .sample(offset)
+                        .map(|v| finite_or(v, 1.0))
+                        .unwrap_or(1.0)
+                }
+            };
+
+            // A pitch-preserving speed change, a speed curve or an effect
+            // stack: the clip is rendered through `audiofx`, the function the
+            // preview's cached render comes from, and mixed at speed 1.
+            if let Some(spec) = crate::modules::audiofx::spec_for(project, segment, &effective.path)
+            {
+                let rendered = crate::modules::audiofx::render(&spec, source, sample_rate, cancel)
+                    .map_err(|e| {
+                        if cancel.load(Ordering::Relaxed) {
+                            ExportError::Cancelled
+                        } else {
+                            ExportError::Audio(anyhow::anyhow!(e))
+                        }
+                    })?;
+                let rendered = remap_stereo(rendered, channel_count);
+                mixer.mix_at(&rendered, segment.target_range.start, gain_at);
+                continue;
+            }
+
             let request = AudioRequest {
                 material_id: &segment.material_id,
                 path: &effective.path,
@@ -258,32 +293,9 @@ pub fn mix_timeline(
             };
             let decoded = source.samples(&request).map_err(ExportError::Audio)?;
 
-            let channel_count = channels.max(1) as usize;
             let target_frames = frames_for(segment.target_range.duration, sample_rate);
             let stretched = resample_linear(&decoded, channel_count, target_frames);
-
-            let track_gain = finite_or(track.volume, 1.0);
-            let volume_track = segment
-                .keyframes
-                .iter()
-                .find(|k| k.property == AnimatableProperty::Volume);
-            let base = finite_or(segment.volume, 1.0) * track_gain * effective.gain;
-
-            mixer.mix_at(&stretched, segment.target_range.start, |frame| {
-                match volume_track {
-                    None => base,
-                    Some(track) => {
-                        // Keyframe times are relative to the segment start, so
-                        // the offset is the frame's position inside the
-                        // segment, not on the timeline.
-                        let offset = micros_for(frame, sample_rate);
-                        base * track
-                            .sample(offset)
-                            .map(|v| finite_or(v, 1.0))
-                            .unwrap_or(1.0)
-                    }
-                }
-            });
+            mixer.mix_at(&stretched, segment.target_range.start, gain_at);
         }
     }
 
@@ -314,6 +326,25 @@ pub fn slice_range(
     let mut slice = mixed[from * channels..to * channels].to_vec();
     slice.resize(want * channels, 0.0);
     slice
+}
+
+/// A stereo render as `channels` channels: the mono mix for one, the pair
+/// repeated for more. Renders are stereo because the mix bus is.
+fn remap_stereo(stereo: Vec<f32>, channels: usize) -> Vec<f32> {
+    if channels == 2 {
+        return stereo;
+    }
+    let mut out = Vec::with_capacity(stereo.len() / 2 * channels);
+    for frame in stereo.as_chunks::<2>().0 {
+        if channels == 1 {
+            out.push((frame[0] + frame[1]) * 0.5);
+        } else {
+            for c in 0..channels {
+                out.push(frame[c % 2]);
+            }
+        }
+    }
+    out
 }
 
 /// Which track kinds can contribute sound.
@@ -366,8 +397,8 @@ pub fn micros_for(frames: usize, sample_rate: u32) -> Micros {
 ///
 /// Linear interpolation between neighbouring sample frames. This is the naive
 /// speed change: the pitch moves with the rate, because the samples are simply
-/// read faster. A pitch-preserving stretch is a phase vocoder and belongs in
-/// its own module the day someone asks for it.
+/// read faster. Only "Change audio pitch" clips come through here; the
+/// pitch-preserving stretch is `modules::audiofx::stretch`.
 ///
 /// The mapping is `in_frames / out_frames` per output frame rather than
 /// `(in-1)/(out-1)`: the endpoint-preserving form would make a segment's
@@ -742,10 +773,17 @@ mod tests {
 
     #[test]
     fn speed_asks_the_source_for_a_longer_range() {
+        // "Change audio pitch" on: the tape-speed path, which reads exactly the
+        // source the clip spans and resamples it.
         let mut project = project();
         let mut seg = segment("a1", 0, MICROS_PER_SECOND);
         seg.speed = 2.0;
         seg.source_range = TimeRange::new(500_000, 2 * MICROS_PER_SECOND);
+        seg.extras.push("fx".into());
+        project.materials.extras.insert(
+            "fx".into(),
+            serde_json::json!({ "audio_fx": { "pitch_follows_speed": true } }),
+        );
         project.tracks.push(track(TrackKind::Audio, vec![seg]));
 
         let source = Recording::default();
@@ -758,6 +796,67 @@ mod tests {
         assert_eq!(requests[0].2, 2 * MICROS_PER_SECOND);
         // And still lands as one second of output.
         assert_eq!(mixed.len(), frames_for(MICROS_PER_SECOND, RATE) * 2);
+    }
+
+    #[test]
+    fn a_pitch_kept_speed_change_reads_around_the_clip_and_lands_at_its_length() {
+        // The default: the stretcher reads pre-roll before the clip and runs
+        // past its end, then the result is exactly the clip's length.
+        let mut project = project();
+        let mut seg = segment("a1", 0, MICROS_PER_SECOND);
+        seg.speed = 2.0;
+        seg.source_range = TimeRange::new(2 * MICROS_PER_SECOND, 2 * MICROS_PER_SECOND);
+        project.tracks.push(track(TrackKind::Audio, vec![seg]));
+
+        let source = Recording::default();
+        let mixed = mix_timeline(&project, &source, RATE, 2, &AtomicBool::new(false)).unwrap();
+        let requests = source.requests.lock().clone();
+        assert_eq!(requests.len(), 1);
+        let (start, duration) = (requests[0].1, requests[0].2);
+        assert!(start < 2 * MICROS_PER_SECOND, "pre-roll before the clip");
+        assert!(start + duration > 4 * MICROS_PER_SECOND, "and past its end");
+        assert_eq!(mixed.len(), frames_for(MICROS_PER_SECOND, RATE) * 2);
+    }
+
+    #[test]
+    fn a_clip_on_a_speed_curve_is_heard() {
+        use crate::modules::project::{SpeedCurveMaterial, SpeedPoint};
+        let mut project = project();
+        let points = vec![
+            SpeedPoint {
+                source: 0,
+                speed: 0.5,
+            },
+            SpeedPoint {
+                source: 2 * MICROS_PER_SECOND,
+                speed: 2.0,
+            },
+        ];
+        let source_range = TimeRange::new(0, 2 * MICROS_PER_SECOND);
+        let length = crate::modules::project::speed::curve_target_duration(&points, source_range);
+        project.materials.speed_curves.push(SpeedCurveMaterial {
+            id: "curve".into(),
+            preset: None,
+            points,
+        });
+        let mut seg = segment("a1", 0, length);
+        seg.source_range = source_range;
+        seg.extras.push("curve".into());
+        project.tracks.push(track(TrackKind::Audio, vec![seg]));
+
+        let mixed = mix_timeline(
+            &project,
+            &Constant { value: 0.25 },
+            RATE,
+            2,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        // A constant source stretched is still about that constant; what
+        // matters is that it is not the silence a curved clip used to be.
+        let middle = &mixed[mixed.len() / 4..mixed.len() * 3 / 4];
+        let level = middle.iter().map(|s| s.abs()).sum::<f32>() / middle.len() as f32;
+        assert!(level > 0.1, "a curved clip is no longer muted ({level})");
     }
 
     #[test]

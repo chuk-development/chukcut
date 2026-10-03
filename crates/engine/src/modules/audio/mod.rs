@@ -48,9 +48,10 @@
 //!   one for a preview that can be seeked mid-block. What the two share is
 //!   [`decode::FileAudioSource`], which answers the export mixer's own
 //!   interface with a real decoder.
-//! - **Pitch-correct a speed change.** A clip at 2x is read twice as fast and
-//!   sounds it, which is what the export mixer does and what every editor does
-//!   until someone asks for a phase vocoder.
+//! - **Run stateful effects.** A pitch-preserving speed change, a speed curve
+//!   and the audio effects are rendered per clip by `modules::audiofx` and
+//!   cached; the plan points such a clip at its render, and the fill thread
+//!   re-plans when a render lands (`audiofx::cache::generation`).
 
 use std::path::PathBuf;
 

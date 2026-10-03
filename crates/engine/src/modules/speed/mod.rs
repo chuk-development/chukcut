@@ -13,13 +13,11 @@
 //!
 //! ## Sound
 //!
-//! A clip on a speed curve is **muted**, in the preview and in the export.
-//! The audio engine resamples at one constant rate per clip and has no
-//! pitch-preserving time stretch (`docs/STATUS.md`, "Speed changes shift
-//! pitch"); a sound that slides through two octaves inside one ramp is not
-//! something anyone keeps. Resolve does the same with a retime curve. The
-//! Curve tab says so. When a time stretch lands, `audio::mixer::plan` and
-//! `export::audio` are the two places to stop skipping these clips.
+//! A clip on a speed curve is heard: `modules::audiofx` renders its sound
+//! through the curve with Signalsmith Stretch, keeping the pitch (or, with
+//! "Change audio pitch" on, resampling it like a tape). The export renders it
+//! inline; the preview plays the cached render and stays silent on the clip
+//! until that has landed, usually well under a second. Decision 0020.
 
 pub mod commands;
 pub mod edit;
