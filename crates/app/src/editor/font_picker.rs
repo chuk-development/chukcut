@@ -18,12 +18,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use chukcut_engine::modules::library::commands::{self as library, FontList};
-use chukcut_engine::modules::library::fonts::{FontCategory, FontEntry};
+use chukcut_engine::modules::library::fonts::{FontCategory, FontEntry, PreviewHost};
 use chukcut_engine::shell::spawn_blocking;
 use gpui::assets::IconName as Lucide;
 use gpui::component::button::Button;
 use gpui::component::input::{Input, InputEvent, InputState};
 use gpui::component::popover::Popover;
+use gpui::component::switch::Switch;
 use gpui::component::Sizable as _;
 use gpui::prelude::*;
 use gpui::{
@@ -107,6 +108,9 @@ pub(crate) struct FontPicker {
     previews: HashMap<String, Preview>,
     installing: HashSet<String>,
     error: Option<String>,
+    /// The library setting: preview faces from Google's 9 KB subsets, or
+    /// from Fontsource's larger latin files.
+    previews_from_google: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -132,6 +136,7 @@ impl FontPicker {
             previews: HashMap::new(),
             installing: HashSet::new(),
             error: None,
+            previews_from_google: library::library_settings().font_previews == PreviewHost::Google,
             _subscriptions: vec![subscription],
         }
     }
@@ -163,7 +168,9 @@ impl FontPicker {
     }
 
     fn load_catalogue(&mut self, cx: &mut Context<Self>) {
-        if self.catalogue.as_ref().is_some_and(|c| c.is_ok()) || self.loading_catalogue {
+        // Once per picker: a failure stays until "Try again", or an offline
+        // machine would ask the network on every frame.
+        if self.catalogue.is_some() || self.loading_catalogue {
             return;
         }
         self.loading_catalogue = true;
@@ -447,6 +454,23 @@ impl Render for FontPicker {
                     .text_color(rgb(TEXT_MUTED))
                     .child(text)
             }))
+            .when(
+                catalogue_category(self.tab).is_some()
+                    && matches!(self.catalogue, Some(Err(_))),
+                |column| {
+                    column.child(
+                        div().flex().child(
+                            Button::new("font-retry")
+                                .label("Try again")
+                                .xsmall()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.catalogue = None;
+                                    cx.notify();
+                                })),
+                        ),
+                    )
+                },
+            )
             .child(list)
             .child(
                 div()
@@ -458,6 +482,28 @@ impl Render for FontPicker {
                         "Fonts on this computer and those downloaded from the library."
                     }),
             )
+            .when(catalogue_category(self.tab).is_some(), |column| {
+                column.child(
+                    Switch::new("font-previews-google")
+                        .checked(self.previews_from_google)
+                        .label("Small previews from Google Fonts (sends your IP to Google)")
+                        .xsmall()
+                        .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                            this.previews_from_google = *checked;
+                            let settings = library::LibrarySettings {
+                                font_previews: if *checked {
+                                    PreviewHost::Google
+                                } else {
+                                    PreviewHost::Fontsource
+                                },
+                            };
+                            if let Err(error) = library::library_set_settings(&settings) {
+                                this.error = Some(error);
+                            }
+                            cx.notify();
+                        })),
+                )
+            })
     }
 }
 

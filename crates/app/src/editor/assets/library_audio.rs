@@ -99,6 +99,20 @@ impl Editor {
                 "Kevin MacLeod (incompetech.com), CC BY 4.0. Export writes the credit.",
             ))
             .children(note.map(|(text, tone)| notice(text, tone)))
+            .when(
+                chosen == all && matches!(self.assets.library.music_all, Some(Err(_))),
+                |column| {
+                    column.child(chips([chip(
+                        "music-retry",
+                        "Try again",
+                        false,
+                        cx.listener(|this, _, _, cx| {
+                            this.assets.library.music_all = None;
+                            cx.notify();
+                        }),
+                    )]))
+                },
+            )
             .child(
                 Self::tile_area("music-list")
                     .child(div().flex().flex_col().gap(px(6.0)).children(rows)),

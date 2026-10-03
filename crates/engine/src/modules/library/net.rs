@@ -35,9 +35,20 @@ pub fn agent() -> ureq::Agent {
         .build()
 }
 
-/// What the user reads when `what` could not be fetched.
+/// What the user reads when `what` could not be fetched. A transport
+/// failure (no network, no DNS, a refused connection) becomes "no
+/// connection"; the full error goes to the log. A server's own answer (a
+/// 404, a rate limit) is kept, because it says something the user can use.
 pub fn unreachable(what: &str, error: &str) -> String {
-    format!("Could not download {what} ({error}). Check the connection; everything already downloaded still works offline.")
+    tracing::warn!(%error, what, "library download failed");
+    let reason = if error.starts_with("could not reach") {
+        "no connection".to_string()
+    } else {
+        error.to_string()
+    };
+    format!(
+        "Could not download {what}: {reason}. Everything already downloaded still works offline."
+    )
 }
 
 /// `url`'s body, up to `cloud::http::MAX_BODY`.
@@ -128,7 +139,10 @@ mod tests {
         assert_eq!(stale.bytes, b"[1]");
         // Nothing on disk and no server: a message, not a panic.
         let error = cached(&url, &dir.join("other.json"), Duration::ZERO, "the list").unwrap_err();
-        assert!(error.starts_with("Could not download the list"), "{error}");
+        assert_eq!(
+            error,
+            "Could not download the list: no connection. Everything already downloaded still works offline."
+        );
     }
 
     #[test]
