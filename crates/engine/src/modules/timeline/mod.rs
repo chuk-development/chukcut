@@ -10,6 +10,7 @@
 
 pub mod commands;
 pub mod freeze;
+pub mod gesture;
 pub mod history;
 pub mod ops;
 

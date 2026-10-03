@@ -1,0 +1,43 @@
+[package]
+name = "chukcut-cli"
+version = "0.1.0"
+description = "chukcut from the command line, and as an MCP server: edit projects headlessly over the engine's command layer."
+authors = ["chukfinley <chuk@chuk.dev>"]
+license = "GPL-3.0-or-later"
+repository = "https://github.com/chuk-development/chukcut"
+homepage = "https://github.com/chuk-development/chukcut"
+readme = "../../README.md"
+publish = false
+edition = "2021"
+
+[[bin]]
+name = "chukcut-cli"
+path = "src/main.rs"
+
+[dependencies]
+chukcut-engine = { path = "../engine", default-features = false }
+# Argument parsing. MIT/Apache-2.0, the de-facto standard; derive keeps every
+# subcommand's arguments in one struct that serde and schemars also read.
+clap = { version = "4.5", features = ["derive", "wrap_help"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# JSON Schema for the MCP tools, derived from the same argument structs the CLI
+# parses, so a tool's schema cannot drift from what it accepts. MIT.
+schemars = "1"
+# The engine's few async commands (import, snapshot) are futures over a plain
+# thread; this drives them without an async runtime.
+pollster = "1.0.1"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+base64 = "0.22"
+# Only to quieten libav: its hardware probes print errors for every encoder
+# the machine lacks, which is noise on a CLI's stderr. The engine's version.
+ffmpeg-next = "6.1"
+
+# Offline transcription (whisper.cpp) is on, as in the app. The same engine
+# features also mean the CLI and the app share one engine build in the
+# workspace target instead of compiling it twice.
+[features]
+default = ["local-whisper"]
+local-whisper = ["chukcut-engine/local-whisper"]
+cuda = ["chukcut-engine/local-whisper-cuda"]
