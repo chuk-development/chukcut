@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- A chukcut project is one JSON file, <name>.chukcut
+     (docs/architecture/project-format.md). The glob is the only rule: the
+     JSON is pretty-printed and its key order is not part of the format, so
+     there is no reliable magic to match. -->
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/x-chukcut">
+    <comment>chukcut project</comment>
+    <sub-class-of type="application/json"/>
+    <icon name="chukcut"/>
+    <glob pattern="*.chukcut" weight="80"/>
+  </mime-type>
+</mime-info>

@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- AppStream metadata, read by software centres (GNOME Software, KDE
+     Discover) and by Flathub. Validate with:
+       appstreamcli validate (no-net) packaging/linux/io.github.chuk_development.chukcut.metainfo.xml
+     The component id is reverse-DNS, as AppStream asks. The desktop file
+     keeps the short name chukcut.desktop on purpose: it must match the
+     Wayland app_id the window sets (crates/app/src/main.rs), or the shell
+     cannot pair the window with its icon. The launchable tag links the two.
+-->
+<component type="desktop-application">
+  <id>io.github.chuk_development.chukcut</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>chukcut</name>
+  <summary>Fast video editor with a native GPU interface</summary>
+  <developer id="io.github.chuk_development">
+    <name>chukcut contributors</name>
+  </developer>
+  <description>
+    <p>
+      chukcut is a video editor for Linux in the style of CapCut: open a phone
+      video, cut it, add captions and effects, and export. The interface and
+      the compositor both run on the GPU.
+    </p>
+    <ul>
+      <li>Magnetic timeline with ripple, razor, multi-select, keyframes and linked audio</li>
+      <li>Colour grading: basic adjustments, HSL, curves, colour wheels and LUTs</li>
+      <li>GPU effects, 120 transitions, picture-in-picture and split layouts</li>
+      <li>Animation presets, a text animator, punch-in zoom and motion tracking</li>
+      <li>Automatic captions with a local Whisper model or a cloud service, with SRT and VTT</li>
+      <li>Silence and filler-word cutting, voice cleanup and a loudness target</li>
+      <li>Hardware export with NVENC and VAAPI</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">chukcut.desktop</launchable>
+  <provides>
+    <binary>chukcut</binary>
+    <mediatype>application/x-chukcut</mediatype>
+  </provides>
+  <url type="homepage">https://github.com/chuk-development/chukcut</url>
+  <url type="bugtracker">https://github.com/chuk-development/chukcut/issues</url>
+  <url type="vcs-browser">https://github.com/chuk-development/chukcut</url>
+  <url type="contribute">https://github.com/chuk-development/chukcut/blob/master/CONTRIBUTING.md</url>
+  <screenshots>
+    <screenshot type="default">
+      <caption>The editor with a vertical project on the timeline</caption>
+      <image>https://raw.githubusercontent.com/chuk-development/chukcut/master/docs/images/editor.png</image>
+    </screenshot>
+  </screenshots>
+  <categories>
+    <category>AudioVideo</category>
+    <category>Video</category>
+    <category>AudioVideoEditing</category>
+  </categories>
+  <keywords>
+    <keyword>video</keyword>
+    <keyword>editor</keyword>
+    <keyword>timeline</keyword>
+    <keyword>captions</keyword>
+  </keywords>
+  <requires>
+    <display_length compare="ge">1280</display_length>
+  </requires>
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </supports>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.0" date="2026-10-03">
+      <description>
+        <p>The first release. See CHANGELOG.md for the full list.</p>
+      </description>
+    </release>
+  </releases>
+</component>

@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name=chukcut
+GenericName=Video Editor
+Comment=Edit videos fast, with a native GPU interface
+Exec=chukcut %F
+TryExec=chukcut
+Icon=chukcut
+Terminal=false
+Categories=AudioVideo;Video;AudioVideoEditing;
+MimeType=application/x-chukcut;
+Keywords=video;editor;edit;cut;timeline;captions;subtitles;reels;shorts;
+StartupNotify=true
+StartupWMClass=chukcut
+SingleMainWindow=true
