@@ -100,6 +100,9 @@ fn kind_of(project: &Project, track: &Track, segment: &Segment) -> &'static str 
     if pool.audio(&segment.material_id).is_some() {
         return "audio";
     }
+    if pool.sequence(&segment.material_id).is_some() {
+        return "compound";
+    }
     match track.kind {
         TrackKind::Sticker => "sticker",
         _ => "unknown",
@@ -125,6 +128,8 @@ pub fn clip(project: &Project, track_index: usize, clip_index: usize, segment: &
         json!(t.content)
     } else if let Some(e) = pool.effect(&segment.material_id) {
         json!(e.kind)
+    } else if let Some(s) = pool.sequence(&segment.material_id) {
+        json!(s.name)
     } else {
         Value::Null
     };
@@ -331,6 +336,12 @@ pub fn project(project: &Project, state: &AppState, path: &std::path::Path) -> V
         "fps": project.fps,
         "duration": seconds(duration),
         "duration_us": duration,
+        // Which timeline the lanes below are, and the way into an open
+        // compound clip; see `timeline list`.
+        "timeline": chukcut_engine::modules::sequence::breadcrumbs(project)
+            .into_iter()
+            .map(|(id, name)| json!({"id": id, "name": name}))
+            .collect::<Vec<_>>(),
         "tracks": tracks,
         "materials": videos.into_iter().chain(images).chain(audios).collect::<Vec<_>>(),
         "markers": markers,
