@@ -142,6 +142,10 @@ fn render_loop(shared: Arc<Shared>) {
         {
             provider = Some((key, MediaSourceProvider::from_project(&request.project)));
         }
+        // Titles and captions change without the files changing.
+        if let Some((_, sources)) = provider.as_mut() {
+            sources.sync_texts(&request.project);
+        }
         let (_, sources) = provider.as_ref().expect("provider was just set");
 
         let (width, height) = request.size;

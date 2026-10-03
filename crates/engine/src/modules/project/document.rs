@@ -542,7 +542,7 @@ pub struct ImageMaterial {
     pub height: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TextMaterial {
     pub id: Id,
     pub content: String,
@@ -566,6 +566,38 @@ pub struct TextMaterial {
     pub shadow: Option<TextShadow>,
     #[serde(default)]
     pub background: Option<[f32; 4]>,
+    /// Present when this title is a caption: the spoken words behind it and
+    /// how they are highlighted. `None` for an ordinary title.
+    ///
+    /// On the material rather than in `extras`, because the renderer reads it
+    /// on every frame of a karaoke caption and must not parse JSON to do it —
+    /// the argument `MaterialPool::transitions` makes for its own fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caption: Option<CaptionData>,
+}
+
+/// What makes a title a caption. See `modules/captions`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CaptionData {
+    /// The words as spoken, in order.
+    ///
+    /// Times are **source time** of the segment (`0` is the segment's first
+    /// instant as placed), like a keyframe's. A caption that is moved on the
+    /// timeline keeps its words in step with itself, and a trimmed head keeps
+    /// them in step with the audio, because trimming advances the source.
+    #[serde(default)]
+    pub words: Vec<CaptionWord>,
+    /// Karaoke: the colour of the word being spoken. `None` switches it off.
+    #[serde(default)]
+    pub highlight: Option<[f32; 4]>,
+}
+
+/// One spoken word of a caption, with its time in the segment's source.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CaptionWord {
+    pub text: String,
+    pub start: Micros,
+    pub end: Micros,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -577,7 +609,7 @@ pub enum TextAlign {
     Right,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct TextShadow {
     #[serde(default = "opaque_black")]
     pub color: [f32; 4],

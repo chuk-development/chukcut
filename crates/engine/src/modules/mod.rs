@@ -7,6 +7,8 @@
 //! these modules and registered in `lib.rs`.
 
 pub mod audio;
+pub mod captions;
+pub mod cloud;
 pub mod effects;
 pub mod export;
 pub mod gpu;
@@ -17,6 +19,7 @@ pub mod preview;
 pub mod project;
 pub mod proxy;
 pub mod render;
+pub mod speech;
 pub mod text;
 pub mod timeline;
 pub mod transitions;

@@ -21,6 +21,7 @@ recommend anything is a survey, and surveys are in `../research/`.
 | [0010](0010-open-source-under-gpl.md) | Open source under GPL-3.0, not sold; which settles the FFmpeg linking question 0002 was built around, and does not settle codec patents | Decided 2026-08-05 |
 | [0011](0011-native-ui-on-gpui.md) | The UI is native, on GPUI; the webview is gone; the engine is its own crate with no UI dependency; Linux only, NVIDIA and Intel first | Decided 2026-10-02. **Supersedes the webview split, 0004's React parts and 0006** |
 | [0012](0012-animation-as-parameters.md) | Animations are parameters relative to the clip (In/Out/Combo, text animator, punch-in zoom), not baked keyframes, so they survive trims and splits | Decided 2026-10-03 |
+| [0013](0013-local-transcription-with-whisper-cpp.md) | Offline captions run whisper.cpp through whisper-rs (feature `local-whisper`, CUDA opt-in), not candle: word timestamps, CPU speed, quantised models | Decided 2026-10-03 |
 
 Decisions already recorded elsewhere, because they predate this directory:
 

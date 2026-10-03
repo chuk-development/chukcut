@@ -600,6 +600,11 @@ pub(crate) fn rasterize(
     let mut bold_width = 0.0f32;
     let mut bitmaps: Vec<BitmapDraw> = Vec::new();
     let mut glyph_rects: Vec<[f32; 4]> = Vec::with_capacity(layout.glyphs.len());
+    // The karaoke word: its glyphs are filled a second time in their own
+    // colour, over the ordinary fill. Over rather than instead of, so the
+    // outline, shadow and silhouette below stay one shape whatever is lit.
+    let mut lit_commands: Vec<Command> = Vec::new();
+    let mut lit_bold: Vec<Command> = Vec::new();
 
     for glyph in &layout.glyphs {
         let pen = (origin.0 + glyph.x, origin.1 + glyph.y);
@@ -630,9 +635,18 @@ pub(crate) fn rasterize(
         glyph_rects.push(ink);
 
         let commands = bez_to_commands(&path);
+        let lit = request.highlight.as_ref().is_some_and(|h| {
+            glyph.cluster.start < h.range.end && glyph.cluster.end > h.range.start
+        });
         if font.embolden {
             bold_width = bold_width.max(font.font_size * 0.02);
             bold_commands.extend(commands.iter().copied());
+            if lit {
+                lit_bold.extend(commands.iter().copied());
+            }
+        }
+        if lit {
+            lit_commands.extend(commands.iter().copied());
         }
         fill_commands.extend(commands);
     }
@@ -696,6 +710,17 @@ pub(crate) fn rasterize(
     if let Some(mask) = fill_mask.as_ref() {
         canvas.blend_mask(mask, request.color);
         timing.fill = timing.mark();
+    }
+    if let Some(highlight) = request.highlight.as_ref() {
+        if !lit_commands.is_empty() {
+            let mut layers = vec![Layer::fill(&lit_commands)];
+            if bold_width > 0.0 && !lit_bold.is_empty() {
+                layers.push(Layer::stroke(&lit_bold, bold_width));
+            }
+            if let Some(mask) = Coverage::render(&layers, clip) {
+                canvas.blend_mask(&mask, highlight.color);
+            }
+        }
     }
 
     // --- colour bitmaps (emoji) -----------------------------------------

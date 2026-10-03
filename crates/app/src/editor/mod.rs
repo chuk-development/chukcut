@@ -54,6 +54,7 @@ actions!(
 );
 
 mod assets;
+mod captions;
 mod export;
 mod home;
 mod inspector;
@@ -111,6 +112,8 @@ pub struct Editor {
     /// Unsaved-changes tracking, settings, transport extras (`lifecycle.rs`,
     /// `playback.rs`).
     shell: lifecycle::ShellState,
+    /// The Captions tab: transcription, caption editing and styling.
+    captions: captions::CaptionsPanel,
     _ticker: Task<()>,
 }
 
@@ -148,6 +151,7 @@ impl Editor {
         let preview = preview::PreviewState {
             quality: settings::quality_for_scale(shell.settings.preview_scale()),
         };
+        let captions = captions::CaptionsPanel::new(window, cx);
         let mut editor = Self {
             state,
             audio,
@@ -169,6 +173,7 @@ impl Editor {
             assets,
             preview,
             shell,
+            captions,
             _ticker: ticker,
         };
         // Hardware encoder detection opens each device and encodes a test

@@ -265,7 +265,8 @@ impl Editor {
                             .border_1()
                             .border_color(rgb(HAIRLINE))
                             .child(picture)
-                            .children(self.motion_overlay(dw, dh, cx)),
+                            .children(self.motion_overlay(dw, dh, cx))
+                            .children(self.caption_overlay((dw, dh), (bw, bh), cx)),
                     ),
             )
             .child(

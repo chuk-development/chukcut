@@ -87,6 +87,7 @@ pub fn default_material(project: &Project, content: Option<String>) -> TextMater
             blur: (font_size / 8.0).round(),
         }),
         background: None,
+        caption: None,
     }
 }
 
@@ -171,7 +172,13 @@ fn title_lane(project: &Project) -> Option<&Track> {
         .tracks
         .iter()
         .rev()
-        .find(|t| t.kind == TrackKind::Text && !t.locked)
+        // A caption lane is text too, but a title dropped among the captions
+        // would be deleted by the next "replace captions".
+        .find(|t| {
+            t.kind == TrackKind::Text
+                && !t.locked
+                && !crate::modules::captions::edit::is_caption_track(project, t)
+        })
 }
 
 fn title_lane_name(project: &Project) -> String {

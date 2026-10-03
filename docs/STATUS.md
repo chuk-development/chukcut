@@ -1717,6 +1717,69 @@ preview, both export tiers and transition layers get the same pixels.
   hue-vs-hue curve. The `Import LUT…` button uses the desktop file portal,
   which does not exist under Xvfb; the import itself is covered by tests.
 
+## Captions and auto captions (2026-10-03)
+
+A **Captions** tab in the asset panel, CapCut's "Untertitel": auto captions,
+a caption list, styles, and SRT/VTT in and out. Engine side, three modules:
+
+- **`modules/captions`** — a caption is a text clip on a `Captions` lane whose
+  `TextMaterial` carries `caption: Some(CaptionData)`: the spoken words with
+  times (segment source time, so they follow a move or a head trim) and an
+  optional karaoke colour. SRT and VTT parse and write (tolerant of BOMs, CRLF,
+  markup, VTT notes and cue settings); words group into **word captions** (1–4
+  on screen) or **sentence captions** (characters per line, lines, longest
+  duration; a full stop or a 0.7 s pause always breaks). Place, split, merge,
+  retext, restyle, regroup and clear are pure functions returning
+  `EditCommand`s, so **every caption edit is one undo step**. That needed the
+  long-promised `EditCommand::SetTextMaterial { before, after }` in
+  `timeline/ops.rs` (see "What is not undoable" above: the variant now exists;
+  `text_set` still writes the pool directly and could switch to it).
+- **`modules/cloud`** — the first piece of the provider registry from
+  `docs/research/integrations.md` §7: accounts (`~/.config/chukcut/accounts.toml`)
+  and their keys (`secrets.toml`, created 0600 in a 0700 directory, tightened
+  at load, `CHUKCUT_KEY_<ACCOUNT>` overrides). One kind so far,
+  OpenAI-compatible, with a `Transcribe` capability and a connection test
+  (`GET {base}/models`). `User-Agent: chukcut/<version>` and nothing else about
+  the user; keys never reach a `Debug` print, an error message or a project.
+- **`modules/speech`** — transcribes the **timeline mix** at 16 kHz mono (the
+  playback mixer, so cut material is not captioned and times need no mapping).
+  Cloud: WAV chunks of at most ten minutes (19 MB, under the 25 MB limits),
+  cut at the quietest 50 ms in the last 30 s, sent with `verbose_json` and
+  word + segment granularities; a server that rejects the granularity field is
+  asked again without it, and segment-only or text-only answers are turned
+  into estimated words. Local: whisper.cpp (decision 0012), models downloaded
+  with a pinned SHA-256 and a progress bar.
+
+The karaoke highlight is drawn by the rasteriser: `TextRequest::highlight`
+fills one byte range a second time in its own colour, and
+`media::provider` caches a karaoke caption's upload **per lit word** under its
+own key, so the time-blind text cache does not freeze the first word.
+
+Colour emoji needed nothing new: the rasteriser already paints CBDT bitmap
+strikes (Ubuntu's Noto Color Emoji). The trap is the symbol blocks: ☕ ⭐ ✅ ⏰
+are *text* presentation unless followed by U+FE0F, and then they are drawn
+monochrome from the caption font. Every emoji in `captions/emoji.rs` carries
+the selector where it needs one, and a test checks it.
+
+Measured: `cargo run -p chukcut-engine --features local-whisper --example
+captions -- jfk.wav --local tiny` transcribes the 11 s JFK sample with correct
+word times in 3.7 s in a debug build at load 30.
+
+**The player's provider did not see new titles.** `player.rs` keeps one
+`MediaSourceProvider` while the set of files is unchanged (it holds open
+decoders), but the provider copies text materials by value — so any title or
+caption added after the first frame was drawn as the red offline placeholder,
+and a retyped one kept its old pixels. `MediaSourceProvider::sync_texts` now
+runs before every preview frame and drops the cached upload of a changed title.
+
+Known gaps: the emoji *picker* is drawn by GPUI, which shows some emoji as
+monochrome outlines (the caption itself is colour, drawn by our rasteriser);
+the timeline's own split (S) duplicates a caption's text into both
+halves — the panel's "Split at playhead" divides the words properly; a font
+from an online library has a hook (any family registered with the text
+renderer shows up in the font list) but no library yet; the drag frame on the
+player is a rectangle, not handles.
+
 ## Not built yet
 
 Both keyframe editing and audio waveforms landed overnight and this line was

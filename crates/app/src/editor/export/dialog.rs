@@ -229,6 +229,8 @@ impl ExportDialog {
                     .clone()
                     .map(PathBuf::from)
                     .unwrap_or_else(|| self.choices.output_path());
+                // Captions as a sidecar file, when the Captions tab asks for it.
+                crate::editor::captions::after_export(&self.state, &path);
                 self.phase = Phase::Done {
                     path,
                     frames: progress.total_frames,

@@ -15,8 +15,8 @@ use crate::modules::motion;
 use crate::modules::project::AnimationMaterial;
 use crate::modules::project::{
     source_duration_for, speed_slack, AnimatableProperty, AudioMaterial, Easing, ImageMaterial,
-    Keyframe, KeyframeTrack, Marker, Micros, Project, Segment, TimeRange, Track, Transform,
-    TransitionMaterial, VideoMaterial,
+    Keyframe, KeyframeTrack, Marker, Micros, Project, Segment, TextMaterial, TimeRange, Track,
+    Transform, TransitionMaterial, VideoMaterial,
 };
 use crate::modules::transitions;
 
@@ -246,6 +246,14 @@ pub enum EditCommand {
         before: Option<AnimationMaterial>,
         after: Option<AnimationMaterial>,
     },
+    /// Replace a title's parameters, keeping its id — the variant
+    /// `text/commands.rs` asks for. Captions edit their words, timing and style
+    /// through it, so a caption edit is one undo step like any other edit.
+    /// The pool stays where it was; only the material's contents change.
+    SetTextMaterial {
+        before: TextMaterial,
+        after: TextMaterial,
+    },
     /// Several commands that undo as one unit, applied in order.
     Composite {
         label: String,
@@ -466,6 +474,7 @@ impl EditCommand {
                 (Some(_), None) => "Remove animation".into(),
                 _ => "Change animation".into(),
             },
+            EditCommand::SetTextMaterial { .. } => "Edit text".into(),
             EditCommand::Composite { label, .. } => label.clone(),
         }
     }
@@ -986,6 +995,9 @@ impl EditCommand {
                 before,
                 after,
             } => motion::edit::set(project, segment_id, before.as_ref(), after.as_ref()),
+            EditCommand::SetTextMaterial { before, after } => {
+                crate::modules::captions::edit::set_text_material(project, before, after)
+            }
 
             EditCommand::Composite { commands, .. } => {
                 for (i, cmd) in commands.iter().enumerate() {
@@ -1123,6 +1135,10 @@ impl EditCommand {
                 after,
             } => EditCommand::SetTransition {
                 segment_id: segment_id.clone(),
+                before: after.clone(),
+                after: before.clone(),
+            },
+            EditCommand::SetTextMaterial { before, after } => EditCommand::SetTextMaterial {
                 before: after.clone(),
                 after: before.clone(),
             },

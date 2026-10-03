@@ -1797,7 +1797,7 @@ impl Editor {
     // --- commands ------------------------------------------------------------------
 
     /// Delete a clip; on the main lane with the magnet on, close the hole.
-    fn remove_clip(&mut self, segment_id: &str, cx: &mut Context<Self>) {
+    pub(super) fn remove_clip(&mut self, segment_id: &str, cx: &mut Context<Self>) {
         let ripple = self.timeline.magnet
             && self
                 .project

@@ -210,6 +210,7 @@ fn a_typewriter_draws_less_of_the_title_while_it_types() {
         stroke_color: [0.0, 0.0, 0.0, 1.0],
         shadow: None,
         background: None,
+        caption: None,
     });
     let mut track = Track::new(TrackKind::Text, "T1");
     track.segments.push(Segment {
