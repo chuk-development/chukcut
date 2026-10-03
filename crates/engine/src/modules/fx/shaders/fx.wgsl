@@ -121,11 +121,17 @@ fn fs_export(in: VertexOutput) -> @location(0) vec4<f32> {
     return vec4<f32>(c.rgb / c.a, min(c.a, 1.0));
 }
 
-// A straight-alpha texture drawn as it is: composited by the pipeline's blend
-// state (source-over for an effected clip, none for an adjustment's result).
+// A straight-alpha texture laid over the frame: premultiplied here for the
+// `Blend::Over` pipeline (`One, OneMinusSrcAlpha`). The sum is the same as
+// straight alpha with `SrcAlpha, OneMinusSrcAlpha`, but the multiply by alpha
+// happens in 32-bit float instead of in the blender, which may round its
+// factors to the target's precision first: NVIDIA rounds the source alpha of
+// an `Rgba8UnormSrgb` target to 1/255. A layer in the compositor's own 8-bit
+// format already sits on that grid; a layer of any finer format would not.
 @fragment
-fn fs_copy(in: VertexOutput) -> @location(0) vec4<f32> {
-    return load0(vec2<i32>(in.clip_position.xy));
+fn fs_over(in: VertexOutput) -> @location(0) vec4<f32> {
+    let c = load0(vec2<i32>(in.clip_position.xy));
+    return vec4<f32>(c.rgb * c.a, c.a);
 }
 
 // ---------------------------------------------------------------------------

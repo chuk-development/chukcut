@@ -178,7 +178,7 @@ pub fn presets() -> &'static [Preset] {
             directional: false,
             params: e.params,
             wgsl: e.wgsl,
-            entry: "main",
+            entry: GL_ENTRY,
         });
         seamless.chain(gl).collect()
     })
@@ -225,9 +225,42 @@ fn chukcut_library_vs(@builtin(vertex_index) index: u32) -> ChukcutLibraryVertex
 }
 "#;
 
+/// The entry point every gl-transitions preset is drawn with: see
+/// [`GL_OUTPUT_WGSL`].
+const GL_ENTRY: &str = "chukcut_main";
+
+/// A second fragment entry for every ported gl-transition, which runs the
+/// port's own `main` and premultiplies what it wrote.
+///
+/// The library pipeline blends with `One, OneMinusSrcAlpha` and wants
+/// premultiplied colour: the sum is the same as straight alpha with
+/// `SrcAlpha, OneMinusSrcAlpha`, but an 8-bit blender may round its factors
+/// to the target's precision first, and NVIDIA rounds the source alpha of an
+/// `Rgba8UnormSrgb` target to 1/255 (a fade from nothing at a progress of
+/// 0.0018 drew black). Multiplying here keeps it in 32-bit float.
+///
+/// The port's `main` writes straight alpha, and WGSL cannot call an entry
+/// point, so this calls what naga translated `main` into: `main_1`, reading
+/// `v_uv_1` and writing `o_color`. `port.py`'s harness fixes those names for
+/// every file in `gl/`, and `every_preset_is_valid_wgsl_with_the_shared_bindings`
+/// fails if a regenerated port changes them.
+const GL_OUTPUT_WGSL: &str = r#"
+@fragment
+fn chukcut_main(@location(0) v_uv: vec2<f32>) -> @location(0) vec4<f32> {
+    v_uv_1 = v_uv;
+    main_1();
+    let c = o_color;
+    return vec4<f32>(c.rgb * c.a, c.a);
+}
+"#;
+
 /// The full source a preset compiles from.
 pub fn source(preset: &Preset) -> String {
-    format!("{}\n{}", preset.wgsl, VERTEX_WGSL)
+    let output = match preset.family {
+        Family::Gl => GL_OUTPUT_WGSL,
+        Family::Seamless => "",
+    };
+    format!("{}\n{}{}", preset.wgsl, VERTEX_WGSL, output)
 }
 
 #[repr(C)]
@@ -340,8 +373,11 @@ impl LibraryPipelines {
                     compilation_options: Default::default(),
                     targets: &[Some(wgpu::ColorTargetState {
                         format: self.format,
-                        // Straight-alpha source-over, as every transition draws.
-                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        // Source-over, as every transition draws, with the
+                        // colour premultiplied by the shader: `seamless.wgsl`
+                        // returns it so, and a gl-transition is drawn through
+                        // `GL_OUTPUT_WGSL`.
+                        blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
                 }),

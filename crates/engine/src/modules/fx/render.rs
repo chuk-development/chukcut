@@ -309,7 +309,9 @@ unsafe impl bytemuck::Pod for FxUniform {}
 pub enum Blend {
     /// Written through: every pass that fills a target of its own.
     Replace,
-    /// Straight-alpha source-over: an effected clip landing on the frame.
+    /// Source-over of premultiplied colour (`One, OneMinusSrcAlpha`): an
+    /// effected clip landing on the frame, through `fs_over`, which
+    /// premultiplies so an 8-bit blender cannot round the alpha first.
     Over,
 }
 
@@ -465,7 +467,7 @@ impl FxRenderer {
                             format,
                             blend: match blend {
                                 Blend::Replace => None,
-                                Blend::Over => Some(wgpu::BlendState::ALPHA_BLENDING),
+                                Blend::Over => Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
                             },
                             write_mask: wgpu::ColorWrites::ALL,
                         })],
@@ -775,7 +777,7 @@ impl<'a> FxFrame<'a> {
         size: (u32, u32),
     ) -> OverDraw {
         let device = self.ctx.device();
-        let pipeline = self.fx.pipeline(device, "fs_copy", format, Blend::Over);
+        let pipeline = self.fx.pipeline(device, "fs_over", format, Blend::Over);
         let (uniform_group, offset) = self.block(FxUniform {
             frame: [size.0 as f32, size.1 as f32, 0.0, 0.0],
             ..Default::default()
