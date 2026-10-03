@@ -64,4 +64,4 @@ column current.
 | 5 | speed | speed curves (time remap) with presets, keyframe easing + graph editor | merged — curved clips muted (no pitch-preserving stretch), no frame blending |
 | 5 | analysis | scene detection, stabilisation, beat detection + auto-cut, auto reframe | merged — no face detector (needs ML worker); maps time via legacy source_time_at, wrong on speed-curved clips |
 | 6 | titles | full title styling on the kit, colour picker, 20–30 title presets, 10 text templates | running (agent/titles) |
-| 6 | polish | in-app file browser fallback, explicit canvas choice kept, frame-snapped ruler, prune unused materials, analysis on TimeMap, QA lows | running (agent/polish) |
+| 6 | polish | in-app file browser fallback, explicit canvas choice kept, frame-snapped ruler, prune unused materials, analysis on TimeMap, QA lows | done on agent/polish — export resolution/loudness not remembered, size estimate untouched, stale tooltip text left |

@@ -94,6 +94,31 @@ Judge performance from a release build only.
    every render. Markers, crop, curves, layouts, freeze frame, translation and
    TTS are not exposed yet.
 
+## Polish pass, 2026-10-03 (agent/polish)
+
+- **File dialogs work without a portal.** `editor::files::choose` asks
+  `xdg-desktop-portal` and, when that errors, opens the built-in browser
+  (`editor/files/`). After one failure the portal is skipped for the rest of
+  the process; `CHUKCUT_FILE_DIALOG=builtin|portal` forces either. Recent
+  folders live in `<config>/recent-folders.json`, the last export folder in
+  `<config>/last-export-folder`.
+  **Trap:** a gpui-component dialog treats Enter as "confirm" and closes
+  itself. A dialog whose inputs use Enter needs `.on_ok(|_, _, _| false)`.
+- **Canvas choice:** `Project::canvas_chosen` (serde default false, not
+  written when false). Start screen sets it only when a canvas or frame rate
+  was clicked; `project_configure` sets it whenever the size or rate changes,
+  and undo restores it. `project_new` takes the flag as its last argument.
+- **Saved files are pruned** (`project/prune.rs`) of parameter materials
+  nothing reaches; only the written copy, never the live pool.
+- **Analysis uses `TimeMap`** (`analysis/store.rs::timeline_time_of` takes a
+  map). `Segment::source_time_at` remains for constant-speed-only callers.
+- **Edit points on frames:** `preview::clock::{nearest_frame_time,
+  frame_start}`. Ruler/scrub → nearest boundary; split, freeze, Q/W → start
+  of the frame on screen; freeze decodes at the cut plus `SAMPLE_SLACK`.
+- **Trap: unit tests that run commands write the autosave working copy**
+  under `$XDG_CONFIG_HOME/chukcut`. Run tests with an isolated
+  `HOME`/`XDG_*`, or the next app launch offers to "restore" a test project.
+
 ## What works, verified
 
 Each of these was measured or checked against an independent tool, not assumed.

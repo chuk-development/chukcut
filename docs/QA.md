@@ -58,74 +58,101 @@ display with lavapipe as the window's Vulkan driver.
 6. **Inspector Effects tab** put on the design kit: tokens, `IconButton`,
    `EmptyState`, pixel type scale (`9d0b9fe`).
 
+## Fixed by the polish pass (`agent/polish`, same day)
+
+1. **File access without a portal.** Every file question goes through
+   `editor::files::choose`: the portal first, and when it errors our own
+   browser (places, recent folders, typed paths, filter, hidden files,
+   multi-select, save name with a replace check). The export folder is
+   chosen there too and the next export starts in the last one used.
+   Verified on Xvfb with no D-Bus: Open, Import, Save, the export folder
+   over the export dialog.
+2. **A chosen canvas is kept.** `Project::canvas_chosen` (absent = not
+   chosen, so old files round-trip unchanged): set by clicking a canvas or
+   frame rate on the start screen, by project settings and the player's
+   ratio menu. Only an unchosen project adopts the first clip's shape.
+3. **Ruler clicks, scrubs, split, freeze and Q/W land on frames**, and a
+   drop, move or trim that reaches no snap target puts the edge on a frame.
+   Verified: ruler click + split cut at exactly frame 214.
+4. **Saved files leave out unreferenced parameter materials** (grades,
+   effects, animations, speed curves, follow links, analysis extras). Only
+   the written copy is pruned; the live pool keeps everything undo, redo
+   and the clipboard can reach. `full_workflow` checks the reopened file
+   against the pruned document and still saves byte-identical.
+5. **Analysis maps time through `TimeMap`**, so beats, scene cuts, reframe
+   keys, snap-to-beat trims and stabilisation follow speed curves.
+6. **Karaoke on imported subtitles**: word times are estimated per cue on
+   import.
+7. Lows: empty "Untitled" working copies are not offered back and the
+   restore prompt only appears on the start screen; old status messages
+   leave the title bar after 8 s; Menu shows Ctrl+N; Settings → Hardware
+   reports zero-copy only when a VAAPI decoder works.
+
 ## Still broken or missing
 
 ### High
 
-- **There is no text styling UI.** A title's inspector has Video, Animation,
+- ~~No way to save or choose a file without a portal~~ — fixed above.
+- **There is no text styling UI** (the titles agent is on it). A title's inspector has Video, Animation,
   Tracking and Effects; nothing sets the font, size, colour, stroke, shadow or
   box. The engine has it all (`text_set`); the wave-3 "text & titles" row in
   the plan was never run. Captions are styled in the Captions tab, titles not
   at all.
   Steps: Text tab → Default text → select the title → look for a font or
   colour control.
-- **No way to save a new project or choose any file without a desktop
-  portal.** Save as, Open, Import, the export folder and caption import all go
-  through `xdg-desktop-portal`; when it is missing (minimal window managers,
-  some i3/sway setups) the status line says "File dialog failed" and a new
-  project can never be saved. The export folder field is read-only, so exports
-  then always go to `~/Videos`. A typed-path fallback would close this.
-  Steps: run without a portal (e.g. `DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent`),
-  new project, Ctrl+S.
 
 ### Medium
 
-- **The canvas the user picked is replaced by the first clip's shape.** The
+All four below were fixed by the polish pass; kept for the record.
+
+- ~~**The canvas the user picked is replaced by the first clip's shape.** The
   start screen preselects 9:16; importing a 16:9 clip into the empty project
   silently makes it 1920×1080 (`import_material`, "canvas adopted from the
   first imported clip"). Fine when the user did not choose, wrong when they
   clicked 9:16 on purpose. It needs a "chosen" flag in the document, so it is
   left for the owner's call.
-  Steps: start screen → 9:16 → New project → import a landscape clip.
-- **Clicking the ruler puts the playhead between frames**, and split and
+  Steps: start screen → 9:16 → New project → import a landscape clip.~~
+- ~~**Clicking the ruler puts the playhead between frames**, and split and
   freeze frame cut at that exact microsecond (a cut at 3.016761 s, not at
   frame 90). Export samples by frame, so the result is right, but clip edges
   off the frame grid make later frame-accurate edits and the timecode
   readout disagree.
   Steps: click the ruler near 00:03, split, read the left clip's duration in
-  the saved file.
-- **Grade edits leave unreferenced colour materials in the saved file.**
+  the saved file.~~
+- ~~**Grade edits leave unreferenced colour materials in the saved file.**
   Every grade commit mints a new `ColorAdjustMaterial`; the old one stays in
   the pool (3 of 4 unreferenced after four grade edits in the end-to-end
   test). Undo needs them while the session lives, but the file keeps them for
   ever. Titles and effects do the same, by design ("an unreferenced material
   is inert"). A prune of unreferenced colour and effect materials at save
-  time (file only, not the live pool) would keep files small.
-- **Karaoke does nothing on captions imported from an .srt**, because an SRT
+  time (file only, not the live pool) would keep files small.~~
+- ~~**Karaoke does nothing on captions imported from an .srt**, because an SRT
   has no word timing (`Cue::words` is empty and the Captions tab says so).
   Estimating words over each cue, as already done for providers without word
-  timing, would make it work.
+  timing, would make it work.~~
 
 ### Low
 
-- The restore prompt offers to bring back an empty "Untitled" (0 clips) and
-  shows even when a project was opened from the command line.
+- ~~The restore prompt offers to bring back an empty "Untitled" (0 clips) and
+  shows even when a project was opened from the command line.~~
 - The title bar's "Autosaved … ago" does not move after a transition edit.
-- The export dialog does not remember the last folder, resolution or loudness
-  target, and its size estimate was 24 MB for a 3.4 MB file.
-- Settings → Hardware says "Zero-copy decode: Yes" on a machine where no
-  VAAPI decoder works (it reports the adapter's DMA-BUF import, not whether
-  any decoder can use it).
-- The title bar keeps the last error ("b_disc.mp4: cannot open …") until the
-  next status message.
+- The export dialog does not remember the resolution or loudness target
+  (the folder it now remembers), and its size estimate was 24 MB for a
+  3.4 MB file.
+- ~~Settings → Hardware says "Zero-copy decode: Yes" on a machine where no
+  VAAPI decoder works.~~
+- ~~The title bar keeps the last error until the next status message.~~
 - A tooltip that is open while its button changes keeps the old text
   (the effect's eye shows "Turn off" after it was turned off).
-- Menu has no New project shortcut hint although Ctrl+N works.
+- ~~Menu has no New project shortcut hint although Ctrl+N works.~~
+- Projects whose clips were placed before the frame snapping keep their
+  off-grid edges, and a drop that snaps to such an edge stays off the grid.
 
 ## Not tested, and why
 
-- File chooser flows (Import button, Open, Save as, caption import/export,
-  Save frame as image, export folder): no portal on Xvfb.
+- The portal file chooser itself (no portal on Xvfb). The built-in browser
+  that replaces it was tested for Open, Import, Save and the export folder;
+  caption import/export, LUT import and Save frame use the same code path.
 - Real audio output and real-time playback: the null ALSA device consumes
   samples at once, so the audio clock runs far faster than real time. The
   player itself is the performance agent's (`player.rs`); nothing there was
