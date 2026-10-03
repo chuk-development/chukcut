@@ -148,6 +148,7 @@ pub fn compose(
     backdrop_opacity: f32,
     poses: &[GlyphPose],
     pad: f32,
+    units: Option<&[Option<usize>]>,
 ) -> Vec<u8> {
     let (w, h) = (glyphs.width as usize, glyphs.height as usize);
     // Premultiplied while compositing; straight on the way out.
@@ -172,6 +173,7 @@ pub fn compose(
     }
 
     let owners = Ownership::new(glyphs, pad);
+    let pivots = pivots(glyphs, units);
     for (i, rect) in owners.rects.iter().enumerate() {
         let Some(rect) = rect else {
             continue;
@@ -181,10 +183,12 @@ pub fn compose(
         if opacity <= 0.0 || pose.scale.abs() < 1e-4 || !pose.scale.is_finite() {
             continue;
         }
-        let centre = (
+        // Each glyph turns and scales about its unit's centre, so a word
+        // pops as a word rather than as letters drifting apart.
+        let centre = pivots[i].unwrap_or((
             (rect[0] + rect[2]) as f32 * 0.5,
             (rect[1] + rect[3]) as f32 * 0.5,
-        );
+        ));
         if !pose.moves() {
             // At rest: a straight copy of the pixels this glyph owns.
             for y in rect[1]..rect[3] {
@@ -255,6 +259,43 @@ pub fn compose(
         dst[3] = (a.clamp(0.0, 1.0) * 255.0).round() as u8;
     }
     bytes
+}
+
+/// The point each glyph is posed about: the centre of the ink of every glyph
+/// in its unit. `None` (no grouping, or a glyph in no unit) poses a glyph
+/// about its own centre.
+fn pivots(image: &RasteredText, units: Option<&[Option<usize>]>) -> Vec<Option<(f32, f32)>> {
+    let n = image.glyph_rects.len();
+    let Some(units) = units else {
+        return vec![None; n];
+    };
+    let mut boxes: std::collections::HashMap<usize, [f32; 4]> = Default::default();
+    for (i, r) in image.glyph_rects.iter().enumerate() {
+        let Some(Some(u)) = units.get(i) else {
+            continue;
+        };
+        if r[2] <= r[0] || r[3] <= r[1] {
+            continue;
+        }
+        boxes
+            .entry(*u)
+            .and_modify(|b| {
+                *b = [
+                    b[0].min(r[0]),
+                    b[1].min(r[1]),
+                    b[2].max(r[2]),
+                    b[3].max(r[3]),
+                ]
+            })
+            .or_insert(*r);
+    }
+    (0..n)
+        .map(|i| {
+            let u = units.get(i).copied().flatten()?;
+            let b = boxes.get(&u)?;
+            Some(((b[0] + b[2]) * 0.5, (b[1] + b[3]) * 0.5))
+        })
+        .collect()
 }
 
 /// A premultiplied texel of `image`.
@@ -464,7 +505,7 @@ mod tests {
             return;
         }
         let poses = vec![GlyphPose::REST; text.layout.glyphs.len()];
-        let out = compose(&text, None, 1.0, &poses, 2.0);
+        let out = compose(&text, None, 1.0, &poses, 2.0, None);
         // Compared premultiplied: a nearly transparent edge pixel's straight
         // colour is a rounding of a rounding and may differ wildly while
         // contributing nothing to the picture.
@@ -504,15 +545,29 @@ mod tests {
         let full = ink(&text.pixels);
         let mut poses = vec![GlyphPose::REST; 2];
         poses[0].opacity = 0.0;
-        let half = ink(&compose(&text, None, 1.0, &poses, 2.0));
+        let half = ink(&compose(&text, None, 1.0, &poses, 2.0, None));
         assert!(half < full * 3 / 4 && half > full / 4, "{half} of {full}");
 
         let mut moved = vec![GlyphPose::REST; 2];
         moved[1].dy = 40.0;
-        let out = compose(&text, None, 1.0, &moved, 2.0);
+        let out = compose(&text, None, 1.0, &moved, 2.0, None);
         let kept = ink(&out);
         assert!((kept as f64 - full as f64).abs() < full as f64 * 0.05);
         assert_ne!(out, text.pixels);
+    }
+
+    #[test]
+    fn a_word_is_posed_about_its_own_centre() {
+        let text = rastered("ab cd");
+        if text.layout.glyphs.len() < 4 {
+            return;
+        }
+        let (units, _) = glyph_units("ab cd", &text.layout, TextUnit::Word);
+        let p = pivots(&text, Some(&units));
+        let firsts: Vec<_> = p.iter().flatten().collect();
+        assert_eq!(firsts[0], firsts[1], "both letters of a word share a pivot");
+        assert_ne!(firsts[1], firsts[2], "the next word has its own");
+        assert!(pivots(&text, None).iter().all(Option::is_none));
     }
 
     #[test]

@@ -160,13 +160,14 @@ pub fn glyph_poses(
     rel: Micros,
     duration: Micros,
     em: f32,
-) -> Option<(Vec<GlyphPose>, f32)> {
+) -> Option<(Vec<GlyphPose>, f32, Vec<Option<usize>>)> {
     if !is_active(material, rel, duration) {
         return None;
     }
     let (win_in, win_out) = text_windows(material, duration);
     let mut poses = vec![GlyphPose::REST; layout.glyphs.len()];
     let mut backdrop = 1.0f32;
+    let mut grouping = Vec::new();
     let mut layer = |animator: &TextAnimator, t: Micros, window: Micros, leaving: bool| {
         let (units, count) = animate::glyph_units(text, layout, animator.unit);
         let more = poses_for(animator, &units, count, t, window, leaving, em);
@@ -175,6 +176,9 @@ pub fn glyph_poses(
         }
         let progress = (t as f32 / window.max(1) as f32).clamp(0.0, 1.0);
         backdrop *= if leaving { 1.0 - progress } else { progress };
+        // The In and Out windows never overlap (`text_windows`), so at most
+        // one animator is running and its grouping is the one to pose about.
+        grouping = units;
     };
     if let Some(a) = &material.text_in {
         if rel < win_in {
@@ -187,7 +191,7 @@ pub fn glyph_poses(
             layer(a, rel - start, win_out, true);
         }
     }
-    Some((poses, backdrop))
+    Some((poses, backdrop, grouping))
 }
 
 /// The animated picture of a text clip at `time`, or `None` when its text
@@ -246,9 +250,16 @@ pub fn render(
     });
 
     let em = text.font_size * scale;
-    let (poses, backdrop_opacity) =
+    let (poses, backdrop_opacity, units) =
         glyph_poses(animation, &text.content, &glyphs.layout, rel, duration, em)?;
-    let pixels = animate::compose(&glyphs, backdrop.as_deref(), backdrop_opacity, &poses, pad);
+    let pixels = animate::compose(
+        &glyphs,
+        backdrop.as_deref(),
+        backdrop_opacity,
+        &poses,
+        pad,
+        Some(&units),
+    );
     Some((pixels, glyphs.width, glyphs.height))
 }
 
