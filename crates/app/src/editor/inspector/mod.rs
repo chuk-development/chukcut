@@ -30,6 +30,7 @@ use gpui::{Entity, Focusable, Subscription};
 
 use super::*;
 
+mod analysis;
 mod animation;
 mod clip;
 mod controls;

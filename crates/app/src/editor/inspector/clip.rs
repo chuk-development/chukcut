@@ -261,12 +261,10 @@ impl Editor {
         .render(self.collapsed("Blend"), blend_rows, cx);
 
         let mut sections = vec![transform, blend];
-        for title in [
-            "Stabilise",
-            "Enhance quality",
-            "Reduce image noise",
-            "Optical flow",
-        ] {
+        if kind != ClipKind::Text {
+            sections.extend(self.analysis_video_sections(segment, cx));
+        }
+        for title in ["Enhance quality", "Reduce image noise", "Optical flow"] {
             sections.push(Section::missing(title, "Not in the engine yet").render(
                 true,
                 Vec::new(),
@@ -407,6 +405,7 @@ impl Editor {
         .render(self.collapsed("Basic"), rows, cx);
         let mut sections = vec![basic];
         sections.extend(self.voice_sections(&segment, cx));
+        sections.push(self.beats_section(&segment, cx));
         div()
             .flex()
             .flex_col()
