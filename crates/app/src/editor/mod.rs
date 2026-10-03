@@ -466,6 +466,10 @@ impl Editor {
         if let Some(text) = pool.texts.iter().find(|m| m.id == material_id) {
             return text.content.clone();
         }
+        if let Some(effect) = pool.effect(material_id) {
+            return chukcut_engine::modules::fx::descriptor(&effect.kind)
+                .map_or_else(|| effect.kind.clone(), |d| d.label.to_string());
+        }
         "clip".into()
     }
 
@@ -484,6 +488,7 @@ impl Editor {
             TrackKind::Video => CLIP_VIDEO,
             TrackKind::Audio => CLIP_AUDIO,
             TrackKind::Text => CLIP_TEXT,
+            TrackKind::Effect => CLIP_EFFECT,
             _ => CLIP_OTHER,
         }
     }
@@ -532,6 +537,7 @@ impl Render for Editor {
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_drop(cx.listener(Self::on_media_drop))
+            .on_drop(cx.listener(Self::on_effect_drop))
             // A click anywhere gives the keyboard back to the editor; a text
             // field under the pointer takes it again in its own handler,
             // which runs after this capture-phase one.

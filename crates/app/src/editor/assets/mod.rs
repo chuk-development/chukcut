@@ -2,9 +2,10 @@
 //! a category column, a search field and a tile grid.
 //!
 //! Only tabs that lead somewhere real are shown — Media, Audio, Text,
-//! Transitions and Filters. Stickers, effect libraries, templates and the AI
-//! tabs have nothing behind them yet.
+//! Effects, Transitions and Filters. Stickers, templates and the AI tabs
+//! have nothing behind them yet.
 
+mod effects;
 mod library;
 mod media;
 
@@ -25,13 +26,15 @@ pub(crate) enum AssetTab {
     Text,
     Transitions,
     Filters,
+    Effects,
 }
 
 impl AssetTab {
-    const ALL: [AssetTab; 5] = [
+    const ALL: [AssetTab; 6] = [
         AssetTab::Media,
         AssetTab::Audio,
         AssetTab::Text,
+        AssetTab::Effects,
         AssetTab::Transitions,
         AssetTab::Filters,
     ];
@@ -43,6 +46,7 @@ impl AssetTab {
             AssetTab::Text => "Text",
             AssetTab::Transitions => "Transitions",
             AssetTab::Filters => "Filters",
+            AssetTab::Effects => "Effects",
         }
     }
 
@@ -53,6 +57,7 @@ impl AssetTab {
             AssetTab::Text => icons::TEXT,
             AssetTab::Transitions => icons::TRANSITIONS,
             AssetTab::Filters => icons::FILTERS,
+            AssetTab::Effects => icons::EFFECTS,
         }
     }
 
@@ -62,8 +67,9 @@ impl AssetTab {
             AssetTab::Media => &["Import", "Project media"],
             AssetTab::Audio => &["Import", "Project audio"],
             AssetTab::Text => &["Add text"],
-            AssetTab::Transitions => &["Transitions"],
+            AssetTab::Transitions => &library::TRANSITION_CATEGORIES,
             AssetTab::Filters => &["Filters"],
+            AssetTab::Effects => &effects::CATEGORIES,
         }
     }
 
@@ -200,8 +206,9 @@ impl Editor {
             AssetTab::Media => self.render_media_tab(category, cx).into_any_element(),
             AssetTab::Audio => self.render_audio_tab(category, cx).into_any_element(),
             AssetTab::Text => self.render_text_tab(cx).into_any_element(),
-            AssetTab::Transitions => self.render_transitions_tab(cx).into_any_element(),
+            AssetTab::Transitions => self.render_transitions_tab(category, cx).into_any_element(),
             AssetTab::Filters => self.render_filters_tab(cx).into_any_element(),
+            AssetTab::Effects => self.render_effects_tab(category, cx).into_any_element(),
         };
 
         Panel::new("asset-panel")

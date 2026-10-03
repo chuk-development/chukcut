@@ -77,7 +77,7 @@ impl Editor {
         let Some(segment) = self.selected_segment().map(|(_, s)| s.clone()) else {
             return div().into_any_element();
         };
-        let tabs: Vec<&'static str> = match kind {
+        let mut tabs: Vec<&'static str> = match kind {
             ClipKind::Video if self.has_sound(&segment) => {
                 vec![VIDEO, AUDIO, SPEED, ANIMATION, ADJUST]
             }
@@ -86,6 +86,12 @@ impl Editor {
             ClipKind::Audio => vec![BASIC, VOICE, SPEED],
             ClipKind::Text => vec![VIDEO, ANIMATION],
         };
+        // Effects: on every picture, and all an effect clip has.
+        if self.project.materials.is_effect_clip(&segment) {
+            tabs = vec![effects::EFFECTS];
+        } else if kind != ClipKind::Audio {
+            tabs.push(effects::EFFECTS);
+        }
         let active = self
             .inspector
             .tab
@@ -111,6 +117,7 @@ impl Editor {
                         None,
                     )
                 }
+                effects::EFFECTS => (None, self.effects_tab(&segment, window, cx), None),
                 AUDIO | BASIC => (None, self.audio_basic(window, cx), None),
                 VOICE => (None, not_yet("Voice changer"), None),
                 SPEED => {

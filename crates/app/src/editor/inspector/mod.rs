@@ -33,6 +33,7 @@ use super::*;
 mod clip;
 mod controls;
 mod details;
+mod effects;
 mod grading;
 
 pub(super) use details::SettingsForm;
@@ -59,6 +60,8 @@ pub(crate) struct Inspector {
     settings: Option<SettingsForm>,
     /// The Adjust tab's own state: HSL band, curve and wheel drags, LUT list.
     grading: grading::GradingState,
+    /// The Effects tab's sliders and drag.
+    effects: effects::EffectsPanel,
 }
 
 /// The widgets behind one property: a number box and, for most, a slider.

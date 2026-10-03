@@ -392,7 +392,7 @@ static EFFECTS: &[EffectDescriptor] = &[
             slider("shadow", "Shadow", 0.0),
             slider("shadow_blur", "Shadow blur", 30.0),
             slider("shadow_distance", "Shadow distance", 20.0),
-            number("shadow_angle", "Shadow angle", -180.0, 180.0, 135.0, "°"),
+            number("shadow_angle", "Shadow angle", -180.0, 180.0, 45.0, "°"),
             color("shadow_color", "Shadow colour", BLACK),
         ],
     },
