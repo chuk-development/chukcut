@@ -546,6 +546,9 @@ impl Editor {
         if let Some(text) = pool.texts.iter().find(|m| m.id == material_id) {
             return text.content.clone();
         }
+        if let Some(sequence) = pool.sequence(material_id) {
+            return sequence.name.clone();
+        }
         if let Some(effect) = pool.effect(material_id) {
             return chukcut_engine::modules::fx::descriptor(&effect.kind)
                 .map_or_else(|| effect.kind.clone(), |d| d.label.to_string());
@@ -554,6 +557,9 @@ impl Editor {
     }
 
     fn clip_color(&self, kind: TrackKind, material_id: &str) -> u32 {
+        if self.project.materials.sequence(material_id).is_some() {
+            return CLIP_COMPOUND;
+        }
         match kind {
             TrackKind::Video
                 if self

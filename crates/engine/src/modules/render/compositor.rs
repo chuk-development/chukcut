@@ -1591,6 +1591,10 @@ impl Compositor {
             .flatten();
         let fetched = match animated_text {
             Some(frame) => Ok(Some(frame)),
+            // A compound clip: its sequence, rendered whole at this instant.
+            None if kind == MaterialKind::Sequence => {
+                self.nested_frame(canvas, materials, segment, source_time, size, sources)
+            }
             None => sources.frame(&self.ctx, &request),
         };
         let frame = match fetched {
@@ -1674,6 +1678,9 @@ impl Compositor {
         if lut.as_ref().is_some_and(|(lut, _)| lut.one_d) {
             grade.features |= super::grade::feature::LUT_1D;
         }
+        if kind == MaterialKind::Sequence {
+            grade.features |= super::grade::feature::PREMULTIPLIED;
+        }
         // Grain is reseeded per frame from the timeline time, never from a
         // clock or a counter: the preview and the export render the same
         // instant and must draw the same grain.
@@ -1707,6 +1714,55 @@ impl Compositor {
             matte,
             slot,
         }))
+    }
+
+    /// A compound clip's picture: its sequence composited at `source_time` into
+    /// a texture of this render's size, handed back as an ordinary source
+    /// frame so the clip's transform, grade, masks and effects apply to the
+    /// whole composite, as they would to a video.
+    ///
+    /// The nested render clears to transparent, so a compound clip shows what
+    /// is beneath it wherever its own lanes are empty — and holds
+    /// *premultiplied* colour, which is why the quad that draws it carries the
+    /// `PREMULTIPLIED` feature bit. The texture is not returned to the pool:
+    /// the source frame still refers to it, and a pooled texture handed out
+    /// again within the same frame would be drawn over.
+    ///
+    /// Recursion is bounded by `sequence::MAX_DEPTH`, counted per thread
+    /// because one render runs on one thread from start to end.
+    #[allow(clippy::too_many_arguments)]
+    fn nested_frame(
+        &self,
+        canvas: (u32, u32),
+        materials: &MaterialPool,
+        segment: &Segment,
+        source_time: Micros,
+        size: (u32, u32),
+        sources: &dyn SourceProvider,
+    ) -> anyhow::Result<Option<SourceFrame>> {
+        thread_local! {
+            static DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        }
+        let depth = DEPTH.get();
+        if depth >= crate::modules::sequence::MAX_DEPTH {
+            tracing::warn!(segment = %segment.id, "compound clips nest too deep; drawing nothing");
+            return Ok(None);
+        }
+        let Some(view) =
+            crate::modules::sequence::nested_in(materials, canvas, &segment.material_id)
+        else {
+            return Ok(None);
+        };
+        if source_time < 0 || source_time >= view.duration() {
+            return Ok(None);
+        }
+        DEPTH.set(depth + 1);
+        let rendered = self.render_to_texture(&view, source_time, size, sources);
+        DEPTH.set(depth);
+        let target = rendered.map_err(|e| anyhow::anyhow!("compound clip: {e}"))?;
+        Ok(Some(SourceFrame::from_texture(Arc::new(
+            target.texture().clone(),
+        ))))
     }
 
     /// Copy a render target back to the CPU, unpadding the rows.

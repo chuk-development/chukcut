@@ -116,6 +116,9 @@ pub mod feature {
     pub const GRAIN: u32 = 1 << 11;
     /// Not a control: the bound LUT is a 1D table rather than a cube.
     pub const LUT_1D: u32 = 1 << 12;
+    /// Not a control: the source holds premultiplied colour — a compound
+    /// clip's nested render — and is divided by its alpha before anything else.
+    pub const PREMULTIPLIED: u32 = 1 << 13;
 }
 
 /// The extended grade, packed the way the uniform block wants it.

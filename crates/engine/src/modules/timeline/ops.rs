@@ -286,6 +286,12 @@ pub enum EditCommand {
         before: TextMaterial,
         after: TextMaterial,
     },
+    /// Timelines and compound clips: add, remove, rename, switch. The body is
+    /// `modules::sequence::edit`; see that module for why switching is an
+    /// edit.
+    Sequence {
+        edit: crate::modules::sequence::SequenceEdit,
+    },
     /// Several commands that undo as one unit, applied in order.
     Composite {
         label: String,
@@ -531,6 +537,7 @@ impl EditCommand {
                 (Some(_), None) => "Remove speed curve".into(),
                 _ => "Change speed curve".into(),
             },
+            EditCommand::Sequence { edit } => edit.label(),
             EditCommand::Composite { label, .. } => label.clone(),
         }
     }
@@ -625,6 +632,7 @@ impl EditCommand {
                         segment.id
                     ));
                 }
+                crate::modules::sequence::check_insert(project, &segment.material_id)?;
                 let track = project
                     .track_mut(track_id)
                     .ok_or_else(|| format!("unknown track {track_id}"))?;
@@ -1111,6 +1119,8 @@ impl EditCommand {
                 *slot,
             ),
 
+            EditCommand::Sequence { edit } => edit.apply(project),
+
             EditCommand::Composite { commands, .. } => {
                 for (i, cmd) in commands.iter().enumerate() {
                     if let Err(e) = cmd.apply(project) {
@@ -1352,6 +1362,9 @@ impl EditCommand {
                 before_target: *after_target,
                 after_target: *before_target,
                 slot: *slot,
+            },
+            EditCommand::Sequence { edit } => EditCommand::Sequence {
+                edit: edit.invert(),
             },
             EditCommand::Composite { label, commands } => EditCommand::Composite {
                 label: label.clone(),
@@ -1665,7 +1678,7 @@ fn split_one(project: &Project, segment_id: &str, at: Micros) -> Result<SplitHal
 /// - A track whose keyframes all sit before the cut collapses to a single
 ///   anchor: the unsplit clip held its last keyframe's value over that region
 ///   (the sampler clamps), and the right half must not snap back to 1.0.
-fn rebase_keyframes_for_split(tracks: &mut Vec<KeyframeTrack>, cut: Micros) {
+pub(crate) fn rebase_keyframes_for_split(tracks: &mut Vec<KeyframeTrack>, cut: Micros) {
     for track in tracks.iter_mut() {
         let boundary = track.sample(cut);
         let governing = track

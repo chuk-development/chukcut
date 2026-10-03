@@ -589,6 +589,20 @@ pub fn missing_media(project: &Project) -> Vec<String> {
             match materials.kind_of(&segment.material_id) {
                 // An effect clip has no media to go missing.
                 None if materials.is_effect_clip(segment) => {}
+                // A compound clip's media is its clips' media.
+                Some(crate::modules::project::document::MaterialKind::Sequence) => {
+                    let inner = crate::modules::sequence::depth_of(project, &segment.material_id)
+                        .and_then(|_| {
+                            crate::modules::sequence::nested(project, &segment.material_id)
+                        });
+                    if let Some(inner) = inner {
+                        lines.extend(
+                            missing_media(&inner).into_iter().map(|line| {
+                                format!("inside the compound clip at {at:.1}s, {line}")
+                            }),
+                        );
+                    }
+                }
                 None => lines.push(format!(
                     "the clip at {at:.1}s on \"{}\" references media that was removed from the \
                      project",

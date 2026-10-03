@@ -88,11 +88,14 @@ fn snapshot(state: &Arc<AppState>) -> Result<Project, String> {
         .project
         .read()
         .clone()
+        .map(crate::modules::sequence::export_root)
         .ok_or_else(|| "no project is open, so there is nothing to export".to_string())
 }
 
 /// Everything one export needs, from a project snapshot and a request.
 fn build_job(project: Project, request: &ExportRequest) -> Result<ExportJob, String> {
+    // The whole timeline, even while a compound clip is open in the editor.
+    let project = crate::modules::sequence::export_root(project);
     let settings = job::resolve_settings(&project, request).map_err(|e| e.to_string())?;
     let compositor = compositor()?;
     let job_id = uuid::Uuid::new_v4().to_string();

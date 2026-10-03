@@ -78,6 +78,9 @@ pub fn prune_unreferenced(project: &mut Project) -> usize {
     roots(to_value(&pool.texts));
     roots(to_value(&pool.transitions));
     roots(to_value(&pool.trackings));
+    // Parked timelines and compound clips reference materials like the
+    // active lanes do.
+    roots(to_value(&pool.sequences));
 
     // Then whatever a reached material names, until nothing new turns up.
     let mut reached: HashSet<String> = HashSet::new();

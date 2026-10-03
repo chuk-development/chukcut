@@ -201,6 +201,10 @@ pub fn mix_timeline(
 ) -> Result<Vec<f32>> {
     let duration = project.duration();
     let mut mixer = AudioMixer::new(sample_rate, channels, duration);
+    // Compound clips' sound, laid out on lanes of its own; see
+    // `sequence::audio`. Borrowed when there are none.
+    let flat = crate::modules::sequence::audio::flatten_audio(project);
+    let project = flat.as_ref();
 
     for track in &project.tracks {
         // `muted` silences a lane and `hidden` conceals it: a hidden video
