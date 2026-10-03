@@ -6,9 +6,10 @@
 
 use std::path::{Path, PathBuf};
 
-use chukcut_engine::modules::export::hwaccel::{fallback_bitrate, HwEncoder};
+use chukcut_engine::modules::export::hwaccel::HwEncoder;
 use chukcut_engine::modules::export::{
-    AudioCodec, Container, ExportOverrides, ExportRequest, Fps, Quality, VideoCodec,
+    AudioCodec, Container, ExportMemory, ExportOverrides, ExportPreset, ExportRequest, Quality,
+    VideoCodec,
 };
 use chukcut_engine::modules::project::{Micros, Project};
 
@@ -42,7 +43,7 @@ impl Resolution {
         }
     }
 
-    fn short_side(self) -> u32 {
+    pub(crate) fn short_side(self) -> u32 {
         match self {
             Resolution::P480 => 480,
             Resolution::P720 => 720,
@@ -55,7 +56,11 @@ impl Resolution {
     /// The option closest to the canvas, so the default export is the size
     /// the user framed.
     pub(crate) fn closest_to(width: u32, height: u32) -> Resolution {
-        let short = width.min(height);
+        Resolution::closest_short_side(width.min(height))
+    }
+
+    /// The option whose short side is nearest `short`.
+    pub(crate) fn closest_short_side(short: u32) -> Resolution {
         Resolution::ALL
             .into_iter()
             .min_by_key(|r| r.short_side().abs_diff(short))
@@ -112,16 +117,19 @@ pub(crate) enum Codec {
     H264,
     Hevc,
     Av1,
+    /// ProRes 422 HQ, for a master. Always .mov with PCM sound.
+    ProRes,
 }
 
 impl Codec {
-    pub(crate) const ALL: [Codec; 3] = [Codec::H264, Codec::Hevc, Codec::Av1];
+    pub(crate) const ALL: [Codec; 4] = [Codec::H264, Codec::Hevc, Codec::Av1, Codec::ProRes];
 
     pub(crate) fn label(self) -> &'static str {
         match self {
             Codec::H264 => "H.264",
             Codec::Hevc => "HEVC",
             Codec::Av1 => "AV1",
+            Codec::ProRes => "ProRes",
         }
     }
 
@@ -130,7 +138,24 @@ impl Codec {
             Codec::H264 => VideoCodec::H264,
             Codec::Hevc => VideoCodec::H265,
             Codec::Av1 => VideoCodec::Av1,
+            Codec::ProRes => VideoCodec::ProRes,
         }
+    }
+
+    fn from_video_codec(codec: VideoCodec) -> Codec {
+        match codec {
+            VideoCodec::H265 => Codec::Hevc,
+            VideoCodec::Av1 => Codec::Av1,
+            VideoCodec::ProRes => Codec::ProRes,
+            // VP9 is not offered in the dialog; a preset or remembered
+            // setting that names it gets the nearest thing that is.
+            VideoCodec::H264 | VideoCodec::Vp9 | VideoCodec::Gif => Codec::H264,
+        }
+    }
+
+    /// ProRes has no quality knob: its data rate follows from the profile.
+    pub(crate) fn has_quality(self) -> bool {
+        self != Codec::ProRes
     }
 
     /// The CRF for a quality level. Each encoder has its own scale: x265's
@@ -138,7 +163,7 @@ impl Codec {
     /// and SVT-AV1 counts to 63.
     fn crf(self, level: Bitrate) -> u8 {
         let (lower, recommended, higher) = match self {
-            Codec::H264 => (26, 20, 16),
+            Codec::H264 | Codec::ProRes => (26, 20, 16),
             Codec::Hevc => (28, 22, 18),
             Codec::Av1 => (40, 32, 24),
         };
@@ -146,16 +171,6 @@ impl Codec {
             Bitrate::Lower => lower,
             Bitrate::Higher => higher,
             Bitrate::Recommended | Bitrate::Custom => recommended,
-        }
-    }
-
-    /// How much smaller than H.264 this codec is at the same quality. Only
-    /// for the size estimate; the encoder decides the real number.
-    fn size_factor(self) -> f64 {
-        match self {
-            Codec::H264 => 1.0,
-            Codec::Hevc => 0.6,
-            Codec::Av1 => 0.5,
         }
     }
 }
@@ -184,6 +199,71 @@ impl Format {
     }
 }
 
+/// What the file is: a video, sound only, or an animated GIF.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OutputKind {
+    Video,
+    Audio,
+    Gif,
+}
+
+impl OutputKind {
+    pub(crate) const ALL: [OutputKind; 3] = [OutputKind::Video, OutputKind::Audio, OutputKind::Gif];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            OutputKind::Video => "Video",
+            OutputKind::Audio => "Audio only",
+            OutputKind::Gif => "GIF",
+        }
+    }
+}
+
+/// The file type of a sound-only export.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AudioFormat {
+    Aac,
+    Mp3,
+    Wav,
+}
+
+impl AudioFormat {
+    pub(crate) const ALL: [AudioFormat; 3] = [AudioFormat::Aac, AudioFormat::Mp3, AudioFormat::Wav];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            AudioFormat::Aac => "AAC (.m4a)",
+            AudioFormat::Mp3 => "MP3",
+            AudioFormat::Wav => "WAV",
+        }
+    }
+
+    fn container(self) -> Container {
+        match self {
+            AudioFormat::Aac => Container::M4a,
+            AudioFormat::Mp3 => Container::Mp3,
+            AudioFormat::Wav => Container::Wav,
+        }
+    }
+
+    fn codec(self) -> AudioCodec {
+        match self {
+            AudioFormat::Aac => AudioCodec::Aac,
+            AudioFormat::Mp3 => AudioCodec::Mp3,
+            AudioFormat::Wav => AudioCodec::Pcm,
+        }
+    }
+}
+
+/// Frame rates for a GIF: every one of them divides into the format's
+/// hundredths of a second evenly or nearly so.
+pub(crate) const GIF_RATES: [(f64, &str); 4] = [
+    (10.0, "10 fps"),
+    (12.5, "12.5 fps"),
+    (15.0, "15 fps"),
+    (25.0, "25 fps"),
+];
+
 /// CapCut's frame-rate list, with the NTSC rates spelled as people know them.
 pub(crate) const FRAME_RATES: [(f64, &str); 7] = [
     (24.0, "24 fps"),
@@ -195,11 +275,12 @@ pub(crate) const FRAME_RATES: [(f64, &str); 7] = [
     (60.0, "60 fps"),
 ];
 
-/// Audio bitrates offered for AAC, in bits per second.
-pub(crate) const AUDIO_BITRATES: [(u32, &str); 3] = [
-    (128_000, "AAC · 128 kbps"),
-    (192_000, "AAC · 192 kbps"),
-    (320_000, "AAC · 320 kbps"),
+/// Audio bitrates offered for AAC and MP3, in bits per second.
+pub(crate) const AUDIO_BITRATES: [(u32, &str); 4] = [
+    (128_000, "128 kbps"),
+    (192_000, "192 kbps"),
+    (256_000, "256 kbps"),
+    (320_000, "320 kbps"),
 ];
 
 /// Everything the dialog lets the user choose.
@@ -219,6 +300,16 @@ pub(crate) struct ExportChoices {
     pub audio_bitrate: u32,
     /// Integrated loudness to bring the mix to, in LUFS; `None` is off.
     pub loudness_target: Option<f32>,
+    pub kind: OutputKind,
+    pub audio_format: AudioFormat,
+    /// The preset these choices were set from, while the user has not
+    /// changed anything a preset decides. While it is set the export asks
+    /// for the preset itself, so it is exactly the preset.
+    pub preset: Option<String>,
+    /// Export only this part of the timeline.
+    pub range: Option<(Micros, Micros)>,
+    /// Use a GPU encoder when one works for the codec.
+    pub use_hardware: bool,
 }
 
 impl ExportChoices {
@@ -242,6 +333,166 @@ impl ExportChoices {
             audio: true,
             audio_bitrate: 192_000,
             loudness_target: None,
+            kind: OutputKind::Video,
+            audio_format: AudioFormat::Aac,
+            preset: None,
+            range: None,
+            use_hardware: true,
+        }
+    }
+
+    /// The choices a dialog opens with: the remembered ones when there are
+    /// any, else the defaults for the project.
+    pub(crate) fn opening(
+        project: &Project,
+        directory: PathBuf,
+        memory: Option<&ExportMemory>,
+    ) -> Self {
+        let mut choices = Self::for_project(project, directory);
+        if let Some(memory) = memory {
+            choices.restore(project, memory);
+        }
+        choices
+    }
+
+    /// Set every choice a preset decides. The name, folder and range stay.
+    pub(crate) fn apply_preset(&mut self, project: &Project, preset: &ExportPreset) {
+        let fitted = preset.for_project(project);
+        self.kind = if fitted.container.is_audio_only() {
+            OutputKind::Audio
+        } else if fitted.container == Container::Gif {
+            OutputKind::Gif
+        } else {
+            OutputKind::Video
+        };
+        if self.kind != OutputKind::Audio {
+            self.resolution = Resolution::closest_short_side(fitted.width.min(fitted.height));
+            self.fps = fitted.fps.as_f64();
+        }
+        if self.kind == OutputKind::Video {
+            self.codec = Codec::from_video_codec(fitted.video_codec);
+            self.format = if fitted.container == Container::Mov {
+                Format::Mov
+            } else {
+                Format::Mp4
+            };
+            self.set_quality(fitted.quality);
+        }
+        self.audio_format = match fitted.audio_codec {
+            AudioCodec::Mp3 => AudioFormat::Mp3,
+            AudioCodec::Pcm => AudioFormat::Wav,
+            _ => AudioFormat::Aac,
+        };
+        self.audio = fitted.audio_codec != AudioCodec::None;
+        if self.audio && fitted.audio_codec != AudioCodec::Pcm {
+            self.audio_bitrate = fitted.audio_bitrate;
+        }
+        self.loudness_target = fitted.loudness_target;
+        self.preset = Some(preset.id.clone());
+    }
+
+    /// Show a quality on the bitrate control: the level whose CRF is
+    /// nearest, or a custom bitrate.
+    fn set_quality(&mut self, quality: Quality) {
+        match quality {
+            Quality::Bitrate(bits) => {
+                self.bitrate = Bitrate::Custom;
+                self.custom_mbps = bits as f64 / 1_000_000.0;
+            }
+            Quality::Crf(crf) => {
+                let codec = self.codec;
+                self.bitrate = [Bitrate::Lower, Bitrate::Recommended, Bitrate::Higher]
+                    .into_iter()
+                    .min_by_key(|level| codec.crf(*level).abs_diff(crf))
+                    .unwrap_or(Bitrate::Recommended);
+            }
+        }
+    }
+
+    /// Put remembered settings back: the preset when there was one and it
+    /// still exists, else each remembered override.
+    pub(crate) fn restore(&mut self, project: &Project, memory: &ExportMemory) {
+        if let Some(directory) = memory.directory.as_ref().map(PathBuf::from) {
+            if directory.is_absolute() && directory.is_dir() {
+                self.directory = directory;
+            }
+        }
+        self.use_hardware = memory.use_hardware;
+        if let Some(preset) = memory
+            .preset_id
+            .as_deref()
+            .and_then(chukcut_engine::modules::export::job::find_preset)
+        {
+            self.apply_preset(project, &preset);
+            self.audio = memory.include_audio || self.kind == OutputKind::Audio;
+            return;
+        }
+        let o = &memory.overrides;
+        match o.container {
+            Some(Container::Gif) => self.kind = OutputKind::Gif,
+            Some(c) if c.is_audio_only() => {
+                self.kind = OutputKind::Audio;
+                self.audio_format = match c {
+                    Container::Mp3 => AudioFormat::Mp3,
+                    Container::Wav => AudioFormat::Wav,
+                    _ => AudioFormat::Aac,
+                };
+            }
+            Some(Container::Mov) => {
+                self.kind = OutputKind::Video;
+                self.format = Format::Mov;
+            }
+            Some(_) => {
+                self.kind = OutputKind::Video;
+                self.format = Format::Mp4;
+            }
+            None => {}
+        }
+        if let (Some(w), Some(h)) = (o.width, o.height) {
+            self.resolution = Resolution::closest_short_side(w.min(h));
+        }
+        if let Some(fps) = o.fps {
+            self.fps = fps;
+        }
+        if let Some(codec) = o.video_codec {
+            if self.kind == OutputKind::Video {
+                self.codec = Codec::from_video_codec(codec);
+            }
+        }
+        if let Some(quality) = o.quality {
+            self.set_quality(quality);
+        }
+        if let Some(bits) = o.audio_bitrate {
+            self.audio_bitrate = bits;
+        }
+        self.loudness_target = o.loudness_target;
+        self.audio = memory.include_audio;
+        self.preset = None;
+    }
+
+    /// What to remember of these choices for the next export.
+    pub(crate) fn memory(&self, project: &Project) -> ExportMemory {
+        ExportMemory {
+            preset_id: self.preset.clone(),
+            overrides: self.overrides(project),
+            include_audio: self.audio,
+            use_hardware: self.use_hardware,
+            directory: Some(self.directory.to_string_lossy().into_owned()),
+        }
+    }
+
+    /// The file extension the export will have.
+    pub(crate) fn extension(&self) -> &'static str {
+        match self.kind {
+            OutputKind::Video => {
+                if self.codec == Codec::ProRes {
+                    "mov"
+                } else {
+                    self.format.label()
+                }
+            }
+            OutputKind::Audio => self.audio_format.container().extension(),
+            OutputKind::Gif => "gif",
         }
     }
 
@@ -269,61 +520,85 @@ impl ExportChoices {
         } else {
             name
         };
-        self.directory
-            .join(format!("{name}.{}", self.format.label()))
+        self.directory.join(format!("{name}.{}", self.extension()))
     }
 
     pub(crate) fn overrides(&self, project: &Project) -> ExportOverrides {
         let (width, height) = self.size(project);
-        ExportOverrides {
-            width: Some(width),
-            height: Some(height),
-            fps: Some(self.fps),
-            video_codec: Some(self.codec.video_codec()),
-            quality: Some(self.quality()),
-            audio_codec: Some(if self.audio {
-                AudioCodec::Aac
-            } else {
-                AudioCodec::None
-            }),
-            audio_bitrate: self.audio.then_some(self.audio_bitrate),
-            sample_rate: None,
-            container: Some(self.format.container()),
-            loudness_target: self.audio.then_some(self.loudness_target).flatten(),
+        let loudness = (self.audio || self.kind == OutputKind::Audio)
+            .then_some(self.loudness_target)
+            .flatten();
+        let base = ExportOverrides {
+            loudness_target: loudness,
+            // An explicit "off": a preset's target must not come back through
+            // a choice the user switched off.
+            loudness_off: loudness.is_none(),
+            sample_rate: Some(48_000),
+            ..Default::default()
+        };
+        match self.kind {
+            OutputKind::Audio => ExportOverrides {
+                audio_codec: Some(self.audio_format.codec()),
+                audio_bitrate: (self.audio_format != AudioFormat::Wav)
+                    .then_some(self.audio_bitrate.min(320_000)),
+                container: Some(self.audio_format.container()),
+                ..base
+            },
+            OutputKind::Gif => ExportOverrides {
+                width: Some(width),
+                height: Some(height),
+                fps: Some(self.fps),
+                video_codec: Some(VideoCodec::Gif),
+                audio_codec: Some(AudioCodec::None),
+                container: Some(Container::Gif),
+                loudness_target: None,
+                loudness_off: true,
+                ..base
+            },
+            OutputKind::Video => {
+                let prores = self.codec == Codec::ProRes;
+                ExportOverrides {
+                    width: Some(width),
+                    height: Some(height),
+                    fps: Some(self.fps),
+                    video_codec: Some(self.codec.video_codec()),
+                    quality: Some(self.quality()),
+                    audio_codec: Some(match (self.audio, prores) {
+                        (false, _) => AudioCodec::None,
+                        (true, true) => AudioCodec::Pcm,
+                        (true, false) => AudioCodec::Aac,
+                    }),
+                    audio_bitrate: (self.audio && !prores).then_some(self.audio_bitrate),
+                    container: Some(if prores {
+                        Container::Mov
+                    } else {
+                        self.format.container()
+                    }),
+                    ..base
+                }
+            }
         }
     }
 
     /// The request for `export_start`. `hardware` is an encoder id from
     /// [`pick_hardware`], or `None` for the software encoder.
+    ///
+    /// While a preset is chosen and untouched, the request names the preset
+    /// and nothing else, so what is exported is exactly that preset.
     pub(crate) fn request(&self, project: &Project, hardware: Option<String>) -> ExportRequest {
+        let hardware = hardware.filter(|_| self.use_hardware && self.kind == OutputKind::Video);
+        let (preset_id, overrides) = match &self.preset {
+            Some(id) => (Some(id.clone()), None),
+            None => (None, Some(self.overrides(project))),
+        };
         ExportRequest {
             output_path: self.output_path().to_string_lossy().into_owned(),
-            preset_id: None,
-            overrides: Some(self.overrides(project)),
+            preset_id,
+            overrides,
             hardware,
-            include_audio: self.audio,
-            range: None,
+            include_audio: self.audio || self.kind == OutputKind::Audio,
+            range: self.range,
         }
-    }
-
-    /// Roughly how big the file will be, in bytes. CRF has no size, so this
-    /// uses the engine's own CRF-to-bitrate rule of thumb, scaled for the
-    /// codec.
-    pub(crate) fn estimated_bytes(&self, project: &Project) -> u64 {
-        let (width, height) = self.size(project);
-        let quality = self.quality();
-        let video = fallback_bitrate(width, height, Fps::from_f64(self.fps), quality) as f64;
-        let video = match quality {
-            Quality::Crf(_) => video * self.codec.size_factor(),
-            Quality::Bitrate(_) => video,
-        };
-        let audio = if self.audio {
-            self.audio_bitrate as f64
-        } else {
-            0.0
-        };
-        let seconds = project.duration().max(0) as f64 / 1_000_000.0;
-        ((video + audio) * seconds / 8.0) as u64
     }
 }
 
@@ -338,13 +613,20 @@ pub(crate) fn pick_hardware(encoders: &[HwEncoder], codec: Codec) -> Option<&HwE
 
 /// "about 220 MB".
 pub(crate) fn size_label(bytes: u64) -> String {
+    format!("about {}", bytes_label(bytes))
+}
+
+/// "220 MB", "1.5 GB", "3.4 MB", "640 KB".
+pub(crate) fn bytes_label(bytes: u64) -> String {
     let mb = bytes as f64 / 1_000_000.0;
     if mb >= 1000.0 {
-        format!("about {:.1} GB", mb / 1000.0)
+        format!("{:.1} GB", mb / 1000.0)
     } else if mb >= 10.0 {
-        format!("about {mb:.0} MB")
+        format!("{mb:.0} MB")
+    } else if mb >= 1.0 {
+        format!("{mb:.1} MB")
     } else {
-        format!("about {mb:.1} MB")
+        format!("{:.0} KB", (bytes as f64 / 1000.0).max(1.0))
     }
 }
 
@@ -484,6 +766,96 @@ mod tests {
         assert_eq!(o.video_codec, Some(VideoCodec::H265));
         assert_eq!(o.container, Some(Container::Mov));
         assert_eq!(o.audio_codec, Some(AudioCodec::None));
+    }
+
+    #[test]
+    fn a_preset_sets_the_choices_and_is_exported_as_itself() {
+        let p = project(1080, 1920, 25.0);
+        let mut choices = ExportChoices::for_project(&p, PathBuf::from("/out"));
+        let tiktok = ExportPreset::by_id("tiktok").unwrap();
+        choices.apply_preset(&p, &tiktok);
+        assert_eq!(choices.resolution, Resolution::P1080);
+        assert_eq!(choices.fps, 30.0);
+        assert_eq!(choices.codec, Codec::H264);
+        assert_eq!(choices.loudness_target, Some(-14.0));
+        let request = choices.request(&p, None);
+        assert_eq!(request.preset_id.as_deref(), Some("tiktok"));
+        assert!(request.overrides.is_none());
+        assert_eq!(request.output_path, "/out/Clip.mp4");
+
+        // Once the user changes something, the choices are exported as
+        // they are shown.
+        choices.preset = None;
+        let request = choices.request(&p, None);
+        assert!(request.preset_id.is_none());
+        let o = request.overrides.unwrap();
+        assert_eq!(o.loudness_target, Some(-14.0));
+        assert!(!o.loudness_off);
+    }
+
+    #[test]
+    fn sound_only_and_gif_choices_ask_for_their_own_files() {
+        let p = project(1920, 1080, 30.0);
+        let mut choices = ExportChoices::for_project(&p, PathBuf::from("/out"));
+        choices.apply_preset(&p, &ExportPreset::by_id("audio_mp3").unwrap());
+        assert_eq!(choices.kind, OutputKind::Audio);
+        assert_eq!(choices.output_path(), PathBuf::from("/out/Clip.mp3"));
+        choices.preset = None;
+        let request = choices.request(&p, Some("nvenc_h264".into()));
+        assert!(request.hardware.is_none(), "no GPU encoder for sound");
+        assert!(request.include_audio);
+        let o = request.overrides.unwrap();
+        assert_eq!(o.container, Some(Container::Mp3));
+        assert_eq!(o.audio_codec, Some(AudioCodec::Mp3));
+        assert_eq!(o.width, None);
+
+        choices.kind = OutputKind::Gif;
+        choices.resolution = Resolution::P480;
+        let o = choices.request(&p, None).overrides.unwrap();
+        assert_eq!(o.container, Some(Container::Gif));
+        assert_eq!((o.width, o.height), (Some(854), Some(480)));
+        assert!(o.loudness_off);
+    }
+
+    #[test]
+    fn prores_is_always_a_quicktime_file_with_pcm_sound() {
+        let p = project(1920, 1080, 30.0);
+        let mut choices = ExportChoices::for_project(&p, PathBuf::from("/out"));
+        choices.codec = Codec::ProRes;
+        assert_eq!(choices.output_path(), PathBuf::from("/out/Clip.mov"));
+        let o = choices.request(&p, None).overrides.unwrap();
+        assert_eq!(o.container, Some(Container::Mov));
+        assert_eq!(o.audio_codec, Some(AudioCodec::Pcm));
+    }
+
+    #[test]
+    fn remembered_choices_come_back_as_they_were() {
+        let p = project(1080, 1920, 30.0);
+        let mut choices = ExportChoices::for_project(&p, PathBuf::from("/out"));
+        choices.resolution = Resolution::P720;
+        choices.codec = Codec::Hevc;
+        choices.bitrate = Bitrate::Higher;
+        choices.fps = 60.0;
+        choices.format = Format::Mov;
+        choices.loudness_target = Some(-16.0);
+        choices.audio_bitrate = 320_000;
+        let memory = choices.memory(&p);
+        let restored = ExportChoices::opening(&p, PathBuf::from("/elsewhere"), Some(&memory));
+        assert_eq!(restored.resolution, Resolution::P720);
+        assert_eq!(restored.codec, Codec::Hevc);
+        assert_eq!(restored.bitrate, Bitrate::Higher);
+        assert_eq!(restored.fps, 60.0);
+        assert_eq!(restored.format, Format::Mov);
+        assert_eq!(restored.loudness_target, Some(-16.0));
+        assert_eq!(restored.audio_bitrate, 320_000);
+        assert!(restored.preset.is_none());
+
+        // A remembered preset comes back as the preset.
+        let mut choices = ExportChoices::for_project(&p, PathBuf::from("/out"));
+        choices.apply_preset(&p, &ExportPreset::by_id("youtube_shorts").unwrap());
+        let restored = ExportChoices::opening(&p, PathBuf::from("/out"), Some(&choices.memory(&p)));
+        assert_eq!(restored.preset.as_deref(), Some("youtube_shorts"));
+        assert_eq!(restored.loudness_target, Some(-14.0));
     }
 
     #[test]

@@ -4,7 +4,10 @@
 mod dialog;
 mod licences;
 mod loudness;
+mod queue;
 mod settings;
+
+pub(crate) use queue::QueueWatch;
 
 use gpui::component::WindowExt as _;
 

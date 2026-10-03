@@ -1,18 +1,29 @@
 //! The IPC surface for exporting.
 //!
-//! Three commands: ask what can be exported, start an export, stop one. The
-//! work itself happens on a thread, and progress comes back over the caller's
-//! own `Channel` rather than a global event, so two dialogs could never see
-//! each other's frames.
+//! Ask what can be exported, check and estimate a request, start an export,
+//! stop one; save and delete user presets; remember the dialog's settings;
+//! and the queue. A single export works on its own thread, and progress comes
+//! back over the caller's own `Channel` rather than a global event, so two
+//! dialogs could never see each other's frames. The queue is the one shared
+//! thing: there is one per process, and it outlives any dialog.
 
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, OnceLock};
+
+use serde::Serialize;
+
+use crate::modules::project::document::{Micros, Project};
 
 use crate::shell::Channel;
 
 use crate::modules::render::{Compositor, CompositorConfig};
 use crate::state::AppState;
 
+use super::estimate::{self, SizeEstimate};
 use super::job::{self, ExportJob, ExportOptions, ExportProgress, ExportRequest, ProgressSink};
+use super::presets::{AudioCodec, Container, ExportPreset, Fps, VideoCodec};
+use super::queue::{ExportQueue, QueueEvent, QueueItem, QueueRunner, RunResult};
+use super::store::{self, ExportMemory};
 
 /// Adapts Tauri's channel to the job's sink.
 ///
@@ -71,6 +82,36 @@ pub fn export_presets() -> ExportOptions {
     job::export_options()
 }
 
+/// The open document, cloned: what an export or an estimate works from.
+fn snapshot(state: &Arc<AppState>) -> Result<Project, String> {
+    state
+        .project
+        .read()
+        .clone()
+        .ok_or_else(|| "no project is open, so there is nothing to export".to_string())
+}
+
+/// Everything one export needs, from a project snapshot and a request.
+fn build_job(project: Project, request: &ExportRequest) -> Result<ExportJob, String> {
+    let settings = job::resolve_settings(&project, request).map_err(|e| e.to_string())?;
+    let compositor = compositor()?;
+    let job_id = uuid::Uuid::new_v4().to_string();
+    // Built from this export's own snapshot, so a file imported since the last
+    // export is present without anything having to re-register it.
+    let sources: Arc<dyn crate::modules::render::SourceProvider> = Arc::new(
+        crate::modules::media::MediaSourceProvider::from_project(&project),
+    );
+    Ok(ExportJob {
+        job_id,
+        project,
+        settings,
+        compositor,
+        sources,
+        audio: job::audio_source(),
+        cancel: Arc::new(AtomicBool::new(false)),
+    })
+}
+
 /// Start an export. Returns the job id to cancel it with.
 ///
 /// Returns as soon as the settings are known to be valid — the encode itself
@@ -83,34 +124,9 @@ pub fn export_start(
     // The snapshot. Taken under the lock, used outside it: an export must not
     // stop the user editing, and the cut they asked for is the one on screen
     // when they pressed the button, not whatever it becomes while it renders.
-    let project = state
-        .project
-        .read()
-        .clone()
-        .ok_or("no project is open, so there is nothing to export")?;
-
-    let settings = job::resolve_settings(&project, &request).map_err(|e| e.to_string())?;
-    let compositor = compositor()?;
-
-    let job_id = uuid::Uuid::new_v4().to_string();
-    let cancel = job::begin_job(&job_id);
-
-    // Built from this export's own snapshot, so a file imported since the last
-    // export is present without anything having to re-register it. Built before
-    // the struct literal because `project` is moved into it.
-    let sources: Arc<dyn crate::modules::render::SourceProvider> = Arc::new(
-        crate::modules::media::MediaSourceProvider::from_project(&project),
-    );
-
-    let export = ExportJob {
-        job_id: job_id.clone(),
-        project,
-        settings,
-        compositor,
-        sources,
-        audio: job::audio_source(),
-        cancel,
-    };
+    let mut export = build_job(snapshot(state)?, &request)?;
+    let job_id = export.job_id.clone();
+    export.cancel = job::begin_job(&job_id);
 
     let sink = ChannelSink(on_progress);
     let id = job_id.clone();
@@ -142,6 +158,221 @@ pub fn export_start(
         .map_err(|error| format!("could not start the export thread: {error}"))?;
 
     Ok(id)
+}
+
+// ---------------------------------------------------------------------------
+// Checking and estimating
+// ---------------------------------------------------------------------------
+
+/// A request resolved against the open project: what it will produce, what
+/// the user should know about it, and how big it will be.
+#[derive(Debug, Clone, Serialize)]
+pub struct ExportPlan {
+    pub output_path: String,
+    pub width: u32,
+    pub height: u32,
+    pub fps: Fps,
+    pub video_codec: VideoCodec,
+    pub audio_codec: AudioCodec,
+    pub container: Container,
+    pub audio_only: bool,
+    pub has_audio: bool,
+    pub loudness_target: Option<f32>,
+    pub duration: Micros,
+    pub total_frames: u64,
+    pub warnings: Vec<String>,
+    /// The instant estimate; see `export_estimate_sampled` for a measured one.
+    pub estimate: SizeEstimate,
+}
+
+/// Resolve `request` without exporting: the settings it ends up with, its
+/// warnings and the instant size estimate. Errors are the same prose the
+/// export itself would fail with.
+pub fn export_plan(state: &Arc<AppState>, request: &ExportRequest) -> Result<ExportPlan, String> {
+    plan_for(&snapshot(state)?, request)
+}
+
+/// [`export_plan`] for a project that is not the open one.
+pub fn plan_for(project: &Project, request: &ExportRequest) -> Result<ExportPlan, String> {
+    let settings = job::resolve_settings(project, request).map_err(|e| e.to_string())?;
+    Ok(ExportPlan {
+        output_path: settings.output_path.display().to_string(),
+        width: settings.video.width,
+        height: settings.video.height,
+        fps: settings.fps(),
+        video_codec: settings.preset.video_codec,
+        audio_codec: settings.preset.audio_codec,
+        container: settings.preset.container,
+        audio_only: settings.audio_only,
+        has_audio: settings.audio.is_some(),
+        loudness_target: settings.loudness_target,
+        duration: settings.duration,
+        total_frames: settings.total_frames,
+        warnings: settings.warnings.clone(),
+        estimate: estimate::quick(&settings),
+    })
+}
+
+/// Measure how big the export will be by encoding samples of it.
+///
+/// Blocking, and seconds of work: run it off the UI thread. `cancel` stops
+/// it between and inside samples, which is what a dialog wants when the
+/// user changes a setting before the answer arrives.
+pub fn export_estimate_sampled(
+    state: &Arc<AppState>,
+    request: &ExportRequest,
+    cancel: Arc<AtomicBool>,
+) -> Result<SizeEstimate, String> {
+    estimate_sampled_for(snapshot(state)?, request, cancel)
+}
+
+/// [`export_estimate_sampled`] for a project that is not the open one — the
+/// dialog's own snapshot, or another file.
+pub fn estimate_sampled_for(
+    project: Project,
+    request: &ExportRequest,
+    cancel: Arc<AtomicBool>,
+) -> Result<SizeEstimate, String> {
+    let mut job = build_job(project, request)?;
+    job.cancel = cancel;
+    estimate::sampled(&job).map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// User presets and remembered settings
+// ---------------------------------------------------------------------------
+
+/// Save the open project's `request` as a user preset called `label`.
+pub fn export_preset_save(
+    state: &Arc<AppState>,
+    request: &ExportRequest,
+    label: &str,
+) -> Result<ExportPreset, String> {
+    let preset = store::preset_from_request(&snapshot(state)?, request, label)?;
+    store::save_user_preset(preset)
+}
+
+/// Delete a user preset. `false` when there was none by that id.
+pub fn export_preset_remove(id: &str) -> Result<bool, String> {
+    store::remove_user_preset(id)
+}
+
+/// Every preset — built in, then the user's — without the hardware probe
+/// `export_presets` runs.
+pub fn export_preset_list() -> Vec<ExportPreset> {
+    let mut presets = ExportPreset::all();
+    presets.extend(store::user_presets());
+    presets
+}
+
+/// The dialog's settings for a project: its own last ones, else the last
+/// ones used anywhere.
+pub fn export_memory_recall(project_id: Option<&str>) -> Option<ExportMemory> {
+    store::recall(project_id)
+}
+
+/// Keep the dialog's settings for the next export of this project and of
+/// any project.
+pub fn export_memory_remember(
+    project_id: Option<&str>,
+    memory: &ExportMemory,
+) -> Result<(), String> {
+    store::remember(project_id, memory)
+}
+
+// ---------------------------------------------------------------------------
+// The queue
+// ---------------------------------------------------------------------------
+
+/// Runs queued exports through the same job the dialog's export uses.
+struct EngineRunner;
+
+impl QueueRunner for EngineRunner {
+    fn run(
+        &self,
+        project: &Project,
+        request: &ExportRequest,
+        cancel: Arc<AtomicBool>,
+        sink: &dyn ProgressSink,
+    ) -> Result<RunResult, String> {
+        let mut export = build_job(project.clone(), request)?;
+        export.cancel = cancel;
+        let outcome = job::run_export(&export, sink).map_err(|e| e.to_string())?;
+        Ok(RunResult {
+            output_path: outcome.output_path.display().to_string(),
+            cancelled: outcome.cancelled,
+            elapsed_seconds: outcome.elapsed.as_secs_f64(),
+        })
+    }
+}
+
+static QUEUE: OnceLock<ExportQueue> = OnceLock::new();
+
+/// The process's export queue.
+pub fn export_queue() -> &'static ExportQueue {
+    QUEUE.get_or_init(|| ExportQueue::new(EngineRunner))
+}
+
+/// Queue an export of the open project as it is now. The request is checked
+/// first, so a setting that cannot work is refused here rather than failing
+/// in the background later. Returns the item id.
+pub fn export_queue_add(
+    state: &Arc<AppState>,
+    request: ExportRequest,
+    label: Option<String>,
+) -> Result<String, String> {
+    export_queue_add_project(snapshot(state)?, request, label)
+}
+
+/// Queue an export of any project snapshot — another file, another cut.
+pub fn export_queue_add_project(
+    project: Project,
+    request: ExportRequest,
+    label: Option<String>,
+) -> Result<String, String> {
+    job::resolve_settings(&project, &request).map_err(|e| e.to_string())?;
+    Ok(export_queue().add(project, request, label))
+}
+
+/// Every item in run order, finished ones included.
+pub fn export_queue_list() -> Vec<QueueItem> {
+    export_queue().items()
+}
+
+/// Skip a queued item or stop a running one.
+pub fn export_queue_cancel(id: &str) -> bool {
+    export_queue().cancel(id)
+}
+
+/// Take a queued or finished item off the list.
+pub fn export_queue_remove(id: &str) -> Result<(), String> {
+    export_queue().remove(id)
+}
+
+/// Move an item to position `to`.
+pub fn export_queue_move(id: &str, to: usize) -> Result<(), String> {
+    export_queue().move_to(id, to)
+}
+
+/// Drop finished items from the list. Returns how many.
+pub fn export_queue_clear_finished() -> usize {
+    export_queue().clear_finished()
+}
+
+/// Hear every queue change on `channel`. Returns an id to unsubscribe with.
+pub fn export_queue_subscribe(channel: Channel<QueueEvent>) -> u64 {
+    export_queue().subscribe(move |event| {
+        let _ = channel.send(event.clone());
+    })
+}
+
+pub fn export_queue_unsubscribe(id: u64) {
+    export_queue().unsubscribe(id)
+}
+
+/// Block until the queue has nothing left to run.
+pub fn export_queue_wait_idle() {
+    export_queue().wait_idle()
 }
 
 /// Save the frame at `time` as a PNG at full canvas resolution.
@@ -196,6 +427,9 @@ pub fn export_cancel(job_id: String) -> Result<bool, String> {
 /// Stop every running export. For window close and app shutdown.
 pub fn cancel_all_exports() {
     job::cancel_all();
+    if let Some(queue) = QUEUE.get() {
+        queue.cancel_all();
+    }
 }
 
 #[cfg(test)]
