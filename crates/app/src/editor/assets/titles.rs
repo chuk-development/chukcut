@@ -55,9 +55,9 @@ impl Editor {
         let title_selected = self.selected_title_segment().is_some();
         let templates = category >= StyleCategory::ALL.len();
         let hint = match (templates, title_selected) {
-            (false, true) => "Click to restyle the selected title, + to add a new one.",
-            (true, true) => "Click to give the selected title this look and animation, + to add.",
-            (_, false) => "Click to add a title at the playhead, or drag one onto the timeline.",
+            (false, true) => "Click restyles the selected title; + adds a new one.",
+            (true, true) => "Click applies to the selected title; + adds a new one.",
+            (_, false) => "Click to add at the playhead, or drag to the timeline.",
         };
 
         let mut tiles: Vec<AnyElement> = Vec::new();

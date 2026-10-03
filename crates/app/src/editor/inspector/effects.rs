@@ -605,20 +605,14 @@ impl Editor {
             let source = base
                 .segment(&segment_id)
                 .map(|(_, s)| fx_edit::source_time_in(&base.materials, s, playhead));
-            let shown = fx_edit::set_param_command(
-                &base,
-                &segment_id,
-                &effect_id,
-                param,
-                value,
-                source,
-            )
-            .and_then(|(material, command)| {
-                let mut copy = (*base).clone();
-                copy.materials.effects.push(material);
-                command.apply(&mut copy)?;
-                Ok(copy)
-            });
+            let shown =
+                fx_edit::set_param_command(&base, &segment_id, &effect_id, param, value, source)
+                    .and_then(|(material, command)| {
+                        let mut copy = (*base).clone();
+                        copy.materials.effects.push(material);
+                        command.apply(&mut copy)?;
+                        Ok(copy)
+                    });
             if let Ok(project) = shown {
                 self.project = Arc::new(project);
                 self.generation += 1;

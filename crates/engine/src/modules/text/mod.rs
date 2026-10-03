@@ -28,6 +28,8 @@
 //!   crate does them. See [`raster`].
 //! - **A cache keyed on content.** A title does not change between frames, so
 //!   it is rasterised once and held; see `cache.rs`.
+//! - **Title styles and templates** of our own, and the compositor tiles that
+//!   show them: see [`presets`].
 //! - **Placing a title on the timeline.** How long a new title is, which lane
 //!   it lands on, what happens when that instant is taken — see [`edit`], which
 //!   is pure, and [`commands`], which is the IPC surface over it.

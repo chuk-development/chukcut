@@ -1396,18 +1396,14 @@ what did not exist was any way for a user to make one. Now:
   outline, which lane, and the free-slot search. Policy in the webview is policy
   in two places.
 
-### What is not undoable, and why
+### Undo (fixed 2026-10-03)
 
-**Changing a title's words, font or colour is not on the undo stack.** There is
-no `EditCommand` variant carrying a `TextMaterial`, and `timeline/ops.rs` was
-owned by other work while this landed, so `text_set` writes the material pool
-directly and schedules an autosave. *Adding* and *deleting* a title are ordinary
-undoable edits; only the parameters are not.
-
-The fix is small and known: an `EditCommand::SetTextMaterial { id, before,
-after }`, mirroring `SetTransition` exactly — which is the variant `transitions`
-already has for this shape of edit. Note when doing it that a per-keystroke undo
-step is not wanted; the debounce above is the natural granularity.
+Every change to a title is one step now: `text_set` and `text_set_content` go
+through `EditCommand::SetTextMaterial`, and styles, templates and positions
+are one `Composite`. The native inspector previews slider and colour drags on
+a copy of the document and writes once on release, and writes typed words
+when the field loses focus, so neither a drag nor a sentence is forty steps.
+See "Titles on the native UI" below.
 
 ### Preview and export are the same pixels, proved
 
@@ -2088,6 +2084,56 @@ the playhead is in with two Bézier handles to drag. Decision 0018.
   Thumbnails and the waveform of a curved clip step at its average speed. Effect parameters have no easing picker yet (the
   engine eases them; the Effects tab writes linear keys).
 
+## Titles on the native UI: Text tab, styles, templates, colour picker (2026-10-03)
+
+The engine could style a title; the GPUI app could not (QA's top gap). Now:
+
+- **Inspector → Text** (`editor/inspector/text_style.rs`): words (multi-line,
+  previewed while typed, written on blur or a click elsewhere), font (the
+  library's picker), size, bold / italic / underline, letter and line
+  spacing, alignment, fill colour and opacity, outline (colour, width),
+  shadow (colour with alpha, X/Y offset, blur), background box (colour with
+  alpha, padding, corner radius) and a 3×3 position grid. Every value is a
+  `TextMaterial` field written by one `SetTextMaterial`; numeric rows use the
+  inspector's `Prop` machinery, so sliders coalesce into one step.
+- **`ui::ColorPicker`** (`ui/color.rs`): saturation/value field, hue strip,
+  optional opacity strip, hex field (`#RGB`, `#RRGGBB`, `#RRGGBBAA`), 16
+  preset colours and the last eight used (kept in
+  `<data>/recent-colours.txt`). Emits `Preview` while dragged and `Commit`
+  once. Used by the Text tab, by effect colour parameters (linear light,
+  converted at the edge) and at the end of each caption colour row.
+- **Asset panel → Text** (`editor/assets/titles.rs`): Default text, 29 styles
+  of our own in Basic / Outline / Box / Glow / Retro, and 10 templates (a
+  style plus a motion animation). Tiles are drawn by the compositor through
+  the same rasteriser and animator as the preview (`text::presets`, cached
+  under the fx tile cache). Click adds at the playhead, or restyles the
+  selected title keeping its words; "+" always adds; a drag onto the
+  timeline adds where it lands, on that lane when it is a title lane.
+- **Engine** (`text::presets`, `text::edit`, `text::commands`):
+  `TextMaterial` gained `underline`, `letter_spacing`, `line_height`,
+  `background_padding`, `background_radius` (defaults left out of the file,
+  so old projects save byte for byte as before; `TextMaterial: Default` so
+  builders need not list them). New commands: `text_styles`,
+  `text_templates`, `text_add_style`, `text_add_template`,
+  `text_apply_style`, `text_apply_template`, `text_set_position`,
+  `text_style_tile`, `text_template_tile`. Not in the CLI yet.
+- **The underline** is part of the fill geometry: outlined and shadowed with
+  the letters, at least a fifteenth of the size thick. Each glyph's rectangle
+  covers its stretch of the line, so the per-letter animator moves the line
+  with the letters instead of dropping it.
+- **A style is a function of the font size**: lengths scale with it, and a
+  style applied to an existing title keeps the title's size, words, id and
+  caption data and resets everything else.
+- **The position grid measures the paragraph** (box included, at the clip's
+  scale) and keeps its edge 6 % in from the canvas edge; a side column sets
+  the alignment and insets by 6 % of the width.
+
+Rough: the typed-words preview is a copy of the document, so a timeline edit
+made while the field still has unwritten words commits them with it. Caption
+colours from the picker are written on release, not previewed while
+dragging. The position grid moves the static position; a title with position
+keyframes keeps following its keyframes.
+
 ## Not built yet
 
 Both keyframe editing and audio waveforms landed overnight and this line was
@@ -2556,6 +2602,13 @@ nothing else in the system would say so.
   Its "click elsewhere commits" uses `on_mouse_down_out`, because the field's
   `InputEvent::Blur` did not arrive for a click on the lanes (Xvfb,
   2026-10-03).
+
+- **A GPUI Component `Popover` whose trigger disappears never says it
+  closed.** Clicking another clip or switching tabs unmounts the colour
+  button; the popover's dismissal never reaches `on_open_change`, the
+  picker's `open` stays true, and the popover springs open the next time the
+  button is drawn. The Text and Effects tabs close their pickers when the tab
+  is drawn after a frame without it (`begin_frame` in the inspector).
 
 - **Do not drive the app on the shared desktop.** Other sessions run their own
   `chukcut` windows there, and one of them on top of yours swallows the

@@ -42,6 +42,9 @@ pub(crate) struct TextTab {
     content: Option<Entity<TextareaState>>,
     /// The words field has been typed in since it was last written.
     content_dirty: bool,
+    /// The clip whose words are being typed: the commit goes there even if
+    /// the click that ends the typing selects another clip first.
+    content_for: Option<String>,
     pickers: HashMap<ColorSlot, Entity<ColorPicker>>,
     /// Whether the tab was drawn in the frame before this one. A popover
     /// whose trigger vanished (another clip selected, the tab switched)
@@ -230,6 +233,18 @@ impl Editor {
         let Some(segment_id) = self.selected.clone() else {
             return;
         };
+        self.edit_title_of(segment_id, key, phase, cx, change)
+    }
+
+    /// [`Self::edit_title`] for a named clip rather than the selected one.
+    fn edit_title_of(
+        &mut self,
+        segment_id: String,
+        key: Prop,
+        phase: Phase,
+        cx: &mut Context<Self>,
+        change: impl FnOnce(&mut TextMaterial),
+    ) {
         let base = match &self.inspector.preview {
             Some(preview) if preview.prop == key => Arc::clone(&preview.base),
             _ => Arc::clone(&self.project),
@@ -330,13 +345,31 @@ impl Editor {
                 let subscription = cx.subscribe_in(
                     &input,
                     window,
-                    |this: &mut Editor, input, event: &InputEvent, _, cx| match event {
+                    |this: &mut Editor, input, event: &InputEvent, window, cx| match event {
                         InputEvent::Change => {
                             let text = input.read(cx).value().to_string();
+                            // A change that is the field being refilled for
+                            // another title is not typing.
+                            let focused = input.read(cx).focus_handle(cx).is_focused(window);
+                            if !focused {
+                                return;
+                            }
+                            let target = match &this.inspector.text.content_for {
+                                Some(id) => id.clone(),
+                                None => match this.selected.clone() {
+                                    Some(id) => id,
+                                    None => return,
+                                },
+                            };
+                            this.inspector.text.content_for = Some(target.clone());
                             this.inspector.text.content_dirty = true;
-                            this.edit_title(Prop::TextContent, Phase::Preview, cx, |m| {
-                                m.content = text
-                            });
+                            this.edit_title_of(
+                                target,
+                                Prop::TextContent,
+                                Phase::Preview,
+                                cx,
+                                |m| m.content = text,
+                            );
                         }
                         InputEvent::Blur => this.commit_content(cx),
                         _ => {}
@@ -374,14 +407,17 @@ impl Editor {
 
     /// Write what was typed, as one undo step.
     fn commit_content(&mut self, cx: &mut Context<Self>) {
+        let target = self.inspector.text.content_for.take();
         if !std::mem::take(&mut self.inspector.text.content_dirty) {
             return;
         }
-        let Some(input) = self.inspector.text.content.clone() else {
+        let (Some(input), Some(target)) = (self.inspector.text.content.clone(), target) else {
             return;
         };
         let text = input.read(cx).value().to_string();
-        self.edit_title(Prop::TextContent, Phase::Commit, cx, |m| m.content = text);
+        self.edit_title_of(target, Prop::TextContent, Phase::Commit, cx, |m| {
+            m.content = text
+        });
     }
 
     /// A toggle in the style row.
