@@ -2159,6 +2159,77 @@ colours from the picker are written on release, not previewed while
 dragging. The position grid moves the static position; a title with position
 keyframes keeps following its keyframes.
 
+## Masks, chroma key and blend modes (2026-10-03)
+
+Backlog item 1. Engine in `project/compositing.rs`, `modules/compositing/`,
+`render/matte.rs`, `render/blend.rs`; shaders in `quad.wgsl` and `fx.wgsl`
+(`fs_blend`); UI in `editor/inspector/masks.rs`. Decision 0020 has the model.
+
+- **Model.** One `CompositingMaterial` per clip in the new pool category
+  `materials.compositing` (skipped when empty), named from the clip's
+  `extras`, minted per edit. It holds the masks (in order), the chroma key
+  and the blend mode. Shapes, mask operations and blend modes are strings
+  behind enums with `Other`: an unknown one loads, draws as absent or normal,
+  and saves back unchanged. Defaults are not stored.
+- **Masks**: linear, mirror, ellipse, rounded rectangle, star, heart. Each has
+  a centre (fraction of the clip from its middle, +y up), width and height
+  (fractions of the clip's shorter side), rotation (degrees clockwise),
+  feather, roundness, invert, on/off and keyframes in source time. They
+  combine in order: add (max), subtract, intersect (min). Up to 8 draw; more
+  stay in the document.
+- **Chroma key**: key colour (encoded sRGB), tolerance, softness, spill,
+  edge shrink. Distances are in the BT.709 CbCr plane of the source as shot,
+  before the grade. Spill takes the key's chroma direction out of what stays,
+  luma kept. Edge shrink is the minimum of the key alpha over two rings of
+  eight source taps.
+- **Blend modes**: normal, multiply, screen, overlay, soft light, hard light,
+  darken, lighten, colour dodge, colour burn, difference, exclusion, add,
+  subtract. W3C formulas on encoded colour, then source-over in light. A
+  blended clip draws into a layer and `fs_blend` lays it onto the frame so
+  far; the composite pass splits there like it does at an effect clip.
+- **Rendering**: masks and key are alpha in `quad.wgsl` behind
+  `matte_flags`, so they apply on every path (ordinary draw, transition
+  side, effect layer, blend layer). A clip with none of the three takes the
+  old path; `nothing_switched_on_changes_a_byte` pins byte identity.
+- **Tests** (`compositing/render_tests.rs`, 12 on the GPU; `render/matte.rs`,
+  `render/blend.rs`, `project/compositing.rs`, `compositing/edit.rs` on the
+  CPU): every shape and a four-mask combination against `mask_coverage` on
+  both decode paths (±2 codes); a mask moves with its clip and follows its
+  keyframes; the key against `key_alpha` and `despill`, and the same on both
+  decode paths; edge shrink; the matte view; all 13 modes at full and partial
+  opacity against `blend::composite`, top clip on both paths; a blend sees
+  only what is beneath and respects its mask; preview/export parity (2×2
+  block means within 4 codes) with all three live; the eyedropper. Three
+  deliberate shader mutations (feather width, key ramp, multiply) failed the
+  suite. `crates/cli/tests/masks.rs` keys a generated green-screen clip
+  over bars through the CLI and reads the rendered PNG back.
+- **Commands** (`compositing_*`): `get`, `add_mask`, `remove_mask`,
+  `set_mask` (a whole mask, what a handle drag commits), `set_mask_value`
+  (keyed at the playhead when animated), `toggle_mask_keyframe`,
+  `set_mask_options` (shape, op, invert, on/off), `move_mask`, `set_key`,
+  `set_blend`, `reset`, and `pick_key_color` (renders the clip alone, without
+  key, mask, grade or effects, and averages 5×5 pixels under the point).
+- **CLI/MCP**: `mask`, `chroma-key` (`chroma_key`), `blend`; `info` shows
+  each clip's `compositing`; `catalog masks` and `catalog blend`.
+- **UI**: Video › Mask (shape tiles, one section per mask with on/off,
+  combine and invert pills, order, delete; the active mask has sliders with
+  keyframe diamonds), handles on the player (move anywhere, width, height,
+  corner, rotate above, feather below; the overlay takes presses 48 px past
+  the picture); Video › Remove background (chroma key with eyedropper,
+  colour picker, four sliders, Show matte); Video › Basic › Blend mode menu.
+  Drags preview on a copy and commit once. Checked by hand on Xvfb with
+  lavapipe: picking, matte view, handles, subtract, difference.
+- **Show matte** is `CompositingMaterial::view_matte`, `#[serde(skip)]`.
+  The app sets it only on the copy it hands the player
+  (`Editor::preview_project`), so it never reaches the file or an export.
+
+Not done: text, brush and pen masks (need a mask texture; decision 0020);
+Adjust › Mask (a grade inside a mask); a blended clip draws as normal inside
+a transition window and with motion blur; masks and key are not carried by
+"Paste attributes" or "Apply to all"; mask handles ignore keyframe-free
+animation (`motion::clip_motion`) when they place themselves; mask and key
+cost not measured.
+
 ## Not built yet
 
 Both keyframe editing and audio waveforms landed overnight and this line was

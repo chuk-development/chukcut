@@ -230,6 +230,8 @@ Lists what you can use. Does not need a project.
 | `models` | local transcription models, and which ones are downloaded |
 | `luts` | `.cube` files in the LUT library |
 | `fonts` | font families that the text renderer can draw |
+| `masks` | mask shapes, mask operations and the mask values you can set |
+| `blend` | blend modes |
 
 ### Timeline
 
@@ -447,6 +449,52 @@ The command waits for the analysis to finish. The result is one undo step.
 chukcut-cli track reel.chukcut 0:0 --at 1.2 --rect 0.52,0.4,0.15,0.2 --overlay 2:0
 ```
 
+#### `mask PROJECT CLIP`
+
+Adds, changes or removes shape masks on a clip. Each change is one undo step.
+
+- `--add SHAPE` adds a mask: `linear`, `mirror`, `ellipse` (or `circle`),
+  `rectangle`, `star` or `heart`. The other options then apply to the new mask.
+- `--mask REF` names the mask to change: its index (0 is the first) or its id.
+  Without it, the command uses the mask it just added, or the only mask.
+- `--set NAME=VALUE` sets a value. `x` and `y` are the centre, as a fraction
+  of the clip from its middle (0.5 is the right or top edge, +y is up).
+  `width`, `height` and `feather` are fractions of the clip's shorter side.
+  `rotation` is degrees, clockwise. `roundness` (0..1) rounds the corners of a
+  rectangle.
+- `--at TIME` sets the values as keyframes at that timeline time.
+- `--op add|subtract|intersect` sets how the mask combines with the masks
+  before it. `--invert true|false`, `--enabled true|false`, `--shape SHAPE`.
+- `--remove` removes the mask. `--clear` removes all masks first.
+
+The result has `compositing.masks`, with each mask's index and id.
+
+```bash
+chukcut-cli mask reel.chukcut 1:0 --add circle --set width=0.8 --set feather=0.2
+chukcut-cli mask reel.chukcut 1:0 --add rectangle --op subtract --set width=0.1
+chukcut-cli mask reel.chukcut 1:0 --mask 0 --set x=-0.3 --at 0 --set x=0.3 --at 2
+```
+
+#### `chroma-key PROJECT CLIP`
+
+Keys a colour out of a clip (green screen). `--color #rrggbb` gives the
+colour. `--pick X,Y` takes it from the footage under a point of the canvas
+(0..1 from the top left) at `--at TIME` (default: the start of the clip).
+`--tolerance`, `--softness`, `--spill` and `--shrink` are 0..1.
+`--enabled false` switches the key off and keeps its values. `--off` removes
+the key.
+
+```bash
+chukcut-cli chroma-key reel.chukcut 1:0 --pick 0.05,0.5 --spill 0.7
+```
+
+#### `blend PROJECT CLIP [MODE] [--opacity N]`
+
+Sets how a clip blends with the lanes below it: `normal`, `multiply`,
+`screen`, `overlay`, `soft_light`, `hard_light`, `darken`, `lighten`,
+`color_dodge`, `color_burn`, `difference`, `exclusion`, `add` or `subtract`.
+`--opacity` is 0..1.
+
 ### Captions
 
 #### `captions transcribe PROJECT`
@@ -612,7 +660,8 @@ The operation names are the MCP tool names: `info`, `validate`, `configure`,
 `import`, `undo`, `redo`, `append`, `place`, `split`, `delete`, `move`,
 `trim`, `clip_set`, `grade`, `effect_add`, `effect_set`, `effect_remove`,
 `animate`, `animate_text`, `zoom`, `keyframe`, `title_add`, `title_set`,
-`transition_add`, `transition_remove`, `track`, `captions_transcribe`,
+`transition_add`, `transition_remove`, `track`, `mask`, `chroma_key`,
+`blend`, `captions_transcribe`,
 `captions_import`, `captions_export`, `captions_style`, `captions_list`,
 `silence_detect`, `silence_remove`, `normalize`, `denoise`, `loudness`,
 `export`, `render_frame`. The arguments are the command's options and

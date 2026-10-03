@@ -34,5 +34,6 @@ Decisions already recorded elsewhere, because they predate this directory:
   `../architecture/preview-pipeline.md`.
 - **All document mutation goes through invertible edit commands** —
   `../architecture/timeline-editing.md`.
+| [0020](0020-masks-keys-and-blend-modes.md) | Masks, chroma key and blend mode are one pool material per clip; masks and key are alpha in the quad shader, blend modes a layer pass over the frame so far | Decided 2026-10-03 |
 | [0019](0019-analysis-without-a-model-results-in-the-document.md) | Scene detection, stabilisation, beats and reframe run on our own Rust code without a model; results live in the document as tagged extras in source time | Decided 2026-10-03 |
 | [0018](0018-speed-curves-anchored-to-source-time.md) | Speed curves are pool materials anchored to source time; one TimeMap maps timeline↔source everywhere | Decided 2026-10-03 |
