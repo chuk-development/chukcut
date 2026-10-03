@@ -2,9 +2,10 @@
 //!
 //! This module does not transcribe. Captions do (`docs/research/ml-features.md`
 //! §3.1), and they produce exactly what is needed here: words with start and
-//! end times. [`WordTimings`] is the seam: the captions module registers an
-//! implementation with [`register_word_timings`], and until it does, the
-//! filler mode says that a transcript is needed rather than guessing.
+//! end times. [`WordTimings`] is the seam: `captions::words` implements it over
+//! the caption lane and `AppState::new` registers it; with no timed captions
+//! under a clip, the filler mode says that a transcript is needed rather than
+//! guessing.
 //!
 //! A filler cut is the word's own span plus a little padding, and it goes
 //! through the same review list and the same [`super::cut::remove_ranges`] as
@@ -15,17 +16,13 @@
 use std::sync::Arc;
 
 use parking_lot::RwLock;
-use serde::{Deserialize, Serialize};
 
 use crate::modules::project::document::{Micros, Project, TimeRange};
 
-/// One transcribed word, in the **source** time of the clip's material.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TimedWord {
-    pub text: String,
-    pub start: Micros,
-    pub end: Micros,
-}
+/// One transcribed word. The captions' type, so the adapter in
+/// `captions::words` hands its words over without converting them; here the
+/// times are in the **source** time of the clip's material.
+pub use crate::modules::captions::TimedWord;
 
 /// Where word times come from. Implemented by whatever owns transcripts.
 pub trait WordTimings: Send + Sync {

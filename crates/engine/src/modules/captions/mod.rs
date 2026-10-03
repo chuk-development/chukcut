@@ -46,6 +46,7 @@ pub mod group;
 pub mod karaoke;
 pub mod srt;
 pub mod style;
+pub mod words;
 
 use serde::{Deserialize, Serialize};
 
@@ -54,7 +55,10 @@ use crate::modules::project::Micros;
 pub use group::CaptionMode;
 pub use style::{CaptionStyle, Placement};
 
-/// One word with the instant it is spoken, in timeline microseconds.
+/// One word with the instant it is spoken.
+///
+/// In timeline microseconds inside this module; `silence::filler` uses the
+/// same type with times in a clip's source (see [`words`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TimedWord {
     pub text: String,

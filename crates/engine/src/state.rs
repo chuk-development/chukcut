@@ -24,6 +24,8 @@ pub struct AppState {
 
 impl AppState {
     pub fn new() -> Arc<Self> {
+        // Filler-word cutting reads the captions' words; see `captions::words`.
+        crate::modules::captions::words::register();
         Arc::new(Self {
             project: RwLock::new(None),
             project_path: RwLock::new(None),
