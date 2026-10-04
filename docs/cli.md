@@ -467,7 +467,9 @@ Closes the open compound clip, or with `--all` every open level.
 #### `compound flatten PROJECT CLIP`
 
 Puts a compound clip's clips back on the timeline in its place, cut at its
-edges. The compound clip must play at normal speed.
+edges. A compound clip at another speed, or on a speed curve, hands that
+speed to the clips inside; a clip with its own curve inside a curved
+compound clip is refused.
 
 ```bash
 chukcut-cli compound create reel.chukcut 0:1 0:2 1:0 --name "Intro"
