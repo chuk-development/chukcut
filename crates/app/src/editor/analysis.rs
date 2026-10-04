@@ -41,6 +41,8 @@ pub(crate) struct AnalysisUi {
 #[derive(Clone, Copy, Default)]
 pub(crate) struct MenuFlags {
     video: bool,
+    /// A video or a compound clip: something whose picture can be read.
+    picture: bool,
     sound: bool,
     beats: bool,
     can_reframe: bool,
@@ -62,8 +64,12 @@ pub(crate) fn analysis_menu(menu: PopupMenu, f: MenuFlags) -> PopupMenu {
     };
     let menu = menu
         .separator()
-        .menu_with_disabled("Detect scenes", Box::new(DetectScenes), !f.video)
-        .menu_with_disabled("Split at scene changes", Box::new(SplitAtScenes), !f.video)
+        .menu_with_disabled("Detect scenes", Box::new(DetectScenes), !f.picture)
+        .menu_with_disabled(
+            "Split at scene changes",
+            Box::new(SplitAtScenes),
+            !f.picture,
+        )
         .menu_with_disabled("Stabilise", Box::new(StabiliseClip), !f.video)
         .menu_with_disabled("Detect beats", Box::new(DetectBeats), !f.sound)
         .menu_with_disabled("Auto-cut to beat", Box::new(AutoCutToBeat), !f.beats)
@@ -105,10 +111,12 @@ impl Editor {
             .and_then(|id| self.project.segment(id));
         let pool = &self.project.materials;
         let video = primary.is_some_and(|(_, s)| pool.video(&s.material_id).is_some());
-        let sound = primary.is_some_and(|(_, s)| {
-            pool.audio(&s.material_id).is_some()
-                || pool.video(&s.material_id).is_some_and(|v| v.has_audio)
-        });
+        let compound = primary.is_some_and(|(_, s)| pool.sequence(&s.material_id).is_some());
+        let sound = compound
+            || primary.is_some_and(|(_, s)| {
+                pool.audio(&s.material_id).is_some()
+                    || pool.video(&s.material_id).is_some_and(|v| v.has_audio)
+            });
         let beats = !self.selection().is_empty() && !snap_points(&self.project).is_empty();
         let canvas = self.project.canvas;
         let canvas_aspect = canvas.width as f32 / canvas.height.max(1) as f32;
@@ -122,6 +130,7 @@ impl Editor {
         });
         MenuFlags {
             video,
+            picture: video || compound,
             sound,
             beats,
             can_reframe,

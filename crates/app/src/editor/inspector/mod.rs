@@ -498,6 +498,8 @@ pub(crate) enum ClipKind {
     Image,
     Audio,
     Text,
+    /// A compound clip: a picture and a sound made of other clips.
+    Compound,
 }
 
 // --- reading values ------------------------------------------------------------------
@@ -511,7 +513,9 @@ impl Editor {
     pub(crate) fn clip_kind(&self, segment: &Segment) -> ClipKind {
         let pool = &self.project.materials;
         let id = &segment.material_id;
-        if pool.videos.iter().any(|m| &m.id == id) {
+        if pool.sequence(id).is_some() {
+            ClipKind::Compound
+        } else if pool.videos.iter().any(|m| &m.id == id) {
             ClipKind::Video
         } else if pool.images.iter().any(|m| &m.id == id) {
             ClipKind::Image
