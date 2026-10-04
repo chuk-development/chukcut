@@ -48,7 +48,8 @@ assets/icons/         app icons
 - **Never open a GPU or VAAPI device yourself.** `modules::gpu` owns one of
   each: `gpu::render_context()` and `gpu::vaapi_device()`. Concurrent Vulkan
   instances crash drivers. (GPUI has its own renderer device; that is the one
-  exception, and the reason the preview reads frames back for now.)
+  exception. Preview frames cross to it as exported memory that GPUI's
+  renderer imports — nothing opens a third device. Decision 0027.)
 - **Media never enters git.** Test fixtures are generated (ffmpeg as a fixture
   generator) into ignored directories. `_scratch/` is for local throwaway work.
 
@@ -208,7 +209,10 @@ cargo run --release -p chukcut-engine --bin chukcut-bench -- --all
   `shaderc-sys` builds glslang from source with CMake: slow but working.
 - **GPUI's images are BGRA** and every new `RenderImage` is uploaded into the
   window's atlas. Drop the previous frame with `cx.drop_image` or playback
-  leaks one texture per frame (`crates/app/src/editor.rs`, `tick`).
+  leaks one texture per frame (`crates/app/src/editor.rs`, `tick`). The
+  preview normally skips this: its frames are `Picture::Shared`, drawn from
+  the engine's exported memory by the patched GPUI under `vendor/`
+  (`vendor/README.md` — re-apply it on every `gpui-kit` bump).
 - **Do not turn full debug info back on.** With it, a debug build of the app
   was 1 GB and `target/` grew to 21 GB during one test run, which filled the
   disk and failed the suite with "no space left on device". The workspace
