@@ -7,7 +7,7 @@
 //! progress and a Cancel in place of either.
 
 use chukcut_engine::modules::tracking::validate::link_status;
-use chukcut_engine::modules::tracking::{FollowMode, LOW_CONFIDENCE};
+use chukcut_engine::modules::tracking::{FollowMode, TrackerKind, LOW_CONFIDENCE};
 use gpui::component::button::{Button, ButtonVariants as _};
 use gpui::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui::component::progress::Progress;
@@ -112,6 +112,7 @@ impl Editor {
                 .child(target_menu)
                 .into_any_element(),
             self.mode_row(cx),
+            self.tracker_row(cx),
             actions(vec![Button::new("tracking-select")
                 .small()
                 .primary()
@@ -138,6 +139,7 @@ impl Editor {
             } else {
                 "Drag a box around the object on the player.".to_string()
             }),
+            self.tracker_row(cx),
             actions(vec![
                 Button::new("tracking-start")
                     .small()
@@ -208,10 +210,13 @@ impl Editor {
             .iter()
             .filter(|s| s.is_lost() || s.c < LOW_CONFIDENCE)
             .count();
+        let made_by = TrackerKind::from_id(&track.settings.tracker).label();
         let summary = if doubtful > 0 {
-            format!("Follows an object in {target_name} · {frames} frames, {doubtful} doubtful")
+            format!(
+                "Follows an object in {target_name} · {frames} frames, {doubtful} doubtful · {made_by}"
+            )
         } else {
-            format!("Follows an object in {target_name} · {frames} frames")
+            format!("Follows an object in {target_name} · {frames} frames · {made_by}")
         };
 
         let slider = self.smoothing_slider(window, cx);
@@ -224,6 +229,7 @@ impl Editor {
         vec![
             hint(summary),
             self.mode_row(cx),
+            self.tracker_row(cx),
             PropertyRow::new("tracking-smoothing", "Smoothing")
                 .no_actions()
                 .child(div().flex_1().child(Slider::new(&slider)))
@@ -291,6 +297,37 @@ impl Editor {
                 })
             });
         PropertyRow::new("tracking-mode-row", "Follow")
+            .no_actions()
+            .child(menu)
+            .into_any_element()
+    }
+
+    /// Which tracker runs: the standard one (KLT, in the editor, no model)
+    /// or VitTrack for fast motion (in the ML worker, downloaded on first
+    /// use, falls back to the standard one when it cannot run).
+    fn tracker_row(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let current = self.tracking.tracker;
+        let editor = cx.entity().downgrade();
+        let menu = Button::new("tracking-tracker")
+            .small()
+            .label(current.label())
+            .dropdown_caret(true)
+            .dropdown_menu_with_anchor(gpui::Anchor::TopRight, move |menu, _, _| {
+                [TrackerKind::Klt, TrackerKind::VitTrack]
+                    .into_iter()
+                    .fold(menu, |menu, tracker| {
+                        let editor = editor.clone();
+                        menu.item(
+                            PopupMenuItem::new(tracker.label())
+                                .checked(tracker == current)
+                                .on_click(move |_, _, cx| {
+                                    let _ = editor
+                                        .update(cx, |editor, cx| editor.set_tracker(tracker, cx));
+                                }),
+                        )
+                    })
+            });
+        PropertyRow::new("tracking-tracker-row", "Tracker")
             .no_actions()
             .child(menu)
             .into_any_element()

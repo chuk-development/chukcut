@@ -6,7 +6,7 @@
 //! job has put its result into the document as one undo step.
 
 use chukcut_engine::modules::analysis::commands::{
-    self as analysis_commands, DetectScenes, Reframe,
+    self as analysis_commands, DetectScenes, Reframe, SubjectCue,
 };
 use chukcut_engine::modules::project::{Micros, Project, TrackKind};
 use clap::Args;
@@ -449,12 +449,28 @@ pub struct ReframeArgs {
     /// Switch the project to this shape, as W:H (9:16, 1:1, 16:9, 4:5).
     #[arg(long)]
     pub ratio: Option<String>,
+    /// What to follow: `auto` (faces when the ML worker can run the face
+    /// detector, downloading it on first use; saliency otherwise), `faces`
+    /// (fail without the detector) or `saliency` (no model).
+    #[arg(long)]
+    #[serde(default)]
+    pub subject: Option<String>,
 }
 
 impl Operation for ReframeArgs {
     const NAME: &'static str = "reframe";
     fn run(self, session: &mut Session, ctx: &Ctx) -> CliResult<Outcome> {
         let ratio = self.ratio.as_deref().map(ratio).transpose()?;
+        let subject = match self.subject.as_deref() {
+            None | Some("auto") => SubjectCue::Auto,
+            Some("faces") => SubjectCue::Faces,
+            Some("saliency") => SubjectCue::Saliency,
+            Some(other) => {
+                return Err(CliError::refused(format!(
+                    "--subject is auto, faces or saliency, not {other}"
+                )))
+            }
+        };
         let ids = if self.clips.is_empty() {
             session.with(analysis_commands::reframe_candidates)
         } else {
@@ -468,6 +484,7 @@ impl Operation for ReframeArgs {
             Reframe {
                 segment_ids: ids.clone(),
                 ratio,
+                subject,
             },
             None,
         )?;

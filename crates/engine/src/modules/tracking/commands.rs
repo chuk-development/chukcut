@@ -19,7 +19,10 @@ use serde::{Deserialize, Serialize};
 
 use super::edit::{self, TrackingCommand};
 use super::job::{self, Direction, TrackJob};
-use super::model::{FollowMode, TrackSample, TrackSettings, TrackingMaterial, FLAG_ANCHOR};
+use super::model::{
+    FollowMode, TrackSample, TrackSettings, TrackerKind, TrackingMaterial, FLAG_ANCHOR,
+};
+use crate::modules::ml::tracker::VitTracker;
 use crate::modules::project::document::{Id, Micros, Project};
 use crate::modules::timeline::commands::EditResponse;
 use crate::modules::timeline::ops::EditCommand;
@@ -48,6 +51,11 @@ pub struct StartTracking {
     /// the samples on the far side of `at` are replaced, the ones before kept.
     #[serde(default)]
     pub retrack: Option<Id>,
+    /// The tracker to run. `None` keeps a re-tracked track's own tracker and
+    /// uses KLT for a new one. VitTrack falls back to KLT, with a note in the
+    /// outcome, when the ML worker cannot run it.
+    #[serde(default)]
+    pub tracker: Option<TrackerKind>,
 }
 
 /// A job's state, as `tracking_status` reports it.
@@ -70,6 +78,10 @@ pub struct JobOutcome {
     pub cancelled: bool,
     /// Wall time of the analysis, for the speed the UI reports.
     pub seconds: f64,
+    /// The tracker that ran.
+    pub tracker: TrackerKind,
+    /// Why it is not the one asked for, when it is not.
+    pub note: Option<String>,
 }
 
 /// One message on a job's channel.
@@ -116,6 +128,15 @@ pub fn tracking_start(
         .name("chukcut-tracking".into())
         .spawn(move || {
             let started = std::time::Instant::now();
+            let mut job = job;
+            let mut note = None;
+            if job.tracker == TrackerKind::VitTrack {
+                if let Err(error) = VitTracker::prepare(&|_, _| {}, &handle.cancel) {
+                    tracing::info!(%error, "VitTrack unavailable; tracking with KLT");
+                    note = Some(format!("{error}; tracked with the standard tracker"));
+                    job.tracker = TrackerKind::Klt;
+                }
+            }
             let result = job::run(&job, &handle.cancel, |progress| {
                 {
                     let mut status = handle.status.lock();
@@ -149,6 +170,8 @@ pub fn tracking_start(
                     frames,
                     cancelled: outcome.cancelled,
                     seconds,
+                    tracker: job.tracker,
+                    note,
                 })
             });
             if let Err(error) = &finished {
@@ -212,6 +235,11 @@ fn prepare(
         ),
     };
     let rect = request.rect.map(|v| v.clamp(-1.0, 2.0));
+    let tracker = request.tracker.unwrap_or(if request.retrack.is_some() {
+        TrackerKind::from_id(&existing.settings.tracker)
+    } else {
+        TrackerKind::Klt
+    });
     let job = TrackJob {
         path: video.path.clone(),
         fps: video.fps,
@@ -222,6 +250,7 @@ fn prepare(
         range,
         direction,
         analysis_size: existing.settings.analysis_size.max(64),
+        tracker,
     };
     Ok((job, existing))
 }
@@ -239,6 +268,9 @@ fn commit(
     }
     let mut guard = state.project.write();
     let project = guard.as_mut().ok_or("no project is open")?;
+    // The stamp names the tracker that made the newest samples; a re-track
+    // with the other tracker restamps the whole track.
+    track.settings.tracker = job.tracker.id().into();
 
     let command = if request.retrack.is_some() {
         // Only one side of the start is re-tracked; everything else stays.

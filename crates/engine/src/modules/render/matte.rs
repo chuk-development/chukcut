@@ -40,6 +40,10 @@ pub mod flag {
     pub const KEY: u32 = 2;
     pub const KEY_SHRINK: u32 = 4;
     pub const VIEW_MATTE: u32 = 8;
+    /// The clip's baked "Remove background" matte is bound at binding 5.
+    /// Set by the compositor, not by [`super::MatteBlock::new`]: whether a
+    /// matte exists depends on the cache, not on the material.
+    pub const BACKGROUND: u32 = 16;
 }
 
 /// How far in the CbCr plane a tolerance or softness of 1 reaches. Pure
@@ -353,6 +357,7 @@ mod tests {
             ("M_KEY", flag::KEY),
             ("M_KEY_SHRINK", flag::KEY_SHRINK),
             ("M_VIEW_MATTE", flag::VIEW_MATTE),
+            ("M_BACKGROUND", flag::BACKGROUND),
         ] {
             assert!(
                 shader.contains(&format!("const {name}: u32 = {value}u;")),

@@ -12,6 +12,7 @@ use std::collections::HashMap;
 
 use chukcut_engine::modules::compositing::commands as compositing;
 use chukcut_engine::modules::compositing::edit::{self as comp_edit, Minted, ResetPart};
+use chukcut_engine::modules::matting::commands as matting;
 use chukcut_engine::modules::project::compositing::{
     BlendMode, ChromaKey, CompositingMaterial, Mask, MaskOp, MaskShape, FEATHER_SPAN,
 };
@@ -30,6 +31,16 @@ use crate::ui::{self, ColorEvent, ColorPicker, EmptyState, IconButton};
 use super::controls::*;
 use super::grading::{disc, ring};
 use super::*;
+
+/// A line of explanation in the panel's caption style.
+fn caption(text: String) -> AnyElement {
+    div()
+        .py(px(4.0))
+        .text_size(px(TEXT_CAPTION))
+        .text_color(rgb(TEXT_DIM))
+        .child(text)
+        .into_any_element()
+}
 
 /// The slider key of the chroma key's controls; masks use their index.
 const KEY: usize = usize::MAX;
@@ -140,6 +151,16 @@ pub(crate) struct MasksPanel {
     overlay: Rc<Cell<Bounds<Pixels>>>,
     shown: bool,
     was_shown: bool,
+    /// The running "Remove background" bake, if any.
+    bake: Option<BakeUi>,
+}
+
+/// A bake the panel shows progress for.
+struct BakeUi {
+    job: u64,
+    segment_id: String,
+    done: u32,
+    total: u32,
 }
 
 impl MasksPanel {
@@ -1160,18 +1181,171 @@ impl Editor {
         }
         .render(self.collapsed("Chroma key"), rows, cx);
 
+        let auto = self.auto_remove_section(segment, &material, cx);
         div()
             .flex()
             .flex_col()
+            .child(auto)
             .child(chroma)
-            .child(
-                Section::missing("Auto remove", "Needs the ML worker (backlog 3)").render(
-                    true,
-                    Vec::new(),
-                    cx,
-                ),
-            )
             .into_any_element()
+    }
+
+    /// "Auto remove": the background behind people, by Robust Video Matting
+    /// in the ML worker, baked per frame while the panel shows progress.
+    fn auto_remove_section(
+        &mut self,
+        segment: &Segment,
+        material: &CompositingMaterial,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let is_video = self.project.materials.video(&segment.material_id).is_some();
+        if !is_video {
+            return Section::missing("Auto remove", "Works on video clips").render(
+                true,
+                Vec::new(),
+                cx,
+            );
+        }
+        let on = material.background.is_some();
+        let mut rows = Vec::new();
+        match &self.inspector.masks.bake {
+            Some(bake) if bake.segment_id == segment.id => {
+                let fraction = bake.done as f32 / bake.total.max(1) as f32;
+                rows.push(caption(format!(
+                    "Removing the background… {} of {} frames",
+                    bake.done, bake.total
+                )));
+                rows.push(
+                    gpui::component::progress::Progress::new("background-progress")
+                        .value(fraction * 100.0)
+                        .into_any_element(),
+                );
+                let job = bake.job;
+                rows.push(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .justify_end()
+                        .child(
+                            Button::new("background-cancel")
+                                .small()
+                                .label("Stop")
+                                .on_click(move |_, _, _| matting::matting_cancel(job)),
+                        )
+                        .into_any_element(),
+                );
+            }
+            _ if on => {
+                rows.push(caption(
+                    "People stay, the rest is cut out. Made by Robust Video Matting \
+                     (GPL-3.0) on this machine; the model downloads once."
+                        .to_string(),
+                ));
+                let id = segment.id.clone();
+                rows.push(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .justify_end()
+                        .child(
+                            Button::new("background-rebake")
+                                .small()
+                                .label("Finish missing frames")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    let result = matting::matting_bake(&this.state, id.clone());
+                                    this.started_bake(&id, result, cx);
+                                })),
+                        )
+                        .into_any_element(),
+                );
+            }
+            _ => rows.push(caption(
+                "Tick the box to cut the background out from behind people.".to_string(),
+            )),
+        }
+        let id = segment.id.clone();
+        Section {
+            checkbox: Some(on),
+            on_check: Some(Box::new(move |this: &mut Editor, checked, cx| {
+                let result = matting::matting_remove_background(&this.state, id.clone(), checked);
+                let job = result.as_ref().ok().and_then(|r| r.job);
+                this.after_command(result, cx);
+                if !checked {
+                    if let Some(bake) = this.inspector.masks.bake.take() {
+                        matting::matting_cancel(bake.job);
+                    }
+                }
+                this.started_bake(&id, Ok(job), cx);
+            })),
+            ..Section::new("Auto remove")
+        }
+        .render(self.collapsed("Auto remove"), rows, cx)
+    }
+
+    /// Show the progress of bake `job` (when one started) for `segment_id`.
+    fn started_bake(
+        &mut self,
+        segment_id: &str,
+        job: Result<Option<u64>, String>,
+        cx: &mut Context<Self>,
+    ) {
+        match job {
+            Ok(Some(job)) => {
+                self.inspector.masks.bake = Some(BakeUi {
+                    job,
+                    segment_id: segment_id.to_string(),
+                    done: 0,
+                    total: 0,
+                });
+            }
+            Ok(None) => {}
+            Err(error) => self.report(Err(error), cx),
+        }
+        cx.notify();
+    }
+
+    /// Called from the editor's tick: a running bake's progress, and a new
+    /// picture whenever frames land, so the preview shows the matte as it is
+    /// made. Returns whether anything changed.
+    pub(crate) fn poll_matting(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(bake) = &mut self.inspector.masks.bake else {
+            return false;
+        };
+        let Some(status) = matting::matting_status(bake.job) else {
+            self.inspector.masks.bake = None;
+            return true;
+        };
+        if let Some(finished) = status.finished {
+            matting::matting_forget(bake.job);
+            self.inspector.masks.bake = None;
+            self.generation += 1;
+            let message = match finished {
+                Ok(done) if done.cancelled => Ok(format!(
+                    "Stopped removing the background after {} frames",
+                    done.written
+                )),
+                Ok(done) => Ok(format!(
+                    "Background removed: {} frames in {:.1} s on {}",
+                    done.written,
+                    done.seconds,
+                    done.provider.as_deref().unwrap_or("the CPU")
+                )),
+                Err(error) => Err(error),
+            };
+            match message {
+                Ok(text) => self.status = Some(text.into()),
+                Err(error) => self.report(Err(error), cx),
+            }
+            return true;
+        }
+        let changed = status.progress.done != bake.done;
+        bake.done = status.progress.done;
+        bake.total = status.progress.total;
+        if changed {
+            // A new picture for the same document: frames just baked.
+            self.generation += 1;
+        }
+        changed
     }
 
     /// The key colour's picker, made on first use.

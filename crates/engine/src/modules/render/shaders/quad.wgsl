@@ -126,6 +126,7 @@ const M_MASK: u32 = 1u;
 const M_KEY: u32 = 2u;
 const M_KEY_SHRINK: u32 = 4u;
 const M_VIEW_MATTE: u32 = 8u;
+const M_BACKGROUND: u32 = 16u;
 const KEY_SCALE: f32 = 0.6;
 const STAR_INNER: f32 = 0.381966;
 // The heart: the classic parametric curve at 32 points, width -1..1
@@ -197,6 +198,10 @@ const LUMA601: vec3<f32> = vec3<f32>(0.299, 0.587, 0.114);
 // rgb and master in a (`render::grade::bake_curves`). A 1x1 placeholder unless
 // `F_CURVES` is set.
 @group(1) @binding(4) var curve_texture: texture_2d<f32>;
+// The clip's baked "Remove background" matte (`render::background`): one
+// channel of alpha over the whole source frame in display orientation. Read
+// only under `M_BACKGROUND`; a 1x1 placeholder otherwise.
+@group(1) @binding(5) var background_texture: texture_2d<f32>;
 
 struct VertexInput {
     @location(0) position: vec2<f32>,
@@ -210,6 +215,9 @@ struct VertexOutput {
     // is measured from. Not `uv`, which is cropped and turned into the
     // texture's stored orientation.
     @location(1) local: vec2<f32>,
+    // The source coordinate in display orientation, before the quarter
+    // turns: where the background matte, stored as displayed, is read.
+    @location(2) display: vec2<f32>,
 };
 
 /// Display-space UV to the stored texture's UV, for a clockwise display
@@ -590,6 +598,7 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     let cropped = quad.crop.xy + in.uv * (quad.crop.zw - quad.crop.xy);
     out.uv = turn_uv(cropped, quad.turns);
     out.local = in.uv;
+    out.display = cropped;
     return out;
 }
 
@@ -793,6 +802,9 @@ fn shade(in: VertexOutput) -> vec4<f32> {
         var cover = key_cover;
         if ((quad.matte_flags.x & M_MASK) != 0u) {
             cover = cover * mask_coverage(in.local);
+        }
+        if ((quad.matte_flags.x & M_BACKGROUND) != 0u) {
+            cover = cover * textureSample(background_texture, source_sampler, in.display).r;
         }
         texel = vec4<f32>(texel.rgb, texel.a * cover);
         // "Show matte": the alpha as grey, opaque, so what is kept is white.

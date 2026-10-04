@@ -21,6 +21,8 @@ use super::reframe::{self, Axis, PathPoint};
 use super::scenes;
 use super::stabilise::{self, Applied};
 use super::store::{self, Beats, CameraPath, NewEntry, SceneCuts, Stabilise};
+use crate::modules::ml::faces::FaceDetector;
+use crate::modules::ml::MlError;
 use crate::modules::project::configure::{ConfigureCommand, ProjectConfig};
 use crate::modules::project::document::{Id, Micros, Project, TimeRange, TrackKind};
 use crate::modules::timeline::commands::EditResponse;
@@ -433,6 +435,24 @@ pub struct Reframe {
     /// step; `None` reframes for the canvas the project has.
     #[serde(default)]
     pub ratio: Option<(u32, u32)>,
+    /// What the window follows. `Auto` uses faces when the ML worker can
+    /// run the face detector (downloading it on first use) and saliency
+    /// otherwise.
+    #[serde(default)]
+    pub subject: SubjectCue,
+}
+
+/// What auto reframe looks for.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubjectCue {
+    /// Faces when the ML worker is available, saliency otherwise.
+    #[default]
+    Auto,
+    /// Faces; the job fails when the face detector cannot run.
+    Faces,
+    /// Motion, contrast and skin tone only; no model, no download.
+    Saliency,
 }
 
 /// The clips "reframe the project" takes over: pictures on visible video
@@ -521,15 +541,68 @@ pub fn analysis_reframe(
         .unwrap_or_else(|| "project".into());
     let state = Arc::clone(state);
     let switch = request.ratio.is_some();
+    let cue = request.subject;
     jobs::spawn(JobKind::Reframe, owner, channel, move |ctx| {
+        // The face detector, when it is wanted and can run. Preparing it may
+        // download the model and a runtime on first use; `Auto` falls back
+        // to saliency on any failure, `Faces` fails the job.
+        let wants_faces = cue != SubjectCue::Saliency && clips.iter().any(|c| c.walk.is_some());
+        let mut fallback: Option<String> = None;
+        let detector = if wants_faces {
+            match FaceDetector::prepare(&|_, _| {}, ctx.cancel_flag()) {
+                Ok(detector) => Some(detector),
+                Err(MlError::Cancelled) => return Err(jobs::CANCELLED.into()),
+                Err(e) if cue == SubjectCue::Faces => return Err(e.to_string()),
+                Err(e) => {
+                    tracing::info!("auto reframe without faces: {e}");
+                    fallback = Some(e.to_string());
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let total = clips.len().max(1) as f32;
         let mut paths: Vec<(Id, Axis, Vec<PathPoint>)> = Vec::new();
+        let (mut face_frames, mut frames) = (0usize, 0usize);
         for (i, clip) in clips.iter().enumerate() {
             let span = (i as f32 / total, (i + 1) as f32 / total);
             let path = match &clip.walk {
                 Some(walk) => {
+                    let mut walk = walk.clone();
+                    let mut detect = |rgba: &[u8], w: usize, h: usize| {
+                        let detector = detector.as_ref()?;
+                        match detector.detect(rgba, w, h) {
+                            Ok(faces) => Some(
+                                faces
+                                    .iter()
+                                    .map(|f| reframe::Subject {
+                                        bbox: [
+                                            f.bbox[0] / w as f32,
+                                            f.bbox[1] / h as f32,
+                                            f.bbox[2] / w as f32,
+                                            f.bbox[3] / h as f32,
+                                        ],
+                                        score: f.score,
+                                    })
+                                    .collect(),
+                            ),
+                            Err(e) => {
+                                tracing::warn!("face detection failed on a frame: {e}");
+                                None
+                            }
+                        }
+                    };
+                    let faces: Option<reframe::FaceCue> = if detector.is_some() {
+                        walk.height = crate::modules::ml::faces::DETECTION_HEIGHT;
+                        Some(&mut detect)
+                    } else {
+                        None
+                    };
                     let analysis =
-                        reframe::analyse(walk, clip.axis, clip.fraction, Some(ctx), span)?;
+                        reframe::analyse(&walk, clip.axis, clip.fraction, Some(ctx), span, faces)?;
+                    face_frames += analysis.face_frames;
+                    frames += analysis.targets.len();
                     let smooth = reframe::smooth(&analysis, clip.fraction);
                     reframe::simplify(&smooth, 0.004)
                 }
@@ -573,7 +646,7 @@ pub fn analysis_reframe(
         drop(guard);
         let origin = state.project_path.read().clone();
         crate::modules::project::autosave::schedule(&snapshot, origin);
-        Ok(if switch {
+        let mut message = if switch {
             format!(
                 "Reframed to {}×{} · {}",
                 config.width,
@@ -582,7 +655,21 @@ pub fn analysis_reframe(
             )
         } else {
             format!("Reframed {}", plural(count, "clip", "clips"))
-        })
+        };
+        if let Some(detector) = &detector {
+            if face_frames > 0 {
+                message.push_str(&format!(
+                    " · followed faces in {}% of frames ({})",
+                    (face_frames * 100 / frames.max(1)),
+                    detector.provider
+                ));
+            } else {
+                message.push_str(" · no faces found");
+            }
+        } else if let Some(why) = fallback {
+            tracing::info!("reframed on saliency: {why}");
+        }
+        Ok(message)
     })
 }
 

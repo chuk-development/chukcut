@@ -454,6 +454,15 @@ cache file (an 8-bit grey video, e.g. FFV1 or lossless HEVC) and composite it
 in the preview. Real-time inference during playback is a later optimisation.
 **Effort M, priority 2.**
 
+**Built (2026-10-04).** RVM MobileNetV3, fp32 ONNX, from the authors' release
+`v1.0.0` (`https://github.com/PeterL1n/RobustVideoMatting/releases/download/v1.0.0/rvm_mobilenetv3_fp32.onnx`,
+14 975 696 bytes, SHA-256 `88d45312…cbbd2828`; repository licence GPL-3.0,
+which covers the weights). Mattes are baked per source frame into
+`~/.cache/chukcut/mattes/` as greyscale PNGs at 960 px (not a matte video:
+frames land as the bake reaches them, so the preview shows them at once), and
+the quad shader multiplies them into the clip's alpha. 15.6 ms per 540×960
+frame on an RTX 3060 (CUDA 13), 99 ms on the CPU. Decision 0025.
+
 ### 3.5 Scene / shot detection
 
 **CapCut:** toolbar "Szenen aufteilen" (free); macOS bundle resource

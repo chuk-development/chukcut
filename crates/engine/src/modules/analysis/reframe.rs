@@ -7,10 +7,13 @@
 //! still when the subject barely moves, panning gently when it travels, and
 //! jumping only at a cut.
 //!
-//! **What matters** is a saliency map built without a model. The research
-//! names YuNet (OpenCV Zoo, MIT) and RT-DETR (Apache-2.0) as the detectors to
-//! add once the separate ML worker exists (§5.1: ONNX Runtime stays out of the
-//! editor process); until then three cues stand in:
+//! **What matters** is, first, **faces**: when the ML worker is installed
+//! (`modules/ml`), YuNet (OpenCV Zoo, MIT) runs on every analysed frame and
+//! the window follows the faces it finds. A face missed for a moment (a head
+//! turned to profile) is held for [`FACE_HOLD`] frames rather than handing
+//! the frame to a weaker cue, which would make the window twitch. Frames with
+//! no face, and every frame on a machine without the worker, use a saliency
+//! map built without a model from three cues:
 //!
 //! - **motion that is not the camera's**: each frame is compared with the
 //!   previous one warped by the camera motion the tracking module's KLT
@@ -39,6 +42,23 @@ use crate::modules::tracking::tracker::Similarity;
 pub const ANALYSIS_HEIGHT: u32 = 144;
 /// Frames analysed per second; the path is smoothed far below this anyway.
 pub const RATE: f64 = 10.0;
+/// Analysed frames a face is remembered for after the detector last saw it:
+/// half a second at [`RATE`].
+pub const FACE_HOLD: usize = 5;
+/// How much more a face counts than the strongest saliency. Faces are the
+/// subject whenever there are any; saliency only breaks ties between them.
+const FACE_WEIGHT: f32 = 10.0;
+
+/// A face in an analysed frame, as fractions of the frame (x, y, w, h).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Subject {
+    pub bbox: [f32; 4],
+    pub score: f32,
+}
+
+/// Finds faces in an RGBA frame (`rgba`, width, height). `None` when the
+/// detector failed on this frame; the frame then uses saliency alone.
+pub type FaceCue<'a> = &'a mut dyn FnMut(&[u8], usize, usize) -> Option<Vec<Subject>>;
 
 /// Which way the window moves: across a frame that is too wide for the new
 /// shape, or up and down one that is too tall.
@@ -65,6 +85,8 @@ pub struct Analysis {
     pub targets: Vec<Target>,
     /// Indices into `targets` where a new shot starts.
     pub cuts: Vec<usize>,
+    /// Analysed frames whose target came from faces.
+    pub face_frames: usize,
 }
 
 /// The window, as a fraction of the frame along `axis`, for a frame of
@@ -202,6 +224,73 @@ pub fn saliency(rgba: &[u8], luma: &Gray, previous: Option<(&Gray, &Similarity)>
         .collect()
 }
 
+/// The weight of `faces` on a `w × h` map: a soft blob per face, larger
+/// and more confident faces weighing more, so the speaker in the foreground
+/// wins over a face in the crowd. For a vertical window the blob sits half a
+/// face below the face's centre, which leaves head room above it.
+pub fn face_map(faces: &[Subject], w: usize, h: usize, axis: Axis) -> Vec<f32> {
+    let mut map = vec![0.0f32; w * h];
+    for face in faces {
+        let [fx, fy, fw, fh] = face.bbox;
+        let cx = (fx + fw * 0.5) * w as f32;
+        let mut cy = (fy + fh * 0.5) * h as f32;
+        if axis == Axis::Vertical {
+            cy += fh * 0.5 * h as f32;
+        }
+        let sx = (fw * w as f32 * 0.6).max(1.0);
+        let sy = (fh * h as f32 * 0.6).max(1.0);
+        let weight = face.score * (fh * 4.0).clamp(0.5, 2.0);
+        let (x0, x1) = (
+            (cx - 3.0 * sx).max(0.0) as usize,
+            ((cx + 3.0 * sx) as usize).min(w.saturating_sub(1)),
+        );
+        let (y0, y1) = (
+            (cy - 3.0 * sy).max(0.0) as usize,
+            ((cy + 3.0 * sy) as usize).min(h.saturating_sub(1)),
+        );
+        for y in y0..=y1 {
+            let dy = (y as f32 + 0.5 - cy) / sy;
+            for x in x0..=x1 {
+                let dx = (x as f32 + 0.5 - cx) / sx;
+                map[y * w + x] += weight * (-0.5 * (dx * dx + dy * dy)).exp();
+            }
+        }
+    }
+    map
+}
+
+/// An RGBA frame shrunk to `height` (aspect kept) by averaging boxes of
+/// source pixels: the saliency cues are tuned for [`ANALYSIS_HEIGHT`], and
+/// frames for face detection are decoded larger.
+pub fn shrink(rgba: &[u8], w: usize, h: usize, height: usize) -> (Vec<u8>, usize, usize) {
+    if h <= height {
+        return (rgba.to_vec(), w, h);
+    }
+    let nh = height.max(1);
+    let nw = ((w * nh) as f32 / h as f32).round().max(1.0) as usize;
+    let mut out = vec![0u8; nw * nh * 4];
+    for y in 0..nh {
+        let (sy0, sy1) = (y * h / nh, ((y + 1) * h / nh).max(y * h / nh + 1));
+        for x in 0..nw {
+            let (sx0, sx1) = (x * w / nw, ((x + 1) * w / nw).max(x * w / nw + 1));
+            let mut sum = [0u32; 4];
+            for sy in sy0..sy1 {
+                for sx in sx0..sx1 {
+                    let p = &rgba[(sy * w + sx) * 4..(sy * w + sx) * 4 + 4];
+                    for c in 0..4 {
+                        sum[c] += p[c] as u32;
+                    }
+                }
+            }
+            let n = ((sy1 - sy0) * (sx1 - sx0)) as u32;
+            for c in 0..4 {
+                out[(y * nw + x) * 4 + c] = (sum[c] / n) as u8;
+            }
+        }
+    }
+    (out, nw, nh)
+}
+
 /// Where a window `fraction` of the frame wide (or tall) holds the most of
 /// `map`, as its centre along `axis`, and how clearly it stood out.
 pub fn best_window(map: &[f32], w: usize, h: usize, axis: Axis, fraction: f32) -> (f32, f32) {
@@ -255,13 +344,17 @@ pub fn best_window(map: &[f32], w: usize, h: usize, axis: Axis, fraction: f32) -
     (centre, confidence)
 }
 
-/// Analyse `job` for a window `fraction` of the frame along `axis`.
+/// Analyse `job` for a window `fraction` of the frame along `axis`. With
+/// `faces`, every frame is also searched for faces (at the walk's size —
+/// [`crate::modules::ml::faces::DETECTION_HEIGHT`] suits the detector) and
+/// the window follows them; saliency always runs at [`ANALYSIS_HEIGHT`].
 pub fn analyse(
     job: &Walk,
     axis: Axis,
     fraction: f32,
     ctx: Option<&JobContext>,
     progress_span: (f32, f32),
+    mut faces: Option<FaceCue>,
 ) -> Result<Analysis, String> {
     let estimator = MotionEstimator::default();
     let mut previous: Option<(Pyramid, Signature)> = None;
@@ -270,20 +363,54 @@ pub fn analyse(
         fps: job.max_rate.unwrap_or(RATE),
         ..Default::default()
     };
+    // The last faces seen, and how many frames ago.
+    let mut held: Option<(Vec<Subject>, usize)> = None;
     walk(job, ctx, progress_span, |frame| {
+        let found = faces
+            .as_mut()
+            .and_then(|detect| detect(&frame.rgba, frame.width, frame.height));
+        let (rgba, width, height) = shrink(
+            &frame.rgba,
+            frame.width,
+            frame.height,
+            ANALYSIS_HEIGHT as usize,
+        );
         let gray = Gray {
-            width: frame.width,
-            height: frame.height,
-            data: super::frames::luma(&frame.rgba),
+            width,
+            height,
+            data: super::frames::luma(&rgba),
         };
         let pyramid = MotionEstimator::pyramid(gray.clone());
-        let signature = Signature::of(&frame.rgba, frame.width, frame.height);
+        let signature = Signature::of(&rgba, width, height);
         let motion = previous
             .as_ref()
             .and_then(|(p, _)| estimator.estimate(p, &pyramid));
         let prev_luma = previous.as_ref().map(|(p, _)| p.base());
-        let map = saliency(&frame.rgba, &gray, prev_luma.zip(motion.as_ref()));
-        let (centre, confidence) = best_window(&map, frame.width, frame.height, axis, fraction);
+        let mut map = saliency(&rgba, &gray, prev_luma.zip(motion.as_ref()));
+        // A cut ends whatever was held: the face belonged to the last shot.
+        let cut = previous
+            .as_ref()
+            .is_some_and(|(_, s)| signature.distance(s) > 0.3);
+        held = match found {
+            Some(f) if !f.is_empty() => Some((f, 0)),
+            _ => held
+                .take()
+                .filter(|(_, age)| *age < FACE_HOLD && !cut)
+                .map(|(f, age)| (f, age + 1)),
+        };
+        let on_faces = held.as_ref().map(|(f, _)| f.as_slice());
+        if let Some(subjects) = on_faces {
+            normalise(&mut map);
+            let weights = face_map(subjects, width, height, axis);
+            for (m, f) in map.iter_mut().zip(weights) {
+                *m = 0.1 * *m + FACE_WEIGHT * f;
+            }
+            out.face_frames += 1;
+        }
+        let (centre, mut confidence) = best_window(&map, width, height, axis, fraction);
+        if on_faces.is_some() {
+            confidence = confidence.max(0.9);
+        }
         scores.times.push(frame.pts);
         scores.scores.push(
             previous
@@ -498,12 +625,72 @@ mod tests {
                 })
                 .collect(),
             cuts: Vec::new(),
+            face_frames: 0,
         };
         let path = smooth(&analysis, 0.3);
         for pair in path.windows(2) {
             assert!(pair[1].centre - pair[0].centre <= 0.5 * 0.3 / 10.0 + 1e-5);
         }
         assert!(path[25].centre > 0.4 && path[25].centre < 0.6);
+    }
+
+    #[test]
+    fn a_face_outweighs_a_brighter_distraction() {
+        let (w, h) = (128usize, 72usize);
+        // Saliency peaks on the left; a face sits on the right.
+        let mut saliency = vec![0.0f32; w * h];
+        for y in 20..50 {
+            for x in 5..30 {
+                saliency[y * w + x] = 3.0;
+            }
+        }
+        normalise(&mut saliency);
+        let face = Subject {
+            bbox: [0.75, 0.3, 0.08, 0.2],
+            score: 0.9,
+        };
+        let faces = face_map(&[face], w, h, Axis::Horizontal);
+        let map: Vec<f32> = saliency
+            .iter()
+            .zip(&faces)
+            .map(|(s, f)| 0.1 * s + FACE_WEIGHT * f)
+            .collect();
+        let (centre, _) = best_window(&map, w, h, Axis::Horizontal, 0.3);
+        assert!((centre - 0.79).abs() < 0.05, "{centre}");
+    }
+
+    #[test]
+    fn the_foreground_face_wins_over_a_small_one() {
+        let (w, h) = (160usize, 90usize);
+        let big = Subject {
+            bbox: [0.1, 0.2, 0.12, 0.35],
+            score: 0.8,
+        };
+        let small = Subject {
+            bbox: [0.8, 0.4, 0.03, 0.06],
+            score: 0.95,
+        };
+        let map = face_map(&[big, small], w, h, Axis::Horizontal);
+        let (centre, _) = best_window(&map, w, h, Axis::Horizontal, 0.3);
+        assert!(centre < 0.3, "{centre}");
+    }
+
+    #[test]
+    fn shrinking_averages_and_keeps_the_aspect() {
+        let (w, h) = (8usize, 4usize);
+        let rgba: Vec<u8> = (0..w * h)
+            .flat_map(|i| {
+                if i % w < 4 {
+                    [0, 0, 0, 255]
+                } else {
+                    [200, 200, 200, 255]
+                }
+            })
+            .collect();
+        let (out, nw, nh) = shrink(&rgba, w, h, 2);
+        assert_eq!((nw, nh), (4, 2));
+        assert_eq!(out[0], 0);
+        assert_eq!(out[3 * 4], 200);
     }
 
     #[test]

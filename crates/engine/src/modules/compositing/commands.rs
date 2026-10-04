@@ -10,7 +10,7 @@ use std::sync::{Arc, OnceLock};
 
 use super::edit::{self, Minted, ResetPart};
 use crate::modules::project::compositing::{
-    BlendMode, ChromaKey, CompositingMaterial, Mask, MaskOp, MaskShape,
+    BackgroundRemoval, BlendMode, ChromaKey, CompositingMaterial, Mask, MaskOp, MaskShape,
 };
 use crate::modules::project::document::{AnimatableProperty, Micros, Project};
 use crate::modules::render::{Compositor, SourceProvider};
@@ -180,6 +180,18 @@ pub fn compositing_set_key(
     key: Option<ChromaKey>,
 ) -> Result<EditResponse, String> {
     commit(state, |p| edit::set_key_command(p, &segment_id, key))
+}
+
+/// Turn "Remove background" on or off. Only the setting: baking the matte
+/// is `matting::commands`, which calls this and starts the bake.
+pub fn compositing_set_background(
+    state: &Arc<AppState>,
+    segment_id: String,
+    background: Option<BackgroundRemoval>,
+) -> Result<EditResponse, String> {
+    commit(state, |p| {
+        edit::set_background_command(p, &segment_id, background)
+    })
 }
 
 pub fn compositing_set_blend(

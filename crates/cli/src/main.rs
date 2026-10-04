@@ -34,6 +34,7 @@ use ops::layout::*;
 use ops::look::*;
 use ops::markers::*;
 use ops::mask::*;
+use ops::ml::*;
 use ops::motion::*;
 use ops::project::*;
 use ops::render::*;
@@ -115,6 +116,8 @@ enum Command {
     Mask(On<MaskArgs>),
     /// Key a colour out of a clip (green screen).
     ChromaKey(On<ChromaKeyArgs>),
+    /// Remove the background behind the people in a video clip (ML).
+    RemoveBackground(On<RemoveBackgroundArgs>),
     /// Set how a clip blends with the lanes beneath it, and its opacity.
     Blend(On<BlendArgs>),
     /// Give a clip an In, Out or Combo animation preset.
@@ -153,6 +156,8 @@ enum Command {
     Record(On<RecordArgs>),
     /// Track a region of a video and optionally make an overlay follow it.
     Track(On<TrackArgs>),
+    /// Attach, detach, bake, smooth or remove a clip's motion track.
+    TrackSet(On<TrackSetArgs>),
     /// Add or remove transitions.
     #[command(subcommand)]
     Transition(TransitionCommand),
@@ -220,6 +225,8 @@ enum Command {
     Batch(BatchArgs),
     /// List effects, audio effects, transitions, animations, grade controls, presets, encoders, models, LUTs or fonts.
     Catalog(CatalogArgs),
+    /// Machine learning: models, runtime packs, status and speed of the ML worker.
+    Ml(MlArgs),
     /// Serve every operation to an MCP client over stdio.
     Mcp,
 }
@@ -564,6 +571,7 @@ fn dispatch(command: Command, dry: bool, ctx: &Ctx) -> CliResult<(&'static str, 
         Command::Grade(o) => on(o, dry, ctx),
         Command::Mask(o) => on(o, dry, ctx),
         Command::ChromaKey(o) => on(o, dry, ctx),
+        Command::RemoveBackground(o) => on(o, dry, ctx),
         Command::Blend(o) => on(o, dry, ctx),
         Command::Effect(EffectCommand::Add(o)) => on(o, dry, ctx),
         Command::Effect(EffectCommand::Set(o)) => on(o, dry, ctx),
@@ -597,6 +605,7 @@ fn dispatch(command: Command, dry: bool, ctx: &Ctx) -> CliResult<(&'static str, 
         Command::Duck(o) => on(o, dry, ctx),
         Command::Record(o) => on(o, dry, ctx),
         Command::Track(o) => on(o, dry, ctx),
+        Command::TrackSet(o) => on(o, dry, ctx),
         Command::Transition(TransitionCommand::Add(o)) => on(o, dry, ctx),
         Command::Transition(TransitionCommand::Remove(o)) => on(o, dry, ctx),
         Command::Marker(MarkerCommand::Add(o)) => on(o, dry, ctx),
@@ -667,6 +676,7 @@ fn dispatch(command: Command, dry: bool, ctx: &Ctx) -> CliResult<(&'static str, 
         Command::Transition(TransitionCommand::More(c)) => c.dispatch(dry, ctx),
         Command::Cloud(CloudCommand::More(c)) => c.dispatch(dry, ctx),
         Command::Catalog(args) => Ok(("catalog", args.run()?, false)),
+        Command::Ml(args) => Ok(("ml", args.run()?, false)),
         Command::Batch(args) => {
             let raw = read_input(&args.file)?;
             let ops = batch_ops(&raw)?;

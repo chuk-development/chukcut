@@ -72,6 +72,11 @@ pub struct CompositingMaterial {
     pub key: Option<ChromaKey>,
     #[serde(default, skip_serializing_if = "BlendMode::is_normal")]
     pub blend: BlendMode,
+    /// "Remove background": a person matte made by a model, baked per source
+    /// frame into the cache (`modules/matting`) and applied as alpha like a
+    /// mask. `None` when off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<BackgroundRemoval>,
     /// Draw the clip's matte (its alpha as grey) instead of its picture.
     /// Runtime only: the app sets it on the copy it hands the preview while
     /// "Show matte" is held, so it is never saved, never undone and never
@@ -94,6 +99,7 @@ impl CompositingMaterial {
             masks: Vec::new(),
             key: None,
             blend: BlendMode::Normal,
+            background: None,
             view_matte: false,
         }
     }
@@ -101,7 +107,10 @@ impl CompositingMaterial {
     /// Whether applying this would change nothing: no mask that draws, no
     /// key that keys, normal blending. Such a material is not stored at all.
     pub fn is_identity(&self) -> bool {
-        self.masks.is_empty() && self.key.is_none() && self.blend.is_normal()
+        self.masks.is_empty()
+            && self.key.is_none()
+            && self.blend.is_normal()
+            && self.background.is_none()
     }
 
     pub fn mask(&self, id: &str) -> Option<&Mask> {
@@ -123,6 +132,22 @@ impl CompositingMaterial {
         }
         None
     }
+}
+
+/// "Remove background" on a clip: which model made (or will make) its matte.
+///
+/// The document records the model and its version, never the matte itself
+/// (decision 0019's split: edit data in the document, pixels in the cache).
+/// The pixels are a cache keyed by the media file, this model and this
+/// version, so a matte made by one version is never shown for another, and an
+/// export that finds frames missing rebuilds them with the version recorded
+/// here — or refuses, if this build does not have it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackgroundRemoval {
+    /// The registry id, e.g. `rvm`.
+    pub model: String,
+    /// The registry version, e.g. `1.0.0-mobilenetv3`.
+    pub version: String,
 }
 
 // ---------------------------------------------------------------------------
