@@ -506,8 +506,10 @@ impl Render for FileBrowser {
             )
             .child(div().flex_1().child(Input::new(&self.path).small()))
             .child(
+                // The state is in the id so an open tooltip is rebuilt with
+                // the new words after a click.
                 IconButton::new(
-                    "files-hidden",
+                    SharedString::from(format!("files-hidden-{}", self.hidden)),
                     if self.hidden {
                         Lucide::Eye
                     } else {

@@ -91,8 +91,49 @@ Judge performance from a release build only.
    2026-10-03 — `chukcut-cli` and `chukcut-cli mcp`, `docs/cli.md`. Export,
    `render-frame` and `view_frame` need a Vulkan device like the app; a
    one-shot CLI process pays the compositor's start-up (0.75 s in a debug build) on
-   every render. Markers, crop, curves, layouts, freeze frame, translation and
-   TTS are not exposed yet.
+   every render. Since 2026-10-04 every command-layer function is reachable
+   from the CLI and MCP, or is on the allowlist in
+   `crates/cli/tests/reachability.rs` with its reason (live preview, jobs
+   inside one process, preview tiles, account keys). That test fails on a new
+   `pub fn` in a `commands.rs` that nothing calls. Pending: the tracking
+   commands (attach, bake, smoothing), which the tracking branch exposes.
+
+## Timelines and compound clips (2026-10-04, agent/compound)
+
+Decision 0024. A project holds several **sequences**: timelines (tabs above
+the lanes, "+" adds one, right-click renames, duplicates or deletes) and
+compound clips (select clips, Alt+G or the clip menu; double-click to open,
+breadcrumbs or the clip menu to close; Alt+Shift+G puts the clips back).
+
+- **How:** the open sequence *is* `Project::tracks`/`markers`;
+  `Project::sequence` says which one, the rest are parked in
+  `MaterialPool::sequences`. A segment whose material is a sequence is a
+  compound clip (`MaterialKind::Sequence`). Engine: `modules/sequence/`
+  (`build.rs` makes every gesture a `Composite`; `edit.rs` holds the four
+  `SequenceEdit` primitives behind `EditCommand::Sequence`). CLI/MCP:
+  `timeline …`, `compound …` (docs/cli.md).
+- **Opening and closing a compound clip are undoable edits.** That is on
+  purpose: undo of an edit made inside only works with that compound open.
+- **Rendering:** a compound clip is its sequence rendered into a texture of
+  the frame's size, drawn as the clip's source (`Compositor::nested_frame`).
+  The nested render is premultiplied; the quad carries
+  `grade::feature::PREMULTIPLIED` and `quad.wgsl` divides it out. Verified on
+  the RTX 3060 and on lavapipe: nested vs flattened frames within 2 code
+  values, exports within 6, mixes within 1e-4 (`tests/compound.rs`).
+- **Sound** is flattened for both mixers (`sequence::audio::flatten_audio`).
+  Not mapped: a compound clip's own volume keyframes and its own speed curve.
+- **Export** always renders the root timeline, also from inside a compound
+  clip (`sequence::export_root` in `export::commands`).
+- **Cycles** are refused at `InsertSegment` (a paste of a compound clip into
+  itself) and nesting stops at 8 levels (`sequence::MAX_DEPTH`).
+- **Old files** round-trip byte for byte; neither key is written for a
+  project with one timeline.
+- **Rough:** every compound clip costs a nested render per frame plus a pool
+  clone; the preview's decode-ahead (`MediaSourceProvider::prefetch_clips`)
+  does not look inside compound clips; analysis, silence cutting, captions
+  and loudness see only the open sequence; flatten needs normal speed;
+  deleting a timeline leaves its compound sequences parked and unused;
+  an older build opening a multi-timeline file drops the parked timelines.
 
 ## Polish pass, 2026-10-03 (agent/polish)
 
@@ -2685,6 +2726,23 @@ first rendered frame actually had. Those two being different is a bug, and
 nothing else in the system would say so.
 
 ## Traps that have already cost time
+
+- **A GPU test proves something about one adapter only.** NVIDIA rounds the
+  source alpha factor of an `Rgba8UnormSrgb` target to 1/255 in the blender;
+  lavapipe does not. A blending test written on lavapipe passed while NVIDIA
+  drew faint alpha in steps (d9d86dd, the agent/alpha merge, and on
+  2026-10-04 the effect runtime: an effect package's pass that blends
+  `SRC_ALPHA, ONE_MINUS_SRC_ALPHA` drew alphas 0.4/255 to 1.1/255 as 0, 13,
+  13, 13 instead of 5, 10, 14, 17). `scripts/gpu-tests.sh [filter]` runs the
+  engine's library tests on the real GPU, then on lavapipe; the second run sets
+  `CHUKCUT_TEST_ADAPTER=llvmpipe`, and `render::test_context` fails a test that
+  got another adapter instead of letting it pass on the wrong one. It also
+  prints the adapter's name once (`--nocapture` shows it). **Do not set
+  `VK_ICD_FILENAMES=` to an empty value**: on this machine a test then found no
+  adapter and skipped, which reads as a pass. The fix for the effect runtime
+  is the same as for the quad: `glsl::premultiply_output` wraps a pass's
+  fragment shader so it writes premultiplied colour, and the pipeline blends
+  with `ONE` (`effects/graph.rs`, `a_straight_alpha_pass_draws_faint_alpha_without_steps`).
 
 - **GPUI Component theme colours set through `Theme::global_mut` never reach
   the widgets.** A Button reads the resolved `theme.tokens`, and the tokens

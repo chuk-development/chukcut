@@ -90,6 +90,11 @@ pub(crate) const CLIP_TEXT_TITLE: u32 = 0x946620;
 /// Effect and sticker clips.
 pub(crate) const CLIP_EFFECT: u32 = 0x6b2b60;
 pub(crate) const CLIP_EFFECT_TITLE: u32 = 0x823576;
+/// Compound clips: a sequence inside a clip. Green, apart from every media
+/// kind, with a lighter inner outline that reads as a stack.
+pub(crate) const CLIP_COMPOUND: u32 = 0x24502f;
+pub(crate) const CLIP_COMPOUND_TITLE: u32 = 0x2e6a3c;
+pub(crate) const CLIP_COMPOUND_EDGE: u32 = 0x7fd59a;
 pub(crate) const CLIP_OTHER: u32 = 0x4a4c55;
 pub(crate) const CLIP_OTHER_TITLE: u32 = 0x585a64;
 /// Lanes behind the clips, a step below the panel so clips stand out.
@@ -107,6 +112,7 @@ pub(crate) fn clip_title(body: u32) -> u32 {
         CLIP_AUDIO => CLIP_AUDIO_TITLE,
         CLIP_TEXT => CLIP_TEXT_TITLE,
         CLIP_EFFECT => CLIP_EFFECT_TITLE,
+        CLIP_COMPOUND => CLIP_COMPOUND_TITLE,
         _ => CLIP_OTHER_TITLE,
     }
 }

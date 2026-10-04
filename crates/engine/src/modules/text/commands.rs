@@ -65,17 +65,30 @@ pub fn text_add(
     content: Option<String>,
     duration: Option<Micros>,
 ) -> Result<TextAdded, String> {
+    text_add_on(state, at, content, duration, None)
+}
+
+/// [`text_add`] on `lane` when that is a title lane (a text lane that is not
+/// locked and holds no captions); elsewhere where [`text_add`] would put it.
+pub fn text_add_on(
+    state: &Arc<AppState>,
+    at: Micros,
+    content: Option<String>,
+    duration: Option<Micros>,
+    lane: Option<String>,
+) -> Result<TextAdded, String> {
     let (material_id, placement) = {
         let mut guard = state.project.write();
         let project = guard.as_mut().ok_or("no project is open")?;
 
         let material = edit::default_material(project, content);
         let material_id = material.id.clone();
-        let placement = edit::insert_command(
+        let placement = edit::insert_command_on(
             project,
             &material_id,
             at,
             duration.unwrap_or(edit::DEFAULT_DURATION),
+            lane.as_deref(),
         )?;
 
         // Before the command, because `InsertSegment` produces a document that
@@ -147,9 +160,21 @@ pub fn text_add_style(
     content: Option<String>,
     lane: Option<String>,
 ) -> Result<TextAdded, String> {
+    text_add_style_for(state, at, style_id, content, lane, None)
+}
+
+/// [`text_add_style`] for `duration` instead of the default three seconds.
+pub fn text_add_style_for(
+    state: &Arc<AppState>,
+    at: Micros,
+    style_id: &str,
+    content: Option<String>,
+    lane: Option<String>,
+    duration: Option<Micros>,
+) -> Result<TextAdded, String> {
     let style = presets::style(style_id)
         .ok_or_else(|| format!("there is no title style called {style_id}"))?;
-    add_title(state, at, lane, None, |project| {
+    add_title(state, at, lane, duration, None, |project| {
         (style.material(project, content), style.transform(), None)
     })
 }
@@ -163,10 +188,22 @@ pub fn text_add_template(
     content: Option<String>,
     lane: Option<String>,
 ) -> Result<TextAdded, String> {
+    text_add_template_for(state, at, template_id, content, lane, None)
+}
+
+/// [`text_add_template`] for `duration` instead of the default three seconds.
+pub fn text_add_template_for(
+    state: &Arc<AppState>,
+    at: Micros,
+    template_id: &str,
+    content: Option<String>,
+    lane: Option<String>,
+    duration: Option<Micros>,
+) -> Result<TextAdded, String> {
     let template = presets::template(template_id)
         .ok_or_else(|| format!("there is no text template called {template_id}"))?;
     let style = template.title_style();
-    add_title(state, at, lane, Some(template.name), |project| {
+    add_title(state, at, lane, duration, Some(template.name), |project| {
         let content = content.unwrap_or_else(|| template.sample().to_string());
         (
             style.material(project, Some(content)),
@@ -182,6 +219,7 @@ fn add_title(
     state: &Arc<AppState>,
     at: Micros,
     lane: Option<String>,
+    duration: Option<Micros>,
     label: Option<&str>,
     make: impl FnOnce(
         &crate::modules::project::document::Project,
@@ -200,7 +238,7 @@ fn add_title(
             project,
             &material_id,
             at,
-            edit::DEFAULT_DURATION,
+            duration.unwrap_or(edit::DEFAULT_DURATION),
             lane.as_deref(),
         )?;
         edit::dress_placement(&mut placement, transform, animation, label);
@@ -346,6 +384,60 @@ fn respond(state: &AppState) -> Result<EditResponse, String> {
 mod tests {
     use super::*;
     use crate::modules::project::document::{CanvasConfig, Project};
+
+    /// Two titles at the same time on two lanes: the second goes on the lane
+    /// it names instead of moving to the next gap, and the styled adds take a
+    /// length of their own.
+    #[test]
+    fn a_title_lands_on_the_named_lane_for_the_asked_length() {
+        use crate::modules::project::document::{Track, TrackKind};
+        use crate::modules::timeline::ops::EditCommand;
+        let state = AppState::new();
+        *state.project.write() = Some(Project::new("t", CanvasConfig::default(), 30.0));
+        let first = text_add(&state, 0, Some("Headline".into()), None).expect("first");
+
+        let lane = Track::new(TrackKind::Text, "Text 2");
+        let lane_id = lane.id.clone();
+        let index = state.with_project(|p| p.tracks.len()).unwrap();
+        crate::modules::timeline::commands::timeline_apply(
+            &state,
+            EditCommand::AddTrack { track: lane, index },
+        )
+        .expect("lane");
+        let second = text_add_on(
+            &state,
+            0,
+            Some("Subtitle".into()),
+            Some(2_000_000),
+            Some(lane_id.clone()),
+        )
+        .expect("second");
+        assert_eq!(second.track_id, lane_id);
+        assert_ne!(second.track_id, first.track_id);
+        assert_eq!(second.start, 0, "not pushed to the next gap");
+
+        let styled = text_add_style_for(
+            &state,
+            0,
+            "lower-third",
+            None,
+            Some(lane_id.clone()),
+            Some(5_000_000),
+        )
+        .expect("styled");
+        let templated =
+            text_add_template_for(&state, 9_000_000, "neon-sign", None, None, Some(1_500_000))
+                .expect("templated");
+        let length = |id: &str| {
+            state
+                .with_project(|p| p.segment(id).map(|(_, s)| s.target_range.duration))
+                .unwrap()
+                .unwrap()
+        };
+        assert_eq!(length(&second.segment_id), 2_000_000);
+        assert_eq!(length(&styled.segment_id), 5_000_000);
+        assert_eq!(length(&templated.segment_id), 1_500_000);
+    }
 
     /// A title's new words are one undo step, and undo brings the old ones
     /// back with the style untouched.

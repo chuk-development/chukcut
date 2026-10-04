@@ -10,16 +10,21 @@
 pub mod analysis;
 pub mod audio;
 pub mod audiofx;
+pub mod caption_edit;
+pub mod clip;
 pub mod cloud;
+pub mod cloud_tools;
 pub mod delivery;
 pub mod frame;
 pub mod layout;
+pub mod library;
 pub mod look;
 pub mod markers;
 pub mod mask;
 pub mod ml;
 pub mod project;
 pub mod render;
+pub mod sequence;
 pub mod summary;
 pub mod text;
 pub mod timeline;
@@ -249,6 +254,42 @@ operations!(
     cloud::StockDownloadArgs,
     render::ExportArgs,
     render::RenderFrameArgs,
+    caption_edit::CaptionsAddArgs,
+    caption_edit::CaptionsTextArgs,
+    caption_edit::CaptionsSplitArgs,
+    caption_edit::CaptionsMergeArgs,
+    caption_edit::CaptionsClearArgs,
+    caption_edit::CaptionsRegroupArgs,
+    clip::RenameArgs,
+    clip::LinkArgs,
+    clip::UnlinkArgs,
+    clip::PasteAttributesArgs,
+    clip::GradeToAllArgs,
+    clip::LookArgs,
+    clip::EffectMoveArgs,
+    clip::EffectResetArgs,
+    clip::EffectKeyframeArgs,
+    clip::TransitionSetArgs,
+    clip::TitleTextArgs,
+    clip::TitleFontArgs,
+    clip::MaskMoveArgs,
+    clip::LaneAddArgs,
+    library::StickerArgs,
+    library::MusicArgs,
+    library::SfxArgs,
+    cloud_tools::SoundArgs,
+    cloud_tools::FalArgs,
+    cloud_tools::CreditsArgs,
+    sequence::TimelineListArgs,
+    sequence::TimelineNewArgs,
+    sequence::TimelineRenameArgs,
+    sequence::TimelineDeleteArgs,
+    sequence::TimelineDuplicateArgs,
+    sequence::TimelineSwitchArgs,
+    sequence::CompoundCreateArgs,
+    sequence::CompoundOpenArgs,
+    sequence::CompoundCloseArgs,
+    sequence::CompoundFlattenArgs,
 );
 
 /// Parse a snake_case engine enum from its name, listing the valid names

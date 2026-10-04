@@ -32,7 +32,7 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 base64 = "0.22"
 # Only to quieten libav: its hardware probes print errors for every encoder
 # the machine lacks, which is noise on a CLI's stderr. The engine's version.
-ffmpeg-next = "6.1"
+ffmpeg-next = "9.0"
 
 # Offline transcription (whisper.cpp) is on, as in the app. The same engine
 # features also mean the CLI and the app share one engine build in the

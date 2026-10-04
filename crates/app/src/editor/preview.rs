@@ -240,7 +240,7 @@ impl Editor {
             .header(
                 PanelHeader::new()
                     .title("Player")
-                    .detail("Timeline 01")
+                    .detail(self.project.sequence.name.clone())
                     .action(header_menu),
             )
             .child(

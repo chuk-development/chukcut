@@ -77,18 +77,48 @@ pub struct NewTitle {
     /// The words of a new title. Defaults to the style's sample.
     #[arg(long)]
     pub text: Option<String>,
-    /// The title lane for a new title: index, name or id.
+    /// The title lane for a new title: index, name or id (`lane-add --kind
+    /// text` makes one).
     #[arg(long)]
     pub track: Option<String>,
+    /// How long a new title shows. Defaults to 3 s.
+    #[arg(long, conflicts_with = "clip")]
+    pub duration: Option<Time>,
 }
 
 impl NewTitle {
     fn lane(&self, session: &Session) -> CliResult<Option<String>> {
-        self.track
-            .as_deref()
-            .map(|t| session.with(|p| select::track(p, t)))
-            .transpose()
+        title_lane(session, self.track.as_deref())
     }
+}
+
+/// The lane `reference` names, refused unless a title may go there: a text
+/// lane that is not locked and holds no captions. Without the check the
+/// engine would quietly use the first title lane instead.
+pub fn title_lane(session: &Session, reference: Option<&str>) -> CliResult<Option<String>> {
+    let Some(reference) = reference else {
+        return Ok(None);
+    };
+    let id = session.with(|p| select::track(p, reference))?;
+    let captions: Vec<String> =
+        chukcut_engine::modules::captions::commands::captions_list(&session.state)?
+            .into_iter()
+            .map(|c| c.track_id)
+            .collect();
+    let usable = session.with(|p| {
+        p.track(&id).is_some_and(|t| {
+            t.kind == chukcut_engine::modules::project::TrackKind::Text
+                && !t.locked
+                && !captions.contains(&t.id)
+        })
+    });
+    if !usable {
+        return Err(CliError::usage(format!(
+            "lane {reference} is not a title lane (a text lane, unlocked, without captions); \
+             `chukcut-cli lane-add PROJECT --kind text` adds one"
+        )));
+    }
+    Ok(Some(id))
 }
 
 /// Add a title in a style, or restyle a title. `catalog title_styles` lists
@@ -122,12 +152,14 @@ impl Operation for TitleStyleArgs {
         }
         let lane = self.target.lane(session)?;
         let at = self.target.at.map_or(0, |t| t.resolve(session.fps()));
-        let added = text_commands::text_add_style(
+        let duration = self.target.duration.map(|d| d.resolve(session.fps()));
+        let added = text_commands::text_add_style_for(
             &session.state,
             at,
             style,
             self.target.text.clone(),
             lane,
+            duration,
         )?;
         Ok(title_outcome(
             session,
@@ -169,12 +201,14 @@ impl Operation for TitleTemplateArgs {
         }
         let lane = self.target.lane(session)?;
         let at = self.target.at.map_or(0, |t| t.resolve(session.fps()));
-        let added = text_commands::text_add_template(
+        let duration = self.target.duration.map(|d| d.resolve(session.fps()));
+        let added = text_commands::text_add_template_for(
             &session.state,
             at,
             template,
             self.target.text.clone(),
             lane,
+            duration,
         )?;
         Ok(title_outcome(
             session,

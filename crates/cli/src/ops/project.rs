@@ -326,11 +326,31 @@ impl Operation for RedoArgs {
 /// transcription `models`, `luts` in the library, `fonts`, `title_styles`,
 /// `title_templates`, split-screen and picture-in-picture `layouts`,
 /// `speed_presets`, cloud `accounts`, mask shapes (`masks`) or `blend` modes.
+/// The asset library: `looks`, `emoji` (search a name; filter a style),
+/// `icons` (search needed), `music` (search Incompetech, or filter a mood
+/// of the curated list), `sfx` (the packs, or filter a pack id for its
+/// sounds), `font_catalogue` (Fontsource; filter a category),
+/// `fonts_installed`, `fonts_system`, `library_settings`. The cloud:
+/// `providers`, `fal_actions`, `voices` (filter an account id). This
+/// machine: `machine` (GPU, decoders, encoders), `settings`, `cache` and
+/// `recent` projects.
 #[derive(Debug, Clone, Args, Deserialize, JsonSchema)]
 pub struct CatalogArgs {
     /// effects, audio, transitions, animations, grade, presets, hardware, models, luts, fonts,
-    /// title_styles, title_templates, layouts, speed_presets, accounts, masks or blend.
+    /// title_styles, title_templates, layouts, speed_presets, accounts, masks, blend, looks,
+    /// emoji, icons, music, sfx, font_catalogue, fonts_installed, fonts_system,
+    /// library_settings, providers, fal_actions, voices, machine, settings, cache or recent.
     pub kind: String,
+    /// Words to search for, where the list is searchable (emoji, icons, music, sfx,
+    /// font_catalogue).
+    #[arg(long)]
+    #[serde(default)]
+    pub search: Option<String>,
+    /// Narrow the list: a sticker style, a music mood, an sfx pack id, a font category or
+    /// a cloud account id, by kind.
+    #[arg(long)]
+    #[serde(default)]
+    pub filter: Option<String>,
 }
 
 impl CatalogArgs {
@@ -367,11 +387,30 @@ impl CatalogArgs {
             "layouts" => super::layout::layouts_catalog(),
             "speed_presets" => json!(chukcut_engine::modules::speed::commands::speed_presets()),
             "accounts" => super::cloud::accounts_catalog(),
-            other => {
-                return Err(CliError::usage(format!(
-                    "there is no catalog called {other:?}; choose effects, audio, transitions, animations, grade, presets, hardware, models, luts, fonts, title_styles, title_templates, layouts, speed_presets, accounts, masks or blend"
-                )))
-            }
+            "providers" => json!(chukcut_engine::modules::cloud::commands::cloud_providers()),
+            "fal_actions" => json!(chukcut_engine::modules::cloud::commands::cloud_fal_actions()),
+            "voices" => super::cloud_tools::voices(self.filter.as_deref())?,
+            "machine" => json!(pollster::block_on(
+                chukcut_engine::modules::workspace::commands::workspace_hardware()
+            )),
+            "settings" => json!(chukcut_engine::modules::workspace::commands::workspace_settings_get()),
+            "cache" => json!({
+                "cache_bytes": chukcut_engine::modules::workspace::commands::workspace_cache_size(),
+                "proxies": chukcut_engine::modules::proxy::commands::proxy_cache_info(),
+            }),
+            "recent" => json!(chukcut_engine::modules::workspace::commands::workspace_recent_entries()),
+            other => match super::library::catalog(
+                other,
+                self.search.as_deref(),
+                self.filter.as_deref(),
+            ) {
+                Some(result) => result?,
+                None => {
+                    return Err(CliError::usage(format!(
+                        "there is no catalog called {other:?}; choose effects, audio, transitions, animations, grade, presets, hardware, models, luts, fonts, title_styles, title_templates, layouts, speed_presets, accounts, masks, blend, looks, emoji, icons, music, sfx, font_catalogue, fonts_installed, fonts_system, library_settings, providers, fal_actions, voices, machine, settings, cache or recent"
+                    )))
+                }
+            },
         };
         let count = data.as_array().map(Vec::len);
         Ok(Outcome::read(

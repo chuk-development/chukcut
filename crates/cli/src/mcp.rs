@@ -79,6 +79,13 @@ const OPEN_WORLD: &[&str] = &[
     "ml",
     // Downloads the model and ONNX Runtime on first use.
     "remove_background",
+    "sound",
+    "fal",
+    "sticker",
+    "music",
+    "sfx",
+    "title_font",
+    "catalog",
 ];
 
 type Out = Arc<Mutex<std::io::Stdout>>;

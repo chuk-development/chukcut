@@ -153,7 +153,7 @@ impl Editor {
                 "Automatic, for footage too heavy to play".into(),
             ))
             .child(div().my(px(8.0)).h(px(1.0)).bg(rgb(HAIRLINE)))
-            .child(row("Timeline name", "Timeline 01".into()))
+            .child(row("Timeline name", self.project.sequence.name.clone()))
             .child(row(
                 "Aspect ratio",
                 aspect_label(canvas.width, canvas.height),

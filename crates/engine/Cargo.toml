@@ -57,7 +57,7 @@ jpeg-encoder = "0.7.0"
 turbojpeg = "1"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-ffmpeg-next = "6.1"
+ffmpeg-next = "9.0"
 # Output device only. cpal is the one crate that is a thin, unopinionated
 # wrapper over the platform APIs (ALSA here) without dragging in a mixer,
 # a decoder or an event loop of its own — we have all three already. 0.18

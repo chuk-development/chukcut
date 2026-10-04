@@ -21,6 +21,7 @@ mod links;
 mod media_cache;
 mod ripple;
 mod selection;
+mod sequences;
 
 use chukcut_engine::modules::inspector::commands as inspector_commands;
 use chukcut_engine::modules::project::{Marker, MarkerColor, Segment, TimeRange};
@@ -87,6 +88,9 @@ pub(crate) fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("ctrl-a", SelectAllClips, TYPING_OFF),
         KeyBinding::new("escape", ClearSelection, TYPING_OFF),
     ]
+    .into_iter()
+    .chain(sequences::key_bindings())
+    .collect()
 }
 
 // --- geometry -------------------------------------------------------------------
@@ -277,6 +281,7 @@ struct MenuState {
     can_freeze: bool,
     analysis: super::analysis::MenuFlags,
     audio: super::audio_tools::MenuFlags,
+    compound: sequences::MenuFlags,
 }
 
 /// One lane as drawn: where it is, in lanes-local pixels.
@@ -1034,6 +1039,11 @@ impl Editor {
                     // down that is not prevented, after this handler: it
                     // would pull the keyboard straight out of the new box.
                     window.prevent_default();
+                    return;
+                }
+                // A double-click on a compound clip opens it.
+                if sequences::is_compound_clip(&self.project, &segment_id) {
+                    self.open_compound(Some(segment_id), cx);
                     return;
                 }
             }
@@ -1827,7 +1837,10 @@ impl Editor {
                 self.set_zoom(self.timeline.zoom * factor, x.max(0.0));
             }
         } else if event.modifiers.shift {
-            self.timeline.scroll_y -= dy;
+            // GPUI's X11 backend already turns a shifted wheel into a
+            // horizontal delta, so dy is 0 there and the lanes below the
+            // panel could not be reached at all; take whichever axis moved.
+            self.timeline.scroll_y -= if dy != 0.0 { dy } else { dx };
         } else {
             let step = if dx.abs() > dy.abs() { dx } else { dy };
             if event.delta.precise() {
@@ -2142,6 +2155,7 @@ impl Editor {
             can_freeze: self.freeze_target().is_some(),
             analysis: self.analysis_flags(),
             audio: self.audio_menu_flags(),
+            compound: self.compound_menu_flags(),
         }
     }
 
@@ -2311,6 +2325,7 @@ impl Editor {
 
     /// Register the timeline's actions on the editor's root element.
     pub(super) fn timeline_actions(&self, root: gpui::Div, cx: &mut Context<Self>) -> gpui::Div {
+        let root = self.sequence_actions(root, cx);
         self.audio_tool_actions(root, cx)
             .on_action(
                 cx.listener(|this, _: &DeleteLeft, _, cx| this.trim_to_playhead(Edge::Head, cx)),
@@ -2523,6 +2538,7 @@ impl Editor {
                     .mx(px(GUTTER))
                     .mb(px(GUTTER))
                     .header(self.render_toolbar_row(cx))
+                    .child(self.render_sequence_bar(cx))
                     .child(
                         div()
                             .flex_1()
@@ -3588,6 +3604,11 @@ impl Editor {
             name = format!("{speed:.1}x · {name}");
         }
         let linked = self.project.materials.link_of(segment).is_some();
+        let compound = self
+            .project
+            .materials
+            .sequence(&segment.material_id)
+            .is_some();
 
         let mut body = div()
             .absolute()
@@ -3627,6 +3648,9 @@ impl Editor {
                 .when(linked, |this| {
                     this.child(IconSrc::from(IconName::Link2).svg(11.0, rgb(TEXT)))
                 })
+                .when(compound, |this| {
+                    this.child(ui::icons::glyph(sequences::COMPOUND_GLYPH, 11.0, rgb(TEXT)))
+                })
                 .child(div().overflow_hidden().text_ellipsis().child(name.clone()))
         };
         let title_strip = || {
@@ -3640,6 +3664,18 @@ impl Editor {
         };
 
         match kind {
+            TrackKind::Video
+                if self
+                    .project
+                    .materials
+                    .sequence(&segment.material_id)
+                    .is_some() =>
+            {
+                body = body.child(title_strip());
+                body = self
+                    .render_compound_clip(body, segment, source, width, height, x0, lanes_w, cx);
+                body = body.child(label());
+            }
             TrackKind::Video => {
                 // The main lane keeps a strip at the bottom for the clip's
                 // own sound, as CapCut draws it.
@@ -4077,6 +4113,7 @@ fn clip_menu(
         .menu_with_disabled("Unlink", Box::new(UnlinkClips), !s.can_unlink)
         .separator()
         .menu_with_disabled("Reset speed", Box::new(ResetSpeed), !s.can_reset_speed);
+    let menu = sequences::compound_menu(menu, s.compound);
     let menu = super::analysis::analysis_menu(menu, s.analysis);
     let menu = super::audio_tools::audio_menu(menu, s.audio);
     menu.separator()

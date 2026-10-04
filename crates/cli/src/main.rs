@@ -37,6 +37,7 @@ use ops::mask::*;
 use ops::ml::*;
 use ops::project::*;
 use ops::render::*;
+use ops::sequence::*;
 use ops::text::*;
 use ops::timeline::*;
 use ops::{Ctx, Operation, Outcome};
@@ -186,6 +187,12 @@ enum Command {
     /// Cloud features: caption translation, text to speech, stock media.
     #[command(subcommand)]
     Cloud(CloudCommand),
+    /// Add, rename, delete, duplicate, list or open timelines.
+    #[command(subcommand)]
+    Timeline(TimelineCommand),
+    /// Make, open, close or flatten compound clips.
+    #[command(subcommand)]
+    Compound(CompoundCommand),
     /// Render the timeline to a file: video, sound only or GIF.
     Export(On<ExportArgs>),
     /// List the export presets as they fit this project, with sizes and warnings.
@@ -199,6 +206,10 @@ enum Command {
     ExportQueue(On<ExportQueueArgs>),
     /// Render one frame as a PNG.
     RenderFrame(On<RenderFrameArgs>),
+    #[command(flatten)]
+    Clip(ops::clip::ClipCommand),
+    #[command(flatten)]
+    Library(ops::library::LibraryCommand),
     /// Run a JSON list of operations against one project, with one undo history.
     Batch(BatchArgs),
     /// List effects, audio effects, transitions, animations, grade controls, presets, encoders, models, LUTs or fonts.
@@ -210,6 +221,34 @@ enum Command {
 }
 
 #[derive(Subcommand)]
+enum TimelineCommand {
+    /// List the timelines and compound clips, and which is open.
+    List(On<TimelineListArgs>),
+    /// Add an empty timeline and open it.
+    New(On<TimelineNewArgs>),
+    /// Rename a timeline.
+    Rename(On<TimelineRenameArgs>),
+    /// Delete a timeline.
+    Delete(On<TimelineDeleteArgs>),
+    /// Copy a timeline into a new one.
+    Duplicate(On<TimelineDuplicateArgs>),
+    /// Open another timeline.
+    Switch(On<TimelineSwitchArgs>),
+}
+
+#[derive(Subcommand)]
+enum CompoundCommand {
+    /// Move clips into a new compound clip in their place.
+    Create(On<CompoundCreateArgs>),
+    /// Open a compound clip; later commands edit its lanes.
+    Open(On<CompoundOpenArgs>),
+    /// Close the open compound clip (--all: every level).
+    Close(On<CompoundCloseArgs>),
+    /// Put a compound clip's clips back on the timeline.
+    Flatten(On<CompoundFlattenArgs>),
+}
+
+#[derive(Subcommand)]
 enum EffectCommand {
     /// Add an effect to a clip, or as an effect clip over the lanes beneath.
     Add(On<EffectAddArgs>),
@@ -217,6 +256,8 @@ enum EffectCommand {
     Set(On<EffectSetArgs>),
     /// Take an effect off a clip.
     Remove(On<EffectRemoveArgs>),
+    #[command(flatten)]
+    More(ops::clip::EffectMoreCommand),
 }
 
 #[derive(Subcommand)]
@@ -245,6 +286,8 @@ enum TitleCommand {
     Position(On<TitlePositionArgs>),
     /// Copy a title with its own words and style.
     Duplicate(On<TitleDuplicateArgs>),
+    #[command(flatten)]
+    More(ops::clip::TitleMoreCommand),
 }
 
 #[derive(Subcommand)]
@@ -259,6 +302,8 @@ enum CaptionsCommand {
     Style(On<CaptionsStyleArgs>),
     /// List the captions.
     List(On<CaptionsListArgs>),
+    #[command(flatten)]
+    Edit(ops::caption_edit::CaptionsEditCommand),
 }
 
 #[derive(Subcommand)]
@@ -275,6 +320,8 @@ enum TransitionCommand {
     Add(On<TransitionAddArgs>),
     /// Remove the transition at the start of a clip.
     Remove(On<TransitionRemoveArgs>),
+    #[command(flatten)]
+    More(ops::clip::TransitionMoreCommand),
 }
 
 #[derive(Subcommand)]
@@ -341,6 +388,8 @@ enum CloudCommand {
     StockSearch(On<StockSearchArgs>),
     /// Download a stock result and import it.
     StockDownload(On<StockDownloadArgs>),
+    #[command(flatten)]
+    More(ops::cloud_tools::CloudMoreCommand),
 }
 
 // Parsed once per process; the size difference costs nothing.
@@ -558,6 +607,16 @@ fn dispatch(command: Command, dry: bool, ctx: &Ctx) -> CliResult<(&'static str, 
         Command::Cloud(CloudCommand::StockKinds(o)) => on(o, dry, ctx),
         Command::Cloud(CloudCommand::StockSearch(o)) => on(o, dry, ctx),
         Command::Cloud(CloudCommand::StockDownload(o)) => on(o, dry, ctx),
+        Command::Timeline(TimelineCommand::List(o)) => on(o, dry, ctx),
+        Command::Timeline(TimelineCommand::New(o)) => on(o, dry, ctx),
+        Command::Timeline(TimelineCommand::Rename(o)) => on(o, dry, ctx),
+        Command::Timeline(TimelineCommand::Delete(o)) => on(o, dry, ctx),
+        Command::Timeline(TimelineCommand::Duplicate(o)) => on(o, dry, ctx),
+        Command::Timeline(TimelineCommand::Switch(o)) => on(o, dry, ctx),
+        Command::Compound(CompoundCommand::Create(o)) => on(o, dry, ctx),
+        Command::Compound(CompoundCommand::Open(o)) => on(o, dry, ctx),
+        Command::Compound(CompoundCommand::Close(o)) => on(o, dry, ctx),
+        Command::Compound(CompoundCommand::Flatten(o)) => on(o, dry, ctx),
         Command::Export(o) => on(o, dry, ctx),
         Command::Presets(o) => on(o, dry, ctx),
         Command::Preset(PresetCommand::Save(o)) => on(o, dry, ctx),
@@ -565,6 +624,13 @@ fn dispatch(command: Command, dry: bool, ctx: &Ctx) -> CliResult<(&'static str, 
         Command::Estimate(o) => on(o, dry, ctx),
         Command::ExportQueue(o) => on(o, dry, ctx),
         Command::RenderFrame(o) => on(o, dry, ctx),
+        Command::Clip(c) => c.dispatch(dry, ctx),
+        Command::Library(c) => c.dispatch(dry, ctx),
+        Command::Effect(EffectCommand::More(c)) => c.dispatch(dry, ctx),
+        Command::Title(TitleCommand::More(c)) => c.dispatch(dry, ctx),
+        Command::Captions(CaptionsCommand::Edit(c)) => c.dispatch(dry, ctx),
+        Command::Transition(TransitionCommand::More(c)) => c.dispatch(dry, ctx),
+        Command::Cloud(CloudCommand::More(c)) => c.dispatch(dry, ctx),
         Command::Catalog(args) => Ok(("catalog", args.run()?, false)),
         Command::Ml(args) => Ok(("ml", args.run()?, false)),
         Command::Batch(args) => {
