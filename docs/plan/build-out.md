@@ -76,6 +76,7 @@ column current.
 | 8 | compound2 | compound clip gaps: nested-render cache, prefetch, audio of compound volume/speed, flatten at speed, timeline prune, real filmstrips | running (agent/compound2) |
 | 8 | polish2 | template follow-ups (relocatable media, split slot marker, Replace media menu, hide placeholders) + QA lows (play/pause tooltip, snapping, track path, scene button) | merged — template media copied per project, split keeps slot on the left half, Replace media in clip menu, snapping slides flush, CLI paths absolute; open: play/pause tooltip + track path not checked on screen |
 | 8 | ml2 | CUDA runtime pack out of the box, SAM click-to-select object masks, BiRefNet object removal, matte cache limits | running (agent/ml2) |
+| 8 | gputex | shared GPU texture between engine and GPUI, readback as fallback (backlog 7) | running (agent/gputex) |
 
 ## Backlog for the next waves (lead picks from the top)
 
