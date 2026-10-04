@@ -8,6 +8,9 @@
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
+use chukcut_ml_worker::accel;
+pub use chukcut_ml_worker::accel::{Acceleration, EngineBuild};
+pub use chukcut_ml_worker::protocol::Quality;
 use chukcut_ml_worker::protocol::{Outcome, Probe, RequestBody};
 use chukcut_ml_worker::registry::{self, Task};
 use serde::{Deserialize, Serialize};
@@ -41,6 +44,153 @@ pub struct MlStatus {
     /// What would make ML faster here, as a sentence: the bundle to install
     /// for an NVIDIA GPU, the OpenVINO build for an Intel one.
     pub advice: Option<String>,
+    /// The chosen mode (Settings › AI acceleration › Fast).
+    pub acceleration: Acceleration,
+    /// The TensorRT add-on that goes with this machine's GPU bundle, when
+    /// there is an NVIDIA bundle for it.
+    pub tensorrt: Option<TensorRtInfo>,
+    /// Per model: what it runs on and at what precision.
+    pub models: Vec<ModelAcceleration>,
+}
+
+/// The TensorRT add-on as the settings page lists it.
+#[derive(Debug, Clone, Serialize)]
+pub struct TensorRtInfo {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub cuda: u32,
+    pub version: &'static str,
+    /// Runtime pack ids, listed and removed with the add-on.
+    pub packs: &'static [&'static str],
+    pub installed: bool,
+    /// The whole download.
+    pub bytes: u64,
+    /// What is still to download.
+    pub missing_bytes: u64,
+    /// Its packs plus the engines built so far, on disk.
+    pub installed_bytes: u64,
+}
+
+/// One model's acceleration, for `ml status` and Settings › AI acceleration.
+#[derive(Debug, Clone, Serialize)]
+pub struct ModelAcceleration {
+    pub id: &'static str,
+    pub name: &'static str,
+    /// `TensorRT`, `CUDA`, `OpenVINO` or `CPU`: what its next job runs on.
+    pub provider: String,
+    /// `fp32` or `fp16`.
+    pub precision: String,
+    /// Whether "Fast" changes anything for it (it has a measured plan).
+    pub has_fast_plan: bool,
+    /// Its TensorRT engines built so far, with how long each took.
+    pub engines: Vec<EngineBuild>,
+}
+
+/// The TensorRT add-on for the CUDA major of the runtime that loads (or of
+/// the bundle this machine's driver calls for).
+fn tensorrt_addon(root: &std::path::Path) -> Option<&'static registry::TensorRtAddon> {
+    let cuda = registry::preferred_runtime(root)
+        .map(|p| p.cuda)
+        .filter(|c| *c != 0)
+        .or_else(|| {
+            registry::nvidia_driver()
+                .as_deref()
+                .and_then(registry::driver_major)
+                .and_then(registry::bundle_for_driver)
+                .map(|b| b.cuda)
+        })?;
+    registry::TENSORRT.iter().find(|t| t.cuda == cuda)
+}
+
+fn tensorrt_info(root: &std::path::Path, addon: &'static registry::TensorRtAddon) -> TensorRtInfo {
+    let packs = || {
+        addon
+            .packs
+            .iter()
+            .filter_map(|id| registry::runtime_pack(id))
+    };
+    TensorRtInfo {
+        id: addon.id,
+        name: addon.name,
+        cuda: addon.cuda,
+        version: registry::TENSORRT_VERSION,
+        packs: addon.packs,
+        installed: registry::tensorrt_present(root, addon),
+        bytes: packs().map(|p| p.bytes).sum(),
+        missing_bytes: registry::tensorrt_missing_bytes(root, addon),
+        installed_bytes: packs()
+            .filter(|p| registry::runtime_present(root, p))
+            .map(|p| download::size_of(&registry::runtime_dir(root, p)))
+            .sum::<u64>()
+            + download::size_of(&accel::engines_root(root)),
+    }
+}
+
+/// What each model runs on, from the mode, what is installed and, when the
+/// status was probed, what the worker found and has loaded.
+fn model_acceleration(root: &std::path::Path, status: &MlStatus) -> Vec<ModelAcceleration> {
+    let builds = accel::engine_builds(root);
+    // The provider plain sessions get: the probe's best non-TensorRT one,
+    // or a guess from the installed runtime.
+    let base = match &status.probe {
+        Some(p) => p
+            .providers
+            .iter()
+            .find(|p| *p != "TensorRT")
+            .cloned()
+            .unwrap_or_else(|| "CPU".into()),
+        None => match status.runtime_id.as_deref() {
+            Some("cuda12") | Some("cuda13") => "CUDA".into(),
+            Some(_) => "CPU".into(),
+            None => "—".into(),
+        },
+    };
+    let tensorrt = status.acceleration == Acceleration::Fast
+        && match &status.probe {
+            Some(p) => p.providers.iter().any(|p| p == "TensorRT"),
+            None => base == "CUDA" && status.tensorrt.as_ref().is_some_and(|t| t.installed),
+        };
+    registry::MODELS
+        .iter()
+        .map(|m| {
+            let plan = accel::fast_plan(m.id);
+            let (mut provider, mut precision) = match plan.filter(|_| tensorrt) {
+                Some(plan) => ("TensorRT".to_string(), plan.precision.as_str().to_string()),
+                None => (base.clone(), "fp32".to_string()),
+            };
+            // What the worker actually holds wins: a TensorRT build that
+            // failed left the model on CUDA.
+            if let Some(probe) = &status.probe {
+                let held: Vec<_> = probe.sessions.iter().filter(|s| s.model == m.id).collect();
+                if let Some(s) = held.iter().find(|s| s.provider == "TensorRT") {
+                    provider = s.provider.clone();
+                    precision = s.precision.clone();
+                }
+            }
+            ModelAcceleration {
+                id: m.id,
+                name: m.name,
+                provider,
+                precision,
+                has_fast_plan: plan.is_some(),
+                engines: builds.iter().filter(|b| b.model == m.id).cloned().collect(),
+            }
+        })
+        .collect()
+}
+
+/// Turn "Fast (fp16/TensorRT)" on or off: saved in the settings, and the
+/// worker restarts in the new mode at its next request.
+pub fn ml_set_acceleration(fast: bool) -> Result<String, String> {
+    let mut settings = crate::modules::workspace::settings::Settings::load();
+    settings.ml_fast = fast;
+    // Saves, and puts the mode into effect (`workspace_settings_apply`).
+    crate::modules::workspace::commands::workspace_settings_set(settings)?;
+    Ok(if fast {
+        "AI acceleration: Fast (fp16/TensorRT where installed)".into()
+    } else {
+        "AI acceleration: Standard (fp32)".into()
+    })
 }
 
 /// An NVIDIA bundle as the settings page lists it.
@@ -236,6 +386,8 @@ pub fn ml_status(probe: bool) -> MlStatus {
         gpus,
         driver,
         worker: worker::binary().map(|p| p.display().to_string()),
+        acceleration: worker::acceleration(),
+        tensorrt: tensorrt_addon(&root).map(|a| tensorrt_info(&root, a)),
         runtime: std::env::var("CHUKCUT_ORT_DYLIB")
             .ok()
             .or_else(|| preferred.map(|p| p.name.to_string())),
@@ -264,6 +416,7 @@ pub fn ml_status(probe: bool) -> MlStatus {
         }
     }
     status.active = active_sentence(&root, &status);
+    status.models = model_acceleration(&root, &status);
     status
 }
 
@@ -358,6 +511,33 @@ pub enum MlItem {
         #[serde(default)]
         id: Option<String>,
     },
+    /// The TensorRT add-on (`registry::TENSORRT`) for "Fast" acceleration.
+    /// `None` picks the one for the GPU bundle in use.
+    Tensorrt {
+        #[serde(default)]
+        id: Option<String>,
+    },
+}
+
+/// The TensorRT add-on `id` names, or the one for this machine.
+fn resolve_tensorrt(id: Option<&str>) -> Result<&'static registry::TensorRtAddon, String> {
+    match id {
+        Some(id) => registry::tensorrt_addon(id).ok_or_else(|| {
+            format!(
+                "there is no TensorRT add-on {id}; choose {}",
+                registry::TENSORRT
+                    .iter()
+                    .map(|t| t.id)
+                    .collect::<Vec<_>>()
+                    .join(" or ")
+            )
+        }),
+        None => tensorrt_addon(&super::root()).ok_or_else(|| {
+            "TensorRT needs an NVIDIA GPU with the NVIDIA bundle; install that first \
+             (`ml install gpu`)"
+                .to_string()
+        }),
+    }
 }
 
 /// The bundle `id` names, or the one for this machine's driver.
@@ -453,6 +633,42 @@ pub fn ml_install(
             worker::shutdown();
             Ok(format!("{} is installed", bundle.name))
         }
+        MlItem::Tensorrt { id } => {
+            let addon = resolve_tensorrt(id.as_deref())?;
+            let total = registry::tensorrt_missing_bytes(&root, addon);
+            let mut before = 0u64;
+            for pack in addon
+                .packs
+                .iter()
+                .filter_map(|id| registry::runtime_pack(id))
+            {
+                if registry::runtime_present(&root, pack) {
+                    continue;
+                }
+                let base = before;
+                download::ensure_runtime(
+                    &root,
+                    pack,
+                    &|done, _| {
+                        progress(MlProgress {
+                            done: base + done,
+                            total,
+                        })
+                    },
+                    cancel,
+                )
+                .map_err(|e| format!("{} ({}): {e}", addon.name, pack.name))?;
+                before += pack.bytes;
+            }
+            registry::link_tensorrt_provider(&root, addon)
+                .map_err(|e| format!("cannot link the TensorRT provider: {e}"))?;
+            worker::shutdown();
+            Ok(format!(
+                "{} is installed; with Fast acceleration on, the first job of each model \
+                 and size builds its engine once (30 s to a few minutes)",
+                addon.name
+            ))
+        }
     }
 }
 
@@ -461,6 +677,28 @@ pub fn ml_install(
 pub fn ml_remove(item: MlItem) -> Result<String, String> {
     let root = super::root();
     worker::shutdown();
+    if let MlItem::Tensorrt { id } = &item {
+        let addon = resolve_tensorrt(id.as_deref())?;
+        registry::unlink_tensorrt_provider(&root, addon);
+        for pack in addon
+            .packs
+            .iter()
+            .filter_map(|id| registry::runtime_pack(id))
+        {
+            let path = registry::runtime_dir(&root, pack);
+            if path.exists() {
+                std::fs::remove_dir_all(&path)
+                    .map_err(|e| format!("cannot delete {}: {e}", path.display()))?;
+            }
+        }
+        // Engines are only good for TensorRT.
+        let engines = accel::engines_root(&root);
+        if engines.exists() {
+            std::fs::remove_dir_all(&engines)
+                .map_err(|e| format!("cannot delete {}: {e}", engines.display()))?;
+        }
+        return Ok(format!("{} is removed", addon.name));
+    }
     if let MlItem::Gpu { id } = &item {
         let bundle = resolve_bundle(id.as_deref())?;
         for pack in bundle
@@ -492,7 +730,7 @@ pub fn ml_remove(item: MlItem) -> Result<String, String> {
                 registry::runtime_pack(id).ok_or(format!("there is no runtime pack {id}"))?;
             (registry::runtime_dir(&root, pack), pack.name)
         }
-        MlItem::Gpu { .. } => unreachable!("handled above"),
+        MlItem::Gpu { .. } | MlItem::Tensorrt { .. } => unreachable!("handled above"),
     };
     if path.exists() {
         std::fs::remove_dir_all(&path)
@@ -511,6 +749,14 @@ pub struct Benchmark {
     pub iterations: u32,
     pub mean_millis: f32,
     pub min_millis: f32,
+    /// `fp32` or `fp16`.
+    pub precision: String,
+    /// The untimed first run: with TensorRT, the engine build when it was
+    /// not cached yet.
+    pub first_millis: f32,
+    /// With `compare`: this run's output against the standard (fp32)
+    /// session's on the same input.
+    pub quality: Option<Quality>,
 }
 
 /// Time `model` on a synthetic `width × height` frame in the worker. The
@@ -522,25 +768,54 @@ pub fn ml_benchmark(
     iterations: u32,
     cancel: &AtomicBool,
 ) -> Result<Benchmark, String> {
+    ml_benchmark_with(model, width, height, iterations, None, false, cancel)
+}
+
+/// [`ml_benchmark`] in a given mode (`None`: the configured one), and with
+/// `compare`, against the standard session's output. Fast mode and
+/// `compare` need a worker in Fast mode: one is started for the
+/// measurement and the configured mode restored after it.
+pub fn ml_benchmark_with(
+    model: &str,
+    width: u32,
+    height: u32,
+    iterations: u32,
+    acceleration: Option<Acceleration>,
+    compare: bool,
+    cancel: &AtomicBool,
+) -> Result<Benchmark, String> {
+    let configured = worker::acceleration();
+    let needs_fast = compare || acceleration == Some(Acceleration::Fast);
+    if needs_fast && configured != Acceleration::Fast {
+        worker::set_acceleration(Acceleration::Fast);
+    }
     let outcome = worker::request(
         RequestBody::Benchmark {
             model: model.into(),
             width,
             height,
             iterations,
+            acceleration,
+            compare,
         },
         &[],
         &|_, _| {},
         Some(cancel),
         Duration::from_secs(600),
     )
-    .map_err(String::from)?;
-    match outcome {
+    .map_err(String::from);
+    if needs_fast && configured != Acceleration::Fast {
+        worker::set_acceleration(configured);
+    }
+    match outcome? {
         Outcome::Benchmark {
             provider,
             iterations,
             mean_millis,
             min_millis,
+            precision,
+            first_millis,
+            quality,
         } => Ok(Benchmark {
             model: model.into(),
             provider,
@@ -549,6 +824,9 @@ pub fn ml_benchmark(
             iterations,
             mean_millis,
             min_millis,
+            precision,
+            first_millis,
+            quality,
         }),
         other => Err(MlError::Failed(format!("unexpected answer {other:?}")).into()),
     }

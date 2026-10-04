@@ -34,13 +34,8 @@ pub fn downsample_ratio(width: usize, height: usize) -> f32 {
 
 /// The `src` tensor of an RGBA8 frame: planar RGB, 0..1. Alpha is ignored.
 pub fn input(rgba: &[u8], width: usize, height: usize) -> Vec<f32> {
-    let plane = width * height;
-    let mut out = vec![0.0f32; 3 * plane];
-    for (i, px) in rgba.as_chunks::<4>().0.iter().take(plane).enumerate() {
-        out[i] = px[0] as f32 / 255.0;
-        out[plane + i] = px[1] as f32 / 255.0;
-        out[2 * plane + i] = px[2] as f32 / 255.0;
-    }
+    let mut out = vec![0.0f32; 3 * width * height];
+    crate::pixels::rgba_to_planes(rgba, width, height, &mut out);
     out
 }
 

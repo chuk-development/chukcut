@@ -1668,6 +1668,22 @@ with CUDA libraries to prefer over the bundle's; `CHUKCUT_ORT_DYLIB` names
 another ONNX Runtime build (an OpenVINO one for Intel GPUs). Also an MCP
 tool, `ml`.
 
+**Fast acceleration** (decision 0031). `ml acceleration fast|standard` sets
+Settings › AI acceleration › "Fast (fp16/TensorRT)"; `ml install tensorrt`
+(or `tensorrt:tensorrt-cu13`, `tensorrt:tensorrt-cu12`) installs the
+TensorRT add-on for the installed GPU bundle (3.7–4.3 GB download). In Fast
+mode RIFE, Real-ESRGAN, LaMa and BiRefNet run on TensorRT at the precision
+measured for each; the first job of a model at a new size builds its engine
+once (30 s to ~5 min) and caches it. `ml status` prints a table: each
+model, what it runs on, its precision and the engines built so far with
+their build times. `ml bench MODEL --accel standard|fast` times one mode
+(default: the configured one) and `--compare` adds how far its output is
+from the standard fp32 session's (PSNR, max difference, IoU for mattes).
+`ml bench` with no model times the heavy models at the sizes the features
+use, in both modes, and prints the speed-ups and the quality of Fast.
+`CHUKCUT_ML_ACCELERATION` (`standard`, `fast`) overrides the setting for
+one process.
+
 ```bash
 chukcut-cli ml status --probe
 chukcut-cli ml install gpu
@@ -1675,6 +1691,9 @@ chukcut-cli ml bench rvm --size 540x960
 chukcut-cli ml bench mobilesam --size 960x540
 chukcut-cli ml bench lama --size 512x512
 chukcut-cli ml bench realesr-general-x4v3 --size 1280x720
+chukcut-cli ml install tensorrt
+chukcut-cli ml bench rife --size 1920x1080 --accel fast --compare
+chukcut-cli ml bench
 ```
 
 ### Undo and redo

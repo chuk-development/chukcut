@@ -11,8 +11,11 @@
 //! request at once instead of waiting behind it.
 //!
 //! ```text
-//! chukcut-ml-worker [--root <dir>]
+//! chukcut-ml-worker [--root <dir>] [--acceleration standard|fast]
 //! ```
+//!
+//! `--acceleration fast` runs the models that have a fast plan on TensorRT
+//! when it is installed (`chukcut_ml_worker::accel`, decision 0031).
 //!
 //! `--root` is the ML directory in the cache (`~/.cache/chukcut/ml`), which
 //! holds `models/` and `runtime/`. The engine downloads into it; the worker
@@ -25,15 +28,16 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use chukcut_ml_worker::accel::{Acceleration, Precision};
 use chukcut_ml_worker::protocol::{
-    read_frame, write_frame, ErrorKind, Message, Outcome, Reply, Request, RequestBody,
+    read_frame, write_frame, ErrorKind, Message, Outcome, Quality, Reply, Request, RequestBody,
     PROTOCOL_VERSION,
 };
 use chukcut_ml_worker::registry::{self, ModelSpec, Task};
-use chukcut_ml_worker::runtime::{Failure, Runtime};
+use chukcut_ml_worker::runtime::{self, Failure, Loaded, Runtime};
 use chukcut_ml_worker::{birefnet, esrgan, lama, rife, rvm, sam, vittrack, yunet};
 use chukcut_ml_worker::{demucs, facemesh};
-use ort::value::Tensor;
+use ort::value::{Tensor, TensorRef};
 
 type Out = Arc<Mutex<BufWriter<std::io::Stdout>>>;
 
@@ -63,9 +67,17 @@ fn default_root() -> PathBuf {
 fn main() {
     let mut args = std::env::args().skip(1);
     let mut root = default_root();
+    let mut mode = Acceleration::Standard;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--root" => root = args.next().map(PathBuf::from).unwrap_or(root),
+            "--acceleration" => {
+                let value = args.next().unwrap_or_default();
+                match Acceleration::parse(&value) {
+                    Some(m) => mode = m,
+                    None => eprintln!("chukcut-ml-worker: unknown acceleration {value:?}"),
+                }
+            }
             "--version" => {
                 println!("chukcut-ml-worker {}", env!("CARGO_PKG_VERSION"));
                 return;
@@ -121,6 +133,8 @@ fn main() {
         embedding: None,
         cancelled,
         reply_payload: Vec::new(),
+        mode,
+        standard_only: false,
     };
     while let Ok((request, payload)) = rx.recv() {
         let id = request.id;
@@ -136,9 +150,26 @@ fn main() {
                 Reply::Progress {
                     fraction,
                     stage: stage.to_string(),
+                    hold_secs: 0,
                 },
             )
         };
+        {
+            // A TensorRT engine build blocks inside session creation; this
+            // tells the engine what it is waiting for and for how long.
+            let out = out.clone();
+            runtime::set_build_notice(Some(Box::new(move |stage: &str, hold_secs: u32| {
+                send(
+                    &out,
+                    id,
+                    Reply::Progress {
+                        fraction: 0.0,
+                        stage: stage.to_string(),
+                        hold_secs,
+                    },
+                )
+            })));
+        }
         let reply = match worker.handle(id, request.body, &payload, &progress) {
             Ok(outcome) => Reply::Done { outcome },
             Err((kind, message)) => Reply::Error { kind, message },
@@ -214,6 +245,11 @@ struct Worker {
     /// What the request being answered sends back beside its header (a
     /// matte); taken and cleared when the reply goes out.
     reply_payload: Vec<u8>,
+    /// The mode the worker was started in.
+    mode: Acceleration,
+    /// Use the standard sessions even in "Fast" mode: what a benchmark of
+    /// `standard`, or the reference run of a comparison, asks for.
+    standard_only: bool,
 }
 
 fn bad(message: impl Into<String>) -> Failure {
@@ -266,9 +302,45 @@ impl Worker {
 
     fn runtime(&mut self) -> Result<&mut Runtime, Failure> {
         if self.runtime.is_none() {
-            self.runtime = Some(Runtime::load(&self.root)?);
+            self.runtime = Some(Runtime::load(&self.root, self.mode)?);
         }
         Ok(self.runtime.as_mut().expect("set above"))
+    }
+
+    /// Run `f` on the session for `spec` at input `shapes`
+    /// (`Runtime::session_for`): TensorRT where the model's fast plan and
+    /// the mode say so. A failure on TensorRT moves the model to CUDA for
+    /// the rest of the worker's life and runs `f` again there, so a
+    /// TensorRT problem never fails a job. Answers `f`'s value, the
+    /// provider and the precision.
+    fn with_session<T>(
+        &mut self,
+        spec: &'static ModelSpec,
+        shapes: &[(&str, Vec<i64>)],
+        f: impl Fn(&mut Loaded) -> Result<T, Failure>,
+    ) -> Result<(T, &'static str, Precision), Failure> {
+        let standard = self.standard_only;
+        let runtime = self.runtime()?;
+        for attempt in 0..2 {
+            let loaded = if standard {
+                runtime.session(spec)?
+            } else {
+                runtime.session_for(spec, shapes)?
+            };
+            let (provider, precision) = (loaded.provider, loaded.precision);
+            match f(loaded) {
+                Ok(value) => return Ok((value, provider, precision)),
+                Err((kind, message)) if provider == "TensorRT" && attempt == 0 => {
+                    eprintln!(
+                        "chukcut-ml-worker: {} on TensorRT: {kind:?}: {message}",
+                        spec.id
+                    );
+                    runtime.demote(spec);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        unreachable!("the second attempt never runs on TensorRT")
     }
 
     fn handle(
@@ -284,7 +356,12 @@ impl Worker {
                 version: env!("CARGO_PKG_VERSION").to_string(),
                 pid: std::process::id(),
             }),
-            RequestBody::Probe => Ok(Outcome::Probe(self.runtime()?.probe.clone())),
+            RequestBody::Probe => {
+                let runtime = self.runtime()?;
+                let mut probe = runtime.probe.clone();
+                probe.sessions = runtime.sessions_info();
+                Ok(Outcome::Probe(probe))
+            }
             RequestBody::Load { model: name } => {
                 let spec =
                     registry::model(&name).ok_or_else(|| bad(format!("unknown model {name}")))?;
@@ -296,10 +373,19 @@ impl Worker {
                     runtime.session(companion)?;
                 }
                 let loaded = runtime.session(spec)?;
-                let provider = loaded.provider.to_string();
+                let mut provider = loaded.provider.to_string();
+                let mut precision = loaded.precision;
+                // A model with a fast plan runs on TensorRT once its first
+                // input arrives (its engine is built for that input's size);
+                // say so now, so the caller names the right provider.
+                if let Some(plan) = runtime.fast_plan_for(spec) {
+                    provider = "TensorRT".into();
+                    precision = plan.precision;
+                }
                 Ok(Outcome::Loaded {
                     model: name,
                     provider,
+                    precision: precision.as_str().into(),
                     millis: millis(started),
                 })
             }
@@ -449,13 +535,16 @@ impl Worker {
                 }
                 let started = Instant::now();
                 let (first, second) = payload.split_at(w * h * 4);
+                // The two frames as the network's input once, for every
+                // phase: at 1080p that is 13 ms a phase saved.
+                let input = rife::input(first, second, w, h);
                 let mut frames = Vec::with_capacity(phases.len() * w * h * 4);
                 let mut provider = String::new();
                 for (i, &phase) in phases.iter().enumerate() {
                     if self.is_cancelled(id) {
                         return Err((ErrorKind::Cancelled, "cancelled".into()));
                     }
-                    let (frame, used) = self.interpolate(spec, first, second, w, h, phase)?;
+                    let (frame, used) = self.interpolate(spec, &input, w, h, phase)?;
                     frames.extend_from_slice(&frame);
                     provider = used;
                     progress((i + 1) as f32 / phases.len() as f32, "interpolating");
@@ -528,7 +617,26 @@ impl Worker {
                 width,
                 height,
                 iterations,
-            } => self.benchmark(id, &name, width, height, iterations.max(1), progress),
+                acceleration,
+                compare,
+            } => {
+                if acceleration == Some(Acceleration::Fast) && self.mode != Acceleration::Fast {
+                    return Err(bad(
+                        "this worker runs in standard mode; start it with --acceleration fast",
+                    ));
+                }
+                self.standard_only = acceleration == Some(Acceleration::Standard);
+                let outcome = self.benchmark(
+                    id,
+                    &name,
+                    (width, height),
+                    iterations.max(1),
+                    compare,
+                    progress,
+                );
+                self.standard_only = false;
+                outcome
+            }
             RequestBody::Separate {
                 model: name,
                 frames,
@@ -689,8 +797,7 @@ impl Worker {
         h: usize,
         allow_cpu: bool,
     ) -> Result<(Vec<u8>, String), Failure> {
-        let loaded = self.runtime()?.session(spec)?;
-        let provider = loaded.provider.to_string();
+        let provider = self.runtime()?.session(spec)?.provider;
         if provider == "CPU" && !spec.cpu_ok && !allow_cpu {
             return Err((
                 ErrorKind::NeedsGpu,
@@ -701,61 +808,66 @@ impl Worker {
             ));
         }
         let size = birefnet::SIZE as i64;
-        let input = Tensor::from_array(([1i64, 3, size, size], birefnet::input(rgba, w, h)))
-            .map_err(inference)?;
-        let outputs = loaded
-            .session
-            .run(ort::inputs!["input_image" => input])
-            .map_err(inference)?;
-        let value = outputs
-            .get("output_image")
-            .ok_or_else(|| inference("the model has no output output_image"))?;
-        let (_, logits) = value.try_extract_tensor::<f32>().map_err(inference)?;
-        if logits.len() != birefnet::SIZE * birefnet::SIZE {
-            return Err(inference(format!(
-                "the matte is {} values, not {}²",
-                logits.len(),
-                birefnet::SIZE
-            )));
-        }
-        Ok((birefnet::matte(logits, w, h), provider))
+        let input = birefnet::input(rgba, w, h);
+        let shapes = [("input_image", vec![1, 3, size, size])];
+        let (matte, provider, _) = self.with_session(spec, &shapes, |loaded| {
+            let input = TensorRef::from_array_view(([1i64, 3, size, size], input.as_slice()))
+                .map_err(inference)?;
+            let outputs = loaded
+                .session
+                .run(ort::inputs!["input_image" => input])
+                .map_err(inference)?;
+            let value = outputs
+                .get("output_image")
+                .ok_or_else(|| inference("the model has no output output_image"))?;
+            let (_, logits) = value.try_extract_tensor::<f32>().map_err(inference)?;
+            if logits.len() != birefnet::SIZE * birefnet::SIZE {
+                return Err(inference(format!(
+                    "the matte is {} values, not {}²",
+                    logits.len(),
+                    birefnet::SIZE
+                )));
+            }
+            Ok(birefnet::matte(logits, w, h))
+        })?;
+        Ok((matte, provider.to_string()))
     }
 
-    /// The frame at `phase` between `first` and `second` (RGBA8, `w × h`
-    /// each), as RGBA8, and the provider it ran on.
+    /// The frame at `phase` between the two frames of `input` (RIFE's
+    /// input tensor, `rife::input`, for frames of `w × h`), as RGBA8, and
+    /// the provider it ran on.
     fn interpolate(
         &mut self,
         spec: &'static ModelSpec,
-        first: &[u8],
-        second: &[u8],
+        input: &[f32],
         w: usize,
         h: usize,
         phase: f32,
     ) -> Result<(Vec<u8>, String), Failure> {
-        let loaded = self.runtime()?.session(spec)?;
-        let provider = loaded.provider.to_string();
-        let input = Tensor::from_array((
-            [1i64, 6, h as i64, w as i64],
-            rife::input(first, second, w, h),
-        ))
-        .map_err(inference)?;
-        // A scalar: a 0-dimensional tensor, not a one-element vector.
-        let timestep = Tensor::from_array(((), vec![phase])).map_err(inference)?;
-        let outputs = loaded
-            .session
-            .run(ort::inputs!["input" => input, "timestep" => timestep])
-            .map_err(inference)?;
-        let value = outputs
-            .get("output")
-            .ok_or_else(|| inference("the model has no output output"))?;
-        let (_, data) = value.try_extract_tensor::<f32>().map_err(inference)?;
-        if data.len() != 3 * w * h {
-            return Err(inference(format!(
-                "the frame is {} values for a {w}x{h} picture",
-                data.len()
-            )));
-        }
-        Ok((rife::frame_bytes(data, w, h), provider))
+        let shape = [1i64, 6, h as i64, w as i64];
+        let (frame, provider, _) =
+            self.with_session(spec, &[("input", shape.to_vec())], |loaded| {
+                // A view, not a copy: 50 MB at 1080p, once per phase.
+                let input = TensorRef::from_array_view((shape, input)).map_err(inference)?;
+                // A scalar: a 0-dimensional tensor, not a one-element vector.
+                let timestep = Tensor::from_array(((), vec![phase])).map_err(inference)?;
+                let outputs = loaded
+                    .session
+                    .run(ort::inputs!["input" => input, "timestep" => timestep])
+                    .map_err(inference)?;
+                let value = outputs
+                    .get("output")
+                    .ok_or_else(|| inference("the model has no output output"))?;
+                let (_, data) = value.try_extract_tensor::<f32>().map_err(inference)?;
+                if data.len() != 3 * w * h {
+                    return Err(inference(format!(
+                        "the frame is {} values for a {w}x{h} picture",
+                        data.len()
+                    )));
+                }
+                Ok(rife::frame_bytes(data, w, h))
+            })?;
+        Ok((frame, provider.to_string()))
     }
 
     /// LaMa over a picture and its mask (`w × h` each): the network's
@@ -768,34 +880,46 @@ impl Worker {
         w: usize,
         h: usize,
     ) -> Result<(Vec<u8>, String), Failure> {
-        let loaded = self.runtime()?.session(spec)?;
-        let provider = loaded.provider.to_string();
         let size = lama::SIZE as i64;
-        let image = Tensor::from_array(([1i64, 3, size, size], lama::image_input(rgba, w, h)))
-            .map_err(inference)?;
-        let mask = Tensor::from_array(([1i64, 1, size, size], lama::mask_input(mask, w, h)))
-            .map_err(inference)?;
-        let outputs = loaded
-            .session
-            .run(ort::inputs!["image" => image, "mask" => mask])
-            .map_err(inference)?;
-        let value = outputs
-            .get("output")
-            .ok_or_else(|| inference("the model has no output output"))?;
-        let (_, data) = value.try_extract_tensor::<f32>().map_err(inference)?;
-        if data.len() != 3 * lama::SIZE * lama::SIZE {
-            return Err(inference(format!(
-                "the picture is {} values, not 3 × {}²",
-                data.len(),
-                lama::SIZE
-            )));
-        }
-        Ok((lama::output_rgba(data, w, h), provider))
+        let image = lama::image_input(rgba, w, h);
+        let mask = lama::mask_input(mask, w, h);
+        let shapes = [
+            ("image", vec![1, 3, size, size]),
+            ("mask", vec![1, 1, size, size]),
+        ];
+        let (filled, provider, _) = self.with_session(spec, &shapes, |loaded| {
+            let image = TensorRef::from_array_view(([1i64, 3, size, size], image.as_slice()))
+                .map_err(inference)?;
+            let mask = TensorRef::from_array_view(([1i64, 1, size, size], mask.as_slice()))
+                .map_err(inference)?;
+            let outputs = loaded
+                .session
+                .run(ort::inputs!["image" => image, "mask" => mask])
+                .map_err(inference)?;
+            let value = outputs
+                .get("output")
+                .ok_or_else(|| inference("the model has no output output"))?;
+            let (_, data) = value.try_extract_tensor::<f32>().map_err(inference)?;
+            if data.len() != 3 * lama::SIZE * lama::SIZE {
+                return Err(inference(format!(
+                    "the picture is {} values, not 3 × {}²",
+                    data.len(),
+                    lama::SIZE
+                )));
+            }
+            Ok(lama::output_rgba(data, w, h))
+        })?;
+        Ok((filled, provider.to_string()))
     }
 
     /// Real-ESRGAN over a picture, tile by tile: the RGBA8 picture at the
     /// model's scale, and the provider it ran on. Checks for a cancel
     /// between tiles.
+    ///
+    /// The GPU and the CPU work side by side: while the network makes one
+    /// tile, a second thread writes the previous tile's floats into the
+    /// picture (`esrgan::place_tile`, 4x the pixels of the tile). At 1080p
+    /// that writing was as long as the network on TensorRT.
     fn upscale(
         &mut self,
         id: u64,
@@ -806,47 +930,66 @@ impl Worker {
         progress: &dyn Fn(f32, &str),
     ) -> Result<(Vec<u8>, String), Failure> {
         let scale = esrgan::SCALE;
-        let mut big = vec![0u8; w * scale * h * scale * 4];
         let (xs, ys) = (esrgan::spans(w), esrgan::spans(h));
         let total = xs.len() * ys.len();
-        let mut provider = String::new();
-        for (n, (&y, &x)) in ys
+        let tiles: Vec<(esrgan::Span, esrgan::Span)> = ys
             .iter()
-            .flat_map(|y| xs.iter().map(move |x| (y, x)))
-            .enumerate()
-        {
-            if self.is_cancelled(id) {
-                return Err((ErrorKind::Cancelled, "cancelled".into()));
+            .flat_map(|&y| xs.iter().map(move |&x| (x, y)))
+            .collect();
+        let mut provider = String::new();
+        std::thread::scope(|scope| -> Result<(Vec<u8>, String), Failure> {
+            // One tile in flight to the placer at a time: memory stays at
+            // two tiles' floats.
+            let (tx, rx) = mpsc::sync_channel::<(Vec<f32>, esrgan::Span, esrgan::Span)>(1);
+            let placer = scope.spawn(move || {
+                let mut big = vec![0u8; w * scale * h * scale * 4];
+                for (data, x, y) in rx {
+                    esrgan::place_tile(&mut big, w, &data, x, y);
+                }
+                big
+            });
+            for (n, &(x, y)) in tiles.iter().enumerate() {
+                if self.is_cancelled(id) {
+                    return Err((ErrorKind::Cancelled, "cancelled".into()));
+                }
+                let input = esrgan::tile_input(rgba, w, h, x, y);
+                let shape = [1i64, 3, y.read_len as i64, x.read_len as i64];
+                let (data, used, _) =
+                    self.with_session(spec, &[("input", shape.to_vec())], |loaded| {
+                        let input = TensorRef::from_array_view((shape, input.as_slice()))
+                            .map_err(inference)?;
+                        let outputs = loaded
+                            .session
+                            .run(ort::inputs!["input" => input])
+                            .map_err(inference)?;
+                        let value = outputs
+                            .get("output")
+                            .ok_or_else(|| inference("the model has no output output"))?;
+                        let (_, data) = value.try_extract_tensor::<f32>().map_err(inference)?;
+                        if data.len() != 3 * x.read_len * scale * y.read_len * scale {
+                            return Err(inference(format!(
+                                "a {}x{} tile came back as {} values",
+                                x.read_len,
+                                y.read_len,
+                                data.len()
+                            )));
+                        }
+                        Ok(data.to_vec())
+                    })?;
+                provider = used.to_string();
+                if tx.send((data, x, y)).is_err() {
+                    return Err(inference("the tile placer stopped"));
+                }
+                if total > 1 {
+                    progress((n + 1) as f32 / total as f32, "upscaling");
+                }
             }
-            let loaded = self.runtime()?.session(spec)?;
-            provider = loaded.provider.to_string();
-            let input = Tensor::from_array((
-                [1i64, 3, y.read_len as i64, x.read_len as i64],
-                esrgan::tile_input(rgba, w, h, x, y),
-            ))
-            .map_err(inference)?;
-            let outputs = loaded
-                .session
-                .run(ort::inputs!["input" => input])
-                .map_err(inference)?;
-            let value = outputs
-                .get("output")
-                .ok_or_else(|| inference("the model has no output output"))?;
-            let (_, data) = value.try_extract_tensor::<f32>().map_err(inference)?;
-            if data.len() != 3 * x.read_len * scale * y.read_len * scale {
-                return Err(inference(format!(
-                    "a {}x{} tile came back as {} values",
-                    x.read_len,
-                    y.read_len,
-                    data.len()
-                )));
-            }
-            esrgan::place_tile(&mut big, w, data, x, y);
-            if total > 1 {
-                progress((n + 1) as f32 / total as f32, "upscaling");
-            }
-        }
-        Ok((big, provider))
+            drop(tx);
+            let big = placer
+                .join()
+                .map_err(|_| inference("the tile placer panicked"))?;
+            Ok((big, provider))
+        })
     }
 
     /// The SAM mask of `clicks` (and `bbox`) in this frame: the mask bytes,
@@ -1134,26 +1277,20 @@ impl Worker {
         &mut self,
         id: u64,
         name: &str,
-        width: u32,
-        height: u32,
+        (width, height): (u32, u32),
         iterations: u32,
+        compare: bool,
         progress: &dyn Fn(f32, &str),
     ) -> Result<Outcome, Failure> {
         let spec = registry::model(name).ok_or_else(|| bad(format!("unknown model {name}")))?;
         let (w, h) = (width.max(1) as usize, height.max(1) as usize);
-        // A mid-grey frame with a soft gradient: real work for the network,
-        // nothing that depends on a fixture.
-        let rgba: Vec<u8> = (0..w * h)
-            .flat_map(|i| {
-                let v = (96 + (i % w) * 64 / w) as u8;
-                [v, v, v, 255]
-            })
-            .collect();
-        let provider = self.runtime()?.session(spec)?.provider.to_string();
-        let session = u64::MAX;
-        let run = |worker: &mut Worker| -> Result<(), Failure> {
+        let rgba = benchmark_frame(w, h);
+        // Make sure the standard session exists (and say what it needs)
+        // before anything is timed.
+        self.runtime()?.session(spec)?;
+        let run = |worker: &mut Worker, session: u64| -> Result<Vec<u8>, Failure> {
             match spec.task {
-                Task::DetectFaces => worker.detect(spec, &rgba, w, h, 0.6).map(|_| ()),
+                Task::DetectFaces => worker.detect(spec, &rgba, w, h, 0.6).map(|_| Vec::new()),
                 Task::TrackBox => {
                     let bbox = vittrack::Rect {
                         x: (w / 3) as i32,
@@ -1173,10 +1310,12 @@ impl Worker {
                             colours: vittrack::colour_signature(&rgba, w, h, bbox),
                         },
                     );
-                    worker.track(session, &rgba, w, h, false).map(|_| ())
+                    worker
+                        .track(session, &rgba, w, h, false)
+                        .map(|_| Vec::new())
                 }
-                Task::Matte => worker.matte(spec, session, &rgba, w, h).map(|_| ()),
-                Task::MatteImage => worker.matte_image(spec, &rgba, w, h, true).map(|_| ()),
+                Task::Matte => worker.matte(spec, session, &rgba, w, h).map(|r| r.0),
+                Task::MatteImage => worker.matte_image(spec, &rgba, w, h, true).map(|r| r.0),
                 Task::SegmentEncoder => {
                     // A new frame per run, so the encoder is timed and not
                     // the embedding cache.
@@ -1188,7 +1327,7 @@ impl Worker {
                     };
                     worker
                         .segment(spec, &rgba, w, h, &[click], None)
-                        .map(|_| ())
+                        .map(|r| r.0)
                 }
                 Task::Interpolate => {
                     // The second frame is the first moved a sixteenth of
@@ -1196,9 +1335,8 @@ impl Worker {
                     let shift = (w / 16).max(1) * 4;
                     let mut second = rgba[shift..].to_vec();
                     second.extend_from_slice(&rgba[..shift]);
-                    worker
-                        .interpolate(spec, &rgba, &second, w, h, 0.5)
-                        .map(|_| ())
+                    let input = rife::input(&rgba, &second, w, h);
+                    worker.interpolate(spec, &input, w, h, 0.5).map(|r| r.0)
                 }
                 Task::Inpaint => {
                     // A hole in the middle third, as a removed object is.
@@ -1210,11 +1348,11 @@ impl Worker {
                             ) * 255
                         })
                         .collect();
-                    worker.inpaint(spec, &rgba, &mask, w, h).map(|_| ())
+                    worker.inpaint(spec, &rgba, &mask, w, h).map(|r| r.0)
                 }
                 Task::Upscale => worker
                     .upscale(id, spec, &rgba, w, h, &|_, _| {})
-                    .map(|_| ()),
+                    .map(|r| r.0),
                 Task::SegmentDecoder => Err(bad(format!(
                     "{} runs with its encoder; benchmark that",
                     spec.id
@@ -1230,7 +1368,7 @@ impl Worker {
                                 + 0.1 * (t * 1_100.0 * std::f32::consts::TAU).sin()
                         })
                         .collect();
-                    worker.separate(spec, input, n).map(|_| ())
+                    worker.separate(spec, input, n).map(|r| r.0)
                 }
                 // The mesh alone, on the middle of the frame, as it runs
                 // while a face is being followed (the detector only runs on
@@ -1240,13 +1378,40 @@ impl Worker {
                     let hint = [w as f32 / 2.0, h as f32 / 2.0, side, 0.0];
                     worker
                         .face_landmarks(spec, &rgba, w, h, &[hint], 1)
-                        .map(|_| ())
+                        .map(|_| Vec::new())
                 }
             }
         };
+        let session = u64::MAX;
+        let reference_session = u64::MAX - 1;
+        // The reference: the standard session's answer to the same input,
+        // from a fresh state.
+        let reference = if compare {
+            let asked = self.standard_only;
+            self.standard_only = true;
+            let reference = run(self, reference_session);
+            self.standard_only = asked;
+            self.tracks.remove(&reference_session);
+            self.mattes.remove(&reference_session);
+            Some(reference?)
+        } else {
+            None
+        };
         // One untimed run: the first run on a GPU provider allocates and
-        // picks kernels, which is not what a frame costs afterwards.
-        run(self)?;
+        // picks kernels (and TensorRT may build its engine), which is not
+        // what a frame costs afterwards. It is also the run compared.
+        let first = Instant::now();
+        let output = run(self, session)?;
+        let first_millis = millis(first);
+        let quality = reference.and_then(|r| quality(spec.task, &r, &output));
+        let (provider, precision) = {
+            let standard = self.standard_only;
+            let runtime = self.runtime()?;
+            match runtime.fast_plan_for(spec).filter(|_| !standard) {
+                Some(plan) => ("TensorRT".to_string(), plan.precision),
+                None => (runtime.session(spec)?.provider.to_string(), Precision::Fp32),
+            }
+        };
         let mut times = Vec::with_capacity(iterations as usize);
         for i in 0..iterations {
             if self.is_cancelled(id) {
@@ -1255,7 +1420,7 @@ impl Worker {
                 return Err((ErrorKind::Cancelled, "cancelled".into()));
             }
             let started = Instant::now();
-            run(self)?;
+            run(self, session)?;
             times.push(millis(started));
             progress((i + 1) as f32 / iterations as f32, "running");
         }
@@ -1266,6 +1431,88 @@ impl Worker {
             iterations,
             mean_millis: times.iter().sum::<f32>() / times.len() as f32,
             min_millis: times.iter().copied().fold(f32::MAX, f32::min),
+            precision: precision.as_str().into(),
+            first_millis,
+            quality,
         })
     }
+}
+
+/// The benchmark's input: a deterministic, textured picture (colour waves,
+/// hard-edged blocks, a ring and fine noise), so a network has detail to
+/// work on and a precision change has something to get wrong. A smooth
+/// gradient hid fp16 differences that real footage shows.
+fn benchmark_frame(w: usize, h: usize) -> Vec<u8> {
+    let mut seed: u32 = 0x9e37_79b9;
+    let mut out = Vec::with_capacity(w * h * 4);
+    for y in 0..h {
+        for x in 0..w {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let noise = (seed >> 24) as f32 / 255.0 - 0.5;
+            let (fx, fy) = (x as f32 / w as f32, y as f32 / h as f32);
+            let wave = (fx * 23.0).sin() * (fy * 17.0).cos();
+            let block = if ((x / 24) + (y / 24)) % 2 == 0 {
+                0.8
+            } else {
+                0.25
+            };
+            let ring = {
+                let d = ((fx - 0.5).powi(2) + (fy - 0.5).powi(2)).sqrt();
+                if (d * 40.0).sin() > 0.0 {
+                    1.0
+                } else {
+                    0.0
+                }
+            };
+            let r = 0.5 + 0.35 * wave + 0.1 * noise;
+            let g = 0.6 * block + 0.3 * ring + 0.1 * noise;
+            let b = 0.3 + 0.4 * fx * ring + 0.2 * (1.0 - fy) + 0.1 * noise;
+            out.extend_from_slice(&[
+                chukcut_ml_worker::pixels::unit_byte(r),
+                chukcut_ml_worker::pixels::unit_byte(g),
+                chukcut_ml_worker::pixels::unit_byte(b),
+                255,
+            ]);
+        }
+    }
+    out
+}
+
+/// How far `output` is from `reference` for a model of `task`; `None`
+/// when the task has no picture or sound to compare.
+fn quality(task: Task, reference: &[u8], output: &[u8]) -> Option<Quality> {
+    if reference.is_empty() || reference.len() != output.len() {
+        return None;
+    }
+    if task == Task::Separate {
+        // Planar f32 samples: an SNR against a full-scale peak.
+        let samples = |b: &[u8]| -> Vec<f32> {
+            b.as_chunks::<4>()
+                .0
+                .iter()
+                .map(|c| f32::from_le_bytes(*c))
+                .collect()
+        };
+        let (a, b) = (samples(reference), samples(output));
+        let mse = a.iter().zip(&b).map(|(x, y)| (x - y).powi(2)).sum::<f32>() / a.len() as f32;
+        let max = a
+            .iter()
+            .zip(&b)
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0f32, f32::max);
+        return Some(Quality {
+            psnr_db: if mse > 0.0 {
+                10.0 * (1.0 / mse).log10()
+            } else {
+                f32::INFINITY
+            },
+            max_diff: max * 32768.0,
+            iou: None,
+        });
+    }
+    Some(chukcut_ml_worker::pixels::compare(
+        reference,
+        output,
+        matches!(task, Task::Matte | Task::MatteImage | Task::SegmentEncoder),
+    ))
 }

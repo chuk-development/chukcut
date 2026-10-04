@@ -9,9 +9,11 @@
 //!
 //! Design: `docs/decisions/0025-ml-worker-process.md`.
 
+pub mod accel;
 pub mod birefnet;
 pub mod esrgan;
 pub mod lama;
+pub mod pixels;
 pub mod protocol;
 pub mod registry;
 pub mod rife;

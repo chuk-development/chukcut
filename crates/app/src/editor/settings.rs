@@ -187,6 +187,10 @@ impl SettingsDialog {
 
     /// Write through: change, persist, and take it back if the disk refused.
     fn change(&mut self, edit: impl FnOnce(&mut Settings), cx: &mut Context<Self>) {
+        // The AI acceleration section saves its toggle itself
+        // (`ml_set_acceleration`); this page's copy may predate that, and
+        // writing it back would undo the toggle.
+        self.settings.ml_fast = Settings::load().ml_fast;
         let before = self.settings.clone();
         edit(&mut self.settings);
         // The engine applies the proxy policy and the cache limit itself, in

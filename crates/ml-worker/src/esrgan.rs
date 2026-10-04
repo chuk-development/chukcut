@@ -104,20 +104,31 @@ pub fn place_tile(big: &mut [u8], width: usize, output: &[f32], xs: Span, ys: Sp
     let big_w = width * SCALE;
     let skip_x = (xs.start as isize - xs.read_start) as usize * SCALE;
     let skip_y = (ys.start as isize - ys.read_start) as usize * SCALE;
-    let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
-    for y in 0..ys.len * SCALE {
-        let oy = skip_y + y;
-        let by = ys.start * SCALE + y;
-        for x in 0..xs.len * SCALE {
-            let ox = skip_x + x;
-            let i = oy * ow + ox;
-            let at = (by * big_w + xs.start * SCALE + x) * 4;
-            big[at] = byte(output[i]);
-            big[at + 1] = byte(output[plane + i]);
-            big[at + 2] = byte(output[2 * plane + i]);
-            big[at + 3] = 255;
+    let (r, g, b) = (
+        &output[..plane],
+        &output[plane..2 * plane],
+        &output[2 * plane..3 * plane],
+    );
+    let row_bytes = big_w * 4;
+    let rows = &mut big[ys.start * SCALE * row_bytes..(ys.start + ys.len) * SCALE * row_bytes];
+    // 33 M pixels at 1080p: rows split over threads, and `unit_byte`
+    // instead of a libm `round` per value (`pixels`).
+    crate::pixels::par_rows(rows, row_bytes, |first, chunk| {
+        for (k, row) in chunk.chunks_exact_mut(row_bytes).enumerate() {
+            let oy = skip_y + first + k;
+            let src = oy * ow + skip_x;
+            let dst = &mut row[xs.start * SCALE * 4..(xs.start + xs.len) * SCALE * 4];
+            for (x, px) in dst.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                let i = src + x;
+                *px = [
+                    crate::pixels::unit_byte(r[i]),
+                    crate::pixels::unit_byte(g[i]),
+                    crate::pixels::unit_byte(b[i]),
+                    255,
+                ];
+            }
         }
-    }
+    });
 }
 
 /// Resize an RGBA8 picture: by area averaging where it shrinks (every

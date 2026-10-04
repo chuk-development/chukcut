@@ -26,6 +26,8 @@ use std::io::{self, Read, Write};
 
 use serde::{Deserialize, Serialize};
 
+pub use crate::accel::{Acceleration, Precision};
+
 /// Bumped when a change would make an old engine and a new worker (or the
 /// reverse) misread each other. `hello` reports it; the engine refuses a
 /// worker with another number instead of failing on a strange message later.
@@ -40,7 +42,10 @@ use serde::{Deserialize, Serialize};
 /// super-resolution (`upscale`).
 /// 6: audio source separation (`separate`, samples in and out) and dense
 /// face landmarks (`face_landmarks`).
-pub const PROTOCOL_VERSION: u32 = 6;
+/// 7: "Fast" acceleration (TensorRT): the mode and loaded sessions in a
+/// probe, `hold_secs` on progress while an engine builds, the precision of
+/// a session, and `acceleration`/`compare` on a benchmark.
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// A header longer than this is a broken stream, not a message.
 const MAX_HEADER: usize = 1 << 20;
@@ -177,6 +182,16 @@ pub enum RequestBody {
         width: u32,
         height: u32,
         iterations: u32,
+        /// Run in this mode rather than the worker's own: `standard` times
+        /// the fp32 CUDA (or CPU) session of a worker started in "Fast"
+        /// mode. A worker in standard mode cannot run `fast`.
+        #[serde(default)]
+        acceleration: Option<Acceleration>,
+        /// Also run the standard session once on the same input and
+        /// report how far the timed session's output is from it
+        /// ([`Outcome::Benchmark`]'s `quality`).
+        #[serde(default)]
+        compare: bool,
     },
     /// The voice in one stretch of stereo sound, by source-separation model
     /// `model`. The payload is `frames` samples per channel at the model's
@@ -218,9 +233,22 @@ pub struct Message {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Reply {
-    Progress { fraction: f32, stage: String },
-    Done { outcome: Outcome },
-    Error { kind: ErrorKind, message: String },
+    Progress {
+        fraction: f32,
+        stage: String,
+        /// The worker is about to block for up to this long without
+        /// another message (a TensorRT engine build); the engine extends
+        /// the request's deadline by it.
+        #[serde(default)]
+        hold_secs: u32,
+    },
+    Done {
+        outcome: Outcome,
+    },
+    Error {
+        kind: ErrorKind,
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -236,6 +264,9 @@ pub enum Outcome {
         model: String,
         /// The execution provider the session runs on, e.g. `CUDA` or `CPU`.
         provider: String,
+        /// `fp32`, or `fp16` for a TensorRT session built in half precision.
+        #[serde(default)]
+        precision: String,
         /// Session creation, including the first (warm-up) run.
         millis: f32,
     },
@@ -303,6 +334,16 @@ pub enum Outcome {
         /// Mean over the timed runs, after one untimed warm-up run.
         mean_millis: f32,
         min_millis: f32,
+        #[serde(default)]
+        precision: String,
+        /// The first, untimed run: a TensorRT engine build when it was not
+        /// cached yet.
+        #[serde(default)]
+        first_millis: f32,
+        /// With `compare`: the timed session's output against the standard
+        /// session's.
+        #[serde(default)]
+        quality: Option<Quality>,
     },
     /// The payload is the voice, as [`RequestBody::Separate`]'s payload.
     Separated {
@@ -335,6 +376,33 @@ pub struct FaceMesh {
     pub points: Vec<[f32; 3]>,
 }
 
+/// How far one output is from a reference output of the same model and
+/// input: pictures by PSNR, mattes and masks also by IoU at half
+/// opacity.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Quality {
+    /// Peak signal-to-noise ratio over all bytes, in dB; `inf` when equal.
+    pub psnr_db: f32,
+    /// The largest difference of one byte (or, for sound, of one sample in
+    /// 1/32768ths).
+    pub max_diff: f32,
+    /// Intersection over union of the two masks thresholded at 128, for
+    /// mattes and masks.
+    #[serde(default)]
+    pub iou: Option<f32>,
+}
+
+/// A session the worker holds.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionInfo {
+    pub model: String,
+    pub provider: String,
+    pub precision: String,
+    /// The input shapes a TensorRT session was built for; empty otherwise.
+    #[serde(default)]
+    pub shapes: String,
+}
+
 /// The machine, as the worker sees it.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Probe {
@@ -351,6 +419,12 @@ pub struct Probe {
     /// path: whether they came from chukcut's packs or from the system.
     #[serde(default)]
     pub libraries: Vec<String>,
+    /// The mode the worker was started in.
+    #[serde(default)]
+    pub acceleration: Acceleration,
+    /// The sessions loaded so far, with what they run on.
+    #[serde(default)]
+    pub sessions: Vec<SessionInfo>,
 }
 
 /// One click of a segmentation prompt, in the frame's pixels.

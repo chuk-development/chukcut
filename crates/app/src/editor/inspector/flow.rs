@@ -98,6 +98,9 @@ impl Editor {
 
         match &self.inspector.flow.bake {
             Some(bake) if bake.segment_id == segment.id => {
+                if let Some(notice) = crate::editor::ml_settings::tensorrt_notice() {
+                    rows.push(caption(notice, TEXT_DIM));
+                }
                 rows.push(caption(
                     format!(
                         "Making slow-motion frames\u{2026} {} of {}",

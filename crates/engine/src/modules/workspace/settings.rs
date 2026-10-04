@@ -62,6 +62,11 @@ pub struct Settings {
     pub audio_scrubbing: bool,
     /// When proxies are made for imported video.
     pub proxy_policy: ProxyPolicy,
+    /// Settings › AI acceleration › "Fast (fp16/TensorRT)": models with a
+    /// measured fast plan run on TensorRT, where the TensorRT add-on is
+    /// installed (decision 0031). On by default: it does nothing until
+    /// TensorRT is installed, and every plan was checked against fp32.
+    pub ml_fast: bool,
 }
 
 /// When proxies are made for imported video.
@@ -111,6 +116,7 @@ impl Default for Settings {
             preview_scale: 1.0,
             audio_scrubbing: true,
             proxy_policy: ProxyPolicy::Auto,
+            ml_fast: true,
         }
     }
 }

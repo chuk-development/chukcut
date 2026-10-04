@@ -614,6 +614,75 @@ pub const RUNTIME_PACKS: &[RuntimePack] = &[
         kind: PackKind::Libraries,
         cuda: 13,
     },
+    // TensorRT (optional, the "Fast" acceleration of Settings › AI
+    // acceleration; decision 0031). Two parts per CUDA major: ONNX
+    // Runtime's TensorRT provider, which is in Microsoft's GPU archive but
+    // not kept by the GPU pack (the same download, pinned the same way, of
+    // which only `libonnxruntime_providers_tensorrt.so`, 0.9 MB, is kept),
+    // and TensorRT 10 itself from NVIDIA's own wheel. ORT 1.28.3's provider
+    // links `libnvinfer.so.10` and `libnvonnxparser.so.10`, so it must be a
+    // TensorRT 10 (11 renames the sonames). The wheels are on
+    // pypi.nvidia.com (PyPI only has a stub that downloads from there);
+    // SHA-256 from that index's `#sha256=` links, read 2026-10-04, and
+    // checked against the cu13 download. Of the wheel only the Linux
+    // libraries are kept: libnvinfer, its plugins, the ONNX parser and the
+    // per-architecture builder resources (the `win_` ones are Windows').
+    RuntimePack {
+        id: "trt-provider-cu12",
+        name: "ONNX Runtime TensorRT provider (CUDA 12)",
+        version: ORT_VERSION,
+        url: "https://github.com/microsoft/onnxruntime/releases/download/v1.28.3/onnxruntime-linux-x64-gpu_cuda12-1.28.3.tgz",
+        sha256: "4e16d2ec66521a24fe917bd848eb8ae3a9107cb8b4aec978fb2b3ab1a640fcb7",
+        bytes: 423_745_424,
+        providers: &["TensorRT"],
+        needs: "the NVIDIA CUDA 12 bundle and TensorRT 10 for CUDA 12",
+        archive: Archive::TarGz,
+        library: TENSORRT_PROVIDER,
+        kind: PackKind::Libraries,
+        cuda: 12,
+    },
+    RuntimePack {
+        id: "trt-provider-cu13",
+        name: "ONNX Runtime TensorRT provider (CUDA 13)",
+        version: ORT_VERSION,
+        url: "https://github.com/microsoft/onnxruntime/releases/download/v1.28.3/onnxruntime-linux-x64-gpu_cuda13-1.28.3.tgz",
+        sha256: "33e91f819324449bede2d1e853c8d46bb6253fa8890bac98ae676f041c8f73a6",
+        bytes: 240_886_111,
+        providers: &["TensorRT"],
+        needs: "the NVIDIA CUDA 13 bundle and TensorRT 10 for CUDA 13",
+        archive: Archive::TarGz,
+        library: TENSORRT_PROVIDER,
+        kind: PackKind::Libraries,
+        cuda: 13,
+    },
+    RuntimePack {
+        id: "tensorrt-cu12",
+        name: "TensorRT 10 for CUDA 12 (NVIDIA)",
+        version: TENSORRT_VERSION,
+        url: "https://pypi.nvidia.com/tensorrt-cu12-libs/tensorrt_cu12_libs-10.16.1.11-py3-none-manylinux_2_28_x86_64.whl",
+        sha256: "8e45036efeb964d323231544442a73619201136ccc84392560254cc8f0d516e4",
+        bytes: 4_304_294_549,
+        providers: &[],
+        needs: "an NVIDIA driver 525 or newer and the CUDA 12 bundle",
+        archive: Archive::Wheel,
+        library: "libnvinfer.so.10",
+        kind: PackKind::Libraries,
+        cuda: 12,
+    },
+    RuntimePack {
+        id: "tensorrt-cu13",
+        name: "TensorRT 10 for CUDA 13 (NVIDIA)",
+        version: TENSORRT_VERSION,
+        url: "https://pypi.nvidia.com/tensorrt-cu13-libs/tensorrt_cu13_libs-10.16.1.11-py3-none-manylinux_2_28_x86_64.whl",
+        sha256: "91142c8ab3c58bed213cf1a563a6eb4e4f0ac529d05b5f909073acece0e3b712",
+        bytes: 3_728_705_565,
+        providers: &[],
+        needs: "an NVIDIA driver 580 or newer and the CUDA 13 bundle",
+        archive: Archive::Wheel,
+        library: "libnvinfer.so.10",
+        kind: PackKind::Libraries,
+        cuda: 13,
+    },
 ];
 
 /// One way to light up a GPU: an ONNX Runtime build and every library its
@@ -664,6 +733,111 @@ pub const BUNDLES: &[Bundle] = &[
         ],
     },
 ];
+
+/// The TensorRT version of the TensorRT packs.
+pub const TENSORRT_VERSION: &str = "10.16.1.11";
+
+/// ONNX Runtime's TensorRT provider library. ONNX Runtime opens it from
+/// its own directory, so it is linked there ([`link_tensorrt_provider`]).
+pub const TENSORRT_PROVIDER: &str = "libonnxruntime_providers_tensorrt.so";
+
+/// TensorRT for one CUDA major: an add-on to the NVIDIA bundle of the same
+/// major, installed and removed together (`chukcut-cli ml install
+/// tensorrt`, Settings › AI acceleration). It is what the "Fast"
+/// acceleration runs on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct TensorRtAddon {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub cuda: u32,
+    /// Runtime pack ids: the provider, then TensorRT.
+    pub packs: &'static [&'static str],
+}
+
+pub const TENSORRT: &[TensorRtAddon] = &[
+    TensorRtAddon {
+        id: "tensorrt-cu13",
+        name: "TensorRT (CUDA 13)",
+        cuda: 13,
+        packs: &["trt-provider-cu13", "tensorrt-cu13"],
+    },
+    TensorRtAddon {
+        id: "tensorrt-cu12",
+        name: "TensorRT (CUDA 12)",
+        cuda: 12,
+        packs: &["trt-provider-cu12", "tensorrt-cu12"],
+    },
+];
+
+/// The TensorRT add-on called `id`.
+pub fn tensorrt_addon(id: &str) -> Option<&'static TensorRtAddon> {
+    TENSORRT.iter().find(|t| t.id == id)
+}
+
+/// The TensorRT add-on that goes with ONNX Runtime pack `ort` (same CUDA
+/// major); `None` for the CPU build.
+pub fn tensorrt_for(ort: &RuntimePack) -> Option<&'static TensorRtAddon> {
+    TENSORRT
+        .iter()
+        .find(|t| ort.cuda != 0 && t.cuda == ort.cuda)
+}
+
+/// Whether every pack of `addon` is installed under `root`.
+pub fn tensorrt_present(root: &Path, addon: &TensorRtAddon) -> bool {
+    addon
+        .packs
+        .iter()
+        .all(|id| runtime_pack(id).is_some_and(|p| runtime_present(root, p)))
+}
+
+/// Download size of the packs of `addon` not installed under `root`.
+pub fn tensorrt_missing_bytes(root: &Path, addon: &TensorRtAddon) -> u64 {
+    addon
+        .packs
+        .iter()
+        .filter_map(|id| runtime_pack(id))
+        .filter(|p| !runtime_present(root, p))
+        .map(|p| p.bytes)
+        .sum()
+}
+
+/// Link the TensorRT provider of `addon` into the directory of the ONNX
+/// Runtime build of the same CUDA major, where ONNX Runtime looks for it
+/// (beside `libonnxruntime.so`; a provider loaded from anywhere else is a
+/// second copy it does not use). Idempotent; a stale link is replaced.
+pub fn link_tensorrt_provider(root: &Path, addon: &TensorRtAddon) -> std::io::Result<()> {
+    let provider = runtime_pack(addon.packs[0]).expect("the add-on's provider is listed");
+    let Some(ort) = RUNTIME_PACKS
+        .iter()
+        .find(|p| p.kind == PackKind::OnnxRuntime && p.cuda == addon.cuda)
+    else {
+        return Ok(());
+    };
+    let lib = runtime_dir(root, ort).join("lib");
+    if !lib.is_dir() {
+        return Ok(());
+    }
+    let link = lib.join(TENSORRT_PROVIDER);
+    let target = runtime_library(root, provider);
+    if std::fs::read_link(&link).is_ok_and(|t| t == target) {
+        return Ok(());
+    }
+    let _ = std::fs::remove_file(&link);
+    std::os::unix::fs::symlink(&target, &link)
+}
+
+/// Remove the link [`link_tensorrt_provider`] made, if any.
+pub fn unlink_tensorrt_provider(root: &Path, addon: &TensorRtAddon) {
+    if let Some(ort) = RUNTIME_PACKS
+        .iter()
+        .find(|p| p.kind == PackKind::OnnxRuntime && p.cuda == addon.cuda)
+    {
+        let link = runtime_dir(root, ort).join("lib").join(TENSORRT_PROVIDER);
+        if std::fs::symlink_metadata(&link).is_ok_and(|m| m.file_type().is_symlink()) {
+            let _ = std::fs::remove_file(link);
+        }
+    }
+}
 
 /// The bundle called `id`.
 pub fn bundle(id: &str) -> Option<&'static Bundle> {
@@ -752,6 +926,21 @@ pub fn keep_from_runtime_archive<'a>(
 ) -> Option<&'a str> {
     let name = path_in_archive.rsplit('/').next()?;
     match pack.archive {
+        // The TensorRT provider pack is the GPU archive again, of which it
+        // keeps only the provider.
+        Archive::TarGz if pack.library == TENSORRT_PROVIDER => {
+            (path_in_archive.contains("/lib/") && name == TENSORRT_PROVIDER).then_some(name)
+        }
+        // TensorRT's wheel: the Linux libraries the provider and the
+        // builder open, not the Windows builder resources.
+        Archive::Wheel if path_in_archive.starts_with("tensorrt_libs/") => {
+            let wanted = matches!(
+                name,
+                "libnvinfer.so.10" | "libnvinfer_plugin.so.10" | "libnvonnxparser.so.10"
+            ) || (name.starts_with("libnvinfer_builder_resource_")
+                && !name.contains("_win_"));
+            wanted.then_some(name)
+        }
         Archive::TarGz => {
             let in_lib = path_in_archive.contains("/lib/");
             (in_lib
@@ -926,6 +1115,65 @@ mod tests {
             keep_from_runtime_archive(wheel, "nvidia_cudnn_cu12-9.27.0.42.dist-info/RECORD")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn the_tensorrt_packs_keep_the_provider_and_the_linux_libraries() {
+        let provider = runtime_pack("trt-provider-cu13").unwrap();
+        let keep = |p| keep_from_runtime_archive(provider, p);
+        assert_eq!(
+            keep(
+                "onnxruntime-linux-x64-gpu_cuda13-1.28.3/lib/libonnxruntime_providers_tensorrt.so"
+            ),
+            Some(TENSORRT_PROVIDER)
+        );
+        assert!(
+            keep("onnxruntime-linux-x64-gpu_cuda13-1.28.3/lib/libonnxruntime.so.1.28.3").is_none()
+        );
+        // The provider pack is the same download as the GPU build.
+        assert_eq!(provider.sha256, runtime_pack("cuda13").unwrap().sha256);
+        let trt = runtime_pack("tensorrt-cu13").unwrap();
+        let keep = |p| keep_from_runtime_archive(trt, p);
+        assert_eq!(
+            keep("tensorrt_libs/libnvinfer.so.10"),
+            Some("libnvinfer.so.10")
+        );
+        assert!(keep("tensorrt_libs/libnvonnxparser.so.10").is_some());
+        assert!(keep("tensorrt_libs/libnvinfer_builder_resource_sm86.so.10.16.1").is_some());
+        assert!(keep("tensorrt_libs/libnvinfer_builder_resource_win_sm86.so.10.16.1").is_none());
+        assert!(keep("tensorrt_libs/__init__.py").is_none());
+        for addon in TENSORRT {
+            for id in addon.packs {
+                assert_eq!(runtime_pack(id).unwrap().cuda, addon.cuda, "{id}");
+            }
+            assert_eq!(
+                runtime_pack(addon.packs[0]).unwrap().library,
+                TENSORRT_PROVIDER
+            );
+        }
+    }
+
+    #[test]
+    fn the_tensorrt_provider_is_linked_beside_onnx_runtime() {
+        let root = scratch("trt-link");
+        let addon = tensorrt_addon("tensorrt-cu13").unwrap();
+        install(&root, &["cuda13", "trt-provider-cu13", "tensorrt-cu13"]);
+        assert!(tensorrt_present(&root, addon));
+        link_tensorrt_provider(&root, addon).unwrap();
+        let link = runtime_dir(&root, runtime_pack("cuda13").unwrap())
+            .join("lib")
+            .join(TENSORRT_PROVIDER);
+        assert_eq!(
+            std::fs::read_link(&link).unwrap(),
+            runtime_library(&root, runtime_pack("trt-provider-cu13").unwrap())
+        );
+        // Twice is fine; removing takes the link away.
+        link_tensorrt_provider(&root, addon).unwrap();
+        unlink_tensorrt_provider(&root, addon);
+        assert!(std::fs::symlink_metadata(&link).is_err());
+        // The add-on is not a runtime and does not change which one loads.
+        assert_eq!(choose_runtime(&root, Some(610), None).unwrap().id, "cuda13");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn scratch(name: &str) -> PathBuf {

@@ -25,30 +25,15 @@
 pub fn input(first: &[u8], second: &[u8], width: usize, height: usize) -> Vec<f32> {
     let plane = width * height;
     let mut out = vec![0.0f32; 6 * plane];
-    for (frame, base) in [(first, 0usize), (second, 3 * plane)] {
-        for (i, px) in frame.as_chunks::<4>().0.iter().take(plane).enumerate() {
-            out[base + i] = px[0] as f32 / 255.0;
-            out[base + plane + i] = px[1] as f32 / 255.0;
-            out[base + 2 * plane + i] = px[2] as f32 / 255.0;
-        }
-    }
+    let (a, b) = out.split_at_mut(3 * plane);
+    crate::pixels::rgba_to_planes(first, width, height, a);
+    crate::pixels::rgba_to_planes(second, width, height, b);
     out
 }
 
 /// The `output` tensor as an opaque RGBA8 frame, rounded and clamped.
 pub fn frame_bytes(output: &[f32], width: usize, height: usize) -> Vec<u8> {
-    let plane = width * height;
-    let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
-    let mut out = Vec::with_capacity(plane * 4);
-    for i in 0..plane {
-        out.extend_from_slice(&[
-            byte(output[i]),
-            byte(output[plane + i]),
-            byte(output[2 * plane + i]),
-            255,
-        ]);
-    }
-    out
+    crate::pixels::planes_to_rgba(output, width, height)
 }
 
 /// Whether `phase` is one the network is asked for: strictly between the

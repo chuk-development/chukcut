@@ -277,6 +277,9 @@ impl Editor {
         let mut progress: Vec<AnyElement> = Vec::new();
         match &self.inspector.enhance.bake {
             Some(bake) if bake.segment_id == segment.id => {
+                if let Some(notice) = crate::editor::ml_settings::tensorrt_notice() {
+                    progress.push(caption(notice, TEXT_DIM));
+                }
                 progress.push(caption(
                     format!("{}\u{2026} {} of {}", bake.stage, bake.done, bake.total),
                     TEXT_DIM,

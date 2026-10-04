@@ -25,8 +25,8 @@ use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 use chukcut_ml_worker::protocol::{
-    read_frame, write_frame, ErrorKind, Message, Outcome, Reply, Request, RequestBody,
-    PROTOCOL_VERSION,
+    read_frame, write_frame, Acceleration, ErrorKind, Message, Outcome, Reply, Request,
+    RequestBody, PROTOCOL_VERSION,
 };
 use parking_lot::Mutex;
 
@@ -111,13 +111,68 @@ pub struct Client {
     alive: Arc<AtomicBool>,
     next_id: AtomicU64,
     pub pid: u32,
+    /// The mode it was started in.
+    pub acceleration: Acceleration,
+}
+
+/// A TensorRT engine build in progress: the request it belongs to, what
+/// the worker said and when it started. Set by the long-wait progress
+/// message, cleared when that request answers.
+static BUILDING: Mutex<Option<(u64, String, Instant)>> = Mutex::new(None);
+
+/// What the worker is building, if it is building a TensorRT engine now
+/// (the first job of a model at a size in "Fast" mode, 30 s to minutes),
+/// and for how long so far: what a job's progress line shows instead of a
+/// frame count that does not move.
+pub fn building() -> Option<(String, Duration)> {
+    BUILDING
+        .lock()
+        .as_ref()
+        .map(|(_, stage, since)| (stage.clone(), since.elapsed()))
+}
+
+/// The mode the next worker starts in, once chosen: by
+/// [`set_acceleration`] (the settings page, `ml bench`), else
+/// `CHUKCUT_ML_ACCELERATION` (`standard` or `fast`), else the saved setting
+/// (`Settings::ml_fast`).
+static ACCELERATION: Mutex<Option<Acceleration>> = Mutex::new(None);
+
+/// The mode workers start in now.
+pub fn acceleration() -> Acceleration {
+    if let Some(mode) = *ACCELERATION.lock() {
+        return mode;
+    }
+    if let Some(mode) = std::env::var("CHUKCUT_ML_ACCELERATION")
+        .ok()
+        .and_then(|v| Acceleration::parse(&v))
+    {
+        return mode;
+    }
+    if crate::modules::workspace::settings::Settings::load().ml_fast {
+        Acceleration::Fast
+    } else {
+        Acceleration::Standard
+    }
+}
+
+/// Start workers in `mode` from now on. A running worker in another mode is
+/// stopped; the next request starts one in `mode`.
+pub fn set_acceleration(mode: Acceleration) {
+    let changed = acceleration() != mode;
+    *ACCELERATION.lock() = Some(mode);
+    if changed || running().is_some_and(|c| c.acceleration != mode) {
+        shutdown();
+    }
 }
 
 impl Client {
     fn spawn(binary: &PathBuf) -> Result<Client, MlError> {
+        let acceleration = acceleration();
         let mut child = Command::new(binary)
             .arg("--root")
             .arg(super::root())
+            .arg("--acceleration")
+            .arg(acceleration.as_str())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -176,6 +231,7 @@ impl Client {
             alive,
             next_id: AtomicU64::new(1),
             pid,
+            acceleration,
         };
         match client.call_with(RequestBody::Hello, &[], &|_, _| {}, None, HELLO_TIMEOUT)? {
             Outcome::Hello { protocol, .. } if protocol == PROTOCOL_VERSION => Ok(client),
@@ -241,11 +297,40 @@ impl Client {
             self.kill();
             return Err(MlError::Crashed(format!("cannot write to the worker: {e}")));
         }
-        let deadline = Instant::now() + timeout;
+        let mut deadline = Instant::now() + timeout;
         let mut cancel_sent = false;
+        // Whatever way this request ends, a build it announced is over.
+        struct Clear(u64);
+        impl Drop for Clear {
+            fn drop(&mut self) {
+                let mut building = BUILDING.lock();
+                if building.as_ref().is_some_and(|(id, ..)| *id == self.0) {
+                    *building = None;
+                }
+            }
+        }
+        let _clear = Clear(id);
         loop {
             match rx.recv_timeout(Duration::from_millis(50)) {
-                Ok((Reply::Progress { fraction, stage }, _)) => progress(fraction, &stage),
+                Ok((
+                    Reply::Progress {
+                        fraction,
+                        stage,
+                        hold_secs,
+                    },
+                    _,
+                )) => {
+                    // The worker announced a long silent step (a TensorRT
+                    // engine build): wait for it on top of the request's
+                    // own time.
+                    if hold_secs > 0 {
+                        deadline = deadline.max(
+                            Instant::now() + timeout + Duration::from_secs(u64::from(hold_secs)),
+                        );
+                        *BUILDING.lock() = Some((id, stage.clone(), Instant::now()));
+                    }
+                    progress(fraction, &stage)
+                }
                 Ok((Reply::Done { outcome }, payload)) => return Ok((outcome, payload)),
                 Ok((Reply::Error { kind, message }, _)) => {
                     return Err(match kind {

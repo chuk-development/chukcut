@@ -44,6 +44,17 @@ pub fn workspace_settings_apply(settings: &Settings) {
     if previous != settings.cache_limit {
         trim::trim_in_background();
     }
+
+    // AI acceleration: a worker running in the other mode stops, and the
+    // next request starts one in this mode. `CHUKCUT_ML_ACCELERATION`, when
+    // set, overrides the setting for the whole process.
+    if std::env::var_os("CHUKCUT_ML_ACCELERATION").is_none() {
+        crate::modules::ml::worker::set_acceleration(if settings.ml_fast {
+            crate::modules::ml::commands::Acceleration::Fast
+        } else {
+            crate::modules::ml::commands::Acceleration::Standard
+        });
+    }
 }
 
 /// Delete least-recently-used cache files until the cache fits in

@@ -1,6 +1,8 @@
 //! Settings › AI acceleration: what runs the models, the GPU bundles to
-//! install or remove with their sizes, the downloaded models, the baked
-//! mattes and the remade frames (Remove object, Enhance quality).
+//! install or remove with their sizes, "Fast (fp16/TensorRT)" with the
+//! TensorRT add-on and each model's provider and precision, the downloaded
+//! models, the baked mattes and the remade frames (Remove object, Enhance
+//! quality).
 //!
 //! Everything here calls `ml::commands`, `matting::commands` and
 //! `enhance::commands`. Probing
@@ -18,11 +20,31 @@ use chukcut_engine::modules::ml::commands::{
     self as ml, BundleInfo, MlItem, MlProgress, MlStatus, ModelInfo, RuntimeInfo,
 };
 use gpui::component::button::Button;
+use gpui::component::switch::Switch;
 use gpui::component::{Disableable as _, Sizable as _};
 use gpui::AnyElement;
 
 use super::settings::{bytes_label, dim, row, section};
 use super::*;
+
+/// The line a job's progress shows while the ML worker builds a TensorRT
+/// engine (the first job of a model at a size in "Fast" mode), with how
+/// long it has taken so far; `None` when no build runs.
+pub(crate) fn tensorrt_notice() -> Option<String> {
+    let (stage, so_far) = chukcut_engine::modules::ml::worker::building()?;
+    let secs = so_far.as_secs();
+    Some(format!("{stage}: {}:{:02} so far", secs / 60, secs % 60))
+}
+
+/// "1 min 12 s" for a build's duration.
+fn build_time(millis: f32) -> String {
+    let secs = (millis / 1000.0).round() as u64;
+    if secs >= 60 {
+        format!("{} min {} s", secs / 60, secs % 60)
+    } else {
+        format!("{secs} s")
+    }
+}
 
 /// What the machine has, read off the UI thread.
 #[derive(Default)]
@@ -171,6 +193,110 @@ impl AiSettings {
         });
         self.reload(true, cx);
         cx.notify();
+    }
+
+    /// Turn "Fast (fp16/TensorRT)" on or off, off the UI thread (it stops
+    /// a running worker), then probe again to show what runs where.
+    fn set_fast(&mut self, fast: bool, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let outcome = cx
+                .background_executor()
+                .spawn(async move { ml::ml_set_acceleration(fast) })
+                .await;
+            let _ = this.update(cx, |settings, cx| {
+                settings.notice = Some(match outcome {
+                    Ok(message) => message.into(),
+                    Err(error) => error.into(),
+                });
+                settings.reload(true, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// The Fast switch, the TensorRT add-on and what each heavy model runs
+    /// on.
+    fn render_acceleration(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let mut rows = Vec::new();
+        let Some(status) = self.snapshot.status.as_ref() else {
+            return rows;
+        };
+        let fast = status.acceleration == ml::Acceleration::Fast;
+        let switch = Switch::new("ml-fast")
+            .checked(fast)
+            .on_click(cx.listener(|this, checked: &bool, _, cx| this.set_fast(*checked, cx)));
+        rows.push(row(
+            "Fast (fp16/TensorRT)",
+            Some(
+                "Runs slow motion, Enhance quality and Remove object on TensorRT, 1.4–2.5x \
+                 faster on NVIDIA GPUs. The first job of a model at a new size prepares it \
+                 once (30 s to a few minutes). Needs TensorRT below.",
+            ),
+            switch,
+        ));
+        if let Some(trt) = &status.tensorrt {
+            let busy = self.install.is_some();
+            let hint = format!(
+                "NVIDIA TensorRT {} and ONNX Runtime's TensorRT provider, for CUDA {}.",
+                trt.version, trt.cuda
+            );
+            let id = trt.id.to_string();
+            let name = trt.name.to_string();
+            let control: AnyElement = if trt.installed {
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(dim(bytes_label(trt.installed_bytes)))
+                    .child(
+                        Button::new("ml-remove-tensorrt")
+                            .label("Remove")
+                            .small()
+                            .disabled(busy)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.remove(
+                                    MlItem::Tensorrt {
+                                        id: Some(id.clone()),
+                                    },
+                                    cx,
+                                )
+                            })),
+                    )
+                    .into_any_element()
+            } else {
+                Button::new("ml-install-tensorrt")
+                    .label(format!("Install ({})", bytes_label(trt.missing_bytes)))
+                    .small()
+                    .disabled(busy)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.install(
+                            MlItem::Tensorrt {
+                                id: Some(id.clone()),
+                            },
+                            name.clone(),
+                            cx,
+                        )
+                    }))
+                    .into_any_element()
+            };
+            rows.push(row(trt.name, Some(hint.as_str()), control));
+        }
+        // What each model with a choice runs on now.
+        for m in status.models.iter().filter(|m| m.has_fast_plan) {
+            let mut text = format!("{} · {}", m.provider, m.precision);
+            if let Some(build) = m.engines.last() {
+                text.push_str(&format!(
+                    " · prepared in {} ({} size{})",
+                    build_time(build.millis),
+                    m.engines.len(),
+                    if m.engines.len() == 1 { "" } else { "s" }
+                ));
+            }
+            rows.push(row(m.name, Some("Runs on"), dim(text)));
+        }
+        rows
     }
 
     fn clear_mattes(&mut self, cx: &mut Context<Self>) {
@@ -340,7 +466,15 @@ impl AiSettings {
     /// or one pack by hand), each removable on its own.
     fn render_loose_packs(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         // A bundle's packs are listed (and removed) with the bundle.
-        let in_bundle = |id: &str| self.snapshot.bundles.iter().any(|b| b.packs.contains(&id));
+        let in_bundle = |id: &str| {
+            self.snapshot.bundles.iter().any(|b| b.packs.contains(&id))
+                || self
+                    .snapshot
+                    .status
+                    .as_ref()
+                    .and_then(|s| s.tensorrt.as_ref())
+                    .is_some_and(|t| t.packs.contains(&id))
+        };
         self.snapshot
             .runtimes
             .iter()
@@ -541,6 +675,7 @@ impl Render for AiSettings {
         {
             rows.push(self.render_bundle(bundle, cx));
         }
+        rows.extend(self.render_acceleration(cx));
         rows.extend(self.render_loose_packs(cx));
         rows.extend(self.render_models(cx));
         rows.push(self.render_mattes(cx));
