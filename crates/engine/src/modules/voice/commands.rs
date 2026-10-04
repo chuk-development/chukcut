@@ -8,10 +8,11 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use super::cleanup::{
-    audible_segment, cleanup_of, original_source, set_cleanup_command, Denoise, Normalize,
-    VoiceCleanup,
+    audible_segment, cleanup_of, denoise_input, original_source, set_cleanup_command, Denoise,
+    Normalize, VoiceCleanup,
 };
 use super::denoise::{self, ENGINE};
+use super::isolate::{self, Isolate, Keep};
 use crate::modules::loudness::measure::measure_file;
 use crate::modules::loudness::normalize::MAX_GAIN_DB;
 use crate::modules::loudness::TRUE_PEAK_CEILING;
@@ -105,12 +106,18 @@ pub fn voice_set_denoise(
         strength: denoise::quantize(s),
         engine: ENGINE.into(),
     });
+    // A clip that isolates its voice is denoised after the isolation, so
+    // that has to exist first.
+    if let Some(isolate) = &cleanup.isolate {
+        isolate::render(&t.original, t.duration, isolate, cancel, &|_| {})?;
+    }
+    let input = denoise_input(&t.original, &cleanup);
     let source = match &cleanup.denoise {
         Some(d) => {
-            let cached = denoise::render(&t.original, t.duration, d.strength, cancel, progress)?;
+            let cached = denoise::render(&input, t.duration, d.strength, cancel, progress)?;
             cached.to_string_lossy().into_owned()
         }
-        None => t.original.clone(),
+        None => input,
     };
     if let Some(normalize) = &cleanup.normalize {
         cleanup.normalize = Some(measure_normalize(
@@ -121,6 +128,114 @@ pub fn voice_set_denoise(
         )?);
     }
     apply(state, &t.segment_id, cleanup)
+}
+
+/// What "Isolate voice" is set to.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct IsolationSetting {
+    /// `0..=1`: how much of what is not kept goes.
+    pub strength: f32,
+    #[serde(default)]
+    pub keep: Keep,
+}
+
+/// Turn voice isolation on, change it, or turn it off with `None`, as one
+/// undo step — at once, without rendering: until the isolated sound is made
+/// ([`voice_isolation_render`]) the clip plays as before, and an export
+/// makes it first.
+pub fn voice_set_isolation(
+    state: &Arc<AppState>,
+    segment_id: String,
+    setting: Option<IsolationSetting>,
+) -> Result<EditResponse, String> {
+    let t = target(state, &segment_id)?;
+    let mut cleanup = t.current.clone();
+    cleanup.isolate = match setting {
+        None => None,
+        Some(s) => {
+            if !s.strength.is_finite() || !(0.0..=1.0).contains(&s.strength) {
+                return Err("the isolation strength is between 0 and 1".into());
+            }
+            Some(Isolate {
+                strength: denoise::quantize(s.strength),
+                keep: s.keep,
+                model: isolate::current_model(),
+            })
+        }
+    };
+    apply(state, &t.segment_id, cleanup)
+}
+
+/// What [`voice_isolation_render`] made.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct IsolationRendered {
+    pub segment_id: String,
+    /// The file the clip plays now.
+    pub path: String,
+    /// Wall-clock seconds the render took (0 when it was cached).
+    pub seconds: f32,
+}
+
+/// Make the isolated sound (and its denoise, when the clip has one) that
+/// `segment_id`'s setting asks for. Blocking: the first render runs the
+/// separation model over the whole recording. `progress` gets `0..=1`.
+pub fn voice_isolation_render(
+    state: &Arc<AppState>,
+    segment_id: String,
+    cancel: &AtomicBool,
+    progress: &dyn Fn(f32),
+) -> Result<IsolationRendered, String> {
+    let t = target(state, &segment_id)?;
+    let isolate = t
+        .current
+        .isolate
+        .clone()
+        .ok_or("the clip does not isolate its voice")?;
+    t.ready(cancel)?;
+    let started = std::time::Instant::now();
+    let mut path = isolate::render(&t.original, t.duration, &isolate, cancel, progress)?;
+    if let Some(d) = &t.current.denoise {
+        path = denoise::render(
+            &path.to_string_lossy(),
+            t.duration,
+            d.strength,
+            cancel,
+            &|_| {},
+        )?;
+    }
+    Ok(IsolationRendered {
+        segment_id: t.segment_id,
+        path: path.to_string_lossy().into_owned(),
+        seconds: started.elapsed().as_secs_f32(),
+    })
+}
+
+/// The clips whose voice isolation is set but not rendered: after a cache
+/// was cleared, or a project came from another machine. The app renders
+/// them in the background; an export renders them itself.
+pub fn voice_isolation_missing(state: &Arc<AppState>) -> Vec<String> {
+    state
+        .with_project(|project| {
+            let mut out = Vec::new();
+            for track in &project.tracks {
+                for segment in &track.segments {
+                    let Some((_, cleanup)) = cleanup_of(project, segment) else {
+                        continue;
+                    };
+                    let Some(isolate) = &cleanup.isolate else {
+                        continue;
+                    };
+                    let Some((original, _)) = original_source(project, segment) else {
+                        continue;
+                    };
+                    if !isolate::cache_path(&original, isolate).is_file() {
+                        out.push(segment.id.clone());
+                    }
+                }
+            }
+            out
+        })
+        .unwrap_or_default()
 }
 
 /// Bring a clip to `target_lufs`, or remove its normalisation with `None`.
@@ -139,12 +254,13 @@ pub fn voice_normalize(
                 return Err("a loudness target is between −40 and −5 LUFS".into());
             }
             t.ready(cancel)?;
-            let source = cleanup
-                .denoise
-                .as_ref()
-                .map(|d| denoise::cache_path(&t.original, d.strength, &d.engine))
-                .filter(|p| p.is_file())
-                .map(|p| p.to_string_lossy().into_owned())
+            // What the clip plays now, as near its setting as the cache has.
+            let source = state
+                .with_project(|project| {
+                    project
+                        .segment(&t.segment_id)
+                        .map(|(_, s)| super::effective_source(project, s, &t.original).path)
+                })?
                 .unwrap_or_else(|| t.original.clone());
             Some(measure_normalize(&source, t.range, target, cancel)?)
         }

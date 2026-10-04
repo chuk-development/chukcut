@@ -718,6 +718,27 @@ pub fn run_export(job: &ExportJob, sink: &dyn ProgressSink) -> Result<ExportOutc
         }
     }
 
+    // Face landmarks for the retouch effect are cache as well: find the
+    // faces it needs before the first frame, so the file is retouched as the
+    // preview was.
+    if !settings.audio_only {
+        let mut preparing = tracker.snapshot(ExportStage::Preparing, 0, Instant::now());
+        preparing.message = Some("Finding faces to retouch".into());
+        if !crate::modules::landmarks::commands::needing(&job.project).is_empty() {
+            sink.send(preparing);
+        }
+        if let Err(message) =
+            crate::modules::landmarks::commands::landmarks_ensure(&job.project, &job.cancel)
+        {
+            let error = ExportError::Settings(message);
+            tracing::error!(%error, "the export could not find the faces to retouch");
+            let mut failed = tracker.snapshot(ExportStage::Failed, 0, Instant::now());
+            failed.message = Some(error.to_string());
+            sink.send(failed);
+            return Err(error);
+        }
+    }
+
     // "Remove object" and "Enhance quality" frames are cache too: make the
     // missing ones first, so the file never shows an object the user
     // removed or the picture they asked to have enhanced.

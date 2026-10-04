@@ -32,6 +32,7 @@ use chukcut_ml_worker::protocol::{
 use chukcut_ml_worker::registry::{self, ModelSpec, Task};
 use chukcut_ml_worker::runtime::{Failure, Runtime};
 use chukcut_ml_worker::{birefnet, esrgan, lama, rife, rvm, sam, vittrack, yunet};
+use chukcut_ml_worker::{demucs, facemesh};
 use ort::value::Tensor;
 
 type Out = Arc<Mutex<BufWriter<std::io::Stdout>>>;
@@ -528,6 +529,47 @@ impl Worker {
                 height,
                 iterations,
             } => self.benchmark(id, &name, width, height, iterations.max(1), progress),
+            RequestBody::Separate {
+                model: name,
+                frames,
+            } => {
+                let spec = model(&name, Task::Separate)?;
+                let frames = frames as usize;
+                let input = demucs::input(payload, frames).ok_or_else(|| {
+                    bad(format!(
+                        "{frames} stereo frames (at most {}) are {} bytes, got {}",
+                        registry::SEPARATION_SEGMENT,
+                        frames * 8,
+                        payload.len()
+                    ))
+                })?;
+                let started = Instant::now();
+                let (vocals, provider) = self.separate(spec, input, frames)?;
+                self.reply_payload = vocals;
+                Ok(Outcome::Separated {
+                    frames: frames as u32,
+                    millis: millis(started),
+                    provider,
+                })
+            }
+            RequestBody::FaceLandmarks {
+                model: name,
+                width,
+                height,
+                hints,
+                max_faces,
+            } => {
+                let (w, h) = frame(payload, width, height)?;
+                let spec = model(&name, Task::FaceLandmarks)?;
+                let started = Instant::now();
+                let (faces, provider) =
+                    self.face_landmarks(spec, payload, w, h, &hints, max_faces.max(1) as usize)?;
+                Ok(Outcome::FaceLandmarks {
+                    faces,
+                    millis: millis(started),
+                    provider,
+                })
+            }
             RequestBody::Cancel { .. } => Ok(Outcome::Ok),
             RequestBody::Shutdown => Ok(Outcome::Ok),
         }
@@ -978,6 +1020,116 @@ impl Worker {
         Ok((next, score, redetected))
     }
 
+    /// The vocals of one padded segment (`demucs::input`), as planar `f32`
+    /// bytes of `frames` per channel, and the provider.
+    fn separate(
+        &mut self,
+        spec: &'static ModelSpec,
+        input: Vec<f32>,
+        frames: usize,
+    ) -> Result<(Vec<u8>, String), Failure> {
+        let loaded = self.runtime()?.session(spec)?;
+        let provider = loaded.provider.to_string();
+        let tensor = Tensor::from_array(([1i64, 2, registry::SEPARATION_SEGMENT as i64], input))
+            .map_err(inference)?;
+        let outputs = loaded
+            .session
+            .run(ort::inputs!["mix" => tensor])
+            .map_err(inference)?;
+        let value = outputs
+            .get("stems")
+            .ok_or_else(|| inference("the model has no output stems"))?;
+        let (_, data) = value.try_extract_tensor::<f32>().map_err(inference)?;
+        let bytes = demucs::vocals_bytes(data, frames).ok_or_else(|| {
+            inference(format!(
+                "the stems are {} values, not {}",
+                data.len(),
+                demucs::STEMS * 2 * registry::SEPARATION_SEGMENT
+            ))
+        })?;
+        Ok((bytes, provider))
+    }
+
+    /// Face mesh landmarks in one frame: on the regions `hints` names, or on
+    /// what YuNet finds when there are none (or none of them holds a face
+    /// any more).
+    fn face_landmarks(
+        &mut self,
+        spec: &'static ModelSpec,
+        rgba: &[u8],
+        w: usize,
+        h: usize,
+        hints: &[[f32; 4]],
+        max_faces: usize,
+    ) -> Result<(Vec<chukcut_ml_worker::protocol::FaceMesh>, String), Failure> {
+        // A face is kept when the mesh is this sure it is looking at one.
+        const PRESENT: f32 = 0.5;
+        let mut regions: Vec<facemesh::Roi> = hints
+            .iter()
+            .map(|&a| facemesh::Roi::from_array(a))
+            .collect();
+        let mut searched = false;
+        let mut faces = Vec::new();
+        let mut provider = String::new();
+        loop {
+            if regions.is_empty() && !searched {
+                searched = true;
+                let detector = model("yunet", Task::DetectFaces)?;
+                let (mut found, _) = self.detect(detector, rgba, w, h, 0.6)?;
+                found.sort_by(|a, b| (b.bbox[2] * b.bbox[3]).total_cmp(&(a.bbox[2] * a.bbox[3])));
+                regions = found
+                    .iter()
+                    .take(max_faces)
+                    .map(|f| facemesh::Roi::from_detection(f.bbox, f.landmarks[0], f.landmarks[1]))
+                    .collect();
+            }
+            for roi in regions.drain(..) {
+                let loaded = self.runtime()?.session(spec)?;
+                provider = loaded.provider.to_string();
+                let tensor = Tensor::from_array((
+                    [1i64, facemesh::SIZE as i64, facemesh::SIZE as i64, 3],
+                    facemesh::input(rgba, w, h, &roi),
+                ))
+                .map_err(inference)?;
+                let outputs = loaded
+                    .session
+                    .run(ort::inputs!["input_12" => tensor])
+                    .map_err(inference)?;
+                let (_, raw) = outputs
+                    .get("Identity")
+                    .ok_or_else(|| inference("the model has no output Identity"))?
+                    .try_extract_tensor::<f32>()
+                    .map_err(inference)?;
+                let (_, logit) = outputs
+                    .get("Identity_1")
+                    .ok_or_else(|| inference("the model has no output Identity_1"))?
+                    .try_extract_tensor::<f32>()
+                    .map_err(inference)?;
+                let score = facemesh::sigmoid(logit.first().copied().unwrap_or(-10.0));
+                if score < PRESENT || raw.len() < facemesh::POINTS * 3 {
+                    continue;
+                }
+                let points = facemesh::points(raw, &roi);
+                faces.push(chukcut_ml_worker::protocol::FaceMesh {
+                    bbox: facemesh::bbox(&points),
+                    roi: facemesh::Roi::from_points(&points).to_array(),
+                    score,
+                    points,
+                });
+            }
+            // Every hinted face lost: look for faces afresh, once.
+            if faces.is_empty() && !searched {
+                continue;
+            }
+            break;
+        }
+        faces.truncate(max_faces);
+        if provider.is_empty() {
+            provider = self.runtime()?.session(spec)?.provider.to_string();
+        }
+        Ok((faces, provider))
+    }
+
     fn benchmark(
         &mut self,
         id: u64,
@@ -1067,6 +1219,29 @@ impl Worker {
                     "{} runs with its encoder; benchmark that",
                     spec.id
                 ))),
+                // One whole segment of a two-tone chord: `width` and
+                // `height` do not apply to sound.
+                Task::Separate => {
+                    let n = registry::SEPARATION_SEGMENT;
+                    let input: Vec<f32> = (0..2 * n)
+                        .map(|i| {
+                            let t = (i % n) as f32 / registry::SEPARATION_RATE as f32;
+                            0.2 * (t * 220.0 * std::f32::consts::TAU).sin()
+                                + 0.1 * (t * 1_100.0 * std::f32::consts::TAU).sin()
+                        })
+                        .collect();
+                    worker.separate(spec, input, n).map(|_| ())
+                }
+                // The mesh alone, on the middle of the frame, as it runs
+                // while a face is being followed (the detector only runs on
+                // the first frame and after a loss).
+                Task::FaceLandmarks => {
+                    let side = w.min(h) as f32 * 0.6;
+                    let hint = [w as f32 / 2.0, h as f32 / 2.0, side, 0.0];
+                    worker
+                        .face_landmarks(spec, &rgba, w, h, &[hint], 1)
+                        .map(|_| ())
+                }
             }
         };
         // One untimed run: the first run on a GPU provider allocates and

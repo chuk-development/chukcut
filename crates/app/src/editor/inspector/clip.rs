@@ -113,10 +113,13 @@ impl Editor {
                 VIDEO => {
                     // A compound clip has no footage of its own to cut out
                     // or retouch; a mask draws on its picture like any other.
-                    let names: &[&'static str] = if kind == ClipKind::Compound {
-                        &["Basic", "Mask"]
-                    } else {
-                        &["Basic", "Remove background", "Mask", "Retouch", "Enhance"]
+                    // Retouch reads faces over time: a video clip's.
+                    let names: &[&'static str] = match kind {
+                        ClipKind::Compound => &["Basic", "Mask"],
+                        ClipKind::Video => {
+                            &["Basic", "Remove background", "Mask", "Retouch", "Enhance"]
+                        }
+                        _ => &["Basic", "Remove background", "Mask", "Enhance"],
                     };
                     // A sub-tab chosen on a video clip ("Enhance") that this
                     // clip does not have (a compound clip) falls back to the
@@ -128,6 +131,7 @@ impl Editor {
                         "Basic" => self.video_basic(&segment, kind, window, cx),
                         "Mask" => self.mask_tab(&segment, window, cx),
                         "Remove background" => self.remove_background_tab(&segment, window, cx),
+                        "Retouch" => self.retouch_tab(&segment, window, cx),
                         enhance::ENHANCE => self.enhance_tab(&segment, cx),
                         _ => not_yet(current),
                     };
@@ -649,8 +653,8 @@ impl Editor {
                 "adjust-preset",
                 "Save as preset",
                 true,
-                false,
-                |_, _, _| {},
+                graded,
+                cx.listener(|this, _, window, cx| this.open_save_preset(window, cx)),
             ))
             .child(panel_button(
                 "adjust-all",

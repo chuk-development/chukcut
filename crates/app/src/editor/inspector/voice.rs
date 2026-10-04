@@ -64,7 +64,7 @@ impl Editor {
             self.normalize_section(&cleanup, cx),
             self.noise_section(&cleanup, cx),
             self.silences_section(cx),
-            Section::missing("Isolate voice", "Not in the engine yet").render(true, Vec::new(), cx),
+            self.isolate_section(&segment.id, &cleanup, cx),
         ]
     }
 

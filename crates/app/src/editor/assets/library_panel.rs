@@ -8,6 +8,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use chukcut_engine::modules::grading::presets::PresetEntry;
 use chukcut_engine::modules::library::commands::{self as library};
 use chukcut_engine::modules::library::looks::LookEntry;
 use chukcut_engine::modules::library::sounds::{Sound, Track};
@@ -70,6 +71,9 @@ pub(crate) struct LibraryPanel {
 
     pub(super) looks: Option<Result<Vec<LookEntry>, String>>,
     pub(super) looks_loading: bool,
+    /// The grade presets saved from the Adjust tab, read from disk when the
+    /// Filters tab is drawn; `None` after a save, so it reads again.
+    pub(crate) grade_presets: Option<Vec<PresetEntry>>,
 
     _subscriptions: Vec<Subscription>,
 }
@@ -126,6 +130,7 @@ impl LibraryPanel {
             open_pack: library::library_sfx_packs()[0].id,
             looks: None,
             looks_loading: false,
+            grade_presets: None,
             _subscriptions: subscriptions,
         }
     }

@@ -26,6 +26,8 @@ pub enum JobKind {
     Stabilise,
     Beats,
     Reframe,
+    /// Face landmarks for retouch and face-follow (`modules::landmarks`).
+    Landmarks,
 }
 
 impl JobKind {
@@ -36,6 +38,7 @@ impl JobKind {
             JobKind::Stabilise => "Analysing camera shake",
             JobKind::Beats => "Detecting beats",
             JobKind::Reframe => "Finding the subject",
+            JobKind::Landmarks => "Finding faces",
         }
     }
 }

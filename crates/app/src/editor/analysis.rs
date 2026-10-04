@@ -299,6 +299,14 @@ impl Editor {
 
     /// Called from the editor's tick: progress in the status line, and the
     /// new document when a job ends. Returns whether anything changed.
+    /// Show an analysis started elsewhere (face landmarks for retouch) in
+    /// the status line, and refresh when it ends.
+    pub(crate) fn follow_analysis_job(&mut self, id: u64) {
+        if !self.analysis.jobs.contains(&id) {
+            self.analysis.jobs.push(id);
+        }
+    }
+
     pub(crate) fn poll_analysis(&mut self, cx: &mut Context<Self>) -> bool {
         if self.analysis.jobs.is_empty() {
             return false;

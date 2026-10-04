@@ -71,7 +71,7 @@ pub fn inspector_set_color(
 /// The material goes into the pool before the command runs, the ordering
 /// `text_add` documents, and comes back out if the edit is refused — the
 /// contract `inspector_set_color` spells out, shared by every grade command.
-fn commit_grade(
+pub(crate) fn commit_grade(
     state: &Arc<AppState>,
     build: impl FnOnce(&Project) -> Result<(Option<ColorAdjustMaterial>, EditCommand), String>,
 ) -> Result<EditResponse, String> {

@@ -303,7 +303,7 @@ impl Editor {
             .into_any_element()
     }
 
-    fn effect_param_row(
+    pub(super) fn effect_param_row(
         &mut self,
         segment: &Segment,
         index: usize,

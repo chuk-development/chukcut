@@ -38,7 +38,9 @@ use serde::{Deserialize, Serialize};
 /// in its payload and several out.
 /// 5: inpainting (`inpaint`, a picture and its mask in one payload) and
 /// super-resolution (`upscale`).
-pub const PROTOCOL_VERSION: u32 = 5;
+/// 6: audio source separation (`separate`, samples in and out) and dense
+/// face landmarks (`face_landmarks`).
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// A header longer than this is a broken stream, not a message.
 const MAX_HEADER: usize = 1 << 20;
@@ -176,6 +178,28 @@ pub enum RequestBody {
         height: u32,
         iterations: u32,
     },
+    /// The voice in one stretch of stereo sound, by source-separation model
+    /// `model`. The payload is `frames` samples per channel at the model's
+    /// rate (`registry::SEPARATION_RATE`), planar `f32` little-endian: the
+    /// left channel, then the right. At most one model segment
+    /// (`registry::SEPARATION_SEGMENT` frames); a shorter stretch is padded
+    /// with silence. Answered with [`Outcome::Separated`] and the voice as
+    /// the payload, in the same layout and length.
+    Separate { model: String, frames: u32 },
+    /// The faces in this frame (the payload, RGBA8) with dense landmarks:
+    /// face mesh model `model` on every face YuNet finds, or in the regions
+    /// `hints` (the `roi` of last frame's faces) when there are any, the way
+    /// a tracker follows instead of searching. A hint whose face is gone is
+    /// dropped; when none is left, YuNet searches again. At most
+    /// `max_faces`, largest first. Answered with [`Outcome::FaceLandmarks`].
+    FaceLandmarks {
+        model: String,
+        width: u32,
+        height: u32,
+        #[serde(default)]
+        hints: Vec<[f32; 4]>,
+        max_faces: u32,
+    },
     /// Stop request `target` at its next check.
     Cancel { target: u64 },
     /// Finish the current request and exit.
@@ -280,7 +304,35 @@ pub enum Outcome {
         mean_millis: f32,
         min_millis: f32,
     },
+    /// The payload is the voice, as [`RequestBody::Separate`]'s payload.
+    Separated {
+        frames: u32,
+        millis: f32,
+        provider: String,
+    },
+    FaceLandmarks {
+        faces: Vec<FaceMesh>,
+        millis: f32,
+        provider: String,
+    },
     Ok,
+}
+
+/// One face's dense landmarks, in the frame's pixels.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FaceMesh {
+    /// The box the landmarks span, x, y, width, height.
+    pub bbox: [f32; 4],
+    /// The square region the next frame's landmarks are looked for in:
+    /// centre x, centre y, side, rotation in radians (the eye line's angle).
+    /// What a request's `hints` take.
+    pub roi: [f32; 4],
+    /// The face model's presence score, 0..1.
+    pub score: f32,
+    /// MediaPipe's canonical face mesh: 468 points, then five per iris
+    /// (478). x and y in pixels; z in the same scale, towards the camera
+    /// negative.
+    pub points: Vec<[f32; 3]>,
 }
 
 /// The machine, as the worker sees it.

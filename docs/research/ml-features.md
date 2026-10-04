@@ -585,6 +585,19 @@ materials; `CCAudioNoiseFilter`, `CCAudioSamiFilter`.
 **Recommendation:** DeepFilterNet as the denoise (S, priority 1). HTDemucs for
 "isolate voice" and "remove vocals" as a baked render job (M, priority 2).
 
+**Built (2026-10-04, decision 0030): Isolate voice.** HTDemucs fine-tuned,
+the vocals specialist, as StemSplitio's ONNX export
+(`huggingface.co/StemSplitio/htdemucs-ft-vocals-onnx`, commit `2ef0d75`,
+316 MB, MIT): `mix` `[1, 2, 343980]` 44.1 kHz in, `stems` `[1, 4, 2, 343980]`
+out (index 3 is the voice), the STFT inside the graph as convolutions, so it
+runs on the CUDA provider. Segments overlap by a quarter and are cross-faded
+linearly. RTX 3060: 0.23 s per 7.8 s segment; CPU 2.6 s. Checked and not
+used: Mel-Band RoFormer (smank's export, MIT weights, 953 MB, 34.8 s per
+8 s on the CPU — best quality, a candidate for a "high quality, GPU" mode),
+UVR-MDX-NET-Voc_FT (needs our own STFT; the weights' licence is a README
+line), Kim_Vocal_2 (licence unclear), DeepFilterNet3 and DPDFNet2
+(Apache-2.0, noise only, not music) and GTCRN (16 kHz, too weak).
+
 ### 3.10 Video stabilisation
 
 **CapCut:** "Stabilisieren" (Pro); `CCVideoStableFilter`; the draft stores
@@ -682,6 +695,25 @@ in the RE repository).
 **Recommendation:** only when an effect needs it (face stickers, retouch,
 "blur faces"). **Effort M, priority 3.**
 
+**Built (2026-10-04, decision 0030): face landmarks.** MediaPipe Face
+Landmarker v2's mesh as `naklitechie/face-landmarks-onnx` (commit `575c338`,
+4.9 MB, Apache-2.0 per Google's model card; three other conversions give
+the same numbers): `input_12` `[N, 256, 256, 3]` NHWC RGB 0..1 on a face
+crop turned so the eyes are level, `Identity` 478 × (x, y, z) in crop
+pixels, `Identity_1` a presence logit. YuNet finds the first crop; each
+frame's points give the next. ~10 ms per frame on the 3060 with the CPU
+close behind; analysis is decode-bound (300 frames of 1080×1920 in ~6 s).
+Fallback found: Face Mesh v1 (468 points, 192², Qualcomm's export via
+`Heliosoph/mediapipe-face-onnx`, Apache-2.0).
+
+**Body pose, not built.** RTMPose-t / -s body7 (Apache-2.0; files at
+`huggingface.co/Tau-J/RTMPose`, commit `cd4d709`, zipped `end2end.onnx`,
+input `[B, 3, 256, 192]` ImageNet-normalised, SimCC outputs `[B, 17, 384]`
+and `[B, 17, 512]`, keypoint = argmax / 2). Needs a person box per frame
+(top-down) and an unzip step in the downloader. The body7 training sets
+include research-only datasets; OpenMMLab ships the weights under
+Apache-2.0 anyway — a business risk to weigh, not a licence problem.
+
 ### 3.14 Colour auto-adjust and colour match
 
 **CapCut:** Adjust → "Automatische Anpassung" (with intensity), colour match,
@@ -694,6 +726,13 @@ Monge–Kantorovich linear transform, against a reference frame. **Write the
 result into our existing colour materials** (decision 0007: Adjust, curves,
 LUT) so the user can see and edit it. That is better than an opaque filter.
 **Effort S, priority 2.**
+
+**Built (2026-10-04, decision 0030).** As recommended, no model: auto adjust
+(log-average exposure, neutral-pixel white balance by Newton steps, a
+levels stretch from the 0.5/99.5 % luma) and colour match (L*a*b* means and
+spreads by damped Gauss–Newton over exposure, contrast, saturation,
+temperature and tint, then RGB curves by histogram specification), both
+fitted on the shader's CPU twin and written into the ordinary controls.
 
 ### 3.15 Retouch and beauty
 
@@ -709,6 +748,13 @@ reshape). The common face-parsing model (BiSeNet on CelebAMask-HQ) has MIT
 code but weights trained on a non-commercial dataset → a legal risk for paid
 use. A skin mask from colour plus the face mesh polygon avoids that model.
 **Effort L, priority 3.**
+
+**Built (2026-10-04, decision 0030).** No skin-segmentation model: the skin
+weight is the face ellipse from the mesh × a CbCr skin test × not the eyes,
+brows and lips; the smoothing is an edge-preserving ring average; eyes and
+teeth are lifted inside their mesh outlines; the jaw slim is a smooth local
+warp. Four presets and a strength. Not built: reshaping beyond the jaw
+(eyes, nose), make-up, hair.
 
 ### 3.16 AI object removal (inpainting)
 
