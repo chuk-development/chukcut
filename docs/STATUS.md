@@ -38,8 +38,8 @@ works on the code.
 
 **Rough, in short** (details in the sections below and in `docs/QA.md`):
 AMD and Intel/hybrid laptops are not checked regularly; OpenVINO untested;
-the tarball (editor, ML worker and CLI) runs only on the build machine's
-FFmpeg major; AI on the CPU takes minutes per clip, BiRefNet
+the tarball and the .deb (editor, ML worker and CLI) run only on the build machine's
+FFmpeg major (the AppImage bundles it; macOS and Windows do not build yet); AI on the CPU takes minutes per clip, BiRefNet
 refuses it; RIFE ~6 fps and BiRefNet ~2 fps at 1080p on an RTX 3060; voice
 isolation peaks at 7–8 GB in the worker; body keypoints have no fingers;
 cloud integrations are untested against live services; a crop has no
@@ -48,13 +48,13 @@ keyframes and the denoise is spatial only.
 **Before you change code:** read "Traps that have already cost time" and
 the CLAUDE.md non-negotiables. Judge performance from a release build only.
 
-**Newest sections first:** UX gaps, Body landmarks, Polish pass 3, CI, Colour AI, QA pass 2, Flaky
+**Newest sections first:** Release builds, UX gaps, Body landmarks, Polish pass 3, CI, Colour AI, QA pass 2, Flaky
 tests, Frame blending, Timelines and compound clips. The ML sections are at
 the end of the file ("The ML worker" and its sub-sections).
 
 ## Update history
 
-Last updated: 2026-10-04 (crop, speed effects, denoise, Performance settings, a persisted export queue with a quit guard, and the ML worker and CLI in the tarball — see "UX gaps" below). Previously 2026-10-04 (body landmarks, follow a body part, reframe on a body, zipped models, faces and voices in the preparation — see "Body landmarks" below). Previously 2026-10-04 (the "At a glance" block above, after polish pass 3). Previously 2026-10-04 (QA pass 2 over the wave 7–9 features and a showcase that shows them — see "QA pass 2" below). Previously 2026-10-04 (CI: clippy is fatal, the engine tests run on lavapipe with ffmpeg, the CLI and ML worker tests run too — see "CI" below). Previously 2026-10-04 (preview frames no longer leave the GPU: shared with GPUI through a patched GPUI, readback as the fallback — see "Preview frames shared with GPUI" under Perf). Previously 2026-10-04 (ML worker: VitTrack re-finding, Remove background, CUDA — see "The ML worker" below). Previously 2026-10-02 (**the UI is native now** — decision 0011. The Tauri
+Last updated: 2026-10-04 (release builds: a manual Release workflow with a .deb, AppImages that bundle FFmpeg, and experimental macOS and Windows jobs — see "Release builds" below). Previously 2026-10-04 (crop, speed effects, denoise, Performance settings, a persisted export queue with a quit guard, and the ML worker and CLI in the tarball — see "UX gaps" below). Previously 2026-10-04 (body landmarks, follow a body part, reframe on a body, zipped models, faces and voices in the preparation — see "Body landmarks" below). Previously 2026-10-04 (the "At a glance" block above, after polish pass 3). Previously 2026-10-04 (QA pass 2 over the wave 7–9 features and a showcase that shows them — see "QA pass 2" below). Previously 2026-10-04 (CI: clippy is fatal, the engine tests run on lavapipe with ffmpeg, the CLI and ML worker tests run too — see "CI" below). Previously 2026-10-04 (preview frames no longer leave the GPU: shared with GPUI through a patched GPUI, readback as the fallback — see "Preview frames shared with GPUI" under Perf). Previously 2026-10-04 (ML worker: VitTrack re-finding, Remove background, CUDA — see "The ML worker" below). Previously 2026-10-02 (**the UI is native now** — decision 0011. The Tauri
 shell and the React frontend are gone; the engine is `crates/engine`
 (`chukcut-engine`, no UI dependency) and the app is a GPUI window in
 `crates/app`. What the native app does today: import (dialog or command line),
@@ -83,6 +83,47 @@ forgets). Previously 2026-07-27: the preview stopped copying its frames — the
 JPEG encoder now reads a surface the compositor drew into, 2.7–2.9× on a whole
 frame; and earlier the same day, the attempt that went the other way round and
 the `vkDeviceWaitIdle` crash it found.
+
+## Release builds (2026-10-04, `agent/release`)
+
+`.github/workflows/release.yml`, started by hand only (Actions › Release ›
+Run workflow): a version, one checkbox per target, and "draft release" (off).
+Every result is a workflow artifact; with a version and the checkbox, also a
+**draft** release. `packaging/README.md` is the manual,
+`docs/decisions/0033-release-builds.md` the reasons.
+
+- **`.deb`** (`packaging/deb/build-deb.sh`), amd64 and arm64: system FFmpeg,
+  Depends from `dpkg-shlibdeps`, worker in `/usr/libexec/chukcut/`. 40 MB.
+  Checked: installed with apt into a clean `ubuntu:24.04` container,
+  `chukcut-cli --version` and `ml status` run and find the worker, removal
+  leaves nothing.
+- **AppImage** (`packaging/appimage/build-appimage.sh`), x86_64 and aarch64:
+  FFmpeg and 188 libraries bundled, 145 MB. libva, libdrm, Vulkan/GL/EGL/GBM,
+  Wayland, libstdc++ and NVIDIA stay on the system (the script fails if one
+  leaks in); libjack is bundled although linuxdeploy's list excludes it.
+  Checked: unpacked into `debian:trixie` and `fedora:42` containers with no
+  FFmpeg at all, it imports an H.264 file and exports an H.264 MP4 on
+  lavapipe; the editor shows its start screen on Xvfb. Needs glibc 2.39.
+- **aarch64**: not run (no ARM machine); the whole workspace type-checks for
+  `aarch64-unknown-linux-gnu` (clang, arm64 glibc sysroot, host headers).
+- **macOS `.dmg`, Windows `.zip` and installer**: jobs written, never run,
+  `continue-on-error`. The engine does not compile off Linux: `render::dmabuf`
+  is gated but `render::shared_frame`, `preview::{zerocopy,vasurface}`,
+  `export::hwframes` and `export::job` use it ungated, and the app draws with
+  the Linux-only `paint_external_buffer`. Decision 0033 lists the files.
+
+Traps:
+
+- **AppImageLauncher intercepts every AppImage**, through a binfmt handler
+  with the `F` flag, so also inside Docker containers and scripts, and can
+  stop to ask a question. Set `APPIMAGELAUNCHER_DISABLE=1`. CI runners do not
+  have it.
+- **`dpkg-shlibdeps` needs a `debian/control` with an `Architecture`
+  field** in its working directory, even an otherwise empty one.
+- **`ldconfig -p | awk '... exit'` under `set -o pipefail` kills the
+  script** with SIGPIPE (exit 141); let awk read to the end.
+- **The `.deb` and the AppImage come from the same Ubuntu 24.04 build**; an
+  older base would widen the AppImage's reach but brings FFmpeg 4.4.
 
 ## UX gaps (2026-10-04, `agent/ux`)
 

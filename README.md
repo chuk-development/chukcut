@@ -167,6 +167,39 @@ load; `CHUKCUT_DECODE=software|auto|vaapi|cuda` and
 
 ## Install
 
+Release builds come from the Release workflow on GitHub (started by hand;
+[`packaging/README.md`](packaging/README.md)). Download them from a
+release, or from the run's artifacts.
+
+### The .deb (Ubuntu 24.04, Mint 22; amd64 and arm64)
+
+```bash
+sudo apt install ./chukcut_<version>_amd64.deb
+```
+
+apt installs the FFmpeg, ALSA and X11 libraries it needs from the
+distribution. The package puts `chukcut` and `chukcut-cli` in `/usr/bin`, the
+AI worker in `/usr/libexec/chukcut/`, and the menu entry, icons and the
+`.chukcut` file type under `/usr/share`. It installs only where Ubuntu 24.04's
+library packages exist.
+
+### The AppImage (x86_64 and aarch64)
+
+```bash
+chmod +x chukcut-<version>-x86_64.AppImage
+./chukcut-<version>-x86_64.AppImage                 # the editor
+./chukcut-<version>-x86_64.AppImage --cli --help    # the command line
+```
+
+FFmpeg and the libraries it links are inside. The system must supply glibc
+2.39 or newer (Ubuntu 24.04, Debian 13, Fedora 40 and later), the Vulkan
+driver, and libva with libdrm (hardware decode loads the system's VAAPI
+driver). Without FUSE, add `--appimage-extract-and-run`. A symlink named
+`chukcut-cli` to the AppImage starts the command line.
+
+macOS and Windows builds are experimental and do not build yet
+([decision 0033](docs/decisions/0033-release-builds.md)).
+
 ### From source, with the install script
 
 From a clone of this repository:
@@ -207,7 +240,7 @@ is not.
 
 ### System packages
 
-Linux only. You need Rust (stable, from [rustup.rs](https://rustup.rs)) and
+Building needs Linux. You need Rust (stable, from [rustup.rs](https://rustup.rs)) and
 these packages:
 
 ```bash

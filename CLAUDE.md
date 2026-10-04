@@ -48,8 +48,13 @@ assets/icons/         app icons
   is what makes undo, autosave and validation uniform.
 - **Exact time.** Times are `i64` microseconds (`Micros`). Never floats, never
   frames, for edit math. See `docs/architecture/project-format.md`.
-- **Linux only.** NVIDIA and Intel come first, AMD is best effort. Do not add
-  code paths or dependencies for other platforms.
+- **Linux is the product.** NVIDIA and Intel come first, AMD is best effort.
+  The release workflow (`.github/workflows/release.yml`) also has macOS and
+  Windows jobs; they are experimental, allowed to fail, and do not build yet
+  (`docs/decisions/0033-release-builds.md`). Work toward them may only add
+  `#[cfg(target_os = "linux")]` gates with a fallback the other platforms
+  use; it must never add a platform branch that changes what Linux does, and
+  never a dependency Linux builds pull in.
 - **Never open a GPU or VAAPI device yourself.** `modules::gpu` owns one of
   each: `gpu::render_context()` and `gpu::vaapi_device()`. Concurrent Vulkan
   instances crash drivers. (GPUI has its own renderer device; that is the one
@@ -180,6 +185,11 @@ cargo check --workspace -j 4     # -j 4: full parallelism can OOM on 32 GB
 # The performance suite. ~1 min, generates its own media, refuses to report if
 # /proc/loadavg is above 4 (--force overrides; then do not quote the result).
 cargo run --release -p chukcut-engine --bin chukcut-bench -- --all
+
+# Packages (target/dist/). The Release workflow on GitHub runs the same
+# scripts, started by hand only; packaging/README.md.
+packaging/deb/build-deb.sh --no-build              # chukcut_<v>_<arch>.deb
+packaging/appimage/build-appimage.sh --no-build    # chukcut-<v>-<arch>.AppImage, FFmpeg bundled
 ```
 
 ## Things that will bite you
