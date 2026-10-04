@@ -140,6 +140,9 @@ pub struct Shell {
     /// Set once the user has agreed to leave; the close request that follows
     /// must not ask again.
     closing: bool,
+    /// The user said "Quit anyway" to a running export queue; the unsaved
+    /// changes guard and the close that follow must not ask about it again.
+    exports_confirmed: bool,
 }
 
 impl Shell {
@@ -167,6 +170,7 @@ impl Shell {
             focus: cx.focus_handle(),
             _events: None,
             closing: false,
+            exports_confirmed: false,
         };
         // Only on the start screen: a launch that opened a project or media
         // asked for that, not for a question about another session. The
@@ -485,10 +489,57 @@ impl Shell {
 
     /// Quit from the menu or Ctrl+Q.
     pub(crate) fn request_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.guard_exports(window, cx) {
+            return;
+        }
         match self.editor().cloned() {
             Some(editor) => editor.update(cx, |editor, cx| editor.request_quit(window, cx)),
             None => self.finish_and_quit(cx),
         }
+    }
+
+    /// Ask before quitting while the export queue runs. `true` when it asked:
+    /// the answer comes back through [`Self::request_quit`], with the
+    /// question already answered. The queue is kept in a file
+    /// (`export_queue_restore`), so quitting anyway loses nothing but the
+    /// running export's progress: it starts over after the restart.
+    fn guard_exports(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        use chukcut_engine::modules::export::commands as export_commands;
+        if self.exports_confirmed || !export_commands::export_queue_busy() {
+            return false;
+        }
+        let shell = cx.weak_entity();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let shell = shell.clone();
+            dialog
+                .w(px(460.0))
+                .title("Export running \u{2014} quit anyway?")
+                .child(div().text_sm().text_color(rgb(TEXT_DIM)).child(
+                    "The export queue is still working. It comes back the next time \
+                             chukcut starts, and the export that was running starts over.",
+                ))
+                .footer(
+                    DialogFooter::new()
+                        .child(
+                            Button::new("exports-quit-cancel")
+                                .label("Keep exporting")
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("exports-quit-anyway")
+                                .primary()
+                                .label("Quit anyway")
+                                .on_click(move |_, window, cx| {
+                                    window.close_dialog(cx);
+                                    let _ = shell.update(cx, |shell, cx| {
+                                        shell.exports_confirmed = true;
+                                        shell.request_quit(window, cx);
+                                    });
+                                }),
+                        ),
+                )
+        });
+        true
     }
 
     /// The window's close button. Answering `false` keeps the window open
@@ -496,6 +547,9 @@ impl Shell {
     fn should_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if self.closing {
             return true;
+        }
+        if self.guard_exports(window, cx) {
+            return false;
         }
         if let Some(editor) = self.editor().cloned() {
             if editor.read(cx).is_dirty() {
@@ -510,6 +564,7 @@ impl Shell {
     /// A clean exit: no working copy left behind to be taken for a crash.
     fn finish(&mut self) {
         self.closing = true;
+        chukcut_engine::modules::export::commands::export_shutdown();
         project_commands::project_close(&self.state, true);
     }
 

@@ -20,6 +20,9 @@ use editor::*;
 
 fn main() {
     chukcut_engine::init();
+    // The export queue outlives a restart: what was queued or running when
+    // the app last quit comes back, held until the user runs it.
+    chukcut_engine::modules::export::commands::export_queue_restore();
 
     let state = AppState::new();
     // Before the window: claims crash recovery, then opens or creates what

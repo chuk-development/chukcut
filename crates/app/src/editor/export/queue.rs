@@ -4,7 +4,10 @@
 
 use chukcut_engine::modules::export::{QueueEvent, QueueItem, QueueStatus};
 use gpui::assets::IconName as Lucide;
+use gpui::component::button::{Button, ButtonVariants as _};
 use gpui::component::progress::Progress;
+use gpui::component::Sizable as _;
+use gpui::AnyElement;
 
 use super::dialog::ExportDialog;
 use super::*;
@@ -12,6 +15,7 @@ use crate::ui::{Badge, IconButton, Tone};
 
 /// The queue as the dialog's right-hand side.
 pub(super) fn render_list(items: &[QueueItem], cx: &mut Context<ExportDialog>) -> impl IntoElement {
+    let banner = held_banner(items, cx);
     let count = items.len();
     let rows = items.iter().enumerate().map(|(index, item)| {
         let (tone, state) = match item.status {
@@ -186,9 +190,58 @@ pub(super) fn render_list(items: &[QueueItem], cx: &mut Context<ExportDialog>) -
             div()
                 .text_size(px(TEXT_LABEL))
                 .text_color(rgb(TEXT_MUTED))
-                .child("One export at a time, top to bottom. The queue keeps running when this dialog is closed."),
+                .child("One export at a time, top to bottom. The queue keeps running when this dialog is closed, and comes back after a restart."),
         )
+        .children(banner)
         .children(rows)
+}
+
+/// Exports a restart brought back wait for a click: one that crashed the
+/// app must not run again by itself at start-up.
+fn held_banner(items: &[QueueItem], cx: &mut Context<ExportDialog>) -> Option<AnyElement> {
+    if !export_commands::export_queue_held() {
+        return None;
+    }
+    let waiting = items
+        .iter()
+        .filter(|i| i.status == QueueStatus::Queued)
+        .count();
+    Some(
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.0))
+            .px(px(10.0))
+            .py(px(8.0))
+            .rounded(px(R_SM))
+            .bg(crate::theme::accent_soft())
+            .child(
+                div()
+                    .flex_1()
+                    .text_size(px(TEXT_LABEL))
+                    .text_color(rgb(TEXT))
+                    .child(held_line(waiting)),
+            )
+            .child(
+                Button::new("export-queue-resume")
+                    .small()
+                    .primary()
+                    .label("Run now")
+                    .on_click(cx.listener(|_, _, _, cx| {
+                        export_commands::export_queue_resume();
+                        cx.notify();
+                    })),
+            )
+            .into_any_element(),
+    )
+}
+
+fn held_line(waiting: usize) -> String {
+    match waiting {
+        1 => "1 export from the last session is waiting.".into(),
+        n => format!("{n} exports from the last session are waiting."),
+    }
 }
 
 /// What the editor knows about the queue between ticks.
@@ -224,6 +277,19 @@ impl Editor {
     /// Turn queue events into the status line and notifications. `true`
     /// when something changed on screen.
     pub(crate) fn poll_export_queue(&mut self) -> bool {
+        if !self.export_queue.subscribed && export_commands::export_queue_held() {
+            let waiting = export_commands::export_queue_list()
+                .iter()
+                .filter(|i| i.status == QueueStatus::Queued)
+                .count();
+            self.status = Some(
+                format!(
+                    "{} Run them from the export dialog's queue.",
+                    held_line(waiting)
+                )
+                .into(),
+            );
+        }
         self.export_queue.ensure_subscribed();
         let events: Vec<QueueEvent> = std::mem::take(&mut *self.export_queue.events.lock());
         if events.is_empty() {
@@ -332,6 +398,12 @@ mod tests {
             elapsed_seconds: None,
             error: Some("no disk".into()),
         }
+    }
+
+    #[test]
+    fn the_held_line_counts_its_exports() {
+        assert_eq!(held_line(1), "1 export from the last session is waiting.");
+        assert_eq!(held_line(3), "3 exports from the last session are waiting.");
     }
 
     #[test]

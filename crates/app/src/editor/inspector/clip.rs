@@ -116,10 +116,15 @@ impl Editor {
                     // Retouch reads faces over time: a video clip's.
                     let names: &[&'static str] = match kind {
                         ClipKind::Compound => &["Basic", "Mask"],
-                        ClipKind::Video => {
-                            &["Basic", "Remove background", "Mask", "Retouch", "Enhance"]
-                        }
-                        _ => &["Basic", "Remove background", "Mask", "Enhance"],
+                        ClipKind::Video => &[
+                            "Basic",
+                            crop::CROP,
+                            "Remove background",
+                            "Mask",
+                            "Retouch",
+                            "Enhance",
+                        ],
+                        _ => &["Basic", crop::CROP, "Remove background", "Mask", "Enhance"],
                     };
                     // A sub-tab chosen on a video clip ("Enhance") that this
                     // clip does not have (a compound clip) falls back to the
@@ -129,6 +134,7 @@ impl Editor {
                         .unwrap_or(names[0]);
                     let body = match current {
                         "Basic" => self.video_basic(&segment, kind, window, cx),
+                        crop::CROP => self.crop_tab(&segment, window, cx),
                         "Mask" => self.mask_tab(&segment, window, cx),
                         "Remove background" => self.remove_background_tab(&segment, window, cx),
                         "Retouch" => self.retouch_tab(&segment, window, cx),
@@ -155,7 +161,7 @@ impl Editor {
                             Some(self.speed_footer(&segment, cx)),
                         ),
                         "Curve" => (self.speed_curve(&segment, cx), None),
-                        _ => (not_yet(current), None),
+                        _ => (self.speed_effects_tab(&segment, cx), None),
                     };
                     (
                         Some(sub_tabs(SPEED, &names, current, cx).into_any_element()),
@@ -193,7 +199,7 @@ impl Editor {
                     _ => None,
                 }
             }
-            SPEED if sub(self, SPEED, "Standard") == "Standard" => self.flow_strip(&segment),
+            SPEED if sub(self, SPEED, "Standard") != "Curve" => self.flow_strip(&segment),
             _ => None,
         };
 
@@ -291,29 +297,155 @@ impl Editor {
         sections.push(blend);
         sections.extend(self.sticker_playback_section(segment, cx));
         // Footage tools; a title has no footage to stabilise or denoise.
-        let footage_tools: &[&str] = match kind {
-            ClipKind::Text => &[],
-            ClipKind::Compound => {
-                sections.extend(self.analysis_video_sections(segment, cx));
-                &[]
-            }
+        match kind {
+            ClipKind::Text => {}
+            ClipKind::Compound => sections.extend(self.analysis_video_sections(segment, cx)),
             _ => {
                 sections.extend(self.analysis_video_sections(segment, cx));
-                &["Enhance quality", "Reduce image noise", "Optical flow"]
+                sections.push(self.denoise_section(segment, window, cx));
+                // Both live on tabs of their own; here is the way there.
+                sections.push(self.jump_section(
+                    "Enhance quality",
+                    "AI upscaling, 2x or 4x, with its own bake.",
+                    "Open Video › Enhance",
+                    (VIDEO, Some(enhance::ENHANCE)),
+                    cx,
+                ));
+                if kind == ClipKind::Video {
+                    sections.push(self.jump_section(
+                        "Optical flow",
+                        "AI in-between frames for slow motion.",
+                        "Open Speed",
+                        (SPEED, Some("Standard")),
+                        cx,
+                    ));
+                }
             }
-        };
-        for &title in footage_tools {
-            sections.push(Section::missing(title, "Not in the engine yet").render(
-                true,
-                Vec::new(),
-                cx,
-            ));
         }
         div()
             .flex()
             .flex_col()
             .children(sections)
             .into_any_element()
+    }
+
+    /// "Reduce image noise": the `denoise` effect, switched on and tuned
+    /// from here. It is an ordinary effect, so it also shows (and can be
+    /// reordered) in the Effects tab, and the CLI's `fx` commands reach it.
+    fn denoise_section(
+        &mut self,
+        segment: &Segment,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        use chukcut_engine::modules::fx::{self, commands as fx_commands};
+        const TITLE: &str = "Reduce image noise";
+        let stack: Vec<_> = self
+            .project
+            .materials
+            .effects_of(segment)
+            .into_iter()
+            .cloned()
+            .collect();
+        let found = stack
+            .iter()
+            .enumerate()
+            .find(|(_, e)| e.kind == fx::catalog::DENOISE)
+            .map(|(i, e)| (i, e.clone()));
+        let on = found.as_ref().is_some_and(|(_, e)| e.enabled);
+        let mut rows = Vec::new();
+        if let Some((index, effect)) = found.as_ref().filter(|_| on) {
+            if let Some(desc) = fx::catalog::descriptor(fx::catalog::DENOISE) {
+                for spec in desc.params {
+                    rows.push(self.effect_param_row(segment, *index, effect, spec, window, cx));
+                }
+            }
+        }
+        let section = Section {
+            checkbox: Some(on),
+            on_check: Some(Box::new(move |this: &mut Editor, value: bool, cx| {
+                let Some(id) = this.selected.clone() else {
+                    return;
+                };
+                let existing = this.project.segment(&id).and_then(|(_, s)| {
+                    this.project
+                        .materials
+                        .effects_of(s)
+                        .into_iter()
+                        .find(|e| e.kind == fx::catalog::DENOISE)
+                        .map(|e| e.id.clone())
+                });
+                let result = match (value, existing) {
+                    // Off removes it rather than disabling it: a switched-off
+                    // effect left in the stack is clutter nobody asked for.
+                    (false, Some(effect)) => {
+                        fx_commands::fx_remove(&this.state, id, effect).map(|_| ())
+                    }
+                    (true, None) => {
+                        fx_commands::fx_add(&this.state, id, fx::catalog::DENOISE.into())
+                            .map(|_| ())
+                    }
+                    (true, Some(effect)) => {
+                        fx_commands::fx_set_enabled(&this.state, id, effect, true).map(|_| ())
+                    }
+                    (false, None) => Ok(()),
+                };
+                this.refresh(cx);
+                this.report(result, cx);
+            })),
+            on_reset: found.as_ref().map(|(_, effect)| {
+                let effect = effect.id.clone();
+                Box::new(move |this: &mut Editor, cx: &mut Context<Editor>| {
+                    let Some(id) = this.selected.clone() else {
+                        return;
+                    };
+                    let result = fx_commands::fx_reset(&this.state, id, effect.clone()).map(|_| ());
+                    this.refresh(cx);
+                    this.report(result, cx);
+                }) as ResetHandler
+            }),
+            ..Section::new(TITLE)
+        };
+        section.render(self.collapsed(TITLE), rows, cx)
+    }
+
+    /// A section that only points at the tab where a tool lives.
+    fn jump_section(
+        &self,
+        title: &'static str,
+        what: &'static str,
+        button: &'static str,
+        (tab, sub): (&'static str, Option<&'static str>),
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let row = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .text_size(px(TEXT_CAPTION))
+                    .text_color(rgb(TEXT_MUTED))
+                    .child(what),
+            )
+            .child(panel_button(
+                SharedString::from(format!("jump-{title}")),
+                button,
+                false,
+                true,
+                cx.listener(move |this, _, _, cx| {
+                    this.inspector.tab = Some(tab);
+                    if let Some(sub) = sub {
+                        this.inspector.sub_tab.insert(tab, sub);
+                    }
+                    cx.notify();
+                }),
+            ))
+            .into_any_element();
+        Section::new(title).render(self.collapsed(title), vec![row], cx)
     }
 
     /// "Sticker" for an animated image clip (Lottie, GIF, WebP): loop it, or
