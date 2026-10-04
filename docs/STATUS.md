@@ -7,7 +7,7 @@ person works, it belongs in this repository, not in a chat log.
 
 ## At a glance (2026-10-04)
 
-**State:** a working editor, not yet a daily driver. Waves 1–10 of
+**State:** a working editor, not yet a daily driver. Waves 1–11 of
 `docs/plan/build-out.md` are merged; that table lists every feature and what
 each wave left open. Users read `docs/manual/`; this file is for whoever
 works on the code.
@@ -24,7 +24,8 @@ works on the code.
   transitions, titles and the text animator, captions (whisper.cpp or a
   server), animated stickers, frame blending, motion blur, speed curves and
   speed effects.
-- **Local AI** (`chukcut-ml-worker`, ONNX Runtime, CUDA bundle or CPU):
+- **Local AI** (`chukcut-ml-worker`, ONNX Runtime, CUDA bundle with an optional
+  TensorRT "Fast" add-on, or CPU):
   VitTrack tracking, RVM / BiRefNet background removal, MobileSAM select
   object, matte-limited grade and effects, RIFE slow motion, LaMa remove
   object, Real-ESRGAN enhance, face mesh retouch and follow face, RTMPose
@@ -40,21 +41,22 @@ works on the code.
 AMD and Intel/hybrid laptops are not checked regularly; OpenVINO untested;
 the tarball (editor, ML worker and CLI) runs only on the build machine's
 FFmpeg major; AI on the CPU takes minutes per clip, BiRefNet
-refuses it; RIFE ~6 fps and BiRefNet ~2 fps at 1080p on an RTX 3060; voice
-isolation peaks at 7–8 GB in the worker; body keypoints have no fingers;
+refuses it; RIFE ~10 fps at 1080p and BiRefNet ~6 fps on an RTX 3060 in
+Fast mode (TensorRT, one preparation per model and frame size); body
+keypoints have no fingers;
 cloud integrations are untested against live services; a crop has no
 keyframes and the denoise is spatial only.
 
 **Before you change code:** read "Traps that have already cost time" and
 the CLAUDE.md non-negotiables. Judge performance from a release build only.
 
-**Newest sections first:** UX gaps, Body landmarks, Polish pass 3, CI, Colour AI, QA pass 2, Flaky
+**Newest sections first:** QA pass 3, UX gaps, Body landmarks, Polish pass 3, CI, Colour AI, QA pass 2, Flaky
 tests, Frame blending, Timelines and compound clips. The ML sections are at
 the end of the file ("The ML worker" and its sub-sections).
 
 ## Update history
 
-Last updated: 2026-10-04 (crop, speed effects, denoise, Performance settings, a persisted export queue with a quit guard, and the ML worker and CLI in the tarball — see "UX gaps" below). Previously 2026-10-04 (body landmarks, follow a body part, reframe on a body, zipped models, faces and voices in the preparation — see "Body landmarks" below). Previously 2026-10-04 (the "At a glance" block above, after polish pass 3). Previously 2026-10-04 (QA pass 2 over the wave 7–9 features and a showcase that shows them — see "QA pass 2" below). Previously 2026-10-04 (CI: clippy is fatal, the engine tests run on lavapipe with ffmpeg, the CLI and ML worker tests run too — see "CI" below). Previously 2026-10-04 (preview frames no longer leave the GPU: shared with GPUI through a patched GPUI, readback as the fallback — see "Preview frames shared with GPUI" under Perf). Previously 2026-10-04 (ML worker: VitTrack re-finding, Remove background, CUDA — see "The ML worker" below). Previously 2026-10-02 (**the UI is native now** — decision 0011. The Tauri
+Last updated: 2026-10-04 (QA pass 3 over waves 10–11: five fixes, the showcase extended — see "QA pass 3" below). Previously 2026-10-04 (crop, speed effects, denoise, Performance settings, a persisted export queue with a quit guard, and the ML worker and CLI in the tarball — see "UX gaps" below). Previously 2026-10-04 (body landmarks, follow a body part, reframe on a body, zipped models, faces and voices in the preparation — see "Body landmarks" below). Previously 2026-10-04 (the "At a glance" block above, after polish pass 3). Previously 2026-10-04 (QA pass 2 over the wave 7–9 features and a showcase that shows them — see "QA pass 2" below). Previously 2026-10-04 (CI: clippy is fatal, the engine tests run on lavapipe with ffmpeg, the CLI and ML worker tests run too — see "CI" below). Previously 2026-10-04 (preview frames no longer leave the GPU: shared with GPUI through a patched GPUI, readback as the fallback — see "Preview frames shared with GPUI" under Perf). Previously 2026-10-04 (ML worker: VitTrack re-finding, Remove background, CUDA — see "The ML worker" below). Previously 2026-10-02 (**the UI is native now** — decision 0011. The Tauri
 shell and the React frontend are gone; the engine is `crates/engine`
 (`chukcut-engine`, no UI dependency) and the app is a GPUI window in
 `crates/app`. What the native app does today: import (dialog or command line),
@@ -83,6 +85,44 @@ forgets). Previously 2026-07-27: the preview stopped copying its frames — the
 JPEG encoder now reads a surface the compositor drew into, 2.7–2.9× on a whole
 frame; and earlier the same day, the attempt that went the other way round and
 the `vkDeviceWaitIdle` crash it found.
+
+## QA pass 3 (2026-10-04, agent/qa3)
+
+Waves 10–11 end to end: remove object, enhance quality, auto adjust,
+colour match, grade presets, retouch, follow face, body landmarks, follow
+body part, reframe on people, isolate voice, Fast mode on TensorRT,
+template into an open project, slots inside compounds, prepare on open,
+stabilisation on compounds, crop, GPU denoise, speed effects, the decode
+and AI runtime pickers, the persisted export queue with the quit guard, and
+the installed layout. All render, undo in one step, survive save and
+reopen, and export what `render-frame` shows (mean 0.5–2.1 code values).
+Table, fixes and open lows: `docs/QA.md`, "QA pass 3". The showcase
+(`scripts/demo.sh`) now has a crop, Bullet time, auto adjust, colour match,
+remove object + enhance 4x on a small clip, isolate voice, and the Quick
+Cuts template put in as a real timeline.
+
+- **Trap, fixed: the landmark and body coverage counted a frame too many.**
+  It stepped the rounded period (33 333 µs) while `t < end`; a 1 s clip at
+  30 fps had 31 steps for 30 frames. Under `DONE_SHARE` (98 %) a clip
+  shorter than about 1.6 s was never done, and the preparation, every
+  export and every `face-landmarks` call analysed it again. The same
+  rounding drifted `walk_sequence` a frame (polish pass 3); the file walk
+  in `analysis/frames.rs` still steps the rounded period, but its
+  dedupe of repeated frames makes it visit every frame anyway.
+- **Trap, fixed: batch and MCP arguments with a wrong name were dropped.**
+  Serde ignores unknown fields, and the CLI's argument structs flatten
+  shared groups, which rules out `deny_unknown_fields`. `ops::parse` now
+  checks the keys against the published JSON schema (`known_arguments`).
+- **Measured (RTX 3060, Fast mode):** remove object on 90 frames of
+  1280×720 (click) 19 s; enhance 2x on 90 frames of 640×360 6 s; isolate
+  voice on 8 s 11.8 s with a worker peak of 1.47 GB; Hero moment on a
+  1080×1920 clip 113 s, of which 84 s prepared the TensorRT engine for
+  that size; the showcase script with `--media --export` 3 min 11 s.
+- **Installed layout:** `scripts/install.sh --no-build --bindir <prefix>/bin`
+  with `XDG_DATA_HOME` under `_scratch`: the installed app and CLI find the
+  worker beside them with `PATH=/usr/bin:/bin`, through a symlink on
+  `PATH`, and in `<prefix>/libexec/chukcut/`; `--uninstall` removes all
+  three.
 
 ## UX gaps (2026-10-04, `agent/ux`)
 

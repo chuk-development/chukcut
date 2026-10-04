@@ -12,11 +12,12 @@
 # the script does not change your settings, presets or recent files.
 # docs/demo.md explains the result.
 #
-# The ML steps (optical-flow slow motion, select object) use the models and
-# the GPU runtime you already installed (`chukcut-cli ml install gpu`): the
-# script links your ML folder (~/.cache/chukcut/ml, or $CHUKCUT_DEMO_ML_CACHE)
-# into its own cache and downloads nothing. Without them it uses frame
-# blending instead of optical flow, skips select object and says so.
+# The ML steps (optical-flow slow motion, select object, remove object,
+# enhance quality, isolate voice) use the models and the GPU runtime you
+# already installed (`chukcut-cli ml install gpu`): the script links your ML
+# folder (~/.cache/chukcut/ml, or $CHUKCUT_DEMO_ML_CACHE) into its own cache
+# and downloads nothing. Without them it uses frame blending instead of
+# optical flow, skips the other ML steps and says so.
 set -euo pipefail
 
 root=$(CDPATH="" cd -- "$(dirname "$0")/.." && pwd)
@@ -114,6 +115,14 @@ make_media() {
      -map "[v]" -map 2:a -filter:a "volume=0.05" \
      -c:v libx264 -preset veryfast -pix_fmt yuv420p -c:a aac -shortest "$media/07-comet.mp4"
 
+  # A small, blocky clip with a white "watermark" box in the top right: the
+  # remove-object and enhance-quality clip. 270x480 at a high CRF, so 4x
+  # enhance brings it to the canvas size and shows what the model cleans.
+  ff -f lavfi -i "mandelbrot=s=270x480:rate=$R:start_scale=0.4:end_scale=0.1:end_pts=60:inner=convergence" \
+     -f lavfi -i "$tone:duration=2" -filter:a "volume=0.05" \
+     -vf "drawbox=x=180:y=20:w=70:h=36:color=white@1:t=fill" -t 2 \
+     -c:v libx264 -preset veryfast -crf 38 -pix_fmt yuv420p -c:a aac -shortest "$media/08-lowres.mp4"
+
   # A voiceover from flite (offline speech synthesis in FFmpeg).
   local words="Welcome to chukcut. A native video editor for Linux. \
 Cut, grade and track your clips. Add titles, captions and stickers. \
@@ -183,7 +192,7 @@ Add titles, captions and stickers.
 Then export straight to TikTok.
 SRT
 
-if [[ $regen_media == 1 || ! -f $media/teal-orange.cube || ! -f $media/07-comet.mp4 || ! -f $media/pulse.gif ]]; then
+if [[ $regen_media == 1 || ! -f $media/teal-orange.cube || ! -f $media/07-comet.mp4 || ! -f $media/pulse.gif || ! -f $media/08-lowres.mp4 ]]; then
   make_media
 fi
 
@@ -217,7 +226,8 @@ c new "$p" --name "chukcut showcase" --width 1080 --height 1920 --fps 30 --force
 
 # The main story on lane 0, and the rest of the media in the library.
 c import "$p" "$media/01-gradients.mp4" "$media/02-fractal.mp4" \
-  "$media/03-pattern.mp4" "$media/04-ball.mp4" "$media/07-comet.mp4" --append
+  "$media/03-pattern.mp4" "$media/04-ball.mp4" "$media/07-comet.mp4" \
+  "$media/08-lowres.mp4" --append
 c import "$p" "$media/05-greenscreen.mp4" "$media/06-life.mp4" \
   "$media/voice.wav" "$media/music.wav" "$media/sticker.png"
 
@@ -226,16 +236,22 @@ frac=$(cj '.tracks[0].clips[1].id' info "$p")
 patt=$(cj '.tracks[0].clips[2].id' info "$p")
 ball=$(cj '.tracks[0].clips[3].id' info "$p")
 comet=$(cj '.tracks[0].clips[4].id' info "$p")
+low=$(cj '.tracks[0].clips[5].id' info "$p")
 
 # Cut: 4 s, 4.5 s, 3 s of source for the ramp, then the ball clip.
 c trim "$p" "$grad" --duration 4 --ripple
 c trim "$p" "$frac" --duration 4.5 --ripple
 c trim "$p" "$patt" --duration 3 --ripple
 
-# Speed ramp: fast, a slow-motion hold in the middle, fast again.
-c speed-curve "$p" "$patt" --preset bullet
-# Frame blending: each frame of the slow middle mixes its two source frames.
-c frame-blend "$p" "$patt" --mode blend
+# A speed effect: a ramp and the frame smoothing that suits it, one step.
+# Bullet time is fast, a slow-motion hold in the middle, fast again, with
+# optical flow; without the model, Smooth montage (frame blending).
+if ml_ready rife; then
+  c speed-effect "$p" "$patt" --effect bullet
+else
+  c speed-effect "$p" "$patt" --effect montage
+  skipped+=("Bullet time on the pattern (Smooth montage instead)")
+fi
 
 # Smooth slow motion on the comet: half speed, and RIFE makes the frames in
 # between (optical flow). Without the model and a GPU runtime, frame
@@ -253,6 +269,21 @@ c transition add "$p" "$frac" --kind gl:crosswarp --duration 0.8
 c transition add "$p" "$patt" --kind seamless:zoom_in --duration 0.6
 c transition add "$p" "$ball" --kind dissolve --duration 0.5
 
+# The small clip at the end: the watermark box removed (LaMa paints over a
+# box, the same place in every frame), then enhanced 4x (Real-ESRGAN) from
+# 270x480 to 1080x1920. The object is removed first, then the result is
+# enhanced.
+if ml_ready lama; then
+  c remove-object "$p" "$low" --box 0.65,0.03,0.3,0.1
+else
+  skipped+=("remove object (the watermark box) on the last clip")
+fi
+if ml_ready realesr-general-x4v3; then
+  c enhance-quality "$p" "$low" --scale 4
+else
+  skipped+=("enhance quality 4x on the last clip")
+fi
+
 end=$(cj '.duration' info "$p")
 
 # ---- Sound: a voiceover, a music bed that ducks under it, captions.
@@ -260,6 +291,12 @@ voice=$(cj '.clip.id' place "$p" voice.wav --at 0.5)
 music=$(cj '.clip.id' place "$p" music.wav --at 0 --duration "$end")
 c normalize "$p" --clip "$voice" --target -14
 c audio-effect add "$p" "$voice" eq3 --set low=-3 --set high=2
+# Isolate voice (HTDemucs) keeps the speech and drops the room tone.
+if ml_ready htdemucs-vocals; then
+  c isolate-voice "$p" "$voice" --keep voice
+else
+  skipped+=("isolate voice on the voiceover")
+fi
 c duck "$p" "$music" --depth 10
 c audio-effect add "$p" "$music" reverb
 
@@ -273,6 +310,10 @@ c grade "$p" "$frac" --set exposure=0.1 --set contrast=1.15 --set saturation=1.2
   --set temperature=0.15 --set vignette_amount=0.35 \
   --lut "$media/teal-orange.cube" --lut-intensity 0.8
 c curve "$p" "$frac" --point 0,0 --point 0.25,0.2 --point 0.75,0.82 --point 1,1
+# Auto adjust balances the opener from its own pixels; colour match gives
+# the comet the fractal's teal-and-orange look (no model, a few seconds each).
+c auto-adjust "$p" "$grad" --amount 0.6
+c colour-match "$p" "$comet" --to "$frac"
 c effect add "$p" glow --clip "$grad" --set intensity=45 --set threshold=75
 c effect add "$p" film_grain --clip "$frac" --set amount=25
 # A punch-in zoom on the fractal, eased over its first second.
@@ -282,9 +323,7 @@ ball_start=$(cj '.tracks[0].clips[3].start' info "$p")
 c effect add "$p" shake --at "$(echo "$ball_start - 0.2" | bc)" --duration 0.6 --set amplitude=45
 
 # ---- Titles: a template (style + animation), then a styled title animated
-# word by word. `title add` has no --track and the CLI cannot add a text
-# lane, so two titles cannot overlap in time; the second one follows the
-# first (docs/QA.md).
+# word by word, one after the other.
 head=$(cj '.clip.id' title template "$p" pop-headline --at 0.2 --text "chukcut")
 c trim "$p" "$head" --duration 1.9
 c title set "$p" "$head" --y 0.45
@@ -306,6 +345,8 @@ c keyframe "$p" "$stk" --property rotation --at 9 --value 15 --easing ease_in_ou
 # blended with Screen.
 pip=$(cj '.clip.id' place "$p" 06-life.mp4 --at 4.5 --duration 3.5)
 c layout pip "$p" "$pip" --corner top_left
+# Crop it to a square from the middle: the cropped part fills the frame.
+c crop "$p" "$pip" --left 0.05 --right 0.95 --top 0.24 --bottom 0.76
 c blend "$p" "$pip" screen --opacity 0.95
 
 # ---- Green screen: key the green out, then a rounded rectangle mask as a
@@ -360,20 +401,19 @@ c marker add "$p" --at 4 --label "Grade + LUT" --color purple
 c marker add "$p" --at 8.5 --label "Speed ramp" --color orange
 c marker add "$p" --at "$ball_start" --label "Tracking" --color red
 c marker add "$p" --at "$comet_start" --label "Slow motion" --color blue
+c marker add "$p" --at "$(cj '.tracks[0].clips[5].start' info "$p")" --label "Remove + enhance" --color yellow
 
 # ---- A second timeline, "Template cut", made from the Quick Cuts template:
-# six slots cut to the beat with its own titles, transitions and music. A
-# template writes a project of its own, so it is built and rendered next to
-# the showcase and its video is put on the second timeline.
-tpl=$out/template-part.chukcut
-c template apply "$tpl" quick-cuts "$media/01-gradients.mp4" "$media/02-fractal.mp4" \
+# six slots cut to the beat with its own titles, transitions and music, put
+# into the showcase as a timeline of its own (one undo step) and opened. Its
+# clips stay editable there, and `template slots` lists its slots.
+c template apply --into "$p" quick-cuts "$media/01-gradients.mp4" "$media/02-fractal.mp4" \
   "$media/03-pattern.mp4" "$media/04-ball.mp4" "$media/05-greenscreen.mp4" \
-  "$media/06-life.mp4" --name "Quick Cuts section" --force
-c export "$tpl" "$media/template-part.mp4"
-c timeline new "$p" --name "Template cut"
-c import "$p" "$media/template-part.mp4" --append
+  "$media/06-life.mp4" --as timeline --name "Template cut"
+# A label of our own over the template's titles, on a text lane of its own.
+c lane-add "$p" --kind text --name "Label"
 c title add "$p" "made from a template" --at 0.2 --duration 2.5 --size 56 \
-  --color "#ffffff" --bold true --background "#00000099" --y -0.7
+  --color "#ffffff" --bold true --background "#00000099" --y -0.7 --track "Label"
 # Back to the main timeline: the app opens on it and the export renders it.
 c timeline switch "$p" 0
 
