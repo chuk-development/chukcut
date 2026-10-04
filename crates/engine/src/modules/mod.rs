@@ -26,6 +26,7 @@ pub mod matting;
 pub mod media;
 pub mod ml;
 pub mod motion;
+pub mod prepare;
 pub mod preview;
 pub mod project;
 pub mod proxy;

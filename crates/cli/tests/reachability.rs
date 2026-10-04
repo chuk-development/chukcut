@@ -62,6 +62,10 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ("enhance::enhance_paint", "a brush on the player in the app; remove_object --stroke takes the stroke in source fractions"),
     ("enhance::enhance_cache_info", "Settings, AI acceleration in the app"),
     ("enhance::enhance_cache_clear", "Settings, AI acceleration in the app; a CLI run must not delete what a running app shows"),
+    ("prepare::prepare_start", "the app's open path, baking what an opened project lacks in the background; a CLI export bakes what it needs first (matting_ensure, speed_flow_ensure, enhance_ensure)"),
+    ("prepare::prepare_status", "the app's status line for prepare_start"),
+    ("prepare::prepare_stop", "the Stop on the app's status line for prepare_start"),
+    ("prepare::prepare_missing", "the count behind prepare_status, for tests and the app; a CLI export bakes what it needs first"),
     ("compositing::compositing_set_background", "the setting alone; remove_background also bakes the matte"),
     ("ml::gpu_vendors", "part of ml status, which reports it"),
     // The live preview, playback and the app's own windows.

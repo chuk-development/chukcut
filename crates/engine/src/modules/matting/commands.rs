@@ -411,6 +411,13 @@ pub fn matting_bake(state: &Arc<AppState>, segment_id: String) -> Result<Option<
             .ok_or("the clip is no longer on the timeline")?;
         job_for(project, segment)
     })??;
+    start_job(job, segment_id)
+}
+
+/// [`matting_bake`] for a job already worked out: a clip inside a compound
+/// clip, which is not on the open timeline's lanes, or a clip of a project
+/// being prepared after it opened (`modules::prepare`).
+pub(crate) fn start_job(job: BakeJob, segment_id: String) -> Result<Option<u64>, String> {
     // A setting this build cannot bake fails now, in words, not on the
     // bake's thread.
     job.kind()?;
@@ -495,7 +502,7 @@ pub fn matting_coverage(state: &Arc<AppState>, segment_id: String) -> Result<Cov
     coverage(&job)
 }
 
-fn coverage(job: &BakeJob) -> Result<Coverage, String> {
+pub(crate) fn coverage(job: &BakeJob) -> Result<Coverage, String> {
     let times = job.best()?.map(|(_, times)| times).unwrap_or_default();
     let total = job.frame_times(job.range.0, job.range.1).len() as u32;
     let missing = job.missing(&times).len() as u32;
@@ -603,7 +610,9 @@ pub fn matting_queue_missing(state: &Arc<AppState>) -> Result<Vec<u64>, String> 
         {
             continue;
         }
-        match matting_bake(state, segment_id) {
+        // By the job, not the clip id: a clip inside a compound clip is not
+        // on the open timeline, and `matting_bake` would not find it.
+        match start_job(job, segment_id) {
             Ok(Some(job)) => started.push(job),
             Ok(None) => {}
             Err(error) => tracing::debug!(%error, "no background bake"),
