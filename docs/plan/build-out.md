@@ -76,24 +76,24 @@ column current.
 | 8 | compound2 | compound clip gaps: nested-render cache, prefetch, audio of compound volume/speed, flatten at speed, timeline prune, real filmstrips | merged — nested-render cache, prefetch + blend inside compounds, compound volume/speed in both mixers, flatten at any speed, timeline prune, real filmstrips; open: scene/beat/reframe inside compounds, compound own audio effects, stale nested frame after LUT file edit |
 | 8 | polish2 | template follow-ups (relocatable media, split slot marker, Replace media menu, hide placeholders) + QA lows (play/pause tooltip, snapping, track path, scene button) | merged — template media copied per project, split keeps slot on the left half, Replace media in clip menu, snapping slides flush, CLI paths absolute; open: play/pause tooltip + track path not checked on screen |
 | 8 | ml2 | CUDA runtime pack out of the box, SAM click-to-select object masks, BiRefNet object removal, matte cache limits | running (agent/ml2) |
-| 8 | gputex | shared GPU texture between engine and GPUI, readback as fallback (backlog 7) | running (agent/gputex) |
+| 8 | gputex | shared GPU texture between engine and GPUI, readback as fallback (backlog 7) | merged — shared preview frames via exported buffer + patched gpui-pre in `vendor/` (4K UI thread 10–15 ms → 0.05 ms, CPU ~100% → 14–39%); readback fallback; open: Intel/hybrid laptops unchecked, export dialog cover picture black (pre-existing) |
 | 8 | stable | flaky tests (templates LUT write race, lavapipe playback count), deterministic pitch-preserving audio on speed curves | running (agent/stable) |
 
 ## Backlog for the next waves (lead picks from the top)
 
 1. **[merged]** **Masks, chroma key, blend modes** — shape masks per clip (rect, ellipse, linear, mirror, heart/star, feather, invert, keyframable), green-screen chroma key with spill suppression, the inspector's blend modes (drawn disabled today). CapCut has all three.
 2. **[merged]** **Audio tools** — voiceover recording (cpal input), EQ / compressor / reverb per clip, auto-ducking music under speech (uses the speech/VAD work), pitch-preserving time stretch (signalsmith-stretch or similar permissive lib) so speed-curved clips keep their sound.
-3. **[stopped by the owner mid-work, 2026-10-03: agent/mlworker has partial, uncommitted work in /mnt/data/git/chukcut-mlworker]** **ML worker process** (docs/research/ml-features.md architecture): `chukcut-ml-worker` on `ort` with CUDA/OpenVINO EPs; first models: YuNet faces (auto-reframe), VitTrack (tracking T2), RVM or BiRefNet-lite person segmentation (local background removal; check licences — GPL is fine for us).
+3. **[merged]** **ML worker process** (docs/research/ml-features.md architecture): `chukcut-ml-worker` on `ort` with CUDA/OpenVINO EPs; first models: YuNet faces (auto-reframe), VitTrack (tracking T2), RVM or BiRefNet-lite person segmentation (local background removal; check licences — GPL is fine for us).
 4. **[merged]** **Export presets and queue** (+ full CLI/MCP coverage; open: quit guard while the queue runs, queue not persisted) — TikTok/Reels/Shorts/YouTube presets, a queue, remember last settings, fix the size estimate; batch export from the CLI.
-5. **Compound clips / nested sequences**, multi-timeline projects (CapCut "Timeline 01").
-6. **Animated stickers** (Lottie via velato on the shared wgpu device) and Noto animated emoji.
-7. **Shared GPU texture with GPUI** — patch gpui-pre per docs/research/gpui-shared-texture.md.
-8. **Frame blending / motion blur** for slow sections and speed ramps (two-frame cache in the provider).
-9. **Keyboard shortcut editor** and presets (CapCut / Premiere layouts).
-10. **Project templates** (CapCut-style templates: placeholders for media + preset text/animations).
+5. **[merged]** **Compound clips / nested sequences**, multi-timeline projects (CapCut "Timeline 01").
+6. **[merged]** **Animated stickers** (Lottie via velato on the shared wgpu device) and Noto animated emoji.
+7. **[merged]** **Shared GPU texture with GPUI** — patch gpui-pre per docs/research/gpui-shared-texture.md.
+8. **[merged]** **Frame blending / motion blur** for slow sections and speed ramps (two-frame cache in the provider).
+9. **[merged]** **Keyboard shortcut editor** and presets (CapCut / Premiere layouts).
+10. **[merged]** **Project templates** (CapCut-style templates: placeholders for media + preset text/animations).
 11. **Intel/VAAPI verification** on the owner's laptop: run `tests/every_card.rs` and the player bench there.
 12. **[merged]** **Premultiply in the remaining straight-alpha pipelines** (also `transitions/library/mod.rs`; fx over-draw was latent; open: check `effects/graph.rs:735`'s data-driven blend) — `transitions/render.rs:268` and `fx/render.rs:468` still use `ALPHA_BLENDING`; on NVIDIA an 8-bit sRGB target rounds source alpha to 1/255 before blending (found and fixed for the quad pipeline in d9d86dd: soft mask edges and low opacities were drawn in steps).
-13. **Run GPU tests on both adapters** — `test_context()` takes the default adapter. Agents testing on lavapipe missed the NVIDIA alpha rounding; run engine GPU tests once on the real GPU and once with `VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json`.
+13. **[merged]** **Run GPU tests on both adapters** — `test_context()` takes the default adapter. Agents testing on lavapipe missed the NVIDIA alpha rounding; run engine GPU tests once on the real GPU and once with `VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json`.
 
 **Paused 2026-10-03 by the owner:** all agents and builds stopped because builds filled the SSD (4 GB free). Before restarting: every agent must share one CARGO_TARGET_DIR or delete its target/ after its branch merges; check `df -h /` first.
 
