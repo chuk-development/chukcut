@@ -3817,6 +3817,92 @@ release worker, load 9–11 from other agents' builds).
   while a blur animation runs; one matte per clip for both grade and
   effects; a 4K clip's in-between frames are made at 1080p.
 
+### Remove object and enhance quality (2026-10-04, agent/ml4)
+
+Decision 0029. Measured on the RTX 3060 (driver 610.57, CUDA 13 bundle,
+release worker and release CLI, load 6–7 from other agents' builds).
+
+- **Remove object** (Video › Enhance › Remove object; CLI/MCP
+  `remove-object`): LaMa (big-lama, Apache-2.0, Carve's fp32 export,
+  208 MB) paints over an object in every frame. What to remove: a click on
+  the player (Select on player; MobileSAM + VitTrack carry it over the
+  clip, the Select object mattes are shared), strokes painted on the player
+  (Paint on player, brush S/M/L) and boxes (CLI), the same place in every
+  frame. The fill, cheapest first: the background seen in earlier frames
+  of a still shot (memory), the background seen anywhere in the still
+  stretch for a selected object (a clean plate from a first pass), LaMa on
+  a square crop around what is left with a soft edge, mixed half and half
+  with the previous frame's fill while the camera holds still.
+- **Enhance quality** (Video › Enhance › Enhance quality: Off / 2x / 4x;
+  CLI/MCP `enhance-quality`): Real-ESRGAN general x4v3 (BSD-3-Clause, 5 MB)
+  remakes every frame, tiled in equal parts of at most 768 px with 16 px of
+  context, 2x by box-averaging the 4x picture; at most 3840 px out, for
+  sources up to 1920 px (larger ones are refused in words).
+- **Frames** are JPEG q95 4:4:4 per source frame in
+  `~/.cache/chukcut/enhance/<digest>-<ops>-<signature>-<provider>-<long side>/`,
+  in the cache limit, kept for the open project by a trim. The compositor
+  draws a made frame in place of the decoded one (placed by the source's
+  size; libjpeg-turbo decodes it at a half, quarter or eighth when that
+  still covers the render), the decoded one until it is made; edits queue
+  missing frames (`enhance_queue_missing`); an export bakes first and fails
+  in words if it cannot. Worker protocol 5 (`inpaint`, `upscale`).
+- **Per frame, through the worker** (`chukcut-cli ml bench`, release):
+
+  | Model | Input | CUDA | CPU (4 threads) |
+  |---|---|---|---|
+  | LaMa | 512² crop | 160 ms | 1.96 s |
+  | Real-ESRGAN x4v3 | 320×180 | 29.5 ms | 357 ms |
+  | Real-ESRGAN x4v3 | 640×360 | 121 ms | 1.99 s |
+  | Real-ESRGAN x4v3 | 960×540 | 284 ms | — |
+  | Real-ESRGAN x4v3 | 1280×720 | 520 ms | — |
+  | Real-ESRGAN x4v3 | 1920×1080 | 1.23 s | (~16 s, by its per-pixel cost) |
+
+- **End to end** (3 s clips at 30 fps, generated footage, release CLI,
+  CUDA):
+
+  | Clip | What | Time | Notes |
+  |---|---|---|---|
+  | 1280×720, a box moving over a still picture | remove, one click | 19.2 s | selection pass + plate; LaMa never ran |
+  | 1920×1080 testsrc2, a static white logo | remove, one box | 27.2 s | LaMa every frame, 167 ms each |
+  | 640×360, crf 35 | enhance 2x (1280×720) | 14.2 s | 146 ms a frame in the worker |
+  | 640×360, crf 35 | enhance 4x (2560×1440) | 14.1 s | |
+  | 1280×720, 1 s | enhance 2x (2560×1440) | 18.5 s | 574 ms a frame; 738 ms before the box path for 2x |
+
+  Disk on this synthetic footage: 0.12 MB a frame at 720p, 0.23 MB at
+  1080p, 0.38 MB at 2560×1440; real footage compresses worse (expect 1–3 MB
+  at 4K).
+- **CPU**: both run there. The bake says what it will take before it
+  starts (Inspector, `estimate` in the CLI's answer) and while it runs ("The
+  AI runs on the CPU here: N frames, about M min …"). A 320×180 clip
+  enhanced 2x took 31 s for 60 frames (debug CLI; the estimate said 25 s);
+  a box removed from it took 123 s (1.92 s a frame in LaMa; the warning
+  said "about 2 min").
+- **Verified** (`tests/enhance.rs`, RTX 3060 and lavapipe): coverage and
+  estimate; a made frame (even 2x larger) fills exactly the clip's place in
+  the preview's render and in an NV12 export that needs no worker, a
+  missing one draws the decoded frame; a real click removal of a moving
+  square on a still background leaves it within 12 code values of the
+  background in every frame and the rest within 3; a real 2x bake makes
+  every frame at 640×360 with the square and the background where they
+  were. CLI: `tests/enhance.rs` (settings, usage errors). App checked on
+  Xvfb + lavapipe: Select on player (the dot, "Selecting the object… 7 of
+  90", Stop), Paint on player (the brush drawn while painting, the object
+  gone after the bake), Enhance 2x ("Made at 1280×720", estimate), Remove
+  object off.
+- **Traps found:** OpenCV Zoo's LaMa (93 MB, block-quantized) runs on ORT's
+  CPU but its `DequantizeLinear` nodes are refused by the CUDA provider
+  ("Unsupported quantization type"); the fp32 file is twice the size and
+  runs everywhere. Fixed 512 px Real-ESRGAN tiles read 70 % more pixels than
+  a 1080p frame has; equal parts read 11 % more. A click on an object that
+  touches a same-coloured area selects both (SAM does what it is asked):
+  test footage with a red square on a red bar removed the bar.
+- **Rough:** a static mask never sees behind itself, so a logo is always
+  LaMa's invention (steady in a still shot, shimmering in a moving one); a
+  moving camera gets no memory, plate or smoothing; LaMa runs fp32 on the
+  CUDA provider (TensorRT or fp16 next); a remade clip with optical flow on
+  blends instead; the inspector's progress sits below the two sections and
+  needs a scroll on a short window.
+
 ## The research
 
 The documents under `docs/research/` were produced by dedicated agents and are

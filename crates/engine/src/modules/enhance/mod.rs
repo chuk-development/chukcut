@@ -389,9 +389,9 @@ fn even(v: u32) -> u32 {
 /// a running bake reports the pace it sees.
 pub fn seconds_per_frame(chain: &Chain, source: (u32, u32)) -> (f64, f64) {
     const LAMA_GPU: f64 = 0.16;
-    const LAMA_CPU: f64 = 1.9;
+    const LAMA_CPU: f64 = 2.0;
     const ESRGAN_GPU_PER_MP: f64 = 0.6;
-    const ESRGAN_CPU_PER_MP: f64 = 7.1;
+    const ESRGAN_CPU_PER_MP: f64 = 8.0;
     const OVERHEAD_PER_MP: f64 = 0.02;
     let (w, h) = chain.decode_size(source.0, source.1);
     let mp = w as f64 * h as f64 / 1e6;

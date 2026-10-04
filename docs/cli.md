@@ -982,6 +982,60 @@ chukcut-cli select-object reel.chukcut 0:0 --at 2.5 --point 0.42,0.55
 chukcut-cli select-object reel.chukcut 1:0 --at 1 --point 0.5,0.5 --exclude 0.5,0.2 --invert
 ```
 
+#### `remove-object PROJECT CLIP [--at TIME --point X,Y …] [--exclude X,Y …] [--box X,Y,W,H …] [--stroke "X,Y X,Y …" …] [--radius R] [--grow G] [--add] [--off] [--no-bake]`
+
+Removes an object from every frame of a video clip ("Remove object" in the
+app, Video › Enhance): LaMa (Apache-2.0, 208 MB) paints over it, in the ML
+worker, on this machine. Say what to remove in any mix of three ways:
+
+- **Clicks**: `--at` (the timeline time of the frame) and `--point` on the
+  object, canvas fractions as `select-object` takes them, `--exclude` on a
+  part to keep. MobileSAM selects it on that frame and it is followed over
+  the clip as `select-object` follows it (those mattes are shared).
+- **Boxes**: `--box x,y,width,height`, fractions of the source picture
+  (top-left origin), the same place in every frame: a logo, a watermark.
+- **Strokes**: `--stroke "x,y x,y …"`, source fractions, with `--radius`
+  (a fraction of the shorter side, default 0.02), the same place in every
+  frame.
+
+Together they replace what the clip removed before; `--add` adds them
+instead. `--grow` (default 0.012 of the shorter side) is how far the mask
+reaches past the object, for its soft edge and a little of its shadow; given
+alone it regrows the clip's mask. `--off` switches it off. Without any of
+these it says what the clip has, how many frames are made and what the rest
+would take on a GPU and on the CPU (`estimate`).
+
+The setting is one undo step; the command then bakes the frames into the
+cache (`~/.cache/chukcut/enhance`) and waits, with progress and, on the CPU,
+how long the rest will take. An export bakes what is missing first. How the
+fill is made: LaMa runs on a crop around the mask; where the object moves
+on a still shot, the background the clip shows in other frames is used
+instead (no model at all for a moving object on a locked-off shot); the
+fill is steadied from frame to frame while the camera holds still.
+
+```bash
+chukcut-cli remove-object reel.chukcut 0:0 --at 2.5 --point 0.42,0.55
+chukcut-cli remove-object reel.chukcut 0:0 --box 0.82,0.03,0.15,0.08
+chukcut-cli remove-object reel.chukcut 0:0 --stroke "0.1,0.9 0.3,0.92" --radius 0.03 --add
+```
+
+#### `enhance-quality PROJECT CLIP [--scale 2|4|off] [--no-bake]`
+
+Makes a video clip's picture larger and cleaner ("Enhance quality" in the
+app, Video › Enhance): Real-ESRGAN general x4v3 (BSD-3-Clause, 5 MB)
+remakes every frame at 2x or 4x, at most 3840 px on the long side, and
+takes out blur, noise and compression blocks on the way. For footage up to
+1920 px; larger clips are refused in words. The preview and the export both
+use the made frames. One undo step, then a bake as `remove-object` does
+(the answer says what it will take; on the CPU a 1080p frame is about 15 s).
+With `remove-object` on the same clip, the object is removed first and the
+result enhanced. `--scale off` switches it off; without `--scale` it says
+what the clip has.
+
+```bash
+chukcut-cli enhance-quality old-clip.chukcut 0:0 --scale 2
+```
+
 #### `apply-to PROJECT CLIP [--grade whole|subject|background] [--effects whole|subject|background]`
 
 Limits a clip's colour grade (everything in the app's Adjust tab: the
@@ -1512,7 +1566,7 @@ licences. `install ITEM`, `remove ITEM`, `bench MODEL [--size WxH]
 [--iterations N]`.
 
 An ITEM is a model (`yunet`, `vittrack`, `rvm`, `birefnet-lite`,
-`mobilesam`), a runtime pack (`runtime:cpu`, `runtime:cuda13`,
+`mobilesam`, `rife`, `lama`, `realesr-general-x4v3`), a runtime pack (`runtime:cpu`, `runtime:cuda13`,
 `runtime:cudnn9-cu12`, …) or a **GPU bundle**: `gpu` installs the one for
 this machine's NVIDIA driver, `gpu:nvidia-cu13` (driver 580 or newer,
 1.3 GB) or `gpu:nvidia-cu12` (driver 525 or newer, 1.9 GB) a named one. A
@@ -1531,6 +1585,8 @@ chukcut-cli ml status --probe
 chukcut-cli ml install gpu
 chukcut-cli ml bench rvm --size 540x960
 chukcut-cli ml bench mobilesam --size 960x540
+chukcut-cli ml bench lama --size 512x512
+chukcut-cli ml bench realesr-general-x4v3 --size 1280x720
 ```
 
 ### Undo and redo
@@ -1646,9 +1702,9 @@ Tools that send data to a service outside this machine have
 `openWorldHint`: `captions_transcribe`, `translate_captions`, `tts`,
 `stock_kinds`, `stock_search`, `stock_download`, `sound`, `fal`, `sticker`,
 `music`, `sfx`, `title_font`, `catalog` (the library and `voices` kinds),
-and `ml`, `remove_background`, `select_object`, `apply_to`, `frame_blend`
-and `smooth_slow_mo`, which download a model or ONNX Runtime on first use
-(they send nothing about the project).
+and `ml`, `remove_background`, `select_object`, `apply_to`, `frame_blend`,
+`smooth_slow_mo`, `remove_object` and `enhance_quality`, which download a
+model or ONNX Runtime on first use (they send nothing about the project).
 
 ### Resources
 

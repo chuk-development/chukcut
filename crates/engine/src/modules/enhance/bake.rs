@@ -269,12 +269,20 @@ pub fn run(
         (true, false) => "Removing the object",
         _ => "Enhancing",
     };
+    // Until a frame has set the pace, the time left is the estimate (on
+    // the CPU, where it matters enough to be said at once).
+    let (gpu_each, cpu_each) = super::seconds_per_frame(&job.chain, job.source_size);
+    let each = if provider == "CPU" {
+        cpu_each
+    } else {
+        gpu_each
+    };
     let mut progress = EnhanceProgress {
         stage: stage.into(),
         done: 0,
         total: grid.len() as u32,
         provider: Some(provider),
-        seconds_left: None,
+        seconds_left: Some(each * grid.len() as f64),
     };
 
     let period = job.period();
