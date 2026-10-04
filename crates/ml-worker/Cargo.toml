@@ -1,0 +1,25 @@
+[package]
+name = "chukcut-ml-worker"
+version = "0.1.0"
+description = "The chukcut ML worker: ONNX Runtime inference in its own process, plus the protocol and model registry the engine shares with it."
+license = "GPL-3.0-or-later"
+repository = "https://github.com/chuk-development/chukcut"
+publish = false
+edition = "2021"
+
+[lib]
+name = "chukcut_ml_worker"
+
+[[bin]]
+name = "chukcut-ml-worker"
+path = "src/main.rs"
+required-features = ["runtime"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ort = { version = "=2.0.0-rc.13", optional = true, default-features = false, features = ["std", "load-dynamic", "cuda", "openvino"] }
+
+[features]
+default = ["runtime"]
+runtime = ["dep:ort"]

@@ -269,9 +269,12 @@ pub(crate) fn paste(
             segment.material_id = material(&segment.material_id);
             segment.target_range = TimeRange::new(start, segment.target_range.duration);
             // A transition belongs to a cut, and a link to a pair; neither
-            // comes along. The pair is linked again below, as a new pair.
+            // comes along. The pair is linked again below, as a new pair. A
+            // template slot is one place to fill: the copy is a plain clip.
             segment.extras.retain(|id| {
-                project.materials.transition(id).is_none() && !project.materials.links.contains(id)
+                project.materials.transition(id).is_none()
+                    && !project.materials.links.contains(id)
+                    && !chukcut_engine::modules::template::slot::is_marker(project, id)
             });
             let index = scratch
                 .track(&target_lane)

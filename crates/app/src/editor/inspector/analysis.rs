@@ -228,23 +228,26 @@ impl Editor {
                 "not analysed".to_string()
             }),
         ));
-        let mut actions = vec![
-            Button::new("scenes-detect")
-                .small()
-                .outline()
-                .label(if marked {
-                    "Detect again"
-                } else {
-                    "Detect scenes"
-                })
-                .on_click(cx.listener(|this, _, _, cx| this.detect_scenes(false, cx))),
-            Button::new("scenes-split")
-                .small()
-                .primary()
-                .label("Split at scene changes")
-                .disabled(marked && found == 0)
-                .on_click(cx.listener(|this, _, _, cx| this.split_at_scenes(cx))),
-        ];
+        // The primary button is the next step: detecting while the clip is
+        // not analysed, splitting once there are cuts to split at.
+        let detect = Button::new("scenes-detect")
+            .small()
+            .label(if marked {
+                "Detect again"
+            } else {
+                "Detect scenes"
+            })
+            .on_click(cx.listener(|this, _, _, cx| this.detect_scenes(false, cx)));
+        let split = Button::new("scenes-split")
+            .small()
+            .label("Split at scene changes")
+            .disabled(marked && found == 0)
+            .on_click(cx.listener(|this, _, _, cx| this.split_at_scenes(cx)));
+        let mut actions = if marked && found > 0 {
+            vec![detect.outline(), split.primary()]
+        } else {
+            vec![detect.primary(), split.outline()]
+        };
         if marked {
             let id = segment.id.clone();
             actions.push(

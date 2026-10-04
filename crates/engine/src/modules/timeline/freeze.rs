@@ -326,8 +326,8 @@ pub fn freeze_frame_edit(
 /// no keyframes: a freeze frame holds the picture, so a zoom running through
 /// the cut stops where it was rather than replaying from the clip's start.
 /// The crop is the clip's. Colour and effect extras are shared, as a split
-/// shares them; transitions, link groups and animations are not, for the
-/// reasons `split_one` gives for the right half.
+/// shares them; transitions, link groups, animations and a template slot
+/// marker are not, for the reasons `split_one` gives for the right half.
 fn still_segment(
     project: &Project,
     clip: &Segment,
@@ -343,6 +343,7 @@ fn still_segment(
             && !project.materials.links.contains(id)
             && project.materials.animation(id).is_none()
             && project.materials.follow(id).is_none()
+            && !crate::modules::template::slot::is_marker(project, id)
     });
     Segment {
         id: new_id(),

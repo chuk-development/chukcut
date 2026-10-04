@@ -12,7 +12,8 @@
 //! "remove the last mask" and "never had one" are the same document.
 
 use crate::modules::project::compositing::{
-    clamp_param, BlendMode, ChromaKey, CompositingMaterial, Mask, MaskOp, MaskShape, MASK_PARAMS,
+    clamp_param, BackgroundRemoval, BlendMode, ChromaKey, CompositingMaterial, Mask, MaskOp,
+    MaskShape, MASK_PARAMS,
 };
 use crate::modules::project::document::{new_id, MaterialKind, Micros, Project, Segment};
 use crate::modules::timeline::ops::EditCommand;
@@ -319,6 +320,23 @@ pub fn set_key_command(
 ) -> Result<Minted, String> {
     update(project, segment_id, "Chroma key", |m| {
         m.key = key;
+        Ok(())
+    })
+}
+
+/// Turn "Remove background" on (with the model that makes the matte) or off.
+pub fn set_background_command(
+    project: &Project,
+    segment_id: &str,
+    background: Option<BackgroundRemoval>,
+) -> Result<Minted, String> {
+    let label = if background.is_some() {
+        "Remove background"
+    } else {
+        "Keep background"
+    };
+    update(project, segment_id, label, |m| {
+        m.background = background;
         Ok(())
     })
 }

@@ -293,6 +293,12 @@ pub struct Compositor {
     pipeline: wgpu::RenderPipeline,
     /// [`Self::pipeline`] with blending disabled, for transition layers.
     layer_pipeline: wgpu::RenderPipeline,
+    /// The premultiplied quad summed additively into a float layer: several
+    /// weighted draws of one clip (frame blending, motion blur). See
+    /// `render::accumulate`.
+    accumulate_pipeline: wgpu::RenderPipeline,
+    /// Turns that float layer back into a clip layer, built on first use.
+    resolver: OnceLock<super::accumulate::Resolver>,
     uniform_layout: wgpu::BindGroupLayout,
     texture_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
@@ -310,6 +316,11 @@ pub struct Compositor {
     curve_placeholder: wgpu::TextureView,
     /// Curve points → baked tables. See [`super::grade::CurveCache`].
     curves: super::grade::CurveCache,
+    /// What binding 5 gets when the segment has no background matte: one
+    /// opaque texel, never read without `M_BACKGROUND`.
+    matte_placeholder: wgpu::TextureView,
+    /// Baked "Remove background" mattes. See [`super::background`].
+    backgrounds: super::background::MatteFrames,
     vertices: wgpu::Buffer,
     indices: wgpu::Buffer,
     /// Per-draw uniforms, addressed with dynamic offsets. Grown, never shrunk —
@@ -477,6 +488,18 @@ impl Compositor {
                     },
                     count: None,
                 },
+                // The clip's "Remove background" matte, filtered (it is
+                // stored smaller than most sources), likewise always bound.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -486,7 +509,10 @@ impl Compositor {
             immediate_size: 0,
         });
 
-        let quad_pipeline = |label: &str, entry: &str, blend: Option<wgpu::BlendState>| {
+        let quad_pipeline = |label: &str,
+                             entry: &str,
+                             blend: Option<wgpu::BlendState>,
+                             format: wgpu::TextureFormat| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
                 layout: Some(&pipeline_layout),
@@ -526,7 +552,7 @@ impl Compositor {
                     entry_point: Some(entry),
                     compilation_options: Default::default(),
                     targets: &[Some(wgpu::ColorTargetState {
-                        format: config.format,
+                        format,
                         blend,
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
@@ -545,6 +571,7 @@ impl Compositor {
             "chukcut quad pipeline",
             "fs_premultiplied",
             Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+            config.format,
         );
 
         // The same quad with the blend switched off, for a transition layer.
@@ -558,7 +585,18 @@ impl Compositor {
         // halo creeping in from the edges of anything that does not cover the
         // canvas. Writing the fragment through untouched is what makes the two
         // agree.
-        let layer_pipeline = quad_pipeline("chukcut quad layer pipeline", "fs_main", None);
+        let layer_pipeline = quad_pipeline(
+            "chukcut quad layer pipeline",
+            "fs_main",
+            None,
+            config.format,
+        );
+        let accumulate_pipeline = quad_pipeline(
+            "chukcut quad accumulate pipeline",
+            "fs_premultiplied",
+            Some(super::accumulate::ADDITIVE),
+            super::accumulate::ACCUMULATION_FORMAT,
+        );
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("chukcut quad sampler"),
@@ -646,6 +684,43 @@ impl Compositor {
             })
             .create_view(&wgpu::TextureViewDescriptor::default());
 
+        // The dead background-matte binding: one opaque texel.
+        let matte_placeholder = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("chukcut matte placeholder"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        ctx.queue().write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &matte_placeholder,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &[255],
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(1),
+                rows_per_image: Some(1),
+            },
+            wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+        let matte_placeholder =
+            matte_placeholder.create_view(&wgpu::TextureViewDescriptor::default());
+
         let vertices = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("chukcut quad vertices"),
             size: std::mem::size_of_val(&QUAD_VERTICES) as u64,
@@ -673,6 +748,8 @@ impl Compositor {
             config,
             pipeline,
             layer_pipeline,
+            accumulate_pipeline,
+            resolver: OnceLock::new(),
             uniform_layout,
             texture_layout,
             sampler,
@@ -681,6 +758,8 @@ impl Compositor {
             luts: super::lut::LutCache::default(),
             curve_placeholder,
             curves: super::grade::CurveCache::default(),
+            matte_placeholder,
+            backgrounds: super::background::MatteFrames::default(),
             vertices,
             indices,
             uniforms: Mutex::new(Scratch::default()),
@@ -1046,7 +1125,10 @@ impl Compositor {
         // item needs it, so a frame without effects takes exactly the path it
         // always took.
         let needs_fx = draws.items.iter().any(|item| match item {
-            Draw::Effected { .. } | Draw::Adjust { .. } | Draw::Blended { .. } => true,
+            Draw::Effected { .. }
+            | Draw::Adjust { .. }
+            | Draw::Blended { .. }
+            | Draw::Accumulated { .. } => true,
             Draw::Transition { from_fx, to_fx, .. } => !from_fx.is_empty() || !to_fx.is_empty(),
             Draw::Quad(_) => false,
         });
@@ -1162,6 +1244,43 @@ impl Compositor {
                     layer_groups.push(None);
                     overs.push(None);
                 }
+                Draw::Accumulated { quads, chain, mode } => {
+                    let frame = fx_frame.as_mut().expect("opened for an accumulated clip");
+                    let (sum, layer) = self.accumulate_layer(
+                        &mut encoder,
+                        &uniform_group,
+                        &source_groups,
+                        quads,
+                        size,
+                    );
+                    layer_targets.push(sum);
+                    let layer = if chain.is_empty() {
+                        layer
+                    } else {
+                        let out = frame.apply(
+                            &mut encoder,
+                            layer.view(),
+                            size,
+                            chain,
+                            self.target_key(size),
+                        );
+                        layer_targets.push(layer);
+                        out
+                    };
+                    layer_groups.push(None);
+                    if mode.is_some() {
+                        blend_layers.push(Some(layer));
+                        overs.push(None);
+                    } else {
+                        overs.push(Some(frame.prepare_over(
+                            layer.view(),
+                            self.config.format,
+                            size,
+                        )));
+                        blend_layers.push(None);
+                        layer_targets.push(layer);
+                    }
+                }
                 Draw::Quad(_) | Draw::Adjust { .. } => {
                     layer_groups.push(None);
                     overs.push(None);
@@ -1182,7 +1301,14 @@ impl Compositor {
         loop {
             let end = draws.items[start..]
                 .iter()
-                .position(|item| matches!(item, Draw::Adjust { .. } | Draw::Blended { .. }))
+                .position(|item| {
+                    matches!(
+                        item,
+                        Draw::Adjust { .. }
+                            | Draw::Blended { .. }
+                            | Draw::Accumulated { mode: Some(_), .. }
+                    )
+                })
                 .map_or(draws.items.len(), |at| start + at);
             {
                 let load = if start == 0 {
@@ -1245,12 +1371,14 @@ impl Compositor {
                             );
                             transition_slot += 1;
                         }
-                        Draw::Effected { .. } => {
+                        Draw::Effected { .. } | Draw::Accumulated { mode: None, .. } => {
                             if let Some(over) = overs[i].as_ref() {
                                 over.draw(&mut pass);
                             }
                         }
-                        Draw::Adjust { .. } | Draw::Blended { .. } => {
+                        Draw::Adjust { .. }
+                        | Draw::Blended { .. }
+                        | Draw::Accumulated { mode: Some(_), .. } => {
                             unreachable!("a pass ends at an effect clip or a blended clip")
                         }
                     }
@@ -1270,7 +1398,10 @@ impl Compositor {
                     chain,
                     self.target_key(size),
                 ),
-                Draw::Blended { mode, .. } => {
+                Draw::Blended { mode, .. }
+                | Draw::Accumulated {
+                    mode: Some(mode), ..
+                } => {
                     let layer = blend_layers[end].as_ref().expect("drawn above");
                     frame.blend(
                         &mut encoder,
@@ -1356,6 +1487,15 @@ impl Compositor {
                             .unwrap_or(&self.curve_placeholder),
                     ),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(
+                        quad.background
+                            .as_ref()
+                            .map(|matte| &matte.view)
+                            .unwrap_or(&self.matte_placeholder),
+                    ),
+                },
             ],
         })
     }
@@ -1406,6 +1546,61 @@ impl Compositor {
         pass.set_bind_group(0, uniform_group, &[quad.slot * self.uniform_stride]);
         pass.set_bind_group(1, group, &[]);
         pass.draw_indexed(0..QUAD_INDICES.len() as u32, 0, 0..1);
+    }
+
+    /// Several weighted draws of one clip summed in a float layer, then
+    /// resolved into an ordinary straight-alpha clip layer. Answers both
+    /// textures: the sum has to outlive the submit as much as the layer does.
+    /// See `render::accumulate`.
+    fn accumulate_layer(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        uniform_group: &wgpu::BindGroup,
+        source_groups: &[Option<wgpu::BindGroup>],
+        quads: &[QuadDraw],
+        size: (u32, u32),
+    ) -> (PooledTexture, PooledTexture) {
+        let device = self.ctx.device();
+        let sum = self.pool.acquire(
+            device,
+            TextureKey::new(
+                size.0,
+                size.1,
+                super::accumulate::ACCUMULATION_FORMAT,
+                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            ),
+        );
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("chukcut accumulate"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: sum.view(),
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+            pass.set_pipeline(&self.accumulate_pipeline);
+            pass.set_vertex_buffer(0, self.vertices.slice(..));
+            pass.set_index_buffer(self.indices.slice(..), wgpu::IndexFormat::Uint16);
+            for quad in quads {
+                let Some(group) = source_groups[quad.slot as usize].as_ref() else {
+                    continue;
+                };
+                pass.set_bind_group(0, uniform_group, &[quad.slot * self.uniform_stride]);
+                pass.set_bind_group(1, group, &[]);
+                pass.draw_indexed(0..QUAD_INDICES.len() as u32, 0, 0..1);
+            }
+        }
+        let layer = self.pool.acquire(device, self.target_key(size));
+        self.resolver
+            .get_or_init(|| super::accumulate::Resolver::new(&self.ctx, self.config.format))
+            .resolve(&self.ctx, encoder, sum.view(), layer.view());
+        (sum, layer)
     }
 
     /// What the frame is made of: one entry per thing that gets drawn, in
@@ -1534,6 +1729,17 @@ impl Compositor {
             // `modules::analysis::stabilise`. Borrowed when it is not.
             let resolved = crate::modules::analysis::stabilise::resolve(project, resolved, time);
 
+            // Frame blending draws the source frame before this instant
+            // and mixes in the one after; see `speed::blend`.
+            let blend = (kind == MaterialKind::Video)
+                .then(|| {
+                    crate::modules::speed::blend::blend_for(
+                        &project.materials,
+                        segment,
+                        source_time,
+                    )
+                })
+                .flatten();
             let quad = self.quad(
                 canvas,
                 &project.materials,
@@ -1541,7 +1747,7 @@ impl Compositor {
                 sources,
                 &resolved,
                 kind,
-                source_time,
+                blend.map_or(source_time, |b| b.first),
                 time,
                 &mut draws,
             )?;
@@ -1559,14 +1765,138 @@ impl Compositor {
                     .materials
                     .compositing_of(segment)
                     .and_then(|m| m.blend.code());
-                draws.items.push(match mode {
-                    Some(mode) => Draw::Blended { quad, chain, mode },
-                    None => blurred(project, segment, time, quad, chain),
+                let accumulated = self.temporal_samples(
+                    project,
+                    segment,
+                    time,
+                    source_time,
+                    blend,
+                    &quad,
+                    size,
+                    sources,
+                    &mut draws,
+                );
+                draws.items.push(match (accumulated, mode) {
+                    (Some(quads), mode) => Draw::Accumulated { quads, chain, mode },
+                    (None, Some(mode)) => Draw::Blended { quad, chain, mode },
+                    (None, None) => blurred(project, segment, time, quad, chain),
                 });
             }
         }
 
         Ok(draws)
+    }
+
+    /// The draws that average into `quad` when the clip blends frames or has
+    /// motion blur: every source frame (with its weight) at every placement
+    /// along the shutter (each `1/n`), the weight folded into the opacity.
+    /// `None` when one draw is the whole picture — no blending at this
+    /// instant, a clip that does not move within the shutter, or a blur
+    /// animation running, which owns the clip's layer and wins.
+    ///
+    /// The first draw keeps `quad`'s uniform slot; the others get new ones.
+    #[allow(clippy::too_many_arguments)]
+    fn temporal_samples(
+        &self,
+        project: &Project,
+        segment: &Segment,
+        time: Micros,
+        source_time: Micros,
+        blend: Option<crate::modules::speed::blend::BlendSample>,
+        quad: &QuadDraw,
+        size: (u32, u32),
+        sources: &dyn SourceProvider,
+        draws: &mut DrawList,
+    ) -> Option<Vec<QuadDraw>> {
+        let blur = fx::motion_blur::motion_blur_of(&project.materials, segment, source_time);
+        if blend.is_none() && blur.is_none() {
+            return None;
+        }
+        let keyed = layout::animated_transform(segment, time);
+        if motion::clip_motion(&project.materials, segment, time, keyed)
+            .is_some_and(|m| m.blur > 0.0 && m.blur_radius > 0.0)
+        {
+            return None;
+        }
+
+        let mut frames: Vec<(SourceFrame, f32)> = vec![(quad.frame.clone(), 1.0)];
+        if let Some(blend) = blend {
+            let request = SourceRequest {
+                material_id: &segment.material_id,
+                kind: MaterialKind::Video,
+                source_time: blend.second,
+                segment_id: &segment.id,
+                max_size: size,
+            };
+            match sources.frame(&self.ctx, &request) {
+                Ok(Some(second)) => {
+                    frames[0].1 = 1.0 - blend.weight;
+                    frames.push((second, blend.weight));
+                }
+                Ok(None) => {}
+                // The earlier frame alone is still a correct picture, one
+                // step less smooth; a missing neighbour is not worth a hole.
+                Err(error) => tracing::debug!(
+                    segment = %segment.id,
+                    %error,
+                    "frame blending: the next source frame is unavailable"
+                ),
+            }
+        }
+
+        let canvas = (project.canvas.width, project.canvas.height);
+        let mut placements: Vec<Option<QuadPlacement>> = vec![Some(quad.placement)];
+        if let Some(blur) = blur {
+            let moved: Vec<Option<QuadPlacement>> =
+                fx::motion_blur::sample_times(time, project.fps, blur, segment)
+                    .into_iter()
+                    .map(|at| {
+                        let resolved =
+                            crate::modules::tracking::follow::resolve(project, segment, at);
+                        let resolved =
+                            crate::modules::analysis::stabilise::resolve(project, resolved, at);
+                        place(canvas, &project.materials, &resolved, quad.frame.size(), at)
+                    })
+                    .collect();
+            let first = moved.iter().flatten().next().copied();
+            let still = first.is_some_and(|first| {
+                moved.iter().all(|p| {
+                    p.is_some_and(|p| {
+                        p.mvp
+                            .iter()
+                            .zip(first.mvp.iter())
+                            .all(|(a, b)| (a - b).abs() < 1e-4)
+                    })
+                })
+            });
+            if !still {
+                placements = moved;
+            }
+        }
+        if frames.len() == 1 && placements.len() == 1 {
+            return None;
+        }
+
+        // A sample where the clip covers nothing still counts: it is the
+        // instant the shutter saw nothing there.
+        let n = placements.len() as f32;
+        let mut quads = Vec::with_capacity(frames.len() * placements.len());
+        for (frame, weight) in &frames {
+            for placement in placements.iter().flatten() {
+                let mut draw = quad.clone();
+                draw.frame = frame.clone();
+                draw.placement = *placement;
+                draw.placement.opacity = placement.opacity * weight / n;
+                if !quads.is_empty() {
+                    draw.slot = draws.slots as u32;
+                    draws.slots += 1;
+                }
+                quads.push(draw);
+            }
+        }
+        // Every placement missed the canvas: the quad's own slot is still
+        // reserved, and drawing nothing is the honest picture.
+        Some(quads)
     }
 
     /// One segment's texture and where it goes, with a uniform slot reserved.
@@ -1590,11 +1920,14 @@ impl Compositor {
         if kind == MaterialKind::Audio {
             return Ok(None);
         }
+        // An animated sticker loops or holds its last frame; a still is
+        // untouched. See `modules::animated`.
+        let fetch_time = crate::modules::animated::clip_time(materials, segment, kind, source_time);
 
         let request = SourceRequest {
             material_id: &segment.material_id,
             kind,
-            source_time,
+            source_time: fetch_time,
             segment_id: &segment.id,
             max_size: size,
         };
@@ -1635,23 +1968,8 @@ impl Compositor {
             }
         };
 
-        let keyed = layout::animated_transform(segment, time);
-        // Keyframe-free animation, on top of the keyframes. `None` for a clip
-        // without one, which then takes exactly the path it always took.
-        let motion = motion::clip_motion(materials, segment, time, keyed);
-        let transform = motion.map_or(keyed, |m| m.transform);
-        let Some(placement) = layout::place_quad(canvas, frame.size(), &transform, segment.crop)
-        else {
+        let Some(placement) = place(canvas, materials, segment, frame.size(), time) else {
             return Ok(None);
-        };
-        let placement = match motion {
-            Some(m) if m.reveal != [0.0, 0.0, 1.0, 1.0] => {
-                let Some(revealed) = layout::reveal(placement, m.reveal) else {
-                    return Ok(None);
-                };
-                revealed
-            }
-            _ => placement,
         };
 
         // The clip's colour adjustment, already reduced to what the shader
@@ -1711,13 +2029,30 @@ impl Compositor {
 
         // Masks and the chroma key, measured in the quad as it is drawn in
         // this render; at rest (or absent) they set no flag.
-        let matte = materials
-            .compositing_of(segment)
+        let compositing = materials.compositing_of(segment);
+        let mut matte = compositing
             .map(|m| {
                 let quad = super::matte::quad_pixel_size(&placement.mvp, size);
                 super::matte::MatteBlock::new(m, source_time, quad)
             })
             .unwrap_or_default();
+        // "Remove background": the baked matte of this source frame, when
+        // there is one. A frame not baked yet draws whole.
+        let background = compositing
+            .and_then(|m| m.background.as_ref())
+            .and_then(|setting| {
+                let video = materials.video(&segment.material_id)?;
+                let period = if video.fps.is_finite() && video.fps > 1.0 {
+                    (1_000_000.0 / video.fps).round() as Micros
+                } else {
+                    33_333
+                };
+                self.backgrounds
+                    .get(&self.ctx, &video.path, setting, source_time, period)
+            });
+        if background.is_some() {
+            matte.flags[0] |= super::matte::flag::BACKGROUND;
+        }
 
         let slot = draws.slots as u32;
         draws.slots += 1;
@@ -1729,6 +2064,7 @@ impl Compositor {
             grade,
             curves,
             matte,
+            background,
             slot,
         }))
     }
@@ -1919,6 +2255,28 @@ impl std::fmt::Debug for Compositor {
     }
 }
 
+/// Where `segment` (already resolved for follows and stabilisation) is drawn
+/// at `time`, for a source picture of `frame_size`. `None` when it covers
+/// nothing.
+fn place(
+    canvas: (u32, u32),
+    materials: &MaterialPool,
+    segment: &Segment,
+    frame_size: (u32, u32),
+    time: Micros,
+) -> Option<QuadPlacement> {
+    let keyed = layout::animated_transform(segment, time);
+    // Keyframe-free animation, on top of the keyframes. `None` for a clip
+    // without one, which then takes exactly the path it always took.
+    let motion = motion::clip_motion(materials, segment, time, keyed);
+    let transform = motion.map_or(keyed, |m| m.transform);
+    let placement = layout::place_quad(canvas, frame_size, &transform, segment.crop)?;
+    match motion {
+        Some(m) if m.reveal != [0.0, 0.0, 1.0, 1.0] => layout::reveal(placement, m.reveal),
+        _ => Some(placement),
+    }
+}
+
 /// `quad` as it should be drawn: as itself, or — while a blur animation runs —
 /// as the incoming side of a blur transition from nothing.
 ///
@@ -1973,6 +2331,7 @@ fn blurred(
 /// two quads that are *not* drawn in the composite pass — they are drawn into
 /// layers beforehand — so "the nth draw" and "the nth uniform block" stopped
 /// being the same number.
+#[derive(Clone)]
 struct QuadDraw {
     frame: SourceFrame,
     placement: QuadPlacement,
@@ -1990,6 +2349,8 @@ struct QuadDraw {
     curves: Option<std::sync::Arc<super::grade::GpuCurves>>,
     /// Masks and chroma key, packed; no flag when the clip has neither.
     matte: super::matte::MatteBlock,
+    /// The clip's baked "Remove background" matte for this frame.
+    background: Option<std::sync::Arc<super::background::GpuMatte>>,
     slot: u32,
 }
 
@@ -2029,6 +2390,16 @@ enum Draw {
         chain: Vec<FxInstance>,
         mode: u32,
     },
+    /// One clip drawn several times and averaged: two source frames mixed
+    /// (frame blending) and/or the clip placed along its movement (motion
+    /// blur). Each quad's opacity already carries its weight. The average
+    /// becomes an ordinary clip layer, which then takes the `Effected` path,
+    /// or the `Blended` one when `mode` is set. See `render::accumulate`.
+    Accumulated {
+        quads: Vec<QuadDraw>,
+        chain: Vec<FxInstance>,
+        mode: Option<u32>,
+    },
 }
 
 /// Everything a frame draws, plus how many uniform blocks it needs.
@@ -2043,16 +2414,18 @@ struct DrawList {
 impl DrawList {
     /// Every quad, in the order the slots were handed out.
     fn quads(&self) -> impl Iterator<Item = &QuadDraw> {
-        self.items
-            .iter()
-            .flat_map(|item| match item {
+        self.items.iter().flat_map(|item| -> Vec<&QuadDraw> {
+            match item {
                 Draw::Quad(quad) | Draw::Effected { quad, .. } | Draw::Blended { quad, .. } => {
-                    [Some(quad), None]
+                    vec![quad]
                 }
-                Draw::Transition { from, to, .. } => [from.as_ref(), to.as_ref()],
-                Draw::Adjust { .. } => [None, None],
-            })
-            .flatten()
+                Draw::Transition { from, to, .. } => {
+                    from.as_ref().into_iter().chain(to.as_ref()).collect()
+                }
+                Draw::Accumulated { quads, .. } => quads.iter().collect(),
+                Draw::Adjust { .. } => Vec::new(),
+            }
+        })
     }
 }
 

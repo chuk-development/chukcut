@@ -248,7 +248,12 @@ pub(crate) fn load_strip(picture: &Picture, count: usize) -> Result<Strip, Strin
     };
     let mut tiles = Vec::with_capacity(paths.len());
     for path in paths {
-        let decoded = image::open(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+        // An animated sticker (a Lottie has no pixels to open) shows the
+        // middle of its animation.
+        let decoded = match chukcut_engine::modules::animated::still(&path, THUMB_PX * 2) {
+            Some(still) => image::DynamicImage::ImageRgba8(still?),
+            None => image::open(&path).map_err(|error| format!("{}: {error}", path.display()))?,
+        };
         // Stills arrive at full size; the atlas only needs a thumbnail.
         let decoded = if decoded.height() > THUMB_PX * 2 {
             decoded.thumbnail(u32::MAX, THUMB_PX * 2)

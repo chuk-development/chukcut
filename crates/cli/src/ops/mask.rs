@@ -3,6 +3,7 @@
 
 use chukcut_engine::modules::compositing::commands as compositing;
 use chukcut_engine::modules::compositing::edit::ResetPart;
+use chukcut_engine::modules::matting::commands as matting;
 use chukcut_engine::modules::project::compositing::{
     BlendMode, ChromaKey, CompositingMaterial, MaskOp, MaskShape, MASK_PARAMS,
 };
@@ -44,6 +45,9 @@ pub fn describe(m: &CompositingMaterial) -> Value {
             "spill": k.spill, "shrink": k.shrink, "enabled": k.enabled,
         })),
         "blend": m.blend.name(),
+        "background": m.background.as_ref().map(|b| json!({
+            "model": b.model, "version": b.version,
+        })),
     })
 }
 
@@ -397,6 +401,84 @@ impl Operation for ChromaKeyArgs {
         let shown = hex([key.color[0], key.color[1], key.color[2], 1.0]);
         compositing::compositing_set_key(&state, segment_id.clone(), Some(key))?;
         Ok(outcome(session, &segment_id, format!("keyed out {shown}")))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Remove background
+// ---------------------------------------------------------------------------
+
+/// Remove the background behind the people in a video clip (Robust Video
+/// Matting in the ML worker; the model and ONNX Runtime download on first
+/// use). Bakes the clip's matte into the cache before it returns, so a
+/// following export or render shows it. `off` keeps the background again.
+#[derive(Debug, Clone, Default, Args, Deserialize, JsonSchema)]
+pub struct RemoveBackgroundArgs {
+    /// The clip: id, id prefix or `lane:index`.
+    pub clip: String,
+    /// Keep the background again.
+    #[arg(long)]
+    #[serde(default)]
+    pub off: bool,
+}
+
+impl Operation for RemoveBackgroundArgs {
+    const NAME: &'static str = "remove_background";
+    fn run(self, session: &mut Session, ctx: &Ctx) -> CliResult<Outcome> {
+        let segment_id = session.with(|p| select::clip(p, &self.clip))?;
+        let state = session.state.clone();
+        let already = material(session, &segment_id).background.is_some();
+        // Asking again on a clip that has it bakes what is missing (after a
+        // trim, or a cleared cache) instead of failing as "nothing changed".
+        let job = if already && !self.off {
+            matting::matting_bake(&state, segment_id.clone())?
+        } else {
+            matting::matting_remove_background(&state, segment_id.clone(), !self.off)?.job
+        };
+        if self.off {
+            return Ok(outcome(session, &segment_id, "kept the background".into()));
+        }
+        let Some(job) = job else {
+            return Ok(outcome(
+                session,
+                &segment_id,
+                "removed the background (already baked)".into(),
+            ));
+        };
+        let finished = loop {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            let Some(status) = matting::matting_status(job) else {
+                return Err(CliError::refused("the background removal job vanished"));
+            };
+            if let Some(finished) = status.finished {
+                matting::matting_forget(job);
+                break finished;
+            }
+            let p = &status.progress;
+            if p.total > 0 {
+                ctx.progress(
+                    &format!("Removing the background: frame {} of {}", p.done, p.total),
+                    Some(p.done as f32 / p.total as f32),
+                );
+            }
+        };
+        match finished {
+            Ok(done) => Ok(outcome(
+                session,
+                &segment_id,
+                format!(
+                    "removed the background: {} frames in {:.1} s on {}",
+                    done.written,
+                    done.seconds,
+                    done.provider.as_deref().unwrap_or("the CPU")
+                ),
+            )),
+            // The setting stays on (an undo takes it off); the export bakes
+            // what is missing or says why it cannot.
+            Err(error) => Err(CliError::refused(format!(
+                "Remove background is on, but its matte could not be made: {error}"
+            ))),
+        }
     }
 }
 

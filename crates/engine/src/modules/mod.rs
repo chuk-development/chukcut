@@ -7,6 +7,7 @@
 //! these modules and registered in `lib.rs`.
 
 pub mod analysis;
+pub mod animated;
 pub mod audio;
 pub mod audiofx;
 pub mod captions;
@@ -20,7 +21,9 @@ pub mod inspector;
 pub mod keymap;
 pub mod library;
 pub mod loudness;
+pub mod matting;
 pub mod media;
+pub mod ml;
 pub mod motion;
 pub mod preview;
 pub mod project;

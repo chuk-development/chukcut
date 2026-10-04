@@ -1,5 +1,6 @@
 //! The Stickers tab: emoji by Unicode group in three looks, and icons from
-//! the Iconify sets the licence policy allows.
+//! the Iconify sets the licence policy allows, and Noto Animated Emoji
+//! (Lottie, loop on the timeline) under "Animated".
 //!
 //! A click (or the "+") fetches the sticker with its licence record and puts
 //! it on an overlay lane at the playhead, centred
@@ -14,7 +15,7 @@ use super::library_panel::{chip, chips, notice, STICKER_PAGE};
 use super::*;
 
 /// The category column: Unicode's groups (shortened), then icons.
-pub(super) const CATEGORIES: [&str; 10] = [
+pub(super) const CATEGORIES: [&str; 11] = [
     "Smileys",
     "People",
     "Animals",
@@ -25,6 +26,7 @@ pub(super) const CATEGORIES: [&str; 10] = [
     "Symbols",
     "Flags",
     "Icons",
+    "Animated",
 ];
 
 /// The Unicode group behind each emoji category.
@@ -41,6 +43,9 @@ const GROUPS: [&str; 9] = [
 ];
 
 const ICONS: usize = 9;
+const ANIMATED: usize = 10;
+/// Animated tiles drawn at once: each one is a playing GIF.
+const ANIMATED_PAGE: usize = 48;
 const STICKER_TILE: f32 = 72.0;
 
 /// The Stickers rail glyph: a square with a peeled corner, on the kit's grid.
@@ -56,6 +61,9 @@ impl Editor {
     ) -> AnyElement {
         if category == ICONS {
             return self.render_icons(cx);
+        }
+        if category == ANIMATED {
+            return self.render_animated(cx);
         }
         self.load_sticker_index(cx);
         let style = self.assets.library.sticker_style;
@@ -259,6 +267,136 @@ impl Editor {
             .detach();
         });
         cx.notify();
+    }
+
+    // --- animated -------------------------------------------------------------
+
+    fn load_animated_index(&mut self, cx: &mut Context<Self>) {
+        let library = &mut self.assets.library;
+        if library.animated.is_some() || library.animated_loading {
+            return;
+        }
+        library.animated_loading = true;
+        self.library_task(cx, library::library_animated_index, |editor, result, _| {
+            editor.assets.library.animated_loading = false;
+            editor.assets.library.animated = Some(result);
+        });
+    }
+
+    /// Noto Animated Emoji: moving tiles (small GIFs our Lottie renderer
+    /// draws), added like any sticker; they loop on the timeline.
+    fn render_animated(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        self.load_animated_index(cx);
+        let head = Self::hint(
+            "Animated emoji by Google, CC BY 4.0: free to use, the credit goes into the credits file.",
+        );
+        let list = match &self.assets.library.animated {
+            None => {
+                return column_with(
+                    head,
+                    notice("Loading the animated emoji\u{2026}", TEXT_MUTED),
+                )
+            }
+            Some(Err(error)) => {
+                let error = error.clone();
+                return column_with(
+                    head,
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.0))
+                        .child(notice(error, DANGER))
+                        .child(chip(
+                            "animated-retry",
+                            "Try again",
+                            false,
+                            cx.listener(|this, _, _, cx| {
+                                this.assets.library.animated = None;
+                                cx.notify();
+                            }),
+                        )),
+                );
+            }
+            Some(Ok(list)) => Arc::clone(list),
+        };
+        let query = self.assets.query(cx).unwrap_or_default();
+        let found = chukcut_engine::modules::library::animated_emoji::search(&list.0, &query, None);
+        let total = found.len();
+        let shown = self
+            .assets
+            .library
+            .sticker_shown
+            .min(ANIMATED_PAGE)
+            .min(total);
+        let emoji: Vec<_> = found.into_iter().take(shown).cloned().collect();
+        let tiles: Vec<AnyElement> = emoji
+            .into_iter()
+            .map(|emoji| self.animated_tile(emoji, cx))
+            .collect();
+        let mut body = div()
+            .flex()
+            .flex_col()
+            .gap(px(10.0))
+            .child(sticker_grid(tiles));
+        if list.1 {
+            body = body.child(notice(
+                "Offline: the list is from the last time. Stickers already used still work.",
+                TEXT_MUTED,
+            ));
+        }
+        if total == 0 {
+            body = body.child(notice("No animated emoji matches.", TEXT_MUTED));
+        } else if shown < total {
+            body = body.child(notice(
+                format!("{shown} of {total}: search to find the others."),
+                TEXT_MUTED,
+            ));
+        }
+        column_with(head, Self::tile_area("animated-grid").child(body))
+    }
+
+    fn animated_tile(
+        &mut self,
+        emoji: chukcut_engine::modules::library::animated_emoji::AnimatedEmoji,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let key = format!("anim:{}", emoji.codepoint);
+        let for_thumb = emoji.clone();
+        let glyph = emoji.glyph.clone();
+        let picture = self.library_pic(
+            key.clone(),
+            move || library::library_animated_preview(&for_thumb, 96),
+            move || {
+                div()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(28.0))
+                    .child(glyph)
+                    .into_any_element()
+            },
+            cx,
+        );
+        let busy = self.assets.library.busy.contains(&key);
+        let name = emoji.name.clone();
+        sticker_tile(
+            SharedString::from(key.clone()),
+            picture,
+            busy,
+            cx.listener(move |this, _, _, cx| {
+                let emoji = emoji.clone();
+                this.add_sticker(
+                    key.clone(),
+                    move || library::library_animated_fetch(&emoji),
+                    cx,
+                )
+            }),
+        )
+        .tooltip(move |window, cx| {
+            gpui::component::tooltip::Tooltip::new(name.clone()).build(window, cx)
+        })
+        .into_any_element()
     }
 
     // --- icons ----------------------------------------------------------------

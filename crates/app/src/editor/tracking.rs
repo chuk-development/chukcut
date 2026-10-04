@@ -11,7 +11,7 @@ use chukcut_engine::modules::tracking::edit as tracking_edit;
 use chukcut_engine::modules::tracking::follow::{self, canvas_to_source, source_to_canvas};
 use chukcut_engine::modules::tracking::job::Direction;
 use chukcut_engine::modules::tracking::{
-    FollowMode, TrackSample, TrackingMaterial, LOW_CONFIDENCE,
+    FollowMode, TrackSample, TrackerKind, TrackingMaterial, LOW_CONFIDENCE,
 };
 use gpui::component::button::{Button, ButtonVariants as _};
 use gpui::component::dialog::DialogFooter;
@@ -29,6 +29,8 @@ pub(crate) struct TrackingUi {
     pub(crate) job: Option<RunningJob>,
     /// How the next track is followed.
     pub(crate) mode: FollowMode,
+    /// Which tracker the next track (or re-track) runs.
+    pub(crate) tracker: TrackerKind,
     /// The clip chosen to track for the selected overlay; `None` is the
     /// default (the topmost video under it).
     pub(crate) target: Option<(String, String)>,
@@ -237,6 +239,7 @@ impl Editor {
             overlay_id: Some(select.overlay_id.clone()),
             mode: self.tracking.mode,
             retrack: select.retrack.clone(),
+            tracker: Some(self.tracking.tracker),
         };
         match tracking_commands::tracking_start(&self.state, request, None) {
             Ok(id) => {
@@ -280,18 +283,24 @@ impl Editor {
             self.refresh(cx);
             self.seek(return_to);
             self.status = Some(match finished {
-                Ok(outcome) => format!(
-                    "{} {} frames in {:.1} s ({:.0} frames/s)",
-                    if outcome.cancelled {
-                        "Stopped after"
-                    } else {
-                        "Tracked"
-                    },
-                    outcome.frames,
-                    outcome.seconds,
-                    outcome.frames as f64 / outcome.seconds.max(1e-3),
-                )
-                .into(),
+                Ok(outcome) => {
+                    let mut text = format!(
+                        "{} {} frames in {:.1} s ({:.0} frames/s)",
+                        if outcome.cancelled {
+                            "Stopped after"
+                        } else {
+                            "Tracked"
+                        },
+                        outcome.frames,
+                        outcome.seconds,
+                        outcome.frames as f64 / outcome.seconds.max(1e-3),
+                    );
+                    if let Some(note) = &outcome.note {
+                        text.push_str(" · ");
+                        text.push_str(note);
+                    }
+                    text.into()
+                }
                 Err(error) => error.into(),
             });
             return true;
@@ -314,6 +323,13 @@ impl Editor {
             }
         }
         changed
+    }
+
+    /// The tracker the next track or re-track runs. Changing it does not
+    /// touch an existing track; "Re-track from here" applies it.
+    pub(crate) fn set_tracker(&mut self, tracker: TrackerKind, cx: &mut Context<Self>) {
+        self.tracking.tracker = tracker;
+        cx.notify();
     }
 
     pub(crate) fn set_follow_mode(&mut self, mode: FollowMode, cx: &mut Context<Self>) {
@@ -574,7 +590,12 @@ impl Editor {
             }
             return shapes;
         }
-        let Some(overlay) = self.tracking_overlay() else {
+        // The follower is not on screen outside its own time, so neither is
+        // the path it follows.
+        let Some(overlay) = self
+            .tracking_overlay()
+            .filter(|overlay| overlay.target_range.contains(at))
+        else {
             return shapes;
         };
         let Some((track, _, Some(target))) =

@@ -263,6 +263,7 @@ impl Editor {
         changed |= self.poll_export_queue();
         changed |= self.expire_status();
         changed |= self.poll_tracking(cx);
+        changed |= self.poll_matting(cx);
         changed |= self.poll_analysis(cx);
         changed |= self.poll_voiceover(cx);
         if let Some(frame) = self.player.take(self.clock.position()) {

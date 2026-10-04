@@ -13,9 +13,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
 
-use super::model::{TrackSample, FLAG_ANCHOR, FLAG_LOST};
-use super::tracker::{BoxState, Frame, Tracker, TrackerParams};
+use super::model::{TrackSample, TrackerKind, FLAG_ANCHOR, FLAG_LOST};
+use super::tracker::{BoxState, Frame, StepResult, Tracker, TrackerParams};
 use crate::modules::media::decoder::VideoDecoder;
+use crate::modules::ml::tracker::VitTracker;
 use crate::modules::project::document::{Micros, SAMPLE_SLACK};
 
 /// Which way from the start frame to track.
@@ -48,6 +49,9 @@ pub struct TrackJob {
     pub direction: Direction,
     /// Long side of the analysis frames, pixels.
     pub analysis_size: u32,
+    /// Which tracker runs. The caller has made sure it can (for VitTrack:
+    /// `VitTracker::prepare`), or chose KLT.
+    pub tracker: TrackerKind,
 }
 
 /// How far a run is.
@@ -95,22 +99,127 @@ impl Source {
         })
     }
 
-    /// The frame shown at `time`, ready for the tracker, with its own
+    /// The frame shown at `time` as RGBA at the analysis size, with its own
     /// timestamp.
-    fn frame(&mut self, time: Micros) -> Result<(Micros, Frame), String> {
+    fn frame(&mut self, time: Micros) -> Result<(Micros, Vec<u8>), String> {
         let frame = self
             .decoder
             .seek_and_decode(time + SAMPLE_SLACK)
             .map_err(|e| format!("decode failed at {time} µs: {e}"))?;
-        let levels = TrackerParams::default().pyramid_levels;
-        let prepared = Frame::from_rgba(
-            &frame.data,
-            frame.width as usize,
-            frame.height as usize,
-            levels,
-        );
-        Ok((frame.pts, prepared))
+        Ok((frame.pts, frame.data))
     }
+}
+
+/// The tracker a run uses, behind one `step`.
+enum Backend {
+    Klt(Box<Tracker>),
+    Vit {
+        tracker: VitTracker,
+        last: BoxState,
+        /// Frames lost in a row, for [`scan_now`].
+        lost_run: u32,
+    },
+}
+
+/// Whether the `lost_run`-th lost frame in a row (1 = the first) gets a
+/// whole-frame scan. A scan costs about a hundred model runs (~0.2 s on a
+/// CPU at 640 px), so every lost frame of a long absence would make a clip
+/// where the object leaves for ten seconds take a minute. The first three
+/// are scanned, because an object that went behind something usually comes
+/// out within a few frames; after that every third, which finds an object
+/// that came back within a tenth of a second at 30 fps.
+fn scan_now(lost_run: u32) -> bool {
+    lost_run <= 3 || lost_run.is_multiple_of(3)
+}
+
+/// VitTrack's score after its window is about 0.6–0.75 on a held object and
+/// falls towards the worker's 0.25 threshold as it slips; this maps that
+/// onto the 0..1 confidence the player draws, with the worker's `CONFIDENT`
+/// (0.45) landing on `LOW_CONFIDENCE` (0.5).
+fn vit_confidence(score: f32) -> f32 {
+    ((score - 0.25) / 0.4).clamp(0.0, 1.0)
+}
+
+impl Backend {
+    fn start(
+        kind: TrackerKind,
+        rgba: &[u8],
+        size: (usize, usize),
+        init: BoxState,
+    ) -> Result<Backend, String> {
+        Ok(match kind {
+            TrackerKind::Klt => {
+                let frame = klt_frame(rgba, size);
+                Backend::Klt(Box::new(Tracker::new(
+                    frame,
+                    init,
+                    TrackerParams::default(),
+                )))
+            }
+            TrackerKind::VitTrack => {
+                let bbox = [
+                    init.cx + 0.5 - init.w * 0.5,
+                    init.cy + 0.5 - init.h * 0.5,
+                    init.w,
+                    init.h,
+                ];
+                Backend::Vit {
+                    tracker: VitTracker::start(rgba, size.0, size.1, bbox)?,
+                    last: init,
+                    lost_run: 0,
+                }
+            }
+        })
+    }
+
+    fn step(&mut self, rgba: &[u8], size: (usize, usize)) -> Result<StepResult, String> {
+        match self {
+            Backend::Klt(tracker) => Ok(tracker.step(klt_frame(rgba, size))),
+            Backend::Vit {
+                tracker,
+                last,
+                lost_run,
+            } => {
+                // `lost_run + 1` is this frame's place in the run of lost
+                // frames if the local search misses here too.
+                let redetect = scan_now(*lost_run + 1);
+                let (bbox, score) = tracker.update(rgba, size.0, size.1, redetect)?;
+                *lost_run = if bbox.is_some() { 0 } else { *lost_run + 1 };
+                Ok(match bbox {
+                    Some(b) => {
+                        // The box only: VitTrack has no rotation, so the
+                        // angle the track started with is kept.
+                        *last = BoxState {
+                            cx: b[0] + b[2] * 0.5 - 0.5,
+                            cy: b[1] + b[3] * 0.5 - 0.5,
+                            w: b[2].max(4.0),
+                            h: b[3].max(4.0),
+                            angle: last.angle,
+                        };
+                        StepResult {
+                            pose: *last,
+                            confidence: vit_confidence(score),
+                            lost: false,
+                        }
+                    }
+                    None => StepResult {
+                        pose: *last,
+                        confidence: vit_confidence(score),
+                        lost: true,
+                    },
+                })
+            }
+        }
+    }
+}
+
+fn klt_frame(rgba: &[u8], size: (usize, usize)) -> Frame {
+    Frame::from_rgba(
+        rgba,
+        size.0,
+        size.1,
+        TrackerParams::default().pyramid_levels,
+    )
 }
 
 fn to_box(init: [f32; 4], angle: f32, size: (usize, usize)) -> BoxState {
@@ -179,11 +288,10 @@ pub fn run(
     progress.latest = Some(anchor);
     report(&progress);
 
-    let params = TrackerParams::default();
     let mut cancelled = false;
 
     if forward {
-        let mut tracker = Tracker::new(first.clone(), init, params);
+        let mut tracker = Backend::start(job.tracker, &first, size, init)?;
         let mut last_pts = start_pts;
         let mut t = start_pts + period;
         while t <= hi {
@@ -198,7 +306,7 @@ pub fn run(
                 continue;
             }
             last_pts = pts;
-            let step = tracker.step(frame);
+            let step = tracker.step(&frame, size)?;
             let flags = if step.lost { FLAG_LOST } else { 0 };
             let sample = to_sample(pts, &step.pose, size, step.confidence, flags);
             samples.push(sample);
@@ -209,12 +317,12 @@ pub fn run(
     }
 
     if backward && !cancelled {
-        let mut tracker = Tracker::new(first, init, params);
+        let mut tracker = Backend::start(job.tracker, &first, size, init)?;
         let chunk = 30 * period;
         let mut chunk_end = start_pts;
         'chunks: while chunk_end > lo {
             let chunk_start = (chunk_end - chunk).max(lo);
-            let mut frames: Vec<(Micros, Frame)> = Vec::new();
+            let mut frames: Vec<(Micros, Vec<u8>)> = Vec::new();
             let mut t = chunk_start;
             while t < chunk_end {
                 let (pts, frame) = source.frame(t)?;
@@ -233,7 +341,7 @@ pub fn run(
                     cancelled = true;
                     break 'chunks;
                 }
-                let step = tracker.step(frame);
+                let step = tracker.step(&frame, size)?;
                 let flags = if step.lost { FLAG_LOST } else { 0 };
                 let sample = to_sample(pts, &step.pose, size, step.confidence, flags);
                 samples.push(sample);

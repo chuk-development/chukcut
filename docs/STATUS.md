@@ -5,7 +5,7 @@ Sessions are long and are not reopened, so nothing important is allowed to live
 only in a conversation. If you learn something that would change how the next
 person works, it belongs in this repository, not in a chat log.
 
-Last updated: 2026-10-02 (**the UI is native now** — decision 0011. The Tauri
+Last updated: 2026-10-04 (ML worker: VitTrack re-finding, Remove background, CUDA — see "The ML worker" below). Previously 2026-10-02 (**the UI is native now** — decision 0011. The Tauri
 shell and the React frontend are gone; the engine is `crates/engine`
 (`chukcut-engine`, no UI dependency) and the app is a GPUI window in
 `crates/app`. What the native app does today: import (dialog or command line),
@@ -97,6 +97,57 @@ Judge performance from a release build only.
    inside one process, preview tiles, account keys). That test fails on a new
    `pub fn` in a `commands.rs` that nothing calls. Pending: the tracking
    commands (attach, bake, smoothing), which the tracking branch exposes.
+
+## Frame blending, motion blur, animated stickers (2026-10-04, agent/motion2)
+
+Decision 0026. Speed → Standard has **Frame blending** (video clips): a frame
+between two source frames mixes both by where it falls, so 0.25x and speed
+ramps play smoothly. Effects → Motion has **Motion blur** (shutter angle,
+samples). Stickers → **Animated**: Noto Animated Emoji (Lottie, CC BY 4.0,
+licence read on Google's page), moving tiles; a Lottie `.json`, animated GIF
+or WebP imported by the user is an animated sticker too. Video → Sticker →
+**Play once** holds the last frame instead of looping. CLI: `frame-blend`,
+`sticker-playback`, `sticker --animated/--once`, `catalog animated_emoji`,
+`effect add … motion_blur`.
+
+- **How:** `Draw::Accumulated` in the compositor draws a clip several times
+  with the quad shader's premultiplied output, weights in the opacity, into
+  an `Rgba16Float` layer (additive), then `render::accumulate::Resolver`
+  turns it into an ordinary straight-alpha layer (effects, blend modes and
+  the over pass as usual). Frame blend: `speed::blend` (extras block),
+  fetches frame k and k+1 middles. Motion blur: `fx::motion_blur`, placement
+  sampled over a centred shutter (keyframes, animations, follows,
+  stabilisation all evaluated per sample). The provider keeps two frames per
+  video (`CachedTexture::previous`); decode-ahead asks for both.
+- **Animated stickers:** `modules::animated` — image materials whose file is
+  Lottie (velato 0.12 without its vello feature + our `RenderSink` onto
+  vello 0.11, which is on our wgpu 30; one vello renderer for the one device)
+  or GIF/WebP (decoded whole by `image`; FFmpeg 6.1 cannot decode an animated
+  WebP). The compositor maps the clip's source time through
+  `animated::clip_time` (loop/once).
+- **Verified** on the RTX 3060 and on lavapipe: `tests/temporal.rs` (a blend
+  matches the linear-light mix of its two neighbours within 4 code values at
+  ¼, ½, ¾; sequential playback shows every source frame clean; an export
+  carries the blend; motion blur smears 6–14 px at 320 px/s with the row's
+  light kept within 3% and its centroid within 0.5 px; a still clip with
+  motion blur is byte-identical to none), `tests/animated_stickers.rs`
+  (Lottie loop and once, GIF frame delays, an export with the box where the
+  animation says on 9 frames across a loop). The real Noto 1f600 Lottie
+  renders correctly (`animated::lottie::tests::lottie_sample`, ignored, takes
+  `CHUKCUT_LOTTIE_SAMPLE`). App checked on Xvfb + lavapipe: tiles play,
+  clicking adds and selects, Play once and Frame blending switch.
+- **Trap: an sRGB view of a storage texture must say `usage`.** A view
+  inherits all of its texture's usages; `Rgba8UnormSrgb` cannot be a storage
+  view, so the view is invalid and *the whole frame's submission* reads back
+  as zeros (not even the background). `lottie.rs` sets
+  `usage: TEXTURE_BINDING`.
+- **Trap: GPUI only plays a GIF in an `img` that has an id.** Without
+  `.id(...)` there is no frame state and no animation-frame request.
+- **Rough:** no optical flow; no accumulation inside a transition window or
+  while a blur animation runs; motion blur moves the one decoded frame (no
+  in-footage blur); velato draws no Lottie text or image layers; a GIF the
+  user imports is now a looping sticker, not a video clip; the VAAPI path
+  holds two decoder surfaces per material between decodes.
 
 ## Timelines and compound clips (2026-10-04, agent/compound)
 
@@ -200,6 +251,24 @@ breadcrumbs or the clip menu to close; Alt+Shift+G puts the clips back).
   still refuse a compound clip; a compound clip's own audio effects (EQ,
   denoise on the compound clip itself) do not reach the mix; an older build
   opening a multi-timeline file drops the parked timelines.
+
+## Polish pass 2, 2026-10-04 (agent/polish2)
+
+- **Trap: rounding a clip edge to the frame grid can overlap a neighbour
+  whose edge is off the grid.** Clips placed before frame snapping, and
+  videos whose length is not whole frames, end between frames. A drag or
+  drop that reached no snap target rounded its head to the nearest frame,
+  caught such an edge by a few microseconds, and was refused ("another clip
+  is in the way"); a drop then fell back to the end of the lane.
+  `timeline::gesture::clear_of_neighbours` slides the clip flush against
+  the edge when the overlap is under one frame. A snap to an off-grid edge
+  stays on it: touching wins over the grid.
+- **Trap: media from the command line was stored by relative path**, so a
+  project made by `chukcut a.mp4` broke when opened from another directory,
+  and the same file picked in a dialog became a second material (materials
+  are matched by path string). `editor/shell.rs` canonicalises it now.
+- Template follow-ups, the play button's tooltip, the follower path outside
+  its time and the scene detection buttons: `docs/QA.md`, "Polish pass 2".
 
 ## Polish pass, 2026-10-03 (agent/polish)
 
@@ -2378,10 +2447,17 @@ built-in), `crates/cli/tests/templates.rs`.
   desktop.** On Xvfb, run the app with `CHUKCUT_FILE_DIALOG=builtin` and
   `DBUS_SESSION_BUS_ADDRESS` unset; otherwise "Choose…" asks the real
   session's xdg-desktop-portal.
-- Rough: the media library lists the placeholder PNGs and the music bed like
-  any import; a template project references a user template's `media/` by
-  absolute path (deleting the template takes those files offline); splitting
-  a slot gives both halves the same marker.
+- Follow-ups done 2026-10-04 (agent/polish2): a project from a user
+  template copies the template's `media/` into
+  `<data>/template-media/<project id>/` (`format::copy_out_media`), so
+  deleting the template leaves it whole; the media library hides the drawn
+  placeholders and music beds (`assets::is_template_asset`); a split slot
+  stays one slot on the left half (the right half, a paste and a freeze
+  still drop the marker); the timeline clip menu has "Replace media…" for
+  any picture clip (`ReplaceMedia` in the shortcut registry).
+- Still rough: template assets (placeholders, music, looks) are referenced
+  by absolute path under the data directory; a template copied to a user
+  with another home directory keeps the old paths (decision 0022).
 
 **Shortcuts** (`modules/keymap`). Every bindable action is in one registry
 (`keymap/registry.rs`) with its keys in three presets (chukcut, CapCut-like,
@@ -3339,6 +3415,60 @@ Rough or missing:
   OAuth originals (research waves 7–8).
 - Generated files are not offered to move into the project folder when it is
   first saved.
+
+## The ML worker: VitTrack re-finding, Remove background, GPU providers (2026-10-04)
+
+Decision 0025. `crates/ml-worker` is a separate process on ONNX Runtime
+loaded at run time; `modules/ml` supervises it; `chukcut-cli ml status
+--probe | models | runtimes | install | remove | bench` (also an MCP tool).
+
+- **Tracking T2 (VitTrack)** is a choice in the tracking inspector
+  ("Fast motion (AI)"), `chukcut-cli track --tracker vittrack` and MCP; it
+  falls back to KLT with a note when the worker cannot run. It now **finds
+  the object again**: when the search around the last box misses, the worker
+  scans the whole frame with the same template (lost frames 1–3, then every
+  third) and accepts a hit only with raw score ≥ 0.5, a plausible size and
+  the start box's colours. `tests/tracking.rs`
+  `vittrack_finds_the_ball_again_…`: a ball behind a bar and out of the frame
+  and back is held within 4.7 px after both. Traps found: at OpenCV's 0.2
+  threshold the box crept onto the occluder and grew without ever counting
+  as lost (now 0.25, sizes checked against the last confident box); without
+  the colour check the scan found "balls" in testsrc2's bars. Cost: a scan is
+  ~110 model runs at 640×360 (~0.3 s on the CPU); the hide-and-return
+  fixture tracks 134 frames in ~30 s on the CPU. No KLT-inside-the-box
+  rotation yet (VitTrack keeps the start angle).
+- **Remove background** (Video › Remove background › Auto remove, CLI/MCP
+  `remove_background`, `matting::commands`). The setting
+  (`CompositingMaterial::background`: model + version) is one undoable edit;
+  turning it on starts a bake of the clip's source range. Mattes are cache:
+  one greyscale PNG per source frame in `~/.cache/chukcut/mattes/<media
+  key>-rvm-<version>-960/`, written as they are made, shown by the preview at
+  once (`render::background::MatteFrames`, binding 5 of the quad shader,
+  `M_BACKGROUND`), and baked for whatever is missing before an export renders
+  (`matting_ensure`; an export fails in words if a matte cannot be made).
+  A frame without a matte yet draws whole. Verified on a 720×1280 talking
+  head: preview, `render-frame` and export all cut her out cleanly; an export
+  re-baked six deleted frames. Tests: `tests/matting.rs` (setting + undo,
+  hole detection, the compositor cutting at a hand-made matte in preview and
+  NV12 export on NVIDIA and lavapipe, a real RVM bake where installed).
+- **Rough:** RVM is people only (no BiRefNet for objects yet); no
+  click-to-select "custom" removal (needs SAM, T3); the matte is not
+  keyed by provider, so a clip half baked on the CPU and half on CUDA
+  differs by ~1/255 between the halves; changing a clip's speed or trimming
+  it longer leaves new frames unbaked until "Finish missing frames" or the
+  export; mattes are never cleaned up with the cache limit yet.
+- **GPU providers:** CUDA, then OpenVINO, then the CPU, probed per worker.
+  Runtime packs: `runtime:cpu` (fetched on first use), `cuda12`, `cuda13`,
+  and `cudnn9-cu12` (NVIDIA's PyPI wheel). `ml status` names the GPU vendors
+  and what to install. **Trap:** Ubuntu's CUDA 12.0 `libcudart.so.12` is too
+  old for ORT 1.28's CUDA 12 provider (`undefined symbol:
+  cudaLibraryGetKernel`). On the RTX 3060 here CUDA worked with the `cuda13`
+  pack and `CHUKCUT_CUDA_LIB_DIRS` pointing at a venv's
+  `nvidia/cu13/lib:nvidia/cudnn/lib`. RVM 15.6 ms per 540×960 frame on CUDA
+  against 99 ms on the CPU. OpenVINO needs an OpenVINO-enabled
+  `libonnxruntime.so` in `CHUKCUT_ORT_DYLIB` (Microsoft's Linux builds have
+  none); not tested on Intel hardware. All ML runs on job threads; the app
+  only polls status from its tick.
 
 ## The research
 

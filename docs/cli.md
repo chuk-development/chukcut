@@ -242,6 +242,7 @@ narrow the lists that take them (see the table).
 | `looks` | chukcut's own looks for `look` (writes them into the LUT library the first time) |
 | `emoji` | emoji stickers for `sticker --emoji`; `--search` a name, `--filter` a style (`fluent3d`, `fluent_flat`, `noto`) |
 | `icons` | icons for `sticker --icon`; `--search` is necessary |
+| `animated_emoji` | Noto Animated Emoji (Lottie, CC BY 4.0) for `sticker --animated`; `--search` a name or tag |
 | `music` | the curated tracks (`--filter` a mood: Upbeat, Chill, Funny, Cinematic, Calm), or `--search` all of Incompetech |
 | `sfx` | the sound-effect packs; `--filter PACK` lists the sounds of one pack (downloads it the first time), `--search` narrows them |
 | `font_catalogue` | Fontsource families; `--search` a name, `--filter` a category (`sans_serif`, `serif`, `display`, `handwriting`, `monospace`, `popular`) |
@@ -382,6 +383,23 @@ pitch-correct time stretch). One undo step. For a constant speed, use
 chukcut-cli speed-curve reel.chukcut 0:2 --preset hero
 chukcut-cli speed-curve reel.chukcut 0:2 --point 0=1 --point 1.2s=0.3 --point 2.5s=1
 ```
+
+#### `frame-blend PROJECT CLIP [--mode none|blend]`
+
+Frame blending for a video clip. With `blend`, a frame that falls between two
+frames of the file shows both, mixed by where it falls, so slow motion and
+speed ramps play smoothly instead of holding each frame. `none` switches it
+off. Without `--mode`, says what the clip has. One undo step. Optical flow is
+not built.
+
+```bash
+chukcut-cli frame-blend reel.chukcut 0:2 --mode blend
+```
+
+Motion blur for fast moves is an effect: `effect add PROJECT motion_blur
+--clip CLIP --set shutter=270 --set samples=12` (shutter angle 0–360°, 180 by
+default; 2–32 samples, 8 by default). It averages the clip's position, scale
+and rotation over the shutter; a clip that does not move is not changed.
 
 ### Markers
 
@@ -829,10 +847,30 @@ the timeline time where you draw the box. `--direction forward|backward|both`
 
 `--overlay CLIP` makes a title, sticker or other clip follow the track.
 `--mode position|position_scale|position_scale_rotation` sets how it follows.
-The command waits for the analysis to finish. The result is one undo step.
+`--tracker klt|vittrack` chooses the tracker: `klt` (the default) needs no
+model and measures rotation; `vittrack` runs a learned tracker in the ML
+worker, holds fast and blurred objects and finds the object again after it
+was hidden or left the frame, and falls back to `klt` when the worker cannot
+run it. The command waits for the analysis to finish. The result is one undo
+step.
 
 ```bash
 chukcut-cli track reel.chukcut 0:0 --at 1.2 --rect 0.52,0.4,0.15,0.2 --overlay 2:0
+```
+
+#### `track-set PROJECT CLIP`
+
+Changes how a clip follows a motion track, or the track itself; each option
+is one undo step. `--attach TRACK_ID --target CLIP` makes the clip follow a
+track `track` made earlier (its full `track_id`) in the video clip it was
+made in. `--mode position|position_scale|position_scale_rotation` sets how it
+follows. `--smoothing 0..1` smooths the followed track. `--bake` turns the
+motion into keyframes on the clip. `--detach` stops following and keeps the
+clip where it is at `--at` (default: its start). `--remove` deletes the
+followed track.
+
+```bash
+chukcut-cli track-set reel.chukcut 2:0 --smoothing 0.4 --mode position_scale
 ```
 
 #### `mask PROJECT CLIP`
@@ -879,6 +917,20 @@ the key.
 chukcut-cli chroma-key reel.chukcut 1:0 --pick 0.05,0.5 --spill 0.7
 ```
 
+#### `remove-background PROJECT CLIP [--off]`
+
+Removes the background behind the people in a video clip, with Robust Video
+Matting (GPL-3.0) in the ML worker. The model (15 MB) and ONNX Runtime
+download on first use. The setting is one undo step; the command then bakes
+the clip's matte into the cache (`~/.cache/chukcut/mattes`) and waits for it.
+Run it again on a clip that has it to bake frames that are missing (after a
+trim, or a cleared cache); an export also bakes them. `--off` keeps the
+background again.
+
+```bash
+chukcut-cli remove-background reel.chukcut 0:0
+```
+
 #### `blend PROJECT CLIP [MODE] [--opacity N]`
 
 Sets how a clip blends with the lanes below it: `normal`, `multiply`,
@@ -893,17 +945,27 @@ music (CC BY 4.0) and CC0 sound packs. Each file is downloaded once into the
 library cache with its licence record; `cloud credits` then lists what needs a
 credit.
 
-#### `sticker PROJECT --emoji NAME | --icon ID | --file IMAGE`
+#### `sticker PROJECT --emoji NAME | --animated NAME | --icon ID | --file FILE`
 
 Puts a sticker on an overlay lane, in the middle of the frame, for three
 seconds, from `--at TIME` (default 0). An emoji is found by name or by the
-emoji itself; `--style fluent3d|fluent_flat|noto` chooses the drawing. An
-icon is `prefix:name` from `catalog icons`, or a word (the first hit). One
-undo step.
+emoji itself; `--style fluent3d|fluent_flat|noto` chooses the drawing.
+`--animated` takes a Noto Animated Emoji by name, tag or the emoji itself
+(`catalog animated_emoji`). An icon is `prefix:name` from `catalog icons`, or
+a word (the first hit). `--file` takes a picture, or an animated sticker of
+your own: a Lottie `.json`, or an animated GIF or WebP. Animated stickers
+loop; `--once` plays one once and holds its last frame. One undo step.
 
 ```bash
 chukcut-cli sticker reel.chukcut --emoji "red heart" --at 2.5
+chukcut-cli sticker reel.chukcut --animated "party popper" --at 1 --once
 ```
+
+#### `sticker-playback PROJECT CLIP [--mode loop|once]`
+
+Makes an animated sticker loop or play once and hold its last frame. Without
+`--mode`, says what the clip has and how long one pass of the animation is.
+One undo step.
 
 #### `music PROJECT TITLE [--at TIME]`
 
@@ -1363,6 +1425,26 @@ export in the queue and the queue keeps running when the dialog is closed.
 Writes the frame at a time as a PNG at the full canvas size. It uses the export
 compositor, so it shows the same pixels as the export.
 
+### Machine learning
+
+#### `ml ACTION [ITEM]`
+
+Not tied to a project. `status` (with `--probe`, starts the ML worker and
+lists the execution providers that work, and says what to install for the
+GPU), `models`, `runtimes`, `install ITEM`, `remove ITEM`, `bench MODEL
+[--size WxH] [--iterations N]`. An ITEM is a model (`yunet`, `vittrack`,
+`rvm`) or a runtime pack (`runtime:cpu`, `runtime:cuda12`, `runtime:cuda13`,
+`runtime:cudnn9-cu12`). `CHUKCUT_CUDA_LIB_DIRS` (colon-separated) names
+directories with CUDA libraries the system does not have; `CHUKCUT_ORT_DYLIB`
+names another ONNX Runtime build (an OpenVINO one for Intel GPUs). Also an
+MCP tool, `ml`.
+
+```bash
+chukcut-cli ml status --probe
+chukcut-cli ml install runtime:cuda13
+chukcut-cli ml bench rvm --size 540x960
+```
+
 ### Undo and redo
 
 #### `undo PROJECT`, `redo PROJECT`
@@ -1404,8 +1486,8 @@ The operation names are the MCP tool names: `info`, `validate`, `configure`,
 `import`, `undo`, `redo`, `append`, `place`, `split`, `delete`, `move`,
 `trim`, `clip_set`, `grade`, `effect_add`, `effect_set`, `effect_remove`,
 `animate`, `animate_text`, `zoom`, `keyframe`, `title_add`, `title_set`,
-`transition_add`, `transition_remove`, `track`, `mask`, `chroma_key`,
-`blend`, `captions_transcribe`,
+`transition_add`, `transition_remove`, `track`, `track_set`, `mask`, `chroma_key`,
+`remove_background`, `blend`, `captions_transcribe`,
 `captions_import`, `captions_export`, `captions_style`, `captions_list`,
 `silence_detect`, `silence_remove`, `normalize`, `denoise`, `loudness`,
 `marker_add`, `marker_set`, `marker_remove`, `marker_list`, `crop`, `curve`,

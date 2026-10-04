@@ -21,6 +21,8 @@ pub mod library;
 pub mod look;
 pub mod markers;
 pub mod mask;
+pub mod ml;
+pub mod motion;
 pub mod project;
 pub mod render;
 pub mod sequence;
@@ -199,9 +201,11 @@ operations!(
     look::TransitionAddArgs,
     look::TransitionRemoveArgs,
     look::TrackArgs,
+    look::TrackSetArgs,
     mask::MaskArgs,
     mask::ChromaKeyArgs,
     mask::BlendArgs,
+    mask::RemoveBackgroundArgs,
     audio::CaptionsTranscribeArgs,
     audio::CaptionsImportArgs,
     audio::CaptionsExportArgs,
@@ -277,6 +281,8 @@ operations!(
     clip::MaskMoveArgs,
     clip::LaneAddArgs,
     library::StickerArgs,
+    motion::FrameBlendArgs,
+    motion::StickerPlaybackArgs,
     library::MusicArgs,
     library::SfxArgs,
     cloud_tools::SoundArgs,

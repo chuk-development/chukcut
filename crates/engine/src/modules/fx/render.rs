@@ -136,6 +136,9 @@ impl FxInstance {
                     && self.get("zoom") <= 0.0
             }
             RGB_SPLIT => self.get("amount") <= 0.0,
+            // Never a pass of the chain: the compositor draws it while it
+            // places the clip (`fx::motion_blur`).
+            MOTION_BLUR => true,
             GLITCH => self.get("intensity") <= 0.0,
             VHS => self.get("intensity") <= 0.0 && self.get("noise") <= 0.0,
             PIXELATE => self.get("size") <= 0.0,

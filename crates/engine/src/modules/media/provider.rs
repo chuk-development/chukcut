@@ -72,6 +72,13 @@ const FRAME_EPSILON: Micros = 8_000;
 struct CachedTexture {
     source_time: Micros,
     frame: SourceFrame,
+    /// The frame of this video decoded before `frame`, kept so that frame
+    /// blending — which asks for the frame before an instant and the one
+    /// after, and at a slow speed asks for the same pair again on the next
+    /// render — finds the earlier one here instead of seeking the decoder
+    /// backwards for it (25–200 ms a seek). Only videos keep one; a title's
+    /// old raster is not worth its memory.
+    previous: Option<(Micros, SourceFrame)>,
 }
 
 /// An open decoder plus the display height it was opened for.
@@ -404,18 +411,23 @@ impl MediaSourceProvider {
         time: Micros,
         size: (u32, u32),
     ) {
+        // Each clip's source instant, and the next frame's when the clip
+        // blends frames (`speed::blend`): both are what the render asks for.
         let wanted = prefetch_requests(project, time);
-        let fetch = |&(material_id, source_time): &(&str, Micros)| {
-            let request = SourceRequest {
-                material_id,
-                kind: MaterialKind::Video,
-                source_time,
-                segment_id: "",
-                max_size: size,
-            };
-            if let Err(error) = self.frame(ctx, &request) {
-                // The render will ask again and report it properly.
-                tracing::debug!(material_id, %error, "decode-ahead failed");
+        let fetch = |&(material_id, source_time, next): &(&str, Micros, Option<Micros>)| {
+            for source_time in std::iter::once(source_time).chain(next) {
+                let request = SourceRequest {
+                    material_id,
+                    kind: MaterialKind::Video,
+                    source_time,
+                    segment_id: "",
+                    max_size: size,
+                };
+                if let Err(error) = self.frame(ctx, &request) {
+                    // The render will ask again and report it properly.
+                    tracing::debug!(material_id, %error, "decode-ahead failed");
+                    return;
+                }
             }
         };
         match wanted.as_slice() {
@@ -461,9 +473,19 @@ impl MediaSourceProvider {
     ) -> Option<SourceFrame> {
         let textures = self.textures.lock();
         let cached = textures.get(material_id)?;
-        let close_enough = (cached.source_time - source_time).abs() <= FRAME_EPSILON;
-        let big_enough = cached.frame.height as f32 * REOPEN_RATIO >= want_height as f32;
-        (close_enough && big_enough).then(|| cached.frame.clone())
+        let usable = |at: Micros, frame: &SourceFrame| {
+            let close_enough = (at - source_time).abs() <= FRAME_EPSILON;
+            let big_enough = frame.height as f32 * REOPEN_RATIO >= want_height as f32;
+            close_enough && big_enough
+        };
+        if usable(cached.source_time, &cached.frame) {
+            return Some(cached.frame.clone());
+        }
+        cached
+            .previous
+            .as_ref()
+            .filter(|(at, frame)| usable(*at, frame))
+            .map(|(_, frame)| frame.clone())
     }
 
     fn store(&self, material_id: &str, source_time: Micros, frame: &SourceFrame) {
@@ -472,6 +494,24 @@ impl MediaSourceProvider {
             CachedTexture {
                 source_time,
                 frame: frame.clone(),
+                previous: None,
+            },
+        );
+    }
+
+    /// [`Self::store`] for a video frame: the frame it replaces stays as the
+    /// previous one. See [`CachedTexture::previous`].
+    fn store_video(&self, material_id: &str, source_time: Micros, frame: &SourceFrame) {
+        let mut textures = self.textures.lock();
+        let previous = textures
+            .remove(material_id)
+            .map(|old| (old.source_time, old.frame));
+        textures.insert(
+            material_id.to_string(),
+            CachedTexture {
+                source_time,
+                frame: frame.clone(),
+                previous,
             },
         );
     }
@@ -546,7 +586,13 @@ impl MediaSourceProvider {
             decoder.acceleration(),
             Acceleration::Auto | Acceleration::Vaapi
         ) {
-            self.textures.lock().remove(material_id);
+            // Only the older of the two kept frames goes: the newer one is
+            // what frame blending mixes with the frame about to be decoded.
+            // That is one surface held across the decode, two after it —
+            // within `EXTRA_HW_FRAMES`' headroom (`media::hwdecode`).
+            if let Some(cached) = self.textures.lock().get_mut(material_id) {
+                cached.previous = None;
+            }
             let started = std::time::Instant::now();
             match decoder.seek_and_map(source_time) {
                 Ok(mapped) => {
@@ -565,7 +611,7 @@ impl MediaSourceProvider {
                         drop(decoder);
                         self.mapped
                             .store(true, std::sync::atomic::Ordering::Relaxed);
-                        self.store(material_id, source_time, &frame);
+                        self.store_video(material_id, source_time, &frame);
                         return Ok(frame);
                     }
                     // The surface came back in a layout this driver will not
@@ -611,7 +657,7 @@ impl MediaSourceProvider {
                         "downloaded NV12 source frame",
                     );
                     drop(decoder);
-                    self.store(material_id, source_time, &frame);
+                    self.store_video(material_id, source_time, &frame);
                     return Ok(frame);
                 }
                 Err(error) => {
@@ -652,8 +698,54 @@ impl MediaSourceProvider {
         // independent and holding both invites a lock-order bug later.
         drop(decoder);
 
-        self.store(material_id, source_time, &frame);
+        self.store_video(material_id, source_time, &frame);
         Ok(frame)
+    }
+
+    /// An animated sticker's picture at `time` into the animation (the
+    /// compositor has already looped or held it; `animated::clip_time`).
+    ///
+    /// A Lottie frame is rasterised by vello at the size the sticker fits the
+    /// frame being rendered, and cached under the exact time like a video
+    /// frame; a GIF or WebP frame is uploaded and cached under the time its
+    /// frame starts, so every render inside one frame's span is a hit.
+    fn animated_frame(
+        &self,
+        ctx: &RenderContext,
+        material_id: &str,
+        animation: &crate::modules::animated::Animation,
+        time: Micros,
+        max_size: (u32, u32),
+    ) -> anyhow::Result<SourceFrame> {
+        use crate::modules::animated::Animation;
+        match animation {
+            Animation::Lottie(lottie) => {
+                let size = lottie.fitted(max_size);
+                if let Some(cached) = self.cached(material_id, time, size.1) {
+                    if (cached.width, cached.height) == size {
+                        return Ok(cached);
+                    }
+                }
+                let frame = lottie
+                    .render(ctx, time, size)
+                    .map_err(|e| anyhow::anyhow!(e))?;
+                self.store(material_id, time, &frame);
+                Ok(frame)
+            }
+            Animation::Frames(frames) => {
+                let index = frames.index_at(time);
+                let start = frames.starts[index];
+                if let Some(cached) = self.textures.lock().get(material_id) {
+                    if cached.source_time == start {
+                        return Ok(cached.frame.clone());
+                    }
+                }
+                let image = &frames.frames[index];
+                let frame = upload_rgba(ctx, image.as_raw(), image.width(), image.height());
+                self.store(material_id, start, &frame);
+                Ok(frame)
+            }
+        }
     }
 
     fn image_frame(
@@ -756,8 +848,8 @@ impl MediaSourceProvider {
 /// What the decode-ahead decodes for a render of `project` at `time`: one
 /// `(material, source time)` per video file on screen, compound clips' insides
 /// included.
-fn prefetch_requests(project: &Project, time: Micros) -> Vec<(&str, Micros)> {
-    let mut wanted: Vec<(&str, Micros)> = Vec::new();
+fn prefetch_requests(project: &Project, time: Micros) -> Vec<Prefetch<'_>> {
+    let mut wanted: Vec<Prefetch<'_>> = Vec::new();
     for (track, segment) in render::visible_segments(project, time) {
         if project.materials.kind_of(&segment.material_id) == Some(MaterialKind::Sequence) {
             inside_compound(&project.materials, track, segment, time, 0, &mut wanted);
@@ -766,23 +858,41 @@ fn prefetch_requests(project: &Project, time: Micros) -> Vec<(&str, Micros)> {
         if project.materials.kind_of(&segment.material_id) != Some(MaterialKind::Video) {
             continue;
         }
-        if crate::modules::transitions::instant_for(track, &project.materials, segment, time)
-            .is_some()
-        {
-            continue;
-        }
-        let Some(source_time) = project.materials.time_map(segment).source_time_at(time) else {
-            continue;
-        };
-        // One position per decoder: the same file twice on screen is
-        // decoded twice by the render anyway, and prefetching both would
-        // make its one demuxer seek back and forth.
-        if wanted.iter().any(|(id, _)| *id == segment.material_id) {
-            continue;
-        }
-        wanted.push((&segment.material_id, source_time));
+        want_video(&project.materials, track, segment, time, &mut wanted);
     }
     wanted
+}
+
+/// What the decode-ahead fetches for one video: its material, the source
+/// instant, and the next frame's when the clip blends frames.
+type Prefetch<'a> = (&'a str, Micros, Option<Micros>);
+
+/// Video clip `segment` at timeline (or nested) time `time`, added to
+/// `wanted` unless a transition decides its times or its file is wanted
+/// already.
+fn want_video<'a>(
+    pool: &'a crate::modules::project::MaterialPool,
+    track: &crate::modules::project::Track,
+    segment: &'a crate::modules::project::Segment,
+    time: Micros,
+    wanted: &mut Vec<Prefetch<'a>>,
+) {
+    if crate::modules::transitions::instant_for(track, pool, segment, time).is_some() {
+        return;
+    }
+    let Some(source_time) = pool.time_map(segment).source_time_at(time) else {
+        return;
+    };
+    // One position per decoder: the same file twice on screen is decoded
+    // twice by the render anyway, and prefetching both would make its one
+    // demuxer seek back and forth.
+    if wanted.iter().any(|(id, _, _)| *id == segment.material_id) {
+        return;
+    }
+    match crate::modules::speed::blend::blend_for(pool, segment, source_time) {
+        Some(blend) => wanted.push((&segment.material_id, blend.first, Some(blend.second))),
+        None => wanted.push((&segment.material_id, source_time, None)),
+    }
 }
 
 /// The videos compound clip `segment` shows at `time`, for the decode-ahead:
@@ -794,7 +904,7 @@ fn inside_compound<'a>(
     segment: &'a crate::modules::project::Segment,
     time: Micros,
     depth: usize,
-    wanted: &mut Vec<(&'a str, Micros)>,
+    wanted: &mut Vec<Prefetch<'a>>,
 ) {
     if depth >= crate::modules::sequence::MAX_DEPTH {
         return;
@@ -822,17 +932,7 @@ fn inside_compound<'a>(
             Some(MaterialKind::Sequence) => {
                 inside_compound(pool, track, segment, inner, depth + 1, wanted)
             }
-            Some(MaterialKind::Video) => {
-                if crate::modules::transitions::instant_for(track, pool, segment, inner).is_some() {
-                    continue;
-                }
-                let Some(source_time) = pool.time_map(segment).source_time_at(inner) else {
-                    continue;
-                };
-                if !wanted.iter().any(|(id, _)| *id == segment.material_id) {
-                    wanted.push((&segment.material_id, source_time));
-                }
-            }
+            Some(MaterialKind::Video) => want_video(pool, track, segment, inner, wanted),
             _ => {}
         }
     }
@@ -868,6 +968,23 @@ impl SourceProvider for MediaSourceProvider {
         // Audio contributes nothing to a video frame.
         if request.kind == MaterialKind::Audio {
             return Ok(None);
+        }
+
+        // An animated sticker keeps its own cache rules (a GIF frame by the
+        // span it covers), which the time-window check below would get wrong
+        // at a frame boundary.
+        if let MaterialSource::Image { path } = source {
+            if let Some(animation) = crate::modules::animated::animation(path) {
+                return self
+                    .animated_frame(
+                        ctx,
+                        request.material_id,
+                        &animation,
+                        request.source_time,
+                        request.max_size,
+                    )
+                    .map(Some);
+            }
         }
 
         if let Some(cached) =
@@ -1232,9 +1349,33 @@ mod tests {
         // 1.75 s into the file.
         assert_eq!(
             prefetch_requests(&project, 3_250_000),
-            vec![("v1", 1_750_000)]
+            vec![("v1", 1_750_000, None)]
         );
         assert!(prefetch_requests(&project, 6_000_000).is_empty());
+
+        // With frame blending on the clip inside, its next frame is fetched
+        // too, as the nested render will ask for both.
+        let mut scratch = project_with_materials();
+        let mut lane = Track::new(TrackKind::Video, "scratch");
+        lane.segments.push(clip("in", "v1", 0, 1_000_000));
+        scratch.tracks.push(lane);
+        let (entry, _) = crate::modules::speed::blend::set_frame_blend_command(
+            &scratch,
+            "in",
+            crate::modules::speed::blend::FrameBlend::Blend,
+        )
+        .unwrap();
+        let (id, value) = entry.expect("blending on has an entry");
+        project.materials.extras.insert(id.clone(), value);
+        project.materials.sequences[0].tracks[0].segments[0]
+            .extras
+            .push(id);
+        let wanted = prefetch_requests(&project, 3_250_000);
+        assert_eq!(wanted.len(), 1);
+        let (material, first, next) = wanted[0];
+        assert_eq!(material, "v1");
+        let next = next.expect("the blend neighbour");
+        assert!(first <= 1_750_000 && 1_750_000 < next, "{first} {next}");
     }
 
     #[test]

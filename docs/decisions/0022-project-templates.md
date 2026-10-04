@@ -85,14 +85,27 @@ the media is copied into `media/`.
   copied between users with different home directories keeps the old
   absolute paths for our assets. Bundling them too would fix it at a few
   hundred kilobytes per template.
-- A project made from a user template references the template's `media/`
-  folder by absolute path. Deleting the template takes those files away
-  from the project (they go offline, decision 0009).
+- A project made from a user template gets its own copy of the template's
+  `media/` files, under `<data>/template-media/<project id>/` (2026-10-04,
+  `format::copy_out_media`), so deleting or moving the template leaves the
+  project whole. The cost is one copy per project; template media is logos
+  and sounds, not footage. Until then the project read the template's
+  folder by absolute path and lost those files with the template.
 - A slot carries picture only. The user's clip's own sound plays at the
   slot's volume, which the built-ins set to 0 under music (and 1 for the
   talking-head and reaction templates).
-- Splitting a filled slot gives both halves the same marker; the fill dialog
-  then lists the slot twice. Harmless, but untidy.
+- **A split slot stays one slot, on the left half** (2026-10-04). The right
+  half is an ordinary clip, as are a pasted or duplicated copy of a slot
+  and a freeze frame's still. Numbering both halves as separate slots was
+  the other choice; it would renumber every later slot and change what a
+  template's labels and fill order mean, for a gesture that is rare in a
+  template. "Replace media…" (timeline clip menu, slots dialog) still fills
+  the right half, like any picture clip. Before, both halves named the same
+  marker and the fill dialog listed the slot twice.
+- The media library leaves out our drawn placeholders and music beds
+  (`assets::is_template_asset`): they are not media the user chose, and a
+  fresh template project showed a tile per slot. The music bed stays on its
+  lane and can be copied from there.
 
 ## What would change our minds
 

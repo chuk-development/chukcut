@@ -664,6 +664,30 @@ pub fn run_export(job: &ExportJob, sink: &dyn ProgressSink) -> Result<ExportOutc
         return Err(error);
     }
 
+    // "Remove background" mattes are cache, not document: bake any the
+    // project needs and does not have yet, before the first frame, so the
+    // file never shows a background the user removed. A matte that cannot
+    // be made fails the export by name rather than shipping the background.
+    if !settings.audio_only {
+        let ensured = crate::modules::matting::commands::matting_ensure(
+            &job.project,
+            &|what, fraction| {
+                let mut preparing = tracker.snapshot(ExportStage::Preparing, 0, Instant::now());
+                preparing.message = Some(format!("{what} ({:.0} %)", fraction * 100.0));
+                sink.send(preparing);
+            },
+            &job.cancel,
+        );
+        if let Err(message) = ensured {
+            let error = ExportError::Settings(message);
+            tracing::error!(%error, "the export could not make its background mattes");
+            let mut failed = tracker.snapshot(ExportStage::Failed, 0, Instant::now());
+            failed.message = Some(error.to_string());
+            sink.send(failed);
+            return Err(error);
+        }
+    }
+
     // Open the file first: a codec that is not in this build, a directory that
     // does not exist or a path that is not writable all fail here, in
     // milliseconds, instead of after the audio mix.

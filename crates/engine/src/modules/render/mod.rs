@@ -54,6 +54,8 @@
 //!   skipped. A muted track still draws: muting silences a lane, `hidden` is
 //!   what conceals it.
 
+pub mod accumulate;
+pub mod background;
 pub mod blend;
 pub mod compositor;
 pub mod context;

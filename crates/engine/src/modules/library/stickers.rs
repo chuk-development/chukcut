@@ -18,9 +18,8 @@
 //! are left out — a brand mark on a video is a trademark question no licence
 //! answers.
 //!
-//! **Animated stickers are not here.** Noto Animated Emoji are Lottie, and
-//! there is no Lottie renderer in the engine yet (velato needs vello on our
-//! wgpu device; dotlottie-rs needs ThorVG built from C++). Static only.
+//! **Animated stickers** (Noto Animated Emoji, Lottie) are in
+//! `animated_emoji`; they are drawn by `modules::animated`.
 //!
 //! A sticker on the timeline is an image clip on an overlay lane, centred and
 //! scaled to 40% of the short side, so it moves, keyframes and follows a

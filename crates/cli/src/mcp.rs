@@ -30,6 +30,7 @@ use base64::Engine as _;
 use serde_json::{json, Map, Value};
 
 use crate::error::{CliError, CliResult};
+use crate::ops::ml::MlArgs;
 use crate::ops::project::{CatalogArgs, NewArgs};
 use crate::ops::render::render_png;
 use crate::ops::template::{TemplateApplyArgs, TemplateDeleteArgs, TemplateListArgs};
@@ -78,6 +79,9 @@ const OPEN_WORLD: &[&str] = &[
     "stock_kinds",
     "stock_search",
     "stock_download",
+    "ml",
+    // Downloads the model and ONNX Runtime on first use.
+    "remove_background",
     "sound",
     "fal",
     "sticker",
@@ -278,6 +282,11 @@ impl Server {
     fn run_tool(&mut self, name: &str, args: &mut Value, ctx: &Ctx) -> CliResult<ToolOutput> {
         if name == "catalog" {
             let args: CatalogArgs =
+                serde_json::from_value(args.clone()).map_err(|e| CliError::usage(e.to_string()))?;
+            return args.run().map(ToolOutput::text);
+        }
+        if name == "ml" {
+            let args: MlArgs =
                 serde_json::from_value(args.clone()).map_err(|e| CliError::usage(e.to_string()))?;
             return args.run().map(ToolOutput::text);
         }
@@ -589,6 +598,8 @@ fn tools() -> Vec<Value> {
         &catalog.description,
         catalog.schema,
     ));
+    let ml = ops::tool_spec::<MlArgs>("ml");
+    out.push(tool_json(ml.name, &ml.description, ml.schema));
     out
 }
 
@@ -599,6 +610,7 @@ fn tool_names() -> Vec<&'static str> {
         "view_frame",
         "batch",
         "catalog",
+        "ml",
         "template_apply",
         "template_list",
         "template_delete",
@@ -697,7 +709,7 @@ mod tests {
                 !tool["description"].as_str().unwrap_or("").is_empty(),
                 "{name} has no description"
             );
-            if !matches!(name, "catalog" | "template_list" | "template_delete") {
+            if !matches!(name, "catalog" | "ml" | "template_list" | "template_delete") {
                 assert_eq!(tool["inputSchema"]["required"][0], "project", "{name}");
             }
         }

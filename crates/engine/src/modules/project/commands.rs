@@ -383,6 +383,29 @@ pub async fn project_import_media(
     state: &Arc<AppState>,
     path: String,
 ) -> Result<ImportedMaterial, String> {
+    // An animated sticker (Lottie, or a GIF or WebP with more than one frame)
+    // is an image material that moves; see `modules::animated`. Loaded
+    // off-thread because a GIF is decoded whole. A still GIF or WebP falls
+    // through to the probe like any picture.
+    if crate::modules::animated::Format::of(std::path::Path::new(&path)).is_some() {
+        let load_path = path.clone();
+        let loaded = crate::shell::spawn_blocking(move || {
+            crate::modules::animated::load(std::path::Path::new(&load_path))
+        })
+        .await
+        .map_err(|error| format!("the import task failed: {error}"))?;
+        match loaded {
+            Ok(animation) => return import_animated(state, &path, &animation),
+            Err(error)
+                if crate::modules::animated::Format::of(std::path::Path::new(&path))
+                    == Some(crate::modules::animated::Format::Lottie) =>
+            {
+                return Err(format!("{path}: {error}"));
+            }
+            Err(_) => {}
+        }
+    }
+
     // Probing opens the container and runs FFmpeg's stream-info pass, which is
     // milliseconds on a warm cache and noticeably longer on a large file over a
     // network mount. A synchronous command would do that on the main thread and
@@ -425,6 +448,58 @@ pub async fn project_import_media(
     // Only the new file: the rest of the pool was considered when it came in.
     if info.has_video {
         crate::modules::proxy::commands::proxy_request_media(vec![path]);
+    }
+    Ok(imported)
+}
+
+/// Add an animated file to the pool as an image material (or hand back the
+/// one already there). Its `duration` is one pass of the animation, which a
+/// caller placing it can use as the clip's length.
+fn import_animated(
+    state: &Arc<AppState>,
+    path: &str,
+    animation: &crate::modules::animated::Animation,
+) -> Result<ImportedMaterial, String> {
+    let name = std::path::Path::new(path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.to_string());
+    let origin = crate::modules::cloud::provenance::read_sidecar(std::path::Path::new(path));
+    let (width, height) = animation.size();
+    let imported = {
+        let mut guard = state.project.write();
+        let project = guard.as_mut().ok_or("no project is open")?;
+        let id = match project.materials.images.iter().find(|m| m.path == path) {
+            Some(existing) => existing.id.clone(),
+            None => {
+                let id = new_id();
+                project.materials.images.push(ImageMaterial {
+                    id: id.clone(),
+                    path: path.to_string(),
+                    width,
+                    height,
+                });
+                if let Some(origin) = origin {
+                    project.materials.origins.insert(id.clone(), origin);
+                }
+                id
+            }
+        };
+        ImportedMaterial {
+            id,
+            kind: MaterialKind::Image,
+            name,
+            path: path.to_string(),
+            duration: animation.duration(),
+            width,
+            height,
+            has_audio: false,
+        }
+    };
+    if let Some(project) = state.project.read().clone() {
+        let origin = state.project_path.read().clone();
+        super::autosave::schedule(&project, origin);
+        crate::modules::workspace::commands::workspace_cache_in_use(media_paths(&project));
     }
     Ok(imported)
 }

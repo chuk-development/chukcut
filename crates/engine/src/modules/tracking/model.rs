@@ -18,6 +18,50 @@ use crate::modules::project::document::{Id, Micros};
 pub const TRACKER: &str = "klt";
 pub const TRACKER_VERSION: u32 = 1;
 
+/// Which tracker analyses a clip.
+///
+/// - **KLT** (T1): optical flow on corners inside the box plus a similarity
+///   fit. In the engine, no model, no download; gives rotation and scale; loses
+///   fast or blurred objects.
+/// - **VitTrack** (T2): a learned single-object tracker (OpenCV Zoo,
+///   Apache-2.0) run in the ML worker. Holds fast motion and blur; gives a box
+///   (position and size) but no rotation. Falls back to KLT, with a note, when
+///   the worker cannot run it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrackerKind {
+    #[default]
+    Klt,
+    #[serde(rename = "vittrack")]
+    VitTrack,
+}
+
+impl TrackerKind {
+    /// The stamp in [`TrackSettings::tracker`].
+    pub fn id(self) -> &'static str {
+        match self {
+            TrackerKind::Klt => TRACKER,
+            TrackerKind::VitTrack => "vittrack",
+        }
+    }
+
+    /// The tracker a stamp names; unknown stamps (a newer build's) read as
+    /// KLT, which every build has.
+    pub fn from_id(id: &str) -> TrackerKind {
+        match id {
+            "vittrack" => TrackerKind::VitTrack,
+            _ => TrackerKind::Klt,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            TrackerKind::Klt => "Standard",
+            TrackerKind::VitTrack => "Fast motion (AI)",
+        }
+    }
+}
+
 /// The long side, in pixels, frames are decoded at for analysis. Decode is the
 /// bottleneck, not the tracker, and 640 px keeps a ball of a few dozen pixels
 /// trackable.

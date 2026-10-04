@@ -39,6 +39,13 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ("proxy::proxy_cancel", "cancels a proxy encode of this process; the CLI turns proxies off"),
     ("proxy::cancel_all_proxies", "the app's quit path"),
     ("tracking::tracking_cancel", "cancels the app's background tracking job; track runs to its end"),
+    ("matting::matting_cancel", "cancels the app's background bake; remove_background runs to its end"),
+    ("matting::matting_coverage", "the inspector's progress; remove_background bakes until nothing is missing"),
+    ("matting::matting_ensure", "the export's own step; export calls it before rendering"),
+    ("matting::job_for", "a helper the bake commands and tests share, not an operation"),
+    ("matting::current_model", "the model version this build writes; remove_background uses it through matting_remove_background"),
+    ("compositing::compositing_set_background", "the setting alone; remove_background also bakes the matte"),
+    ("ml::gpu_vendors", "part of ml status, which reports it"),
     // The live preview, playback and the app's own windows.
     ("preview::preview_start", "the app's live preview server; render_frame and view_frame render a frame"),
     ("preview::preview_seek", "the live preview"),
@@ -74,6 +81,8 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ("library::library_font_system_preview", "the font picker's preview tile"),
     ("library::library_sticker_thumb", "the Stickers tab's preview tile"),
     ("library::library_icon_thumb", "the Stickers tab's preview tile"),
+    ("library::library_animated_preview", "the Stickers tab's moving preview tile"),
+    ("animated::animated_preview", "a moving preview tile for the Stickers tab and the media panel"),
     ("library::library_set_settings", "only chooses where font preview tiles come from (a privacy choice in the app); catalog library_settings shows it"),
     // The app's session, crash recovery and start screen.
     ("project::project_get", "the app's copy of the open document; a Session holds its own"),
@@ -140,29 +149,7 @@ const ALLOWLIST: &[(&str, &str)] = &[
 /// Functions another branch is exposing right now. Not failures, and not
 /// checked for staleness, so that branch's merge does not break this test;
 /// delete an entry once its operation exists.
-const PENDING: &[(&str, &str)] = &[
-    (
-        "tracking::tracking_attach",
-        "the tracking agent's ops/ml.rs",
-    ),
-    (
-        "tracking::tracking_set_mode",
-        "the tracking agent's ops/ml.rs",
-    ),
-    (
-        "tracking::tracking_detach",
-        "the tracking agent's ops/ml.rs",
-    ),
-    ("tracking::tracking_bake", "the tracking agent's ops/ml.rs"),
-    (
-        "tracking::tracking_remove",
-        "the tracking agent's ops/ml.rs",
-    ),
-    (
-        "tracking::tracking_set_smoothing",
-        "the tracking agent's ops/ml.rs",
-    ),
-];
+const PENDING: &[(&str, &str)] = &[];
 
 fn workspace() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")

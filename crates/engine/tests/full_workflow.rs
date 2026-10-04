@@ -761,6 +761,7 @@ fn a_whole_session_through_the_command_layer() {
                 overlay_id: Some(follower.segment_id.clone()),
                 mode: FollowMode::default(),
                 retrack: None,
+                tracker: None,
             },
             None,
         ),

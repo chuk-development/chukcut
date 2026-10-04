@@ -21,7 +21,9 @@ use chukcut_engine::modules::render::{
 use chukcut_engine::modules::tracking::edit;
 use chukcut_engine::modules::tracking::follow::{followed_transform, source_to_canvas};
 use chukcut_engine::modules::tracking::job::{run, Direction, TrackJob};
-use chukcut_engine::modules::tracking::{FollowMode, TrackSample, TrackSettings, TrackingMaterial};
+use chukcut_engine::modules::tracking::{
+    FollowMode, TrackSample, TrackSettings, TrackerKind, TrackingMaterial,
+};
 
 const W: f32 = 1280.0;
 const H: f32 = 720.0;
@@ -153,6 +155,7 @@ fn a_thrown_ball_is_tracked() {
         range: (0, 1_300_000),
         direction: Direction::Forward,
         analysis_size: 640,
+        tracker: TrackerKind::Klt,
     };
     let outcome = run(&job, &AtomicBool::new(false), |_| {}).expect("track");
     if std::env::var_os("TRACKING_DEBUG").is_some() {
@@ -194,6 +197,228 @@ fn a_thrown_ball_is_tracked() {
     assert!(worst < 10.0, "worst error {worst} px");
 }
 
+/// VitTrack (tracker T2) on the same throw. Runs only where the ML worker,
+/// a runtime pack and the model are already installed: a test must not
+/// download 9 MB behind someone's back. `cargo build -p chukcut-ml-worker`
+/// and one auto reframe or `chukcut-cli` ML install set that up.
+#[test]
+fn a_thrown_ball_is_held_by_vittrack() {
+    if !vittrack_ready() {
+        return;
+    }
+    let Some(path) = thrown_ball() else {
+        eprintln!("skipping: ffmpeg could not generate the fixture");
+        return;
+    };
+    let (cx, cy) = thrown_truth(0.0);
+    let side = 52.0;
+    let job = TrackJob {
+        path: path.to_string_lossy().into(),
+        fps: 30.0,
+        source_size: (W as u32, H as u32),
+        start: 0,
+        init: [cx / W, cy / H, side / W, side / H],
+        init_angle: 0.0,
+        range: (0, 1_300_000),
+        direction: Direction::Forward,
+        analysis_size: 640,
+        tracker: TrackerKind::VitTrack,
+    };
+    let started = std::time::Instant::now();
+    let outcome = run(&job, &AtomicBool::new(false), |_| {}).expect("track");
+    let seconds = started.elapsed().as_secs_f32();
+    let (mut worst, mut sum) = (0.0f32, 0.0f32);
+    for s in &outcome.samples {
+        let (tx, ty) = thrown_truth(s.t as f64 / 1e6);
+        let e = ((s.x * W - tx).powi(2) + (s.y * H - ty).powi(2)).sqrt();
+        worst = worst.max(e);
+        sum += e;
+    }
+    let n = outcome.samples.len();
+    let mean = sum / n as f32;
+    let lost = outcome.samples.iter().filter(|s| s.is_lost()).count();
+    eprintln!(
+        "vittrack thrown: {n} frames in {seconds:.2} s, mean {mean:.2} px, worst {worst:.2} px, {lost} lost"
+    );
+    assert!(n >= 38, "{n} frames");
+    assert_eq!(lost, 0);
+    // VitTrack boxes are whole pixels at the 640 px analysis size (2 px at
+    // full size) and it has no sub-pixel flow, so it is looser than KLT on
+    // this clean throw; it earns its place on real motion blur.
+    assert!(mean < 6.0, "mean error {mean} px");
+    assert!(worst < 14.0, "worst error {worst} px");
+}
+
+/// Whether the ML worker, a runtime pack and VitTrack are installed, and
+/// VitTrack is loaded. A test must not download behind someone's back, so
+/// without them the VitTrack tests skip with a note.
+fn vittrack_ready() -> bool {
+    use chukcut_engine::modules::ml;
+    use chukcut_ml_worker::registry;
+    let root = ml::root();
+    let ready = ml::worker::binary().is_some()
+        && registry::model_present(&root, registry::model("vittrack").unwrap())
+        && (registry::preferred_runtime(&root).is_some()
+            || std::env::var_os("CHUKCUT_ORT_DYLIB").is_some());
+    if !ready {
+        eprintln!("skipping: the ML worker, a runtime or VitTrack is not installed");
+        return false;
+    }
+    ml::tracker::VitTracker::prepare(&|_, _| {}, &AtomicBool::new(false)).expect("prepare");
+    true
+}
+
+/// Where the ball of [`hide_and_return`] is at `seconds`: its centre in
+/// pixels, and whether it is wholly in view (not behind the bar, not cut by
+/// the frame's edge).
+fn hide_and_return_truth(seconds: f64) -> ((f32, f32), bool) {
+    let (x, y) = if seconds < 3.3 {
+        (100.0 + 400.0 * seconds, 300.0)
+    } else {
+        (-48.0 + 400.0 * (seconds - 3.3), 500.0)
+    };
+    let behind_bar = x + 48.0 > 560.0 && x < 760.0;
+    let in_frame = x >= 0.0 && x + 48.0 <= W as f64;
+    (
+        ((x + 24.0) as f32, (y + 24.0) as f32),
+        in_frame && !behind_bar,
+    )
+}
+
+/// The two cases a box tracker that only looks near the last box cannot
+/// survive. 4.5 s, 1280×720, 30 fps; an orange ball of radius 22 px moving
+/// right at 400 px/s over testsrc2:
+///
+/// - from 1.03 s to 1.65 s it passes behind a grey bar (x 560–760) and comes
+///   out 200 px from where it went in;
+/// - at 2.83 s it leaves the frame on the right, and at 3.3 s it comes back
+///   in from the left, 200 px lower.
+fn hide_and_return() -> Option<PathBuf> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let path = fixture_dir().join("hide-and-return.mp4");
+    if path.exists() {
+        return Some(path);
+    }
+    let disc = "color=c=orange:size=48x48:rate=30:duration=4.5,format=rgba,\
+                geq=r='250':g='140':b='20':a='if(lte(hypot(X-23.5,Y-23.5),22),255,0)'";
+    let status = Command::new("ffmpeg")
+        .args(["-y", "-v", "error"])
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=1280x720:rate=30:duration=4.5",
+        ])
+        .args(["-f", "lavfi", "-i", disc])
+        .args([
+            "-filter_complex",
+            "[0][1]overlay=x='if(lt(t,3.3),100+400*t,-48+400*(t-3.3))':\
+             y='if(lt(t,3.3),300,500)':eval=frame,\
+             drawbox=x=560:y=0:w=200:h=720:color=gray:t=fill",
+        ])
+        .args(["-c:v", "libx264", "-preset", "veryfast", "-crf", "20"])
+        .args(["-pix_fmt", "yuv420p", "-t", "4.5"])
+        .arg(path.with_extension("tmp.mp4"))
+        .stdout(Stdio::null())
+        .status()
+        .ok()?;
+    if !status.success() {
+        return None;
+    }
+    std::fs::rename(path.with_extension("tmp.mp4"), &path).ok()?;
+    Some(path)
+}
+
+/// Tracker T2's reason to exist beyond speed: the ball goes behind a bar and
+/// comes out further on, then leaves the frame and comes back elsewhere, and
+/// VitTrack finds it again both times. While it is hidden the frames are
+/// marked lost, not glued to the bar or the background.
+#[test]
+fn vittrack_finds_the_ball_again_after_occlusion_and_leaving_the_frame() {
+    if !vittrack_ready() {
+        return;
+    }
+    let Some(path) = hide_and_return() else {
+        eprintln!("skipping: ffmpeg could not generate the fixture");
+        return;
+    };
+    let ((cx, cy), _) = hide_and_return_truth(0.0);
+    let side = 52.0;
+    let job = TrackJob {
+        path: path.to_string_lossy().into(),
+        fps: 30.0,
+        source_size: (W as u32, H as u32),
+        start: 0,
+        init: [cx / W, cy / H, side / W, side / H],
+        init_angle: 0.0,
+        range: (0, 4_466_666),
+        direction: Direction::Forward,
+        analysis_size: 640,
+        tracker: TrackerKind::VitTrack,
+    };
+    let started = std::time::Instant::now();
+    let outcome = run(&job, &AtomicBool::new(false), |_| {}).expect("track");
+    let seconds = started.elapsed().as_secs_f32();
+
+    // Visible frames, split by the phase they are in; the first 0.2 s after
+    // each reappearance are the tracker's to spend finding the ball again.
+    let (mut held, mut refound_bar, mut refound_edge) = (vec![], vec![], vec![]);
+    let (mut hidden, mut hidden_lost) = (0, 0);
+    for s in &outcome.samples {
+        let t = s.t as f64 / 1e6;
+        let ((tx, ty), visible) = hide_and_return_truth(t);
+        let error = ((s.x * W - tx).powi(2) + (s.y * H - ty).powi(2)).sqrt();
+        if !visible {
+            hidden += 1;
+            hidden_lost += s.is_lost() as usize;
+            continue;
+        }
+        if t < 1.0 {
+            held.push(error);
+        } else if (1.85..2.8).contains(&t) {
+            refound_bar.push(error);
+        } else if t > 3.62 {
+            refound_edge.push(error);
+        }
+    }
+    let worst = |v: &[f32]| v.iter().copied().fold(0.0f32, f32::max);
+    let missed = |v: &[f32]| v.iter().filter(|e| **e > 12.0).count();
+    if std::env::var_os("TRACKING_DEBUG").is_some() {
+        for s in &outcome.samples {
+            let ((tx, ty), visible) = hide_and_return_truth(s.t as f64 / 1e6);
+            eprintln!(
+                "{:>8} truth ({tx:6.1},{ty:6.1}) {visible:5} got ({:6.1},{:6.1}) c {:.2} lost {}",
+                s.t,
+                s.x * W,
+                s.y * H,
+                s.c,
+                s.is_lost()
+            );
+        }
+    }
+    eprintln!(
+        "hide and return: {} frames in {seconds:.2} s; worst {:.1} / {:.1} / {:.1} px; \
+         {hidden_lost} of {hidden} hidden frames lost",
+        outcome.samples.len(),
+        worst(&held),
+        worst(&refound_bar),
+        worst(&refound_edge),
+    );
+    assert!(outcome.samples.len() >= 130);
+    assert!(!refound_bar.is_empty() && !refound_edge.is_empty());
+    assert_eq!(missed(&held), 0, "lost before the bar");
+    assert_eq!(missed(&refound_bar), 0, "not found again after the bar");
+    assert_eq!(missed(&refound_edge), 0, "not found again after leaving");
+    // Most hidden frames are marked lost rather than tracking something
+    // else. Not all: the first frame or two behind the bar still see the
+    // ball's last sliver.
+    assert!(
+        hidden_lost * 10 >= hidden * 7,
+        "{hidden_lost} of {hidden} hidden frames lost"
+    );
+}
+
 fn job(path: &std::path::Path, start: Micros, direction: Direction) -> TrackJob {
     let (cx, cy) = truth(start as f64 / 1e6);
     let side = 2.0 * RADIUS + 6.0;
@@ -207,6 +432,7 @@ fn job(path: &std::path::Path, start: Micros, direction: Direction) -> TrackJob 
         range: (0, 3_966_666),
         direction,
         analysis_size: 640,
+        tracker: TrackerKind::Klt,
     }
 }
 
