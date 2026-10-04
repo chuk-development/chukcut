@@ -186,11 +186,27 @@ impl AiSettings {
             Some(status) => status.active.clone(),
             None => "Checking\u{2026}".to_string(),
         };
-        rows.push(row(
-            "Models run on",
-            status.and_then(|s| s.advice.as_deref()),
-            dim(active),
-        ));
+        // The answer can be a sentence with a library path in it. As the
+        // row's control it took the whole width and squeezed the label to one
+        // letter per line, so it goes under the label here, where it wraps.
+        let advice = status.and_then(|s| s.advice.clone());
+        rows.push(
+            div()
+                .min_h(px(44.0))
+                .px_3()
+                .py_2()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .border_b_1()
+                .border_color(rgb(PANEL))
+                .child(div().text_sm().child("Models run on"))
+                .child(dim(active))
+                .children(
+                    advice.map(|advice| div().text_xs().text_color(rgb(TEXT_DIM)).child(advice)),
+                )
+                .into_any_element(),
+        );
         if let Some(status) = status {
             let gpus = if status.gpus.is_empty() {
                 "None found".to_string()
