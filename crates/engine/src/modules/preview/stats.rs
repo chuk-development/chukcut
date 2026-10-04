@@ -487,6 +487,9 @@ struct Inner {
     encode: Option<Backend>,
     /// A backend change is worth one line, not one per frame.
     fallback_reported: bool,
+    /// [`SUMMARY_INTERVAL`], except in a test that needs one window to hold
+    /// a whole run (see [`PlaybackStats::set_summary_interval`]).
+    interval: Duration,
 }
 
 impl Inner {
@@ -581,6 +584,7 @@ impl PlaybackStats {
                 decode: None,
                 encode: None,
                 fallback_reported: false,
+                interval: SUMMARY_INTERVAL,
             }),
         }
     }
@@ -715,7 +719,7 @@ impl PlaybackStats {
     #[must_use]
     pub fn tick(&self, now: Instant) -> Option<Summary> {
         let mut inner = self.inner.lock();
-        if now.saturating_duration_since(inner.window_started) < SUMMARY_INTERVAL {
+        if now.saturating_duration_since(inner.window_started) < inner.interval {
             return None;
         }
         let summary = inner.summarise(now);
@@ -728,6 +732,19 @@ impl PlaybackStats {
         inner.roll(now);
         // The lock is dropped by returning. Nothing is formatted here.
         Some(summary)
+    }
+
+    /// How often [`Self::tick`] closes a window; [`SUMMARY_INTERVAL`] unless
+    /// changed.
+    ///
+    /// For tests that count every frame of a run in one summary. The pacer
+    /// ticks on the wall clock, so on a slow adapter (lavapipe renders a few
+    /// frames a second under load) a run of twelve frames spans more than one
+    /// interval, a tick drains the first frames into a log line, and the
+    /// final summary sees only the rest: "counted 8 frames against 12".
+    #[cfg(test)]
+    pub fn set_summary_interval(&self, interval: Duration) {
+        self.inner.lock().interval = interval;
     }
 
     /// The last summary of a run, whatever the window looks like.
