@@ -138,14 +138,19 @@ pub(crate) fn sub_tabs(
     )
 }
 
+/// What a section's reset button runs.
+pub(crate) type ResetHandler = Box<dyn Fn(&mut Editor, &mut Context<Editor>)>;
+/// What a section's enable checkbox runs, with the new state.
+pub(crate) type CheckHandler = Box<dyn Fn(&mut Editor, bool, &mut Context<Editor>)>;
+
 /// A section: header with a collapse caret, an optional enable checkbox and
 /// reset, then its rows — drawn by the kit's `Section`.
 pub(crate) struct Section {
     pub title: &'static str,
     pub checkbox: Option<bool>,
     pub enabled: bool,
-    pub on_reset: Option<Box<dyn Fn(&mut Editor, &mut Context<Editor>)>>,
-    pub on_check: Option<Box<dyn Fn(&mut Editor, bool, &mut Context<Editor>)>>,
+    pub on_reset: Option<ResetHandler>,
+    pub on_check: Option<CheckHandler>,
     pub note: Option<&'static str>,
 }
 
