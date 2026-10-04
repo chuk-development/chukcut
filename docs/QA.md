@@ -136,7 +136,11 @@ All four below were fixed by the polish pass; kept for the record.
 
 - ~~The restore prompt offers to bring back an empty "Untitled" (0 clips) and
   shows even when a project was opened from the command line.~~
-- The title bar's "Autosaved … ago" does not move after a transition edit.
+- ~~The title bar's "Autosaved … ago" does not move after a transition edit.~~
+  Checked on agent/polish2 in the running app (Xvfb, lavapipe): the label
+  said "Autosaved 1 min ago"; a Cross dissolve from the Transitions tab
+  turned it into "just now", and the working copy on disk had the
+  transition. Fixed by `888f1ed` already; nothing left to do.
 - ~~The export dialog does not remember the resolution or loudness target
   (the folder it now remembers), and its size estimate was 24 MB for a
   3.4 MB file.~~ Fixed on agent/exportq: the dialog opens with the project's
@@ -152,11 +156,22 @@ All four below were fixed by the polish pass; kept for the record.
   eyes, the key eyedropper, the file browser's hidden-files switch, an export
   queue row's stop/skip) carry the state in their element id, so a click makes
   a new element whose tooltip starts closed. The player's play/pause button
-  (`preview.rs`) still has the old behaviour. Built, and the app's tests
-  pass; not yet looked at on screen.
+  (`preview.rs`) does the same since agent/polish2 (`player-play` /
+  `player-pause`). Not toggled on screen: starting playback on the test
+  display would need audio output.
 - ~~Menu has no New project shortcut hint although Ctrl+N works.~~
-- Projects whose clips were placed before the frame snapping keep their
-  off-grid edges, and a drop that snaps to such an edge stays off the grid.
+- ~~Projects whose clips were placed before the frame snapping keep their
+  off-grid edges, and a drop that snaps to such an edge stays off the grid.~~
+  Decided on agent/polish2: touching an off-grid edge wins over the grid. A
+  snap to such an edge stays exactly on it (no gap, no overlap). The real
+  bug was the other case: a move or drop that reached no snap target was
+  rounded to a frame *into* the off-grid neighbour, by a few microseconds;
+  the move was refused and a drop landed at the end of the lane instead.
+  `timeline::gesture::clear_of_neighbours` now slides such a clip flush
+  against the edge (one frame of slack), in the clip drag and the media
+  drop. Tests: `gesture::tests::a_rounded_edge_slides_flush_…`,
+  `…a_flush_place_is_accepted_by_the_move_it_feeds`, and the app's
+  `a_drop_rounded_into_an_off_grid_clip_lands_flush_against_it`.
 
 ## Not tested, and why
 
@@ -184,7 +199,10 @@ Fixed on this branch:
   only the vertical one, so lanes below the panel could not be reached (the
   showcase's music lane). `on_timeline_scroll` now takes whichever axis moved.
 
-Open (CLI gaps; for the CLI coverage owner):
+Open (CLI gaps; for the CLI coverage owner) — all four closed on
+agent/upkeep (checked on agent/polish2: `sticker`, `lane_add`,
+`title add --track`, `--duration` on the title commands, and the
+`docs/cli.md` glow and contrast notes):
 
 - **No sticker command.** `library_sticker_index/fetch` exist in the engine,
   but the CLI and MCP cannot search or add a sticker. Workaround: `import` a
@@ -202,9 +220,34 @@ Open (CLI gaps; for the CLI coverage owner):
 
 Open (app, low):
 
-- With a tracked follower selected, the player draws the track's path also
-  when the playhead is outside the follower's time.
-- The Scene detection section draws "Split at scene changes" as the primary
-  button while the clip says "not analysed".
+- ~~With a tracked follower selected, the player draws the track's path also
+  when the playhead is outside the follower's time.~~ Fixed on
+  agent/polish2 (`editor/tracking.rs`): no path or box outside the
+  follower's time. Not looked at on screen.
+- ~~The Scene detection section draws "Split at scene changes" as the primary
+  button while the clip says "not analysed".~~ Fixed on agent/polish2: the
+  primary button is the next step, Detect scenes until scene changes were
+  found, then Split. Seen on Xvfb.
 - On lavapipe the first preview frame of an opened project takes 15 to 30 s.
   Not judged on a real GPU.
+
+## Polish pass 2, 2026-10-04 (`agent/polish2`)
+
+Template follow-ups (decision 0022) and the lows above.
+
+- **A project made from a user template copies the template's media** into
+  `<data>/template-media/<project id>/`; deleting the template no longer
+  takes files out of the project (`tests/templates.rs` deletes the template
+  and checks every path still exists).
+- **A split slot stays one slot**, on the left half; the right half, a
+  pasted or duplicated copy and a freeze frame's still are plain clips.
+- **"Replace media…" in the timeline clip menu** for any video or photo clip
+  on an unlocked picture lane (a slot or not), one undo step. Seen on Xvfb:
+  the clip took the chosen file in place.
+- **The media library hides the template's slot placeholders and music
+  bed.** Seen on Xvfb with a Quick Cuts project made by the CLI: only the
+  user's clip is listed.
+- **Media given on the command line is imported by absolute path.** It was
+  stored as typed (`_scratch/media/a.mp4`), so the project broke when opened
+  from another directory, and the same file chosen again in a dialog became
+  a second material. Found while checking Replace media.

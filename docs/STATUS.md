@@ -135,6 +135,24 @@ breadcrumbs or the clip menu to close; Alt+Shift+G puts the clips back).
   deleting a timeline leaves its compound sequences parked and unused;
   an older build opening a multi-timeline file drops the parked timelines.
 
+## Polish pass 2, 2026-10-04 (agent/polish2)
+
+- **Trap: rounding a clip edge to the frame grid can overlap a neighbour
+  whose edge is off the grid.** Clips placed before frame snapping, and
+  videos whose length is not whole frames, end between frames. A drag or
+  drop that reached no snap target rounded its head to the nearest frame,
+  caught such an edge by a few microseconds, and was refused ("another clip
+  is in the way"); a drop then fell back to the end of the lane.
+  `timeline::gesture::clear_of_neighbours` slides the clip flush against
+  the edge when the overlap is under one frame. A snap to an off-grid edge
+  stays on it: touching wins over the grid.
+- **Trap: media from the command line was stored by relative path**, so a
+  project made by `chukcut a.mp4` broke when opened from another directory,
+  and the same file picked in a dialog became a second material (materials
+  are matched by path string). `editor/shell.rs` canonicalises it now.
+- Template follow-ups, the play button's tooltip, the follower path outside
+  its time and the scene detection buttons: `docs/QA.md`, "Polish pass 2".
+
 ## Polish pass, 2026-10-03 (agent/polish)
 
 - **File dialogs work without a portal.** `editor::files::choose` asks
@@ -2312,10 +2330,17 @@ built-in), `crates/cli/tests/templates.rs`.
   desktop.** On Xvfb, run the app with `CHUKCUT_FILE_DIALOG=builtin` and
   `DBUS_SESSION_BUS_ADDRESS` unset; otherwise "Choose…" asks the real
   session's xdg-desktop-portal.
-- Rough: the media library lists the placeholder PNGs and the music bed like
-  any import; a template project references a user template's `media/` by
-  absolute path (deleting the template takes those files offline); splitting
-  a slot gives both halves the same marker.
+- Follow-ups done 2026-10-04 (agent/polish2): a project from a user
+  template copies the template's `media/` into
+  `<data>/template-media/<project id>/` (`format::copy_out_media`), so
+  deleting the template leaves it whole; the media library hides the drawn
+  placeholders and music beds (`assets::is_template_asset`); a split slot
+  stays one slot on the left half (the right half, a paste and a freeze
+  still drop the marker); the timeline clip menu has "Replace media…" for
+  any picture clip (`ReplaceMedia` in the shortcut registry).
+- Still rough: template assets (placeholders, music, looks) are referenced
+  by absolute path under the data directory; a template copied to a user
+  with another home directory keeps the old paths (decision 0022).
 
 **Shortcuts** (`modules/keymap`). Every bindable action is in one registry
 (`keymap/registry.rs`) with its keys in three presets (chukcut, CapCut-like,
