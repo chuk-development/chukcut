@@ -75,6 +75,7 @@ column current.
 | 8 | motion2 | frame blending + motion blur, animated stickers (Lottie, animated emoji, GIF/WebP) (backlog 6, 8) | running (agent/motion2) |
 | 8 | compound2 | compound clip gaps: nested-render cache, prefetch, audio of compound volume/speed, flatten at speed, timeline prune, real filmstrips | running (agent/compound2) |
 | 8 | polish2 | template follow-ups (relocatable media, split slot marker, Replace media menu, hide placeholders) + QA lows (play/pause tooltip, snapping, track path, scene button) | running (agent/polish2) |
+| 8 | ml2 | CUDA runtime pack out of the box, SAM click-to-select object masks, BiRefNet object removal, matte cache limits | running (agent/ml2) |
 
 ## Backlog for the next waves (lead picks from the top)
 
