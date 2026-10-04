@@ -5,11 +5,18 @@
 #   scripts/demo.sh            # media (if missing) + project
 #   scripts/demo.sh --media    # regenerate the media, then the project
 #   scripts/demo.sh --export   # also export _scratch/demo/showcase.mp4
+#   scripts/demo.sh --no-ml    # leave out the steps that need ML models
 #
 # Everything goes to _scratch/demo/ (ignored by git). Media never enters git.
 # The CLI runs with its own HOME and XDG folders under _scratch/demo/xdg, so
 # the script does not change your settings, presets or recent files.
 # docs/demo.md explains the result.
+#
+# The ML steps (optical-flow slow motion, select object) use the models and
+# the GPU runtime you already installed (`chukcut-cli ml install gpu`): the
+# script links your ML folder (~/.cache/chukcut/ml, or $CHUKCUT_DEMO_ML_CACHE)
+# into its own cache and downloads nothing. Without them it uses frame
+# blending instead of optical flow, skips select object and says so.
 set -euo pipefail
 
 root=$(CDPATH="" cd -- "$(dirname "$0")/.." && pwd)
@@ -22,22 +29,32 @@ p=$out/showcase.chukcut
 
 regen_media=0
 do_export=0
+use_ml=1
 for arg in "$@"; do
   case $arg in
     --media) regen_media=1 ;;
     --export) do_export=1 ;;
+    --no-ml) use_ml=0 ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
 done
 
 [[ -x $cli ]] || { echo "no CLI at $cli; run: cargo build --release -p chukcut-cli" >&2; exit 1; }
 
+# The ML models and runtimes the user already has, found before HOME moves.
+user_ml=${CHUKCUT_DEMO_ML_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/chukcut/ml}
+
 # Isolated settings: presets, the LUT library and the working copy stay here.
 export HOME=$out/xdg/home
 export XDG_CONFIG_HOME=$out/xdg/config
 export XDG_CACHE_HOME=$out/xdg/cache
 export XDG_DATA_HOME=$out/xdg/data
-mkdir -p "$media" "$HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME"
+mkdir -p "$media" "$HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME/chukcut" "$XDG_DATA_HOME"
+# Read-only use of the user's models: mattes and flow frames are baked into
+# the isolated cache, never into the user's.
+if [[ $use_ml == 1 && -d $user_ml && ! -e $XDG_CACHE_HOME/chukcut/ml ]]; then
+  ln -s "$user_ml" "$XDG_CACHE_HOME/chukcut/ml"
+fi
 
 ff() { ffmpeg -hide_banner -loglevel error -y "$@"; }
 
@@ -88,6 +105,15 @@ make_media() {
      -t 5 -vf "scale=$W:$H:flags=neighbor" \
      -an -c:v libx264 -preset veryfast -pix_fmt yuv420p "$media/06-life.mp4"
 
+  # A comet: a bright disc that crosses moving gradients fast, about 17 px
+  # a frame. Slowed to half speed, optical flow makes the missing frames.
+  ff -f lavfi -i "gradients=s=${W}x${H}:r=$R:d=3:speed=0.02:n=4:seed=3" \
+     -f lavfi -i "color=c=black:s=220x220:r=$R:d=3,format=rgba,geq=r='255':g='235':b='150':a='255*max(0,min(1,(105-hypot(X-110,Y-110))/12))'" \
+     -f lavfi -i "$tone:duration=3" \
+     -filter_complex "[0:v][1:v]overlay=x='-220+t*500':y='1500-t*420'[v]" \
+     -map "[v]" -map 2:a -filter:a "volume=0.05" \
+     -c:v libx264 -preset veryfast -pix_fmt yuv420p -c:a aac -shortest "$media/07-comet.mp4"
+
   # A voiceover from flite (offline speech synthesis in FFmpeg).
   local words="Welcome to chukcut. A native video editor for Linux. \
 Cut, grade and track your clips. Add titles, captions and stickers. \
@@ -96,13 +122,19 @@ Then export straight to TikTok."
      -af "aresample=48000,apad=pad_dur=0.5,loudnorm=I=-16" -ac 1 -ar 48000 "$media/voice.wav"
 
   # A music bed: a kick on every beat at 120 BPM over a minor chord.
-  ff -f lavfi -i "aevalsrc=exprs='0.55*sin(2*PI*55*t*(1+2*exp(-mod(t,0.5)*30)))*exp(-mod(t,0.5)*9)+0.06*(sin(2*PI*220*t)+sin(2*PI*261.63*t)+sin(2*PI*329.63*t))*(0.6+0.4*sin(2*PI*0.25*t))':s=48000:d=24" \
-     -af "afade=t=out:st=22:d=2" -ac 2 "$media/music.wav"
+  ff -f lavfi -i "aevalsrc=exprs='0.55*sin(2*PI*55*t*(1+2*exp(-mod(t,0.5)*30)))*exp(-mod(t,0.5)*9)+0.06*(sin(2*PI*220*t)+sin(2*PI*261.63*t)+sin(2*PI*329.63*t))*(0.6+0.4*sin(2*PI*0.25*t))':s=48000:d=30" \
+     -af "afade=t=out:st=28:d=2" -ac 2 "$media/music.wav"
 
   # A sticker: a yellow smiley with a transparent background.
   ff -f lavfi -i "color=c=black:s=512x512:d=1,format=rgba" -frames:v 1 \
      -vf "geq=r='255':g='196':b='0':a='if(lte(hypot(X-256,Y-256),240)*not(lte(hypot(X-180,Y-200),34))*not(lte(hypot(X-332,Y-200),34))*not(between(hypot(X-256,Y-270),120,150)*gt(Y,290)),255,0)'" \
      "$media/sticker.png"
+
+  # An animated sticker: a cyan ring that pulses, with a transparent
+  # background. The palette keeps one colour for "transparent"; without
+  # palettegen's reserve_transparent the GIF comes out opaque.
+  ff -f lavfi -i "color=c=black@0:s=256x256:r=15:d=2,format=rgba,geq=r='40':g='210':b='255':a='255*between(hypot(X-128,Y-128),40+40*abs(sin(T*3.1416)),70+50*abs(sin(T*3.1416)))',split[a][b];[a]palettegen=reserve_transparent=1[pal];[b][pal]paletteuse=alpha_threshold=128" \
+     -loop 0 "$media/pulse.gif"
 
   # A teal-and-orange LUT (17 points per axis): shadows to teal, highlights
   # to orange, a little more contrast.
@@ -151,7 +183,7 @@ Add titles, captions and stickers.
 Then export straight to TikTok.
 SRT
 
-if [[ $regen_media == 1 || ! -f $media/sticker.png || ! -f $media/teal-orange.cube ]]; then
+if [[ $regen_media == 1 || ! -f $media/teal-orange.cube || ! -f $media/07-comet.mp4 || ! -f $media/pulse.gif ]]; then
   make_media
 fi
 
@@ -165,11 +197,27 @@ c() { "$cli" "$@"; }
 # Run a CLI command with --json and print one field of its data (a jq path).
 cj() { local path=$1; shift; "$cli" --json "$@" | jq -r ".data$path"; }
 
+# Whether the ML steps can run here without a download: a GPU runtime and
+# the model files. On the CPU they work but take minutes, so the showcase
+# leaves them out there too.
+ml_ready() {
+  [[ $use_ml == 1 ]] || return 1
+  local runtime models
+  runtime=$("$cli" --json ml status | jq -r '.data.runtime_id // ""')
+  [[ $runtime == cuda* ]] || return 1
+  models=$("$cli" --json ml models | jq -r '[.data[] | select(.downloaded) | .id] | join(" ")')
+  local m
+  for m in "$@"; do
+    [[ " $models " == *" $m "* ]] || return 1
+  done
+}
+skipped=()
+
 c new "$p" --name "chukcut showcase" --width 1080 --height 1920 --fps 30 --force
 
 # The main story on lane 0, and the rest of the media in the library.
 c import "$p" "$media/01-gradients.mp4" "$media/02-fractal.mp4" \
-  "$media/03-pattern.mp4" "$media/04-ball.mp4" --append
+  "$media/03-pattern.mp4" "$media/04-ball.mp4" "$media/07-comet.mp4" --append
 c import "$p" "$media/05-greenscreen.mp4" "$media/06-life.mp4" \
   "$media/voice.wav" "$media/music.wav" "$media/sticker.png"
 
@@ -177,6 +225,7 @@ grad=$(cj '.tracks[0].clips[0].id' info "$p")
 frac=$(cj '.tracks[0].clips[1].id' info "$p")
 patt=$(cj '.tracks[0].clips[2].id' info "$p")
 ball=$(cj '.tracks[0].clips[3].id' info "$p")
+comet=$(cj '.tracks[0].clips[4].id' info "$p")
 
 # Cut: 4 s, 4.5 s, 3 s of source for the ramp, then the ball clip.
 c trim "$p" "$grad" --duration 4 --ripple
@@ -185,6 +234,19 @@ c trim "$p" "$patt" --duration 3 --ripple
 
 # Speed ramp: fast, a slow-motion hold in the middle, fast again.
 c speed-curve "$p" "$patt" --preset bullet
+# Frame blending: each frame of the slow middle mixes its two source frames.
+c frame-blend "$p" "$patt" --mode blend
+
+# Smooth slow motion on the comet: half speed, and RIFE makes the frames in
+# between (optical flow). Without the model and a GPU runtime, frame
+# blending stands in.
+if ml_ready rife; then
+  c smooth-slow-mo "$p" "$comet" --speed 0.5
+else
+  c set "$p" "$comet" --speed 0.5
+  c frame-blend "$p" "$comet" --mode blend
+  skipped+=("optical flow on the comet (frame blending instead)")
+fi
 
 # Transitions on the three cuts: a gl-transition, a seamless one, a dissolve.
 c transition add "$p" "$frac" --kind gl:crosswarp --duration 0.8
@@ -264,11 +326,56 @@ tag=$(cj '.clip.id' title add "$p" "tracked" --at "$ball_start" \
   --background "#e0202080" --y 0.12)
 c track "$p" "$ball" --at "$ball_start" --rect 0.5,0.5,0.17,0.095 --overlay "$tag" --mode position
 
+# ---- Select object: MobileSAM picks the ball on one frame, VitTrack
+# carries it over the clip. The grade then applies to the background only
+# (saturation 0, darker), so the red ball keeps its colour. The matte stays
+# uncut: remove-background --off keeps the background in the picture.
+if ml_ready mobilesam mobilesam-decoder vittrack; then
+  # One second into the clip the ball's centre is at (847, 1313) px.
+  c select-object "$p" "$ball" --at "$(echo "$ball_start + 1" | bc)" --point 0.785,0.684
+  c apply-to "$p" "$ball" --grade background
+  c grade "$p" "$ball" --set saturation=0 --set exposure=-0.3
+  c remove-background "$p" "$ball" --off
+else
+  skipped+=("select object + background-only grade on the ball")
+fi
+
+# ---- An animated sticker over the comet: a pulsing GIF that crosses the
+# frame fast, with motion blur on its move.
+comet_start=$(cj '.tracks[0].clips[4].start' info "$p")
+pulse=$(cj '.clip.id' sticker "$p" --file "$media/pulse.gif" --at "$(echo "$comet_start + 0.5" | bc)")
+c set "$p" "$pulse" --scale 0.6 --y 0.35
+c keyframe "$p" "$pulse" --property x --at "$(echo "$comet_start + 0.5" | bc)" --value -0.8
+c keyframe "$p" "$pulse" --property x --at "$(echo "$comet_start + 1.5" | bc)" --value 0.8 --easing ease_in_out
+c keyframe "$p" "$pulse" --property x --at "$(echo "$comet_start + 2.5" | bc)" --value 0 --easing ease_out
+c effect add "$p" motion_blur --clip "$pulse" --set shutter=300 --set samples=12
+
+# ---- A compound clip: the two intro titles become one clip, "Intro titles",
+# that can be moved, animated or opened (double-click in the app) as one.
+c compound create "$p" "$head" "$sub" --name "Intro titles"
+
 # ---- Markers on the ruler at each section.
 c marker add "$p" --at 0 --label "Intro" --color green
 c marker add "$p" --at 4 --label "Grade + LUT" --color purple
 c marker add "$p" --at 8.5 --label "Speed ramp" --color orange
 c marker add "$p" --at "$ball_start" --label "Tracking" --color red
+c marker add "$p" --at "$comet_start" --label "Slow motion" --color blue
+
+# ---- A second timeline, "Template cut", made from the Quick Cuts template:
+# six slots cut to the beat with its own titles, transitions and music. A
+# template writes a project of its own, so it is built and rendered next to
+# the showcase and its video is put on the second timeline.
+tpl=$out/template-part.chukcut
+c template apply "$tpl" quick-cuts "$media/01-gradients.mp4" "$media/02-fractal.mp4" \
+  "$media/03-pattern.mp4" "$media/04-ball.mp4" "$media/05-greenscreen.mp4" \
+  "$media/06-life.mp4" --name "Quick Cuts section" --force
+c export "$tpl" "$media/template-part.mp4"
+c timeline new "$p" --name "Template cut"
+c import "$p" "$media/template-part.mp4" --append
+c title add "$p" "made from a template" --at 0.2 --duration 2.5 --size 56 \
+  --color "#ffffff" --bold true --background "#00000099" --y -0.7
+# Back to the main timeline: the app opens on it and the export renders it.
+c timeline switch "$p" 0
 
 # ---- Delivery: a preset of our own on top of the TikTok preset. Presets
 # live in the (isolated) config folder, not in the project.
@@ -277,6 +384,10 @@ c estimate "$p" --preset user_showcase
 
 c validate "$p"
 c info "$p"
+c timeline list "$p"
+for note in "${skipped[@]}"; do
+  echo "note: ML step left out (--no-ml, or no GPU runtime and models): $note" >&2
+done
 
 if [[ $do_export == 1 ]]; then
   c export "$p" "$out/showcase.mp4" --preset user_showcase --sidecar srt
