@@ -4233,6 +4233,11 @@ TensorRT 10.16.1.11, release worker and CLI, load 4–9 from other agents.
   failed for BiRefNet and left it on CUDA; the worker now drops other
   models' sessions before it builds. TensorRT's ORT provider must sit next
   to `libonnxruntime.so` (a symlink), and only TensorRT 10 loads.
+- **Checked in the app** (Xvfb + lavapipe; the worker on the RTX 3060):
+  Settings › AI acceleration shows the Fast switch, the TensorRT add-on
+  (2.9 GB with its engines, Remove) and the four models with "TensorRT ·
+  fp16 · prepared in 51 s (3 sizes)"; switching Fast off saves the setting,
+  restarts the worker and shows them on "CUDA · fp32".
 - **Rough:** one engine per input size, so a project with many clip sizes
   builds many; Fast mode holds a CUDA and a TensorRT session per model (GPU
   memory); a model whose TensorRT build fails stays on CUDA until the

@@ -229,7 +229,7 @@ impl AiSettings {
         rows.push(row(
             "Fast (fp16/TensorRT)",
             Some(
-                "Runs slow motion, Enhance quality and Remove object on TensorRT, 1.4–2.5x \
+                "Runs slow motion, Enhance quality and Remove object on TensorRT, 1.5–2.6x \
                  faster on NVIDIA GPUs. The first job of a model at a new size prepares it \
                  once (30 s to a few minutes). Needs TensorRT below.",
             ),
@@ -286,7 +286,7 @@ impl AiSettings {
         // What each model with a choice runs on now.
         for m in status.models.iter().filter(|m| m.has_fast_plan) {
             let mut text = format!("{} · {}", m.provider, m.precision);
-            if let Some(build) = m.engines.last() {
+            if let Some(build) = m.engines.last().filter(|_| m.provider == "TensorRT") {
                 text.push_str(&format!(
                     " · prepared in {} ({} size{})",
                     build_time(build.millis),
