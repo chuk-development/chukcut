@@ -108,12 +108,15 @@ column current.
 
 **Paused 2026-10-03 by the owner:** all agents and builds stopped because builds filled the SSD (4 GB free). Before restarting: every agent must share one CARGO_TARGET_DIR or delete its target/ after its branch merges; check `df -h /` first.
 
-## Open for the next session (2026-10-03)
+## Open for the next session (updated 2026-10-04)
 
-- **Moved to the data disk (2026-10-04):** the repository, its worktrees, `~/.cargo` and `~/.rustup` now live on `/mnt/data` (1.8 TB, separate from the system disk); the old paths are symlinks. Worktrees go to `/mnt/data/git/chukcut-<name>`. Each keeps its own `target/`; the lead deletes the worktree after its branch merges. Check `df -h /mnt/data` before launching.
-- **ML worker** (backlog 3): partial, uncommitted work in `/mnt/data/git/chukcut-mlworker` (branch agent/mlworker) — review it, commit or redo.
-- **Release build is stale:** rebuild `cargo build --release -p chukcut`; the running binary predates the alpha fixes (d9d86dd, agent/alpha merge).
-- **CI:** green after the font fix (runs 37142894595, 37144217430 passed on 2026-10-03).
+- **Machine:** the repository, its worktrees, `~/.cargo` and `~/.rustup` live on `/mnt/data` (1.8 TB); the old paths are symlinks. Worktrees go to `/mnt/data/git/chukcut-<name>`; the lead removes each after its merge. Check `df -h /mnt/data` before launching.
+- **Resource budget:** every Claude process runs in `claude.slice` (`~/.config/systemd/user/claude.slice`: 70% CPU, RAM throttled above 70%, hard cap 80%, swap 4 GB). Builds at `-j 3`, at most 4 agents at once. Before this, parallel builds pushed the user session into memory pressure and systemd-oomd killed terminals with the session in them.
+- **Merge routine:** merge one branch at a time, then `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -j 3 -- -D warnings`, rebuild `chukcut-ml-worker`, `cargo test --workspace -j 3 --no-fail-fast`; push only when all pass. Conflicts so far were in shared tables (Cargo.toml patch table, worker protocol version, settings fields, decision numbers) — keep both sides.
+- **Waves 7–11 are merged.** Running at the time of writing: qa3 (end-to-end QA of waves 10–11, installed layout, showcase extension).
+- **Showcase:** `/mnt/data/git/chukcut-qa2/_scratch/demo/showcase.chukcut` (built by `scripts/demo.sh`; the qa2 worktree is kept for it). The owner's display shows it in the release build.
+- **CI:** clippy is fatal; CLI, ML worker and engine GPU tests (lavapipe) run in CI. Check `gh run list` after each push.
 - **Dependabot PRs:** #26 (rust-minor) and #27 (ffmpeg-next 9) are applied on master (7823f49, f283efe) and can be closed; #5, #7, #8, #9, #16, #24, #25 target the removed web/Tauri code and can be closed; #28 (skrifa 0.47) is unreviewed. Closing PRs needs the owner (the session may not write to GitHub).
-- **Owner decisions pending:** (1) a project identity (URL + project e-mail, not the owner's) for Wikimedia/Musopen User-Agent — until then those sources stay off; (2) delete the fork `chukfinley/filmcraft` (needs `gh auth refresh -h github.com -s delete_repo`).
-- **Follow-up:** check `effects/graph.rs:735` (data-driven blend state) for the NVIDIA alpha rounding.
+- **Owner decisions pending:** (1) a project identity (URL + project e-mail, not the owner's) for the Wikimedia/Musopen User-Agent — until then those sources stay off; (2) delete the fork `chukfinley/filmcraft` (needs `gh auth refresh -h github.com -s delete_repo`); (3) delete the mattes made from the owner's own clip during the ML worker check: `~/.cache/chukcut/mattes/person-376879dd99acffd5-*`.
+- **Needs the owner's hardware:** backlog 11, Intel/VAAPI verification on the laptop (`tests/every_card.rs`, player bench, OpenVINO path).
+- **Known gaps worth a next wave:** crop keyframes; temporal/ML denoise; RIFE fp16 quality; one TensorRT engine per input size; body fingers (RTMW) and id swaps; static logos on a moving camera in Remove object; matte-limited effects inside transitions; optical flow under Remove object.
