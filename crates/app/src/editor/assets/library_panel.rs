@@ -170,7 +170,10 @@ impl Editor {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         match self.assets.library.pics.get(&key) {
+            // The id is what lets GPUI play an animated GIF tile: an `img`
+            // without one keeps no frame state and stays on frame one.
             Some(Pic::Ready(path)) => img(path.clone())
+                .id(SharedString::from(format!("pic-{key}")))
                 .size_full()
                 .object_fit(ObjectFit::Contain)
                 .into_any_element(),

@@ -116,6 +116,7 @@ impl Editor {
             // as they are.
             Kind::Image if lottie => match self.assets.thumbs.get(&item.id) {
                 Some(Thumb::Ready(path)) => img(path.clone())
+                    .id(SharedString::from(format!("media-pic-{}", item.id)))
                     .size_full()
                     .object_fit(ObjectFit::Contain)
                     .into_any_element(),
@@ -154,6 +155,7 @@ impl Editor {
                 }
             },
             Kind::Image => img(PathBuf::from(&item.path))
+                .id(SharedString::from(format!("media-pic-{}", item.id)))
                 .size_full()
                 .object_fit(ObjectFit::Cover)
                 .into_any_element(),
