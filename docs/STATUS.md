@@ -3329,7 +3329,10 @@ Decision 0025, "Amended". What changed, with what it measured on the RTX
   listed `libcudart.so.13`, `libcublas.so.13` and `libcudnn.so.9` from the
   packs. Measured through the worker: RVM 15.4 ms per 540×960 frame,
   MobileSAM 71.6 ms per 960×540 (encoder + decoder), BiRefNet lite 426 ms
-  per 960×540, VitTrack 3.5 ms per 640×360.
+  per 960×540, VitTrack 3.5 ms per 640×360. The CUDA 12 bundle works on the
+  same machine despite Ubuntu's CUDA 12.0 in `/usr/lib` (the original trap):
+  with `CHUKCUT_ML_RUNTIME=cuda12` the probe loaded `libcudart.so.12` 12.9
+  from the pack; RVM 13.3 ms, MobileSAM 66.6 ms.
   **Traps:** the CUDA provider registers without cuDNN and only fails on
   the first convolution ("cuDNN is unavailable … libcudnn.so"), which a
   half-installed bundle hit; the probe now requires `libcudnn.so.9` to open
