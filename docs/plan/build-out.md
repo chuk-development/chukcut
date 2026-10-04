@@ -80,7 +80,7 @@ column current.
 | 8 | stable | flaky tests (templates LUT write race, lavapipe playback count), deterministic pitch-preserving audio on speed curves | merged — atomic writes for looks/tiles/fonts/stickers, per-file autosave queue, autosave off in unit tests, seeded Signalsmith Stretch (vendored), robust lavapipe timing tests |
 | 9 | ml3 | AI slow motion (RIFE-class optical flow through the ML worker), matte-driven grade/effect masks (subject / background) | running (agent/ml3) |
 | 9 | compound3 | scene/beat/reframe inside compound clips, compound clip's own audio effects in the mix, file identity in the nested cache, black export cover picture | running (agent/compound3) |
-| 9 | ci | CI green on every job, clippy warnings fixed and made fatal, CLI tests in CI, GPU tests on the runner if lavapipe is there | running (agent/ci) |
+| 9 | ci | CI green on every job, clippy warnings fixed and made fatal, CLI tests in CI, GPU tests on the runner if lavapipe is there | merged — master CI green, clippy fatal (0 warnings), CLI + ML worker tests in CI, engine GPU tests on lavapipe in CI |
 
 ## Backlog for the next waves (lead picks from the top)
 
