@@ -130,6 +130,11 @@ impl CompositingMaterial {
                 return Some(format!("chroma key {field}"));
             }
         }
+        if let Some(background) = &self.background {
+            if let Some(field) = background.invalid_field() {
+                return Some(format!("background {field}"));
+            }
+        }
         None
     }
 }
@@ -142,12 +147,68 @@ impl CompositingMaterial {
 /// version, so a matte made by one version is never shown for another, and an
 /// export that finds frames missing rebuilds them with the version recorded
 /// here — or refuses, if this build does not have it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Three kinds of model fill it (`modules/matting`): people (`rvm`), the
+/// main object of the frame (`birefnet-lite`), and an object the user
+/// clicked (`mobilesam`, with the clicks in [`prompt`](Self::prompt)).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BackgroundRemoval {
     /// The registry id, e.g. `rvm`.
     pub model: String,
     /// The registry version, e.g. `1.0.0-mobilenetv3`.
     pub version: String,
+    /// "Select object": where the user clicked, which defines the matte as
+    /// much as the model does (it is part of the cache key). `None` for the
+    /// automatic models.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<ObjectPrompt>,
+    /// Remove what the matte keeps and keep the rest: cut an object out of
+    /// the picture instead of keeping only it. Applied when drawing, so
+    /// flipping it re-bakes nothing.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub invert: bool,
+}
+
+/// The clicks that select an object, on one frame of the clip's source.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ObjectPrompt {
+    /// Source time (µs) of the frame the points were placed on. The matte
+    /// is propagated from this frame forwards and backwards.
+    pub time: i64,
+    pub points: Vec<PromptPoint>,
+}
+
+/// One click: a point of the source frame (fractions of its width and
+/// height, top-left origin, display orientation), on the object to keep or
+/// on a part to leave out.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PromptPoint {
+    pub x: f32,
+    pub y: f32,
+    /// On the object (`true`) or a part to leave out of it.
+    pub keep: bool,
+}
+
+impl BackgroundRemoval {
+    /// The first value that is not a finite fraction, by name.
+    pub fn invalid_field(&self) -> Option<String> {
+        let prompt = self.prompt.as_ref()?;
+        if prompt.points.is_empty() {
+            return Some("prompt points (none)".into());
+        }
+        if !prompt.points.iter().any(|p| p.keep) {
+            return Some("prompt points (none on the object)".into());
+        }
+        prompt
+            .points
+            .iter()
+            .any(|p| {
+                !(p.x.is_finite() && p.y.is_finite())
+                    || !(0.0..=1.0).contains(&p.x)
+                    || !(0.0..=1.0).contains(&p.y)
+            })
+            .then(|| "prompt point outside the frame".into())
+    }
 }
 
 // ---------------------------------------------------------------------------

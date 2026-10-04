@@ -38,7 +38,11 @@ const RELIST_AFTER: Duration = Duration::from_millis(500);
 const KEEP: usize = 8;
 
 struct Listing {
-    /// `None` when the media file cannot be read (offline media).
+    /// The matte key (`cache::key_for`); `None` when the media file cannot
+    /// be read (offline media).
+    key: Option<String>,
+    /// The directory drawn from: the one with the most frames
+    /// (`cache::best`), so one clip never mixes two providers' mattes.
     dir: Option<PathBuf>,
     times: Vec<Micros>,
     listed: Instant,
@@ -47,10 +51,14 @@ struct Listing {
 /// A matte file: its directory and its presentation time.
 type MatteKey = (PathBuf, Micros);
 
+/// What identifies a clip's mattes before the media file is read: the
+/// file, the model, the version and the selection.
+type ListingKey = (String, String, String, Option<String>);
+
 /// Matte lookups and uploads, shared by every render of one compositor.
 #[derive(Default)]
 pub struct MatteFrames {
-    listings: Mutex<HashMap<(String, String, String), Listing>>,
+    listings: Mutex<HashMap<ListingKey, Listing>>,
     uploaded: Mutex<Vec<(MatteKey, Arc<GpuMatte>)>>,
 }
 
@@ -94,30 +102,36 @@ impl MatteFrames {
         source_time: Micros,
         period: Micros,
     ) -> Option<(PathBuf, Micros)> {
-        let key = (
+        let listing_key = (
             media.to_string(),
             setting.model.clone(),
             setting.version.clone(),
+            setting.prompt.as_ref().map(cache::prompt_hash),
         );
         let mut listings = self.listings.lock();
-        let listing = listings.entry(key).or_insert_with(|| {
-            let dir = cache::dir_for(media.as_ref(), &setting.model, &setting.version).ok();
-            let times = dir.as_deref().map(cache::list).unwrap_or_default();
+        let listing = listings.entry(listing_key).or_insert_with(|| {
+            let key = cache::key_for(media.as_ref(), setting).ok();
+            let best = key.as_deref().and_then(cache::best);
             Listing {
-                dir,
-                times,
+                key,
+                dir: best.as_ref().map(|(dir, _)| dir.clone()),
+                times: best.map(|(_, times)| times).unwrap_or_default(),
                 listed: Instant::now(),
             }
         });
-        let dir = listing.dir.clone()?;
-        if let Some(pts) = cache::lookup(&listing.times, source_time, period) {
-            return Some((dir, pts));
+        if let Some(dir) = &listing.dir {
+            if let Some(pts) = cache::lookup(&listing.times, source_time, period) {
+                return Some((dir.clone(), pts));
+            }
         }
         if listing.listed.elapsed() < RELIST_AFTER {
             return None;
         }
-        listing.times = cache::list(&dir);
+        let best = listing.key.as_deref().and_then(cache::best);
+        listing.dir = best.as_ref().map(|(dir, _)| dir.clone());
+        listing.times = best.map(|(_, times)| times).unwrap_or_default();
         listing.listed = Instant::now();
+        let dir = listing.dir.clone()?;
         cache::lookup(&listing.times, source_time, period).map(|pts| (dir, pts))
     }
 }

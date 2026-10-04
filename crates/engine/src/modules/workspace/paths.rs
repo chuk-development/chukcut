@@ -155,13 +155,31 @@ pub fn ensure(dir: PathBuf) -> std::io::Result<PathBuf> {
 /// cannot be regenerated is stored there.
 pub fn clear_cache() -> std::io::Result<()> {
     let root = cache_root();
-    if root.exists() {
-        std::fs::remove_dir_all(&root)?;
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return Ok(());
+    };
+    // Everything derived goes; the downloads the user chose (speech models,
+    // ML models and runtime packs) stay, as they do for a trim
+    // (`trim::EXEMPT_DIRS`). The ML packs are removed in Settings › AI
+    // acceleration.
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if super::trim::EXEMPT_DIRS.contains(&name.to_string_lossy().as_ref()) {
+            continue;
+        }
+        let path = entry.path();
+        if std::fs::symlink_metadata(&path)?.is_dir() {
+            std::fs::remove_dir_all(&path)?;
+        } else {
+            std::fs::remove_file(&path)?;
+        }
     }
     Ok(())
 }
 
-/// Total bytes currently held in the cache, for the settings UI.
+/// Total bytes currently held in the cache, for the settings UI: what the
+/// cache limit counts, so not the downloads it leaves alone
+/// (`trim::EXEMPT_DIRS`).
 pub fn cache_size() -> u64 {
     fn walk(dir: &Path) -> u64 {
         let Ok(entries) = std::fs::read_dir(dir) else {
@@ -176,7 +194,19 @@ pub fn cache_size() -> u64 {
             })
             .sum()
     }
-    walk(&cache_root())
+    let root = cache_root();
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter(|e| !super::trim::EXEMPT_DIRS.contains(&e.file_name().to_string_lossy().as_ref()))
+        .map(|e| match e.metadata() {
+            Ok(m) if m.is_dir() => walk(&e.path()),
+            Ok(m) => m.len(),
+            Err(_) => 0,
+        })
+        .sum()
 }
 
 /// A short, filesystem-safe, collision-resistant key for an absolute path.

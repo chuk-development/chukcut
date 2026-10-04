@@ -129,6 +129,8 @@ pub(crate) struct SettingsDialog {
     notice: Option<SharedString>,
     /// Cloud accounts: `editor/accounts.rs`.
     accounts: Entity<super::accounts::AccountsSettings>,
+    /// AI acceleration: `editor/ml_settings.rs`.
+    ai: Entity<super::ml_settings::AiSettings>,
 }
 
 impl SettingsDialog {
@@ -157,6 +159,7 @@ impl SettingsDialog {
             log_file: logs.file,
             notice: None,
             accounts: cx.new(super::accounts::AccountsSettings::new),
+            ai: cx.new(super::ml_settings::AiSettings::new),
         };
         dialog.measure_cache(cx);
         dialog
@@ -411,7 +414,7 @@ impl SettingsDialog {
                 Button::new("settings-clear-cache")
                     .label("Clear")
                     .small()
-                    .tooltip("Thumbnails, waveforms, proxies and preview frames. All of it is rebuilt when needed.")
+                    .tooltip("Thumbnails, waveforms, proxies, preview frames and baked background mattes. All of it is rebuilt when needed; downloaded models stay.")
                     .on_click(cx.listener(|this, _, _, cx| this.clear_cache(cx))),
             );
         section(
@@ -524,6 +527,7 @@ impl Render for SettingsDialog {
             .child(self.render_general(cx))
             .child(self.render_playback(cx))
             .child(self.render_storage(cx))
+            .child(self.ai.clone())
             .child(super::keymap::settings_section())
             .child(self.accounts.clone())
             .child(self.render_hardware())
@@ -531,11 +535,11 @@ impl Render for SettingsDialog {
     }
 }
 
-fn dim(text: impl Into<SharedString>) -> gpui::Div {
+pub(crate) fn dim(text: impl Into<SharedString>) -> gpui::Div {
     div().text_sm().text_color(rgb(TEXT_DIM)).child(text.into())
 }
 
-fn section(title: &str, rows: Vec<AnyElement>) -> AnyElement {
+pub(crate) fn section(title: &str, rows: Vec<AnyElement>) -> AnyElement {
     div()
         .flex()
         .flex_col()
@@ -558,7 +562,7 @@ fn section(title: &str, rows: Vec<AnyElement>) -> AnyElement {
         .into_any_element()
 }
 
-fn row(label: &str, hint: Option<&str>, control: impl IntoElement) -> AnyElement {
+pub(crate) fn row(label: &str, hint: Option<&str>, control: impl IntoElement) -> AnyElement {
     div()
         .min_h(px(44.0))
         .px_3()

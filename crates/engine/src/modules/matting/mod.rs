@@ -1,6 +1,9 @@
-//! "Remove background": a person matte per source frame, made by a model in
-//! the ML worker, baked into the cache, and applied by the compositor as
-//! alpha like a mask.
+//! "Remove background": a matte per source frame, made by a model in the ML
+//! worker, baked into the cache, and applied by the compositor as alpha like
+//! a mask. Three models: people (Robust Video Matting), the main object
+//! (BiRefNet lite) and "Select object", the object under the user's clicks
+//! (MobileSAM, propagated over the clip with VitTrack, [`object`]). Any of
+//! them can be inverted: the subject cut out, the rest kept.
 //!
 //! - **The setting** is a field of the clip's compositing material
 //!   ([`BackgroundRemoval`](crate::modules::project::compositing::BackgroundRemoval)):
@@ -24,3 +27,38 @@
 pub mod bake;
 pub mod cache;
 pub mod commands;
+pub mod object;
+
+use serde::{Deserialize, Serialize};
+
+use crate::modules::ml::matte;
+use crate::modules::project::compositing::BackgroundRemoval;
+
+/// What "Remove background" keeps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BackgroundMode {
+    /// People, by Robust Video Matting: fast, stable from frame to frame.
+    #[default]
+    People,
+    /// The main object of the picture, by BiRefNet lite: any object, finer
+    /// edges, needs a GPU.
+    Objects,
+}
+
+impl BackgroundMode {
+    /// The registry id of the model.
+    pub fn model(self) -> &'static str {
+        match self {
+            BackgroundMode::People => matte::MODEL,
+            BackgroundMode::Objects => matte::OBJECTS_MODEL,
+        }
+    }
+
+    /// The mode a setting was made with; `None` for "Select object".
+    pub fn of(setting: &BackgroundRemoval) -> Option<Self> {
+        [BackgroundMode::People, BackgroundMode::Objects]
+            .into_iter()
+            .find(|m| m.model() == setting.model)
+    }
+}

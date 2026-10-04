@@ -205,6 +205,7 @@ operations!(
     mask::ChromaKeyArgs,
     mask::BlendArgs,
     mask::RemoveBackgroundArgs,
+    mask::SelectObjectArgs,
     audio::CaptionsTranscribeArgs,
     audio::CaptionsImportArgs,
     audio::CaptionsExportArgs,

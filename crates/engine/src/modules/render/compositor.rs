@@ -1782,6 +1782,12 @@ impl Compositor {
             });
         if background.is_some() {
             matte.flags[0] |= super::matte::flag::BACKGROUND;
+            if compositing
+                .and_then(|m| m.background.as_ref())
+                .is_some_and(|b| b.invert)
+            {
+                matte.flags[0] |= super::matte::flag::BACKGROUND_INVERT;
+            }
         }
 
         let slot = draws.slots as u32;

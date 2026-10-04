@@ -15,8 +15,10 @@
 //! - **Faces** ([`faces`]): YuNet, for auto reframe.
 //! - **Tracker** ([`tracker`]): VitTrack, tracker T2 for fast motion, with a
 //!   whole-frame scan that finds the object again after it was hidden.
-//! - **Matte** ([`matte`]): Robust Video Matting, for "Remove background"
-//!   (`modules/matting`).
+//! - **Matte** ([`matte`]): Robust Video Matting (people) and BiRefNet
+//!   (objects), for "Remove background" (`modules/matting`).
+//! - **Segment** ([`segment`]): MobileSAM, the object under a click, for
+//!   "Select object".
 //! - **Commands** ([`commands`]): what the UI, the CLI and MCP call.
 //!
 //! **Degrading.** Every caller treats ML as optional. No worker binary, no
@@ -35,6 +37,7 @@ pub mod commands;
 pub mod download;
 pub mod faces;
 pub mod matte;
+pub mod segment;
 pub mod tracker;
 pub mod worker;
 
@@ -87,18 +90,43 @@ pub fn prepare(
             cancel,
         )?;
     }
-    download::ensure_model(
-        &root,
-        spec,
-        false,
-        &|done, total| {
-            progress(
-                &format!("Downloading {what}"),
-                (total > 0).then(|| done as f32 / total as f32),
-            )
-        },
-        cancel,
-    )?;
+    // A model too slow for the CPU must not be downloaded (224 MB for
+    // BiRefNet) or loaded on a machine where only the CPU works: ask the
+    // worker what runs first.
+    if !spec.cpu_ok {
+        let providers = match worker::request(
+            RequestBody::Probe,
+            &[],
+            &|_, _| {},
+            Some(cancel),
+            Duration::from_secs(60),
+        )? {
+            Outcome::Probe(probe) => probe.providers,
+            other => return Err(MlError::Failed(format!("unexpected answer {other:?}"))),
+        };
+        if providers.iter().all(|p| p == "CPU") {
+            return Err(MlError::Failed(format!(
+                "{} needs a GPU, and models run on the CPU here (one frame would take \
+                 12–25 s and 6–11 GB of memory). Install the GPU bundle in Settings › AI \
+                 acceleration, or use People or Select object",
+                spec.name
+            )));
+        }
+    }
+    for spec in std::iter::once(spec).chain(spec.companion.and_then(registry::model)) {
+        download::ensure_model(
+            &root,
+            spec,
+            false,
+            &|done, total| {
+                progress(
+                    &format!("Downloading {what} ({} of {} MB)", done >> 20, total >> 20),
+                    (total > 0).then(|| done as f32 / total as f32),
+                )
+            },
+            cancel,
+        )?;
+    }
     progress(&format!("Starting {what}"), None);
     match worker::request(
         RequestBody::Load {

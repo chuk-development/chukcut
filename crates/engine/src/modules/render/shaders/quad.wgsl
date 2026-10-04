@@ -127,6 +127,7 @@ const M_KEY: u32 = 2u;
 const M_KEY_SHRINK: u32 = 4u;
 const M_VIEW_MATTE: u32 = 8u;
 const M_BACKGROUND: u32 = 16u;
+const M_BACKGROUND_INVERT: u32 = 32u;
 const KEY_SCALE: f32 = 0.6;
 const STAR_INNER: f32 = 0.381966;
 // The heart: the classic parametric curve at 32 points, width -1..1
@@ -804,7 +805,11 @@ fn shade(in: VertexOutput) -> vec4<f32> {
             cover = cover * mask_coverage(in.local);
         }
         if ((quad.matte_flags.x & M_BACKGROUND) != 0u) {
-            cover = cover * textureSample(background_texture, source_sampler, in.display).r;
+            var matte = textureSample(background_texture, source_sampler, in.display).r;
+            if ((quad.matte_flags.x & M_BACKGROUND_INVERT) != 0u) {
+                matte = 1.0 - matte;
+            }
+            cover = cover * matte;
         }
         texel = vec4<f32>(texel.rgb, texel.a * cover);
         // "Show matte": the alpha as grey, opaque, so what is kept is white.

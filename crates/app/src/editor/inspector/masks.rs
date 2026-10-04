@@ -14,7 +14,8 @@ use chukcut_engine::modules::compositing::commands as compositing;
 use chukcut_engine::modules::compositing::edit::{self as comp_edit, Minted, ResetPart};
 use chukcut_engine::modules::matting::commands as matting;
 use chukcut_engine::modules::project::compositing::{
-    BlendMode, ChromaKey, CompositingMaterial, Mask, MaskOp, MaskShape, FEATHER_SPAN,
+    BackgroundRemoval, BlendMode, ChromaKey, CompositingMaterial, Mask, MaskOp, MaskShape,
+    FEATHER_SPAN,
 };
 use chukcut_engine::modules::render::layout;
 use chukcut_engine::modules::render::matte::{heart_polygon, star_polygon};
@@ -26,7 +27,7 @@ use gpui::component::switch::Switch;
 use gpui::component::Sizable as _;
 use gpui::{canvas, point, AnyElement, DispatchPhase, PathBuilder, Subscription};
 
-use crate::ui::{self, ColorEvent, ColorPicker, EmptyState, IconButton};
+use crate::ui::{self, ColorEvent, ColorPicker, EmptyState, IconButton, SegmentedTabs};
 
 use super::controls::*;
 use super::grading::{disc, ring};
@@ -153,6 +154,55 @@ pub(crate) struct MasksPanel {
     was_shown: bool,
     /// The running "Remove background" bake, if any.
     bake: Option<BakeUi>,
+    /// Bakes the engine started on its own after an edit left a matte with
+    /// missing frames (`matting_queue_missing`), and the frames each had
+    /// done when last polled.
+    background_jobs: Vec<(u64, u32)>,
+    /// When the last of those polls redrew the preview.
+    background_redrawn: Option<std::time::Instant>,
+    /// The model the Auto remove row shows while it is off.
+    mode: RemoveMode,
+    /// "Select object" is armed: presses on the player are clicks.
+    selecting: bool,
+    /// The clicks so far, with the clip and the timeline time they are on.
+    clicks: Option<Clicks>,
+}
+
+/// What "Auto remove" keeps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum RemoveMode {
+    #[default]
+    People,
+    Objects,
+    Select,
+}
+
+impl RemoveMode {
+    const ALL: [RemoveMode; 3] = [RemoveMode::People, RemoveMode::Objects, RemoveMode::Select];
+
+    fn label(self) -> &'static str {
+        match self {
+            RemoveMode::People => "People",
+            RemoveMode::Objects => "Objects",
+            RemoveMode::Select => "Select",
+        }
+    }
+
+    /// The mode a clip's setting was made with.
+    fn of(setting: &BackgroundRemoval) -> RemoveMode {
+        match matting::BackgroundMode::of(setting) {
+            Some(matting::BackgroundMode::People) => RemoveMode::People,
+            Some(matting::BackgroundMode::Objects) => RemoveMode::Objects,
+            None => RemoveMode::Select,
+        }
+    }
+}
+
+/// "Select object" clicks on one frame of one clip, as canvas fractions.
+struct Clicks {
+    segment_id: String,
+    time: Micros,
+    points: Vec<matting::CanvasPoint>,
 }
 
 /// A bake the panel shows progress for.
@@ -1190,8 +1240,10 @@ impl Editor {
             .into_any_element()
     }
 
-    /// "Auto remove": the background behind people, by Robust Video Matting
-    /// in the ML worker, baked per frame while the panel shows progress.
+    /// "Auto remove": the background behind people (Robust Video Matting),
+    /// behind the picture's main object (BiRefNet lite), or around an object
+    /// the user clicks on the player (MobileSAM, "Select"), baked per frame
+    /// while the panel shows progress. "Cut out instead" inverts it.
     fn auto_remove_section(
         &mut self,
         segment: &Segment,
@@ -1206,13 +1258,109 @@ impl Editor {
                 cx,
             );
         }
-        let on = material.background.is_some();
+        let setting = material.background.clone();
+        let on = setting.is_some();
+        let mode = setting
+            .as_ref()
+            .map(RemoveMode::of)
+            .unwrap_or(self.inspector.masks.mode);
         let mut rows = Vec::new();
+
+        let editor = cx.entity().downgrade();
+        let id = segment.id.clone();
+        rows.push(label_row(
+            "Keep",
+            SegmentedTabs::new(
+                "background-mode",
+                RemoveMode::ALL.iter().map(|m| m.label()),
+                RemoveMode::ALL.iter().position(|m| *m == mode).unwrap_or(0),
+            )
+            .on_select(move |index, _, cx| {
+                let mode = RemoveMode::ALL[index];
+                let id = id.clone();
+                let _ = editor.update(cx, |this, cx| this.set_remove_mode(&id, mode, cx));
+            }),
+        ));
+
+        match mode {
+            RemoveMode::People => rows.push(caption(
+                "People stay, the rest is cut out. Robust Video Matting (GPL-3.0), on this \
+                 machine; the model downloads once (15 MB)."
+                    .to_string(),
+            )),
+            RemoveMode::Objects => rows.push(caption(
+                "The main object of the picture stays: a product, a pet, a car. BiRefNet lite \
+                 (MIT, 224 MB download). Needs an NVIDIA GPU with the GPU bundle (Settings › AI \
+                 acceleration); edges may shimmer, as it sees one frame at a time."
+                    .to_string(),
+            )),
+            RemoveMode::Select => {
+                let selecting = self.inspector.masks.selecting;
+                let count = self
+                    .inspector
+                    .masks
+                    .clicks
+                    .as_ref()
+                    .filter(|c| c.segment_id == segment.id)
+                    .map(|c| c.points.len())
+                    .unwrap_or(0);
+                rows.push(caption(if selecting {
+                    "Click the object on the player. Alt-click or right-click a part to leave \
+                     out. The selection follows the object over the whole clip."
+                        .to_string()
+                } else if setting.as_ref().is_some_and(|s| s.prompt.is_some()) {
+                    "The selected object stays. Select again to change it. MobileSAM \
+                     (Apache-2.0, 45 MB download) and the VitTrack tracker."
+                        .to_string()
+                } else {
+                    "Press Select on player, then click the object to keep.".to_string()
+                }));
+                let id = segment.id.clone();
+                let mut buttons = div().flex().flex_row().justify_end().gap(px(6.0));
+                if count > 0 {
+                    buttons = buttons.child(
+                        Button::new("background-clear-clicks")
+                            .small()
+                            .label("Clear clicks")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.inspector.masks.clicks = None;
+                                cx.notify();
+                            })),
+                    );
+                }
+                rows.push(
+                    buttons
+                        .child(
+                            Button::new("background-select")
+                                .small()
+                                .label(if selecting {
+                                    "Done"
+                                } else {
+                                    "Select on player"
+                                })
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    let armed = !this.inspector.masks.selecting;
+                                    this.inspector.masks.selecting = armed;
+                                    this.inspector.masks.mode = RemoveMode::Select;
+                                    if armed {
+                                        this.inspector.masks.picking = false;
+                                        // New clicks start a new selection.
+                                        this.inspector.masks.clicks = None;
+                                        this.selected = Some(id.clone());
+                                    }
+                                    cx.notify();
+                                })),
+                        )
+                        .into_any_element(),
+                );
+            }
+        }
+
         match &self.inspector.masks.bake {
             Some(bake) if bake.segment_id == segment.id => {
                 let fraction = bake.done as f32 / bake.total.max(1) as f32;
                 rows.push(caption(format!(
-                    "Removing the background… {} of {} frames",
+                    "Removing the background\u{2026} {} of {} frames",
                     bake.done, bake.total
                 )));
                 rows.push(
@@ -1236,11 +1384,6 @@ impl Editor {
                 );
             }
             _ if on => {
-                rows.push(caption(
-                    "People stay, the rest is cut out. Made by Robust Video Matting \
-                     (GPL-3.0) on this machine; the model downloads once."
-                        .to_string(),
-                ));
                 let id = segment.id.clone();
                 rows.push(
                     div()
@@ -1259,27 +1402,184 @@ impl Editor {
                         .into_any_element(),
                 );
             }
-            _ => rows.push(caption(
-                "Tick the box to cut the background out from behind people.".to_string(),
-            )),
+            _ => {}
         }
+
+        if let Some(setting) = &setting {
+            let id = segment.id.clone();
+            rows.push(label_row(
+                "Cut out instead",
+                Switch::new("background-invert")
+                    .checked(setting.invert)
+                    .on_click(cx.listener(move |this, checked: &bool, _, cx| {
+                        let result = matting::matting_set_invert(&this.state, id.clone(), *checked);
+                        this.after_command(result, cx);
+                    })),
+            ));
+            let matte = self.inspector.masks.matte_view;
+            rows.push(label_row(
+                "Show matte",
+                Switch::new("background-matte")
+                    .checked(matte)
+                    .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                        this.inspector.masks.matte_view = *checked;
+                        this.generation += 1;
+                        cx.notify();
+                    })),
+            ));
+        }
+
         let id = segment.id.clone();
         Section {
             checkbox: Some(on),
             on_check: Some(Box::new(move |this: &mut Editor, checked, cx| {
-                let result = matting::matting_remove_background(&this.state, id.clone(), checked);
-                let job = result.as_ref().ok().and_then(|r| r.job);
-                this.after_command(result, cx);
-                if !checked {
-                    if let Some(bake) = this.inspector.masks.bake.take() {
-                        matting::matting_cancel(bake.job);
-                    }
+                if checked {
+                    let mode = this.inspector.masks.mode;
+                    this.set_remove_mode(&id, mode, cx);
+                    return;
                 }
-                this.started_bake(&id, Ok(job), cx);
+                this.inspector.masks.selecting = false;
+                this.inspector.masks.clicks = None;
+                let result = matting::matting_remove_background_with(&this.state, id.clone(), None);
+                this.after_command(result, cx);
+                if let Some(bake) = this.inspector.masks.bake.take() {
+                    matting::matting_cancel(bake.job);
+                }
+                cx.notify();
             })),
             ..Section::new("Auto remove")
         }
         .render(self.collapsed("Auto remove"), rows, cx)
+    }
+
+    /// Switch "Auto remove" to `mode` (and on): people and objects start a
+    /// bake now; "Select" arms the player for clicks and waits for one.
+    fn set_remove_mode(&mut self, segment_id: &str, mode: RemoveMode, cx: &mut Context<Self>) {
+        self.inspector.masks.mode = mode;
+        let model = match mode {
+            RemoveMode::People => matting::BackgroundMode::People,
+            RemoveMode::Objects => matting::BackgroundMode::Objects,
+            RemoveMode::Select => {
+                self.inspector.masks.selecting = true;
+                self.inspector.masks.picking = false;
+                self.inspector.masks.clicks = None;
+                cx.notify();
+                return;
+            }
+        };
+        self.inspector.masks.selecting = false;
+        let current = self
+            .project
+            .segment(segment_id)
+            .and_then(|(_, s)| self.project.materials.compositing_of(s))
+            .and_then(|m| m.background.clone());
+        if current.is_some_and(|s| s.model == model.model() && s.prompt.is_none()) {
+            cx.notify();
+            return;
+        }
+        if let Some(bake) = self.inspector.masks.bake.take() {
+            matting::matting_cancel(bake.job);
+        }
+        let result = matting::matting_remove_background_with(
+            &self.state,
+            segment_id.to_string(),
+            Some(model),
+        );
+        let job = result.as_ref().ok().and_then(|r| r.job);
+        let failed = result.is_err();
+        self.after_command(result, cx);
+        if !failed {
+            self.started_bake(segment_id, Ok(job), cx);
+        }
+    }
+
+    /// A click of "Select object" on the player, at `position`: on the
+    /// object (`keep`) or on a part to leave out. Each click re-selects
+    /// with every click so far on this frame, as one undo step.
+    fn select_click(&mut self, position: Point<Pixels>, keep: bool, cx: &mut Context<Self>) {
+        let Some(segment_id) = self.selected.clone() else {
+            return;
+        };
+        let b = self.inspector.masks.overlay.get();
+        let (w, h) = (f32::from(b.size.width), f32::from(b.size.height));
+        if w < 1.0 || h < 1.0 {
+            return;
+        }
+        let at = self.overlay_point(position);
+        let point = matting::CanvasPoint {
+            x: (at[0] / w).clamp(0.0, 1.0),
+            y: (at[1] / h).clamp(0.0, 1.0),
+            keep,
+        };
+        let time = self.clock.position();
+        let clicks = self.inspector.masks.clicks.get_or_insert_with(|| Clicks {
+            segment_id: segment_id.clone(),
+            time,
+            points: Vec::new(),
+        });
+        if clicks.segment_id != segment_id || clicks.time != time {
+            *clicks = Clicks {
+                segment_id: segment_id.clone(),
+                time,
+                points: Vec::new(),
+            };
+        }
+        clicks.points.push(point);
+        if !clicks.points.iter().any(|p| p.keep) {
+            self.status = Some("Click the object to keep first".into());
+            cx.notify();
+            return;
+        }
+        let points = clicks.points.clone();
+        if let Some(bake) = self.inspector.masks.bake.take() {
+            matting::matting_cancel(bake.job);
+        }
+        self.status = Some("Selecting the object\u{2026}".into());
+        let result =
+            matting::matting_select_object(&self.state, segment_id.clone(), time, points, None);
+        let job = result.as_ref().ok().and_then(|r| r.job);
+        let failed = result.is_err();
+        self.after_command(result, cx);
+        if !failed {
+            self.started_bake(&segment_id, Ok(job), cx);
+        }
+    }
+
+    /// Called from `refresh` after any edit: when a clip with Remove
+    /// background on is missing matte frames (it was trimmed longer, sped
+    /// up, brought back by an undo, or its mattes were cleaned up), bake
+    /// them in the background. The scan reads files, so it runs off the UI
+    /// thread; only clips with the setting make it run at all.
+    pub(crate) fn queue_missing_mattes(&mut self, cx: &mut Context<Self>) {
+        let any = self
+            .project
+            .materials
+            .compositing
+            .iter()
+            .any(|m| m.background.is_some());
+        if !any {
+            return;
+        }
+        let state = Arc::clone(&self.state);
+        cx.spawn(async move |this, cx| {
+            let jobs = cx
+                .background_executor()
+                .spawn(async move { matting::matting_queue_missing(&state) })
+                .await;
+            let _ = this.update(cx, |editor, cx| match jobs {
+                Ok(jobs) => {
+                    let known = &mut editor.inspector.masks.background_jobs;
+                    for job in jobs {
+                        if !known.iter().any(|(j, _)| *j == job) {
+                            known.push((job, 0));
+                        }
+                    }
+                    cx.notify();
+                }
+                Err(error) => tracing::debug!(%error, "no background re-bake"),
+            });
+        })
+        .detach();
     }
 
     /// Show the progress of bake `job` (when one started) for `segment_id`.
@@ -1308,6 +1608,57 @@ impl Editor {
     /// picture whenever frames land, so the preview shows the matte as it is
     /// made. Returns whether anything changed.
     pub(crate) fn poll_matting(&mut self, cx: &mut Context<Self>) -> bool {
+        let background = self.poll_background_bakes();
+        self.poll_panel_bake(cx) || background
+    }
+
+    /// The bakes `queue_missing_mattes` started: redraw the preview as
+    /// their frames land (at most a few times a second; each redraw re-reads
+    /// the cache listing), and drop them when they end.
+    fn poll_background_bakes(&mut self) -> bool {
+        if self.inspector.masks.background_jobs.is_empty() {
+            return false;
+        }
+        // The panel follows its own bake, and forgets it when it ends.
+        let panel = self.inspector.masks.bake.as_ref().map(|b| b.job);
+        let mut landed = false;
+        let mut ended = false;
+        self.inspector
+            .masks
+            .background_jobs
+            .retain_mut(|(job, done)| {
+                if Some(*job) == panel {
+                    return false;
+                }
+                let Some(status) = matting::matting_status(*job) else {
+                    return false;
+                };
+                if let Some(finished) = status.finished {
+                    if let Err(error) = finished {
+                        tracing::warn!(%error, "a background re-bake failed");
+                    }
+                    matting::matting_forget(*job);
+                    ended = true;
+                    return false;
+                }
+                landed |= status.progress.done != *done;
+                *done = status.progress.done;
+                true
+            });
+        let due = self
+            .inspector
+            .masks
+            .background_redrawn
+            .is_none_or(|at| at.elapsed() >= std::time::Duration::from_millis(300));
+        if ended || (landed && due) {
+            self.inspector.masks.background_redrawn = Some(std::time::Instant::now());
+            self.generation += 1;
+            return true;
+        }
+        false
+    }
+
+    fn poll_panel_bake(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(bake) = &mut self.inspector.masks.bake else {
             return false;
         };
@@ -1487,6 +1838,68 @@ impl Editor {
             return None;
         }
         let bounds = Rc::clone(&self.inspector.masks.overlay);
+        if self.inspector.masks.selecting && self.selected.is_some() {
+            let bounds_paint = Rc::clone(&bounds);
+            let time = self.clock.position();
+            let dots: Vec<(f32, f32, bool)> = self
+                .inspector
+                .masks
+                .clicks
+                .as_ref()
+                .filter(|c| Some(&c.segment_id) == self.selected.as_ref() && c.time == time)
+                .map(|c| {
+                    c.points
+                        .iter()
+                        .map(|p| (p.x * dw, p.y * dh, p.keep))
+                        .collect()
+                })
+                .unwrap_or_default();
+            return Some(
+                div()
+                    .id("select-object-overlay")
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .w(px(dw))
+                    .h(px(dh))
+                    .cursor_crosshair()
+                    .border_2()
+                    .border_color(rgb(ACCENT))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                            this.select_click(event.position, !event.modifiers.alt, cx);
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                            this.select_click(event.position, false, cx);
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .children(dots.into_iter().map(|(x, y, keep)| {
+                        // Green on the object, red on a part left out.
+                        let colour = if keep { 0x2fbf71 } else { 0xe5484d };
+                        div()
+                            .absolute()
+                            .left(px(x - 6.0))
+                            .top(px(y - 6.0))
+                            .size(px(12.0))
+                            .rounded_full()
+                            .border_2()
+                            .border_color(rgb(0xffffff))
+                            .bg(rgb(colour))
+                    }))
+                    .child(
+                        canvas(move |b, _, _| bounds_paint.set(b), |_, _, _, _| {})
+                            .absolute()
+                            .size_full(),
+                    )
+                    .into_any_element(),
+            );
+        }
         if self.inspector.masks.picking && self.selected.is_some() {
             let bounds_paint = Rc::clone(&bounds);
             return Some(

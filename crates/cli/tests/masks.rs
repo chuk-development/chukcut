@@ -197,3 +197,67 @@ fn key_mask_and_blend_a_green_screen_clip() {
     assert_eq!(last["masks"].as_array().unwrap().len(), 2, "{batch}");
     assert!(last["key"].is_null());
 }
+
+/// The ML operations' arguments are checked before any model is touched:
+/// a background model that does not exist, a selection without a point on
+/// the object, points outside the canvas, a playhead off the clip. And
+/// `ml status` / `ml bundles` say what runs and what can be installed
+/// without starting the worker.
+#[test]
+fn ml_operations_refuse_bad_arguments_and_status_says_what_runs() {
+    require_ffmpeg!();
+    let dir = common::scratch("ml-args");
+    let (_, bars) = common::media(&dir);
+    let project = dir.join("ml.chukcut");
+    let p = project.to_str().unwrap();
+    ok(&dir, &["new", p]);
+    ok(&dir, &["import", p, bars.to_str().unwrap(), "--append"]);
+
+    let bad_model = run(&dir, &["remove-background", p, "0:0", "--model", "cats"]);
+    assert_ne!(bad_model.code, 0);
+    let message = bad_model.json["error"]["message"].as_str().unwrap_or("");
+    assert!(message.contains("people or objects"), "{message}");
+
+    let no_point = run(&dir, &["select-object", p, "0:0", "--at", "1"]);
+    assert_ne!(no_point.code, 0);
+    let outside = run(
+        &dir,
+        &["select-object", p, "0:0", "--at", "1", "--point", "1.5,0.2"],
+    );
+    assert_ne!(outside.code, 0);
+    let message = outside.json["error"]["message"].as_str().unwrap_or("");
+    assert!(message.contains("inside the canvas"), "{message}");
+    let off_clip = run(
+        &dir,
+        &[
+            "select-object",
+            p,
+            "0:0",
+            "--at",
+            "30",
+            "--point",
+            "0.5,0.5",
+        ],
+    );
+    assert_ne!(off_clip.code, 0);
+    let message = off_clip.json["error"]["message"].as_str().unwrap_or("");
+    assert!(message.contains("playhead"), "{message}");
+    // Nothing was recorded by the refusals.
+    let info = ok(&dir, &["info", p]);
+    assert!(!info.to_string().contains("mobilesam"), "{info}");
+
+    let status = ok(&dir, &["ml", "status"]);
+    assert!(status["active"].is_string(), "{status}");
+    assert!(status["mattes"]["bytes"].is_u64(), "{status}");
+    let bundles = ok(&dir, &["ml", "bundles"]);
+    let ids: Vec<&str> = bundles
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|b| b["id"].as_str())
+        .collect();
+    assert_eq!(ids, ["nvidia-cu13", "nvidia-cu12"]);
+    assert!(bundles[0]["bytes"].as_u64().unwrap() > 500_000_000);
+    let unknown = run(&dir, &["ml", "install", "gpu:nvidia-cu11"]);
+    assert_ne!(unknown.code, 0);
+}

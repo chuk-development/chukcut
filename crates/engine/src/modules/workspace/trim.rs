@@ -13,18 +13,25 @@
 //!
 //! - **The open project's derived files**, as far as that is cheap to know:
 //!   the thumbnail and waveform directories of its media (both are keyed by
-//!   path alone) and the proxies the cache index maps to its media. Voice
+//!   path alone), the proxies the cache index maps to its media, and the
+//!   baked "Remove background" mattes of its media (`mattes/<digest>-…`,
+//!   keyed by the file's content digest, which a trim reads from each file's
+//!   head and tail). A matte costs a model run per frame to make again, so
+//!   it is the last thing to throw away for the project being edited. Voice
 //!   cleanup renders are keyed by path *and* strength *and* engine, which this
 //!   module cannot reconstruct without the document's clip settings; they are
 //!   ordinary LRU candidates and are re-rendered on demand if trimmed.
 //! - **Files being written**: dot-prefixed (`.partial-proxy.mp4`) and
 //!   `*.part` / `*.tmp` names. Deleting one mid-write would fail a job that
 //!   is about to make the cache useful.
-//! - **`whisper/`**, the speech models. They live under the cache root because
-//!   they can be fetched again, but a 1.5 GB model is a download the user chose,
-//!   not derived data, and evicting it would turn the next transcription into
-//!   a surprise download. It is outside the count as well as the deletion, so
-//!   the limit is about what the app derives on its own.
+//! - **`whisper/`** and **`ml/`**, the speech models and the ML worker's
+//!   models and runtime packs. They live under the cache root because they
+//!   can be fetched again, but a 1.5 GB model or a 1.3 GB CUDA bundle is a
+//!   download the user chose, not derived data, and evicting it would turn
+//!   the next transcription or background removal into a surprise download.
+//!   They are outside the count as well as the deletion, so the limit is
+//!   about what the app derives on its own; Settings › AI acceleration
+//!   removes ML packs explicitly.
 //! - **The proxy index**, `proxies/index.json`.
 //!
 //! Protected files still count towards the total. A limit smaller than what
@@ -72,7 +79,7 @@ static IN_USE_KNOWN: AtomicBool = AtomicBool::new(false);
 
 /// Top-level directories under the cache root that are never trimmed or
 /// counted. See the module docs.
-const EXEMPT_DIRS: [&str; 1] = ["whisper"];
+pub const EXEMPT_DIRS: [&str; 2] = ["whisper", "ml"];
 
 /// Set the limit trims run against. Returns the previous one.
 pub fn set_limit(bytes: u64) -> u64 {
@@ -296,6 +303,7 @@ pub fn trim_cache(limit: u64) -> TrimReport {
         protection.dirs.push(paths::thumbnails_dir(path));
         protection.dirs.push(paths::waveform_dir(path));
     }
+    protection.dirs.extend(matte_dirs_of(&media));
     protection.files.insert(proxies.root().join("index.json"));
     let wanted: HashSet<String> = media
         .iter()
@@ -318,6 +326,30 @@ pub fn trim_cache(limit: u64) -> TrimReport {
         tracing::info!(?report, "trimmed the cache to its limit");
     }
     report
+}
+
+/// The matte directories of `media` (`matting::cache`, named after each
+/// file's content digest), whatever model or provider made them.
+fn matte_dirs_of(media: &[PathBuf]) -> Vec<PathBuf> {
+    let prefixes: Vec<String> = media
+        .iter()
+        .filter_map(|p| crate::modules::matting::cache::media_prefix(p).ok())
+        .collect();
+    if prefixes.is_empty() {
+        return Vec::new();
+    }
+    let Ok(entries) = std::fs::read_dir(crate::modules::matting::cache::root()) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter(|e| {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            prefixes.iter().any(|p| name.starts_with(p.as_str()))
+        })
+        .map(|e| e.path())
+        .collect()
 }
 
 /// [`trim_cache`] against the configured limit; nothing when there is none,
