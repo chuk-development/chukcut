@@ -57,7 +57,7 @@ format, hardware H.264/HEVC export on the GPU, and AAC audio.
 
 ### Text and captions
 
-- Titles with font, outline, shadow and box, 29 styles and 10 text templates
+- Titles with font, outline, shadow and box, 30 styles and 10 text templates
 - A text animator by letter, word or line
 - Automatic captions, offline with whisper.cpp or with an OpenAI-compatible server
 - Word or sentence captions, karaoke highlight, styles, emoji
