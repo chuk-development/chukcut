@@ -118,6 +118,17 @@ impl Editor {
     }
 
     pub(super) fn enhance_tab(&mut self, segment: &Segment, cx: &mut Context<Self>) -> AnyElement {
+        // Every frame made: how long making them would take is no longer
+        // news, and next to "All N frames are made" it reads as work to come.
+        let enhanced = {
+            let materials = &self.project.materials;
+            enh::removal_of(materials, segment).is_some()
+                || enh::upscale_of(materials, segment).is_some()
+        };
+        let all_made = enhanced
+            && self
+                .enhance_coverage(&segment.id)
+                .is_some_and(|(made, total)| total > 0 && made >= total);
         let materials = &self.project.materials;
         let removal = enh::removal_of(materials, segment);
         let upscale = enh::upscale_of(materials, segment);
@@ -225,13 +236,15 @@ impl Editor {
                 ));
             }
             rows.push(caption(format!("Removing {}.", parts.join(", ")), TEXT_DIM));
-            rows.push(caption(
-                estimate(Chain {
-                    removal: Some(r.clone()),
-                    upscale: None,
-                }),
-                TEXT_MUTED,
-            ));
+            if !all_made {
+                rows.push(caption(
+                    estimate(Chain {
+                        removal: Some(r.clone()),
+                        upscale: None,
+                    }),
+                    TEXT_MUTED,
+                ));
+            }
         }
         let id = segment.id.clone();
         let remove_section = Section {
@@ -290,7 +303,9 @@ impl Editor {
                 };
                 let (w, h) = chain.out_size(v.width, v.height);
                 rows.push(caption(format!("Made at {w}×{h}."), TEXT_DIM));
-                rows.push(caption(estimate(chain), TEXT_MUTED));
+                if !all_made {
+                    rows.push(caption(estimate(chain), TEXT_MUTED));
+                }
             }
         }
         let quality_section =
