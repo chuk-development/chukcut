@@ -295,8 +295,10 @@ breadcrumbs or the clip menu to close; Alt+Shift+G puts the clips back).
   names itself (`SourceProvider::cache_identity`; `MediaSourceProvider`
   changes its identity on `with_preview_proxies` and when `sync_texts`
   changes a title). Bounded: 16 views, 24 frames or 200 MB of textures.
-  Not covered: file contents on disk (a LUT edited in place, a missing file
-  that comes back) — the next document edit refreshes.
+  ~~Not covered: file contents on disk (a LUT edited in place, a missing file
+  that comes back) — the next document edit refreshes.~~ Covered since
+  agent/compound3: the digest feeds in the size and modification time of
+  every file its entries name (next section).
 - **Measured** (`chukcut-bench --filter composite`, release, RTX 3060,
   1920x1080, readback included; the old and new binaries run alternately,
   four runs each at load 1.7–3.4; medians of the runs, per frame on screen;
@@ -343,10 +345,80 @@ breadcrumbs or the clip menu to close; Alt+Shift+G puts the clips back).
   differs by up to 0.12 in places (phase and short dips), so
   `tests/compound.rs` compares curved sound by what the mixer is handed and
   by level, not sample by sample.
-- **Rough:** scene detection, beat detection and the other picture analyses
+- **Rough:** ~~scene detection, beat detection and the other picture analyses
   still refuse a compound clip; a compound clip's own audio effects (EQ,
-  denoise on the compound clip itself) do not reach the mix; an older build
-  opening a multi-timeline file drops the parked timelines.
+  denoise on the compound clip itself) do not reach the mix;~~ (both done on
+  agent/compound3, next section) an older build opening a multi-timeline file
+  drops the parked timelines.
+
+### Compound clip follow-ups 3 (2026-10-04, agent/compound3)
+
+- **Scenes, beats and auto reframe work on a compound clip.** Its picture
+  is its sequence rendered: `analysis::frames::walk` renders the nested view
+  (`Walk::sequence`, through `sequence::thumbs`' shared compositor) one frame
+  per project frame instead of decoding a file; beat detection mixes it
+  (`sequence::audio::mix_of`). Results are stored in the sequence's time —
+  the compound clip's source time — so its time map puts them on the
+  timeline at any constant speed or curve. Scene scores are cached under
+  `sequence:<id>#<digest>`. Tested at 2x (`tests/analysis.rs`: cuts at 0.5
+  and 1 s of a 3-shot clip, 120 BPM clicks every 0.25 s, the reframe window
+  following a moving disc at 2t), on the RTX 3060 and on lavapipe.
+- **Reframing a compound clip** treats it as a picture of its contents'
+  shape: the largest full-frame picture inside, through compound clips
+  inside (`analysis::edits::content_size`). A compound clip is always drawn
+  as a canvas-sized texture with its contents fitted (letterboxed), so a 16:9
+  shot inside a compound clip on a 9:16 canvas is reframed by scaling the
+  compound clip by the cover factor and panning it — the same numbers as the
+  shot itself. The frames are read on a canvas of that shape. A compound clip
+  that is cropped is approximated (the crop is applied to the contents'
+  shape, not to the canvas texture it really cuts).
+- **A compound clip's own audio effects, voice cleanup and pitch that
+  follows its speed reach both mixers and the loudness measurements.** It is
+  mixed down (`sequence::bounce`): its sequence mixed as the export mixes a
+  timeline, unclamped (`export::mix_timeline_unclamped`), into
+  `<cache>/compound-mix/<sound digest>-v1.wav` (32-bit float). The flattened
+  copy the mixers get then holds the compound clip as one audio clip on that
+  file (material id `compound-mix:…`), with the compound clip's id, extras,
+  speed, volume and keyframes — so denoise, normalise, the effect stack and
+  the speed render apply as on any clip. The key is
+  `sequence::digest::sound_digest` (lanes, pool entries incl. audio
+  materials and link groups, file identities): a change inside makes a new
+  mix-down, undo finds the old one. Measured against the equivalent
+  (`tests/compound.rs`): an EQ on the compound clip equals the EQ on its
+  sine inside within 5 % RMS; preview mix equals export mix within 1e-3; a
+  normalise gain changes the mix by exactly that gain and the mix loudness
+  by that many dB.
+- **Who renders the mix-down:** the export, `denoise::ensure_rendered` (now
+  walks the flattened project, so it also renders the denoise caches of
+  clips *inside* compound clips, which it did not before), the loudness
+  measurements, `voice_set_denoise`/`voice_normalize` and `audiofx_render`
+  render a missing one before they read it. The preview never blocks: the
+  plan asks a background worker (`chukcut-compound-mix` thread) for it and
+  plays the contents dry until it lands; landing bumps
+  `audiofx::cache::generation` so the audio engine re-plans. The same worker
+  renders a missing denoise cache of a mix-down.
+- **Cost:** a mix-down is the whole sequence, decoded and mixed once per
+  content change (processed clips inside are rendered first); not measured
+  on long sequences. Any edit inside the sequence,
+  also a picture-only one, changes the key; edits inside happen while the
+  compound clip is open, where it is not played, so this is once per close.
+- **Nested frames follow files on disk.** `sequence::digest` feeds in the
+  identity (size, modification time, or "missing") of every absolute path
+  the hashed entries name — videos, images, LUTs, fonts, packages — so a LUT
+  edited in place or a missing file that comes back renders afresh on the
+  next frame. One `stat` per file per frame per compound clip.
+- **The inspector knows compound clips.** They read as titles before
+  (`ClipKind::Text`), with no Audio, Speed or Adjust tab. Now
+  `ClipKind::Compound`: Video (Basic, Mask), Audio, Speed, Animation,
+  Adjust, Effects; scene detection in Video › Basic; the clip menu offers
+  scenes and beats. Stabilisation still refuses a compound clip (it would
+  need the camera path of a rendered composite).
+- **The export dialog's black cover** was the playhead at the end of the
+  timeline: the preview rendered the empty instant after the last clip, so
+  after playback had run to the end the player and the cover (the frame at
+  the playhead) were black, on both paths. The preview now shows the start
+  of the last frame there (`preview::clock::shown_time`). Seen on Xvfb with
+  lavapipe on the showcase project, shared and readback paths.
 
 ## Polish pass 2, 2026-10-04 (agent/polish2)
 
@@ -746,8 +818,9 @@ at 4K the readback spent a whole core moving pixels.
 - **Not checked**: playback in the real window (it would play audio on the
   owner's speakers) — the harness is the playback measurement; Intel/VAAPI
   machines; a hybrid laptop's automatic fallback outside the unit test.
-- **Seen, not caused here**: the export dialog's cover is black on both paths
-  (checked with `CHUKCUT_PREVIEW_READBACK=1`).
+- ~~**Seen, not caused here**: the export dialog's cover is black on both paths
+  (checked with `CHUKCUT_PREVIEW_READBACK=1`).~~ The playhead was at the end
+  of the timeline; fixed on agent/compound3 (`preview::clock::shown_time`).
 
 ### Export, 60 s of 1080p, the 5-layer project (1800 frames)
 

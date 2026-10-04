@@ -120,9 +120,34 @@ its inverse leaves the pool byte-identical. Tabs never jump around.
   version was not bumped because that would rewrite every existing file.
 - **Deleting a timeline** removes the compound sequences only it reached, in
   the same composite, so undo brings them back.
-- **Picture analyses** (scenes, beats, reframe) see the active sequence only.
+- ~~**Picture analyses** (scenes, beats, reframe) see the active sequence only.~~
   Silence cutting and loudness on a compound clip measure its contents' mix;
   captions and the mix loudness hear compound clips through the mixer.
+
+## Amendment, 2026-10-04 (agent/compound3)
+
+- **Analyses read a compound clip's contents.** Scene detection and auto
+  reframe render its sequence (`analysis::frames::Walk::sequence`), beat
+  detection mixes it. Results are stored in the sequence's time, which is
+  the compound clip's source time, so they ride its time map like a video's
+  results ride the file's. For reframing, a compound clip is a picture of its
+  contents' shape (the largest full-frame picture inside), because its
+  rendered texture is always canvas-sized.
+- **A compound clip that processes its own sound is mixed down.** Taking the
+  sound apart (above, "Sound") is exact for gains and speeds but not for a
+  compressor, a reverb, noise reduction or a loudness gain measured on the
+  sum. Such a clip is heard through a cached mix-down of its sequence
+  (`sequence::bounce`), an audio file in sequence time, which the existing
+  cleanup, effect and speed renders then treat as the clip's source. The
+  export and every measurement render it first; the preview waits for a
+  background render and plays the contents dry meanwhile, the rule
+  `audiofx::cache` already follows. Cost: a full decode and mix of the
+  sequence per content change, and one more cached file. What would change
+  it: long compound clips with effects edited often from the outside — then
+  mix down only the window the clip shows.
+- **The nested-render digest includes file identities** (size and
+  modification time of every path its entries name), so files edited or
+  restored on disk invalidate cached nested frames without a document edit.
 
 ## What would change our minds
 
