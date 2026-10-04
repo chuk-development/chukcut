@@ -770,7 +770,12 @@ the timeline time where you draw the box. `--direction forward|backward|both`
 
 `--overlay CLIP` makes a title, sticker or other clip follow the track.
 `--mode position|position_scale|position_scale_rotation` sets how it follows.
-The command waits for the analysis to finish. The result is one undo step.
+`--tracker klt|vittrack` chooses the tracker: `klt` (the default) needs no
+model and measures rotation; `vittrack` runs a learned tracker in the ML
+worker, holds fast and blurred objects and finds the object again after it
+was hidden or left the frame, and falls back to `klt` when the worker cannot
+run it. The command waits for the analysis to finish. The result is one undo
+step.
 
 ```bash
 chukcut-cli track reel.chukcut 0:0 --at 1.2 --rect 0.52,0.4,0.15,0.2 --overlay 2:0
@@ -818,6 +823,20 @@ the key.
 
 ```bash
 chukcut-cli chroma-key reel.chukcut 1:0 --pick 0.05,0.5 --spill 0.7
+```
+
+#### `remove-background PROJECT CLIP [--off]`
+
+Removes the background behind the people in a video clip, with Robust Video
+Matting (GPL-3.0) in the ML worker. The model (15 MB) and ONNX Runtime
+download on first use. The setting is one undo step; the command then bakes
+the clip's matte into the cache (`~/.cache/chukcut/mattes`) and waits for it.
+Run it again on a clip that has it to bake frames that are missing (after a
+trim, or a cleared cache); an export also bakes them. `--off` keeps the
+background again.
+
+```bash
+chukcut-cli remove-background reel.chukcut 0:0
 ```
 
 #### `blend PROJECT CLIP [MODE] [--opacity N]`
@@ -1304,6 +1323,26 @@ export in the queue and the queue keeps running when the dialog is closed.
 Writes the frame at a time as a PNG at the full canvas size. It uses the export
 compositor, so it shows the same pixels as the export.
 
+### Machine learning
+
+#### `ml ACTION [ITEM]`
+
+Not tied to a project. `status` (with `--probe`, starts the ML worker and
+lists the execution providers that work, and says what to install for the
+GPU), `models`, `runtimes`, `install ITEM`, `remove ITEM`, `bench MODEL
+[--size WxH] [--iterations N]`. An ITEM is a model (`yunet`, `vittrack`,
+`rvm`) or a runtime pack (`runtime:cpu`, `runtime:cuda12`, `runtime:cuda13`,
+`runtime:cudnn9-cu12`). `CHUKCUT_CUDA_LIB_DIRS` (colon-separated) names
+directories with CUDA libraries the system does not have; `CHUKCUT_ORT_DYLIB`
+names another ONNX Runtime build (an OpenVINO one for Intel GPUs). Also an
+MCP tool, `ml`.
+
+```bash
+chukcut-cli ml status --probe
+chukcut-cli ml install runtime:cuda13
+chukcut-cli ml bench rvm --size 540x960
+```
+
 ### Undo and redo
 
 #### `undo PROJECT`, `redo PROJECT`
@@ -1346,7 +1385,7 @@ The operation names are the MCP tool names: `info`, `validate`, `configure`,
 `trim`, `clip_set`, `grade`, `effect_add`, `effect_set`, `effect_remove`,
 `animate`, `animate_text`, `zoom`, `keyframe`, `title_add`, `title_set`,
 `transition_add`, `transition_remove`, `track`, `mask`, `chroma_key`,
-`blend`, `captions_transcribe`,
+`remove_background`, `blend`, `captions_transcribe`,
 `captions_import`, `captions_export`, `captions_style`, `captions_list`,
 `silence_detect`, `silence_remove`, `normalize`, `denoise`, `loudness`,
 `marker_add`, `marker_set`, `marker_remove`, `marker_list`, `crop`, `curve`,

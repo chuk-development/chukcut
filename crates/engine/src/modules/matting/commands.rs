@@ -239,7 +239,15 @@ pub fn matting_ensure(
     cancel: &AtomicBool,
 ) -> Result<(), String> {
     let mut todo = Vec::new();
-    for track in &project.tracks {
+    // The timeline being exported, and the insides of compound clips, which
+    // the compositor renders nested (other timelines are not exported).
+    let compounds = project
+        .materials
+        .sequences
+        .iter()
+        .filter(|s| s.kind == crate::modules::sequence::SequenceKind::Compound)
+        .flat_map(|s| &s.tracks);
+    for track in project.tracks.iter().chain(compounds) {
         for segment in &track.segments {
             let on = project
                 .materials

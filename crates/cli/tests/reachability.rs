@@ -39,6 +39,13 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ("proxy::proxy_cancel", "cancels a proxy encode of this process; the CLI turns proxies off"),
     ("proxy::cancel_all_proxies", "the app's quit path"),
     ("tracking::tracking_cancel", "cancels the app's background tracking job; track runs to its end"),
+    ("matting::matting_cancel", "cancels the app's background bake; remove_background runs to its end"),
+    ("matting::matting_coverage", "the inspector's progress; remove_background bakes until nothing is missing"),
+    ("matting::matting_ensure", "the export's own step; export calls it before rendering"),
+    ("matting::job_for", "a helper the bake commands and tests share, not an operation"),
+    ("matting::current_model", "the model version this build writes; remove_background uses it through matting_remove_background"),
+    ("compositing::compositing_set_background", "the setting alone; remove_background also bakes the matte"),
+    ("ml::gpu_vendors", "part of ml status, which reports it"),
     // The live preview, playback and the app's own windows.
     ("preview::preview_start", "the app's live preview server; render_frame and view_frame render a frame"),
     ("preview::preview_seek", "the live preview"),

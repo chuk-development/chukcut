@@ -427,11 +427,18 @@ impl Operation for RemoveBackgroundArgs {
     fn run(self, session: &mut Session, ctx: &Ctx) -> CliResult<Outcome> {
         let segment_id = session.with(|p| select::clip(p, &self.clip))?;
         let state = session.state.clone();
-        let answer = matting::matting_remove_background(&state, segment_id.clone(), !self.off)?;
+        let already = material(session, &segment_id).background.is_some();
+        // Asking again on a clip that has it bakes what is missing (after a
+        // trim, or a cleared cache) instead of failing as "nothing changed".
+        let job = if already && !self.off {
+            matting::matting_bake(&state, segment_id.clone())?
+        } else {
+            matting::matting_remove_background(&state, segment_id.clone(), !self.off)?.job
+        };
         if self.off {
             return Ok(outcome(session, &segment_id, "kept the background".into()));
         }
-        let Some(job) = answer.job else {
+        let Some(job) = job else {
             return Ok(outcome(
                 session,
                 &segment_id,
