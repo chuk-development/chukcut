@@ -231,6 +231,8 @@ enum Command {
     #[command(flatten)]
     Colour(ops::colour::ColourCommand),
     #[command(flatten)]
+    Ai(ops::ai::AiCommand),
+    #[command(flatten)]
     Library(ops::library::LibraryCommand),
     /// Run a JSON list of operations against one project, with one undo history.
     Batch(BatchArgs),
@@ -684,6 +686,7 @@ fn dispatch(command: Command, dry: bool, ctx: &Ctx) -> CliResult<(&'static str, 
         }
         Command::Clip(c) => c.dispatch(dry, ctx),
         Command::Colour(c) => c.dispatch(dry, ctx),
+        Command::Ai(c) => c.dispatch(dry, ctx),
         Command::Library(c) => c.dispatch(dry, ctx),
         Command::Effect(EffectCommand::More(c)) => c.dispatch(dry, ctx),
         Command::Title(TitleCommand::More(c)) => c.dispatch(dry, ctx),

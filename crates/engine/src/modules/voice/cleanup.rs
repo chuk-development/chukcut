@@ -28,6 +28,7 @@ use crate::modules::project::document::{new_id, Project, Segment, TrackKind};
 use crate::modules::timeline::ops::EditCommand;
 
 use super::denoise;
+use super::isolate::{self, Isolate};
 
 /// The key of a cleanup block inside its `MaterialPool::extras` value.
 pub const KEY: &str = "voice_cleanup";
@@ -41,6 +42,11 @@ pub struct VoiceCleanup {
     /// A gain that brings the clip to a loudness target.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub normalize: Option<Normalize>,
+    /// The voice separated from music and noise (or the reverse), rendered
+    /// to a cached file. Comes before the denoise: noise reduction works on
+    /// what isolation kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub isolate: Option<Isolate>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -68,7 +74,7 @@ pub struct Normalize {
 
 impl VoiceCleanup {
     pub fn is_identity(&self) -> bool {
-        self.denoise.is_none() && self.normalize.is_none()
+        self.denoise.is_none() && self.normalize.is_none() && self.isolate.is_none()
     }
 
     /// The linear gain the normalisation adds, `1.0` when there is none.
@@ -122,6 +128,20 @@ pub fn audible_segment(project: &Project, segment_id: &str) -> Option<String> {
         .map(|(_, _, s)| s.id.clone())
 }
 
+/// The file the denoise of `original` reads: the isolated mix when the clip
+/// isolates its voice, the original otherwise.
+pub fn denoise_input(original: &str, cleanup: &VoiceCleanup) -> String {
+    cleanup
+        .isolate
+        .as_ref()
+        .map(|i| {
+            isolate::cache_path(original, i)
+                .to_string_lossy()
+                .into_owned()
+        })
+        .unwrap_or_else(|| original.to_string())
+}
+
 /// The file a segment's sound is decoded from before any cleanup, and the
 /// material's duration.
 pub fn original_source(project: &Project, segment: &Segment) -> Option<(String, i64)> {
@@ -157,13 +177,23 @@ pub fn effective_source(project: &Project, segment: &Segment, original: &str) ->
             gain: 1.0,
         };
     };
+    // Isolation first, then the denoise of what it kept; each stage that is
+    // not rendered yet is skipped, so the clip plays as near to its setting
+    // as the cache allows and never falls silent.
+    let isolated = cleanup
+        .isolate
+        .as_ref()
+        .map(|i| isolate::cache_path(original, i))
+        .filter(|cached| cached.is_file())
+        .map(|cached| cached.to_string_lossy().into_owned());
+    let base = isolated.unwrap_or_else(|| original.to_string());
     let path = cleanup
         .denoise
         .as_ref()
-        .map(|d| denoise::cache_path(original, d.strength, &d.engine))
+        .map(|d| denoise::cache_path(&base, d.strength, &d.engine))
         .filter(|cached| cached.is_file())
         .map(|cached| cached.to_string_lossy().into_owned())
-        .unwrap_or_else(|| original.to_string());
+        .unwrap_or(base);
     EffectiveSource {
         path,
         gain: cleanup.gain(),
@@ -294,6 +324,7 @@ mod tests {
                 gain_db: 6.0,
                 measured_lufs: Some(-20.0),
             }),
+            isolate: None,
         };
         apply(&mut p, &mut history, "sound", Some(cleanup.clone()));
         let (_, sound) = p.segment("sound").unwrap();
@@ -321,6 +352,7 @@ mod tests {
                 engine: denoise::ENGINE.into(),
             }),
             normalize: None,
+            isolate: None,
         };
         apply(&mut p, &mut history, "sound", Some(cleanup.clone()));
         assert!(set_cleanup_command(&p, "sound", Some(cleanup)).is_err());

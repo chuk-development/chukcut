@@ -52,6 +52,7 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ("speed::speed_flow_status", "the app's progress for an optical-flow bake; frame_blend and smooth_slow_mo wait with speed_flow_wait"),
     ("speed::speed_flow_running", "the app's status line for optical-flow bakes"),
     ("speed::speed_flow_queue_missing", "the app's re-bake after an edit; a CLI export bakes what is missing (speed_flow_ensure) and frame_blend --mode flow bakes its clip"),
+    ("voice::voice_isolation_missing", "the app's re-render after a cache was cleared; an export renders what is missing (denoise::ensure_rendered) and isolate_voice renders its clip"),
     ("speed::speed_flow_ensure", "the export's own step; export calls it before rendering"),
     ("compositing::compositing_set_background", "the setting alone; remove_background also bakes the matte"),
     ("ml::gpu_vendors", "part of ml status, which reports it"),

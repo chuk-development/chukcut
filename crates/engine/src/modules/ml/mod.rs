@@ -21,6 +21,8 @@
 //!   "Select object".
 //! - **Interpolate** ([`interpolate`]): RIFE, frames between frames, for
 //!   "Optical flow (AI)" slow motion (`speed::flow`).
+//! - **Separate** ([`separate`]): HTDemucs, the voice out of a recording,
+//!   for "Isolate voice" (`voice::isolate`).
 //! - **Commands** ([`commands`]): what the UI, the CLI and MCP call.
 //!
 //! **Degrading.** Every caller treats ML as optional. No worker binary, no
@@ -41,6 +43,7 @@ pub mod faces;
 pub mod interpolate;
 pub mod matte;
 pub mod segment;
+pub mod separate;
 pub mod tracker;
 pub mod worker;
 

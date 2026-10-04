@@ -18,5 +18,9 @@ pub mod sam;
 pub mod vittrack;
 pub mod yunet;
 
+// Isolate voice and face landmarks (protocol 6).
+pub mod demucs;
+pub mod facemesh;
+
 #[cfg(feature = "runtime")]
 pub mod runtime;

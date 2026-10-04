@@ -7,6 +7,7 @@
 //! same functions the app calls — against one [`Session`], so one invocation
 //! has one undo history.
 
+pub mod ai;
 pub mod analysis;
 pub mod audio;
 pub mod audiofx;
@@ -288,6 +289,7 @@ operations!(
     colour::GradePresetSaveArgs,
     colour::GradePresetApplyArgs,
     colour::GradePresetsArgs,
+    ai::IsolateVoiceArgs,
     library::StickerArgs,
     motion::FrameBlendArgs,
     motion::SmoothSlowMoArgs,

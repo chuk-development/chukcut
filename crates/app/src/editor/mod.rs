@@ -388,6 +388,7 @@ impl Editor {
         // trim made the clip longer); bake them in the background.
         self.queue_missing_mattes(cx);
         self.queue_missing_flow(cx);
+        self.queue_missing_isolation(cx);
         cx.notify();
     }
 

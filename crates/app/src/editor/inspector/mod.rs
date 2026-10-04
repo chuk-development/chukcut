@@ -41,6 +41,7 @@ mod easing;
 mod effects;
 mod flow;
 mod grading;
+mod isolate;
 mod masks;
 mod matte_target;
 mod speed;
@@ -75,6 +76,8 @@ pub(crate) struct Inspector {
     grading: grading::GradingState,
     /// Auto adjust, colour match and "Save as preset".
     colour_tools: colour_tools::ColourToolsState,
+    /// Isolate voice's background renders.
+    isolate: isolate::IsolatePanel,
     /// The Effects tab's sliders and drag.
     effects: effects::EffectsPanel,
     /// The audio effect sliders of the Audio tab.

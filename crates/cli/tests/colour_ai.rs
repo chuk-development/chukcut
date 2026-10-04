@@ -58,3 +58,43 @@ fn auto_adjust_colour_match_and_presets() {
     let removed = ok(&dir, &["grade-presets", p, "--remove", "Bars fix"]);
     assert_eq!(removed["presets"].as_array().unwrap().len(), 0);
 }
+
+/// The setting alone: the CLI's private cache has no model, so the render is
+/// left to the app and the export (`--no-render`).
+#[test]
+fn isolate_voice_sets_and_clears_the_setting() {
+    require_ffmpeg!();
+    let dir = common::scratch("isolate-voice");
+    let (card, _) = common::media(&dir);
+    let project = dir.join("voice.chukcut");
+    let p = project.to_str().unwrap();
+    ok(&dir, &["new", p]);
+    ok(&dir, &["import", p, card.to_str().unwrap(), "--append"]);
+    let data = ok(
+        &dir,
+        &[
+            "isolate-voice",
+            p,
+            "0:0",
+            "--keep",
+            "background",
+            "--strength",
+            "0.5",
+            "--no-render",
+        ],
+    );
+    let isolate = &data["cleanup"]["isolate"];
+    assert_eq!(isolate["keep"], "background", "{data}");
+    assert_eq!(isolate["strength"], 0.5);
+    assert!(isolate["model"]
+        .as_str()
+        .unwrap()
+        .starts_with("htdemucs-vocals"));
+    let out = run(
+        &dir,
+        &["isolate-voice", p, "0:0", "--keep", "drums", "--no-render"],
+    );
+    assert_eq!(out.code, 2, "{}", out.json);
+    let data = ok(&dir, &["isolate-voice", p, "0:0", "--off"]);
+    assert!(data["cleanup"].is_null(), "{data}");
+}
