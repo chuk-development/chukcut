@@ -420,6 +420,22 @@ chukcut-cli smooth-slow-mo reel.chukcut 0:2
 chukcut-cli smooth-slow-mo reel.chukcut 0:2 --speed 0.25
 ```
 
+#### `speed-effect PROJECT CLIP [--effect NAME | --remove] [--no-bake]`
+
+A speed effect, the app's Speed › Speed effects: a speed-curve preset and
+the frame smoothing that suits it, as one undo step. `montage`, `jump_cut`,
+`flash_in` and `flash_out` use frame blending; `hero` and `bullet` use
+optical flow, whose frames are baked before the command returns (unless
+`--no-bake`), as `frame-blend --mode flow` does. The ramp goes on every clip
+linked to the clip, like `speed-curve`. Applying the effect a clip already
+wears changes nothing. `--remove` takes the ramp and the smoothing off.
+Without either, lists the effects and says which one the clip wears.
+
+```bash
+chukcut-cli speed-effect reel.chukcut 0:2 --effect hero
+chukcut-cli speed-effect reel.chukcut 0:2 --remove
+```
+
 Motion blur for fast moves is an effect: `effect add PROJECT motion_blur
 --clip CLIP --set shutter=270 --set samples=12` (shutter angle 0–360°, 180 by
 default; 2–32 samples, 8 by default). It averages the clip's position, scale
@@ -1746,7 +1762,7 @@ The operation names are the MCP tool names: `info`, `validate`, `configure`,
 `auto_adjust`, `colour_match`, `grade_preset_save`, `grade_preset_apply`,
 `grade_presets`, `isolate_voice`, `face_landmarks`, `retouch`,
 `follow_face`,
-`frame_blend`, `smooth_slow_mo`, `captions_transcribe`,
+`frame_blend`, `smooth_slow_mo`, `speed_effect`, `captions_transcribe`,
 `captions_import`, `captions_export`, `captions_style`, `captions_list`,
 `silence_detect`, `silence_remove`, `normalize`, `denoise`, `loudness`,
 `marker_add`, `marker_set`, `marker_remove`, `marker_list`, `crop`, `curve`,
@@ -1818,7 +1834,7 @@ Tools that send data to a service outside this machine have
 `stock_kinds`, `stock_search`, `stock_download`, `sound`, `fal`, `sticker`,
 `music`, `sfx`, `title_font`, `catalog` (the library and `voices` kinds),
 and `ml`, `remove_background`, `select_object`, `apply_to`, `frame_blend`,
-`smooth_slow_mo`, `remove_object`, `enhance_quality`, `isolate_voice`,
+`smooth_slow_mo`, `speed_effect`, `remove_object`, `enhance_quality`, `isolate_voice`,
 `face_landmarks`, `retouch` and `follow_face`, which download a model or
 ONNX Runtime on first use (they send nothing about the project).
 

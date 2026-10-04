@@ -188,6 +188,9 @@ enum Command {
     /// Smooth slow motion in one step: optical flow on, slowed to 0.5x
     /// (or --speed) unless it is slowed already, frames baked.
     SmoothSlowMo(On<SmoothSlowMoArgs>),
+    /// A speed effect in one step: a ramp (montage, hero, bullet, jump_cut,
+    /// flash_in, flash_out) and the frame smoothing that suits it.
+    SpeedEffect(On<SpeedEffectArgs>),
     /// Make an animated sticker loop or play once.
     StickerPlayback(On<StickerPlaybackArgs>),
     /// Picture in picture and split-screen layouts.
@@ -641,6 +644,7 @@ fn dispatch(command: Command, dry: bool, ctx: &Ctx) -> CliResult<(&'static str, 
         Command::SpeedCurve(o) => on(o, dry, ctx),
         Command::FrameBlend(o) => on(o, dry, ctx),
         Command::SmoothSlowMo(o) => on(o, dry, ctx),
+        Command::SpeedEffect(o) => on(o, dry, ctx),
         Command::StickerPlayback(o) => on(o, dry, ctx),
         Command::Layout(LayoutCommand::Pip(o)) => on(o, dry, ctx),
         Command::Layout(LayoutCommand::Split(o)) => on(o, dry, ctx),
