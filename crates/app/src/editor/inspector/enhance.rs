@@ -124,8 +124,8 @@ impl Editor {
 
         // --- Remove object --------------------------------------------------------------
         let mut rows: Vec<AnyElement> = vec![caption(
-            "Paints over an object in every frame with LaMa (Apache-2.0, 208 MB download), \
-             on this machine. Click the object, or paint over a logo or a sign.",
+            "Paints over an object in every frame with LaMa (Apache-2.0, a 200 MB \
+             download), on this machine. Click the object, or paint over a logo or a sign.",
             TEXT_MUTED,
         )];
         let mode = self.inspector.enhance.mode;

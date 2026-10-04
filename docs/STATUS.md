@@ -3901,7 +3901,10 @@ release worker and release CLI, load 6–7 from other agents' builds).
   moving camera gets no memory, plate or smoothing; LaMa runs fp32 on the
   CUDA provider (TensorRT or fp16 next); a remade clip with optical flow on
   blends instead; the inspector's progress sits below the two sections and
-  needs a scroll on a short window.
+  needs a scroll on a short window; a project opened with its frames
+  cleared from the cache bakes them at the first edit or the export, as
+  mattes and optical-flow frames do (opening does not queue bakes).
+  Settings › AI acceleration shows the remade frames' size with Clear.
 
 ## The research
 
