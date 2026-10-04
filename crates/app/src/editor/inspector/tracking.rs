@@ -106,6 +106,7 @@ impl Editor {
             });
 
         let face_rows = self.face_follow_rows(target.clone(), cx);
+        let body_rows = self.body_follow_rows(target.clone(), cx);
         let mut rows = vec![
             hint("Draw a box around an object in the video, and this clip follows it.".to_string()),
             PropertyRow::new("tracking-target-row", "Track in")
@@ -123,6 +124,7 @@ impl Editor {
                 .into_any_element()]),
         ];
         rows.extend(face_rows);
+        rows.extend(body_rows);
         rows
     }
 
@@ -213,12 +215,18 @@ impl Editor {
             .iter()
             .filter(|s| s.is_lost() || s.c < LOW_CONFIDENCE)
             .count();
-        // A track made from a face's landmarks (`landmarks::commands`) is
-        // not re-tracked with a box and was made by no box tracker.
-        let face =
+        // A track made from a face's or a body's landmarks
+        // (`landmarks::commands`, `body::commands`) is not re-tracked with a
+        // box and was made by no box tracker.
+        let face_track =
             track.settings.tracker == chukcut_engine::modules::landmarks::commands::FACE_TRACKER;
-        let (what, made_by) = if face {
+        let body_track =
+            track.settings.tracker == chukcut_engine::modules::body::commands::BODY_TRACKER;
+        let face = face_track || body_track;
+        let (what, made_by) = if face_track {
             ("a face", "Face landmarks")
+        } else if body_track {
+            ("a body part", "Body landmarks")
         } else {
             (
                 "an object",

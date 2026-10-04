@@ -557,10 +557,13 @@ pub struct Reframe {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SubjectCue {
-    /// Faces when the ML worker is available, saliency otherwise.
+    /// Faces when the ML worker is available — and people's bodies on
+    /// frames without a face, when the person detector can run — saliency
+    /// otherwise.
     #[default]
     Auto,
-    /// Faces; the job fails when the face detector cannot run.
+    /// Faces (and bodies, as `Auto`); the job fails when the face detector
+    /// cannot run.
     Faces,
     /// Motion, contrast and skin tone only; no model, no download.
     Saliency,
@@ -674,34 +677,73 @@ pub fn analysis_reframe(
         } else {
             None
         };
+        // The person detector, for frames without a face: optional in
+        // either mode (a clip of someone seen from behind still reframes
+        // on saliency without it).
+        let people = if wants_faces && detector.is_some() {
+            match crate::modules::ml::body::PeopleDetector::prepare(&|_, _| {}, ctx.cancel_flag()) {
+                Ok(people) => Some(people),
+                Err(MlError::Cancelled) => return Err(jobs::CANCELLED.into()),
+                Err(e) => {
+                    tracing::info!("auto reframe without people: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let total = clips.len().max(1) as f32;
         let mut paths: Vec<(Id, Axis, Vec<PathPoint>)> = Vec::new();
-        let (mut face_frames, mut frames) = (0usize, 0usize);
+        let (mut face_frames, mut body_frames, mut frames) = (0usize, 0usize, 0usize);
         for (i, clip) in clips.iter().enumerate() {
             let span = (i as f32 / total, (i + 1) as f32 / total);
             let path = match &clip.walk {
                 Some(walk) => {
                     let mut walk = walk.clone();
+                    let fraction = |b: [f32; 4], w: usize, h: usize| {
+                        [
+                            b[0] / w as f32,
+                            b[1] / h as f32,
+                            b[2] / w as f32,
+                            b[3] / h as f32,
+                        ]
+                    };
                     let mut detect = |rgba: &[u8], w: usize, h: usize| {
                         let detector = detector.as_ref()?;
-                        match detector.detect(rgba, w, h) {
+                        let faces = match detector.detect(rgba, w, h) {
                             Ok(faces) => Some(
                                 faces
                                     .iter()
-                                    .map(|f| reframe::Subject {
-                                        bbox: [
-                                            f.bbox[0] / w as f32,
-                                            f.bbox[1] / h as f32,
-                                            f.bbox[2] / w as f32,
-                                            f.bbox[3] / h as f32,
-                                        ],
-                                        score: f.score,
+                                    .map(|f| {
+                                        reframe::Subject::face(fraction(f.bbox, w, h), f.score)
                                     })
-                                    .collect(),
+                                    .collect::<Vec<_>>(),
                             ),
                             Err(e) => {
                                 tracing::warn!("face detection failed on a frame: {e}");
                                 None
+                            }
+                        };
+                        if faces.as_ref().is_some_and(|f| !f.is_empty()) {
+                            return faces;
+                        }
+                        // No face: a person's body, when one is there.
+                        let Some(people) = people.as_ref() else {
+                            return faces;
+                        };
+                        match people.detect(rgba, w, h) {
+                            Ok(found) if !found.is_empty() => Some(
+                                found
+                                    .iter()
+                                    .map(|p| {
+                                        reframe::Subject::from_body(fraction(p.bbox, w, h), p.score)
+                                    })
+                                    .collect(),
+                            ),
+                            Ok(_) => faces,
+                            Err(e) => {
+                                tracing::warn!("person detection failed on a frame: {e}");
+                                faces
                             }
                         }
                     };
@@ -713,7 +755,8 @@ pub fn analysis_reframe(
                     };
                     let analysis =
                         reframe::analyse(&walk, clip.axis, clip.fraction, Some(ctx), span, faces)?;
-                    face_frames += analysis.face_frames;
+                    face_frames += analysis.face_frames - analysis.body_frames;
+                    body_frames += analysis.body_frames;
                     frames += analysis.targets.len();
                     let smooth = reframe::smooth(&analysis, clip.fraction);
                     reframe::simplify(&smooth, 0.004)
@@ -777,6 +820,12 @@ pub fn analysis_reframe(
                 ));
             } else {
                 message.push_str(" · no faces found");
+            }
+            if body_frames > 0 {
+                message.push_str(&format!(
+                    " · people in {}%",
+                    (body_frames * 100 / frames.max(1))
+                ));
             }
         } else if let Some(why) = fallback {
             tracing::info!("reframed on saliency: {why}");

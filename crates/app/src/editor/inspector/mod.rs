@@ -33,6 +33,7 @@ use super::*;
 mod analysis;
 mod animation;
 mod audio_fx;
+mod body;
 mod clip;
 mod colour_tools;
 mod controls;
@@ -82,6 +83,8 @@ pub(crate) struct Inspector {
     isolate: isolate::IsolatePanel,
     /// Retouch and face-follow.
     face: face::FacePanel,
+    /// Follow a body part.
+    body: body::BodyPanel,
     /// The Effects tab's sliders and drag.
     effects: effects::EffectsPanel,
     /// The audio effect sliders of the Audio tab.

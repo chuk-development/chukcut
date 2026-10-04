@@ -56,6 +56,7 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ("landmarks::landmarks_ensure", "the export's own step; export calls it before rendering"),
     ("landmarks::needing", "a helper of the export step and the app's queue, not an operation"),
     ("landmarks::face_samples", "the pose samples landmarks_follow_face builds; a public helper for its tests"),
+    ("body::part_samples", "the pose samples body_follow builds; a public helper for its tests"),
     ("voice::voice_isolation_missing", "the app's re-render after a cache was cleared; an export renders what is missing (denoise::ensure_rendered) and isolate_voice renders its clip"),
     ("speed::speed_flow_ensure", "the export's own step; export calls it before rendering"),
     ("enhance::enhance_status", "the app's progress for a remade-frame bake; remove_object and enhance_quality wait with enhance_wait"),

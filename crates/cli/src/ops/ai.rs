@@ -1,11 +1,14 @@
 //! Machine-learning edits on a clip: isolate voice, face landmarks,
-//! retouch, text or stickers that follow a face. Each edit is one engine
+//! retouch, text or stickers that follow a face, body landmarks and
+//! following a body part. Each edit is one engine
 //! command (and one undo step); the slow part, a model run in the ML
 //! worker, is cached.
 
 use std::sync::atomic::AtomicBool;
 
 use chukcut_engine::modules::analysis::commands as analysis_commands;
+use chukcut_engine::modules::body::commands::{self as body, FollowBody};
+use chukcut_engine::modules::body::shape::BodyPart;
 use chukcut_engine::modules::landmarks::commands::{self as landmarks, FollowFace, RetouchSetting};
 use chukcut_engine::modules::landmarks::shape::Anchor;
 use chukcut_engine::modules::tracking::FollowMode;
@@ -337,6 +340,140 @@ impl Operation for FollowFaceArgs {
     }
 }
 
+/// Find the people of a clip that has none analysed yet; quiet when it has.
+fn ensure_bodies(session: &Session, id: &str, ctx: &Ctx) -> CliResult<Option<String>> {
+    let coverage = body::body_coverage(&session.state, id.to_string())?;
+    if coverage.done() {
+        return Ok(None);
+    }
+    let job = body::body_analyse(&session.state, id.to_string(), None)?;
+    wait(job, "Finding people", ctx).map(Some)
+}
+
+/// Find the people in a video clip (RTMPose, 17 body keypoints per person,
+/// with a YOLOX person detector, in the ML worker) and print those at a
+/// time: each person's id, box, score and keypoints. Analyses the clip
+/// first if it has to.
+#[derive(Debug, Clone, Default, Args, Deserialize, JsonSchema)]
+pub struct BodyLandmarksArgs {
+    /// The video clip: id, id prefix or `lane:index`.
+    pub clip: String,
+    /// The timeline time to read. Default: the clip's start.
+    #[arg(long)]
+    pub at: Option<Time>,
+}
+
+impl Operation for BodyLandmarksArgs {
+    const NAME: &'static str = "body_landmarks";
+    fn run(self, session: &mut Session, ctx: &Ctx) -> CliResult<Outcome> {
+        let id = session.with(|p| select::clip(p, &self.clip))?;
+        let analysed = ensure_bodies(session, &id, ctx)?;
+        let start = session
+            .with(|p| p.segment(&id).map(|(_, s)| s.target_range.start))
+            .unwrap_or(0);
+        let at = self.at.map_or(start, |t| t.resolve(session.fps()));
+        let people = body::body_people(&session.state, id.clone(), at)?;
+        let coverage = body::body_coverage(&session.state, id.clone())?;
+        Ok(Outcome::read(
+            format!(
+                "{} person(s) at {:.2} s; {} of {} frames analysed",
+                people.len(),
+                seconds(at),
+                coverage.analysed,
+                coverage.total
+            ),
+            json!({"clip": id, "at": seconds(at), "people": people, "coverage": coverage, "analysis": analysed}),
+        ))
+    }
+}
+
+/// Make a title, sticker or picture follow a body part of a person in a
+/// video clip — a hand, the head, the hips: its position (and with --mode,
+/// scale and rotation) rides with the part. The part's pose becomes a
+/// motion track, so `track-set` and `track` work on it afterwards. Finds the
+/// people first if the clip has none analysed.
+#[derive(Debug, Clone, Default, Args, Deserialize, JsonSchema)]
+pub struct FollowBodyArgs {
+    /// The clip that follows: id, id prefix or `lane:index`.
+    pub clip: String,
+    /// The video clip whose person it follows.
+    #[arg(long)]
+    pub body_of: String,
+    /// head, shoulders, chest (default), hips, body, left_hand, right_hand,
+    /// left_elbow, right_elbow, left_knee, right_knee, left_foot or
+    /// right_foot. Left and right are the person's own.
+    #[arg(long)]
+    pub part: Option<String>,
+    /// position (default), position_scale or position_scale_rotation.
+    #[arg(long)]
+    pub mode: Option<String>,
+    /// Which person: 1 is the first one seen (`body-landmarks` lists them
+    /// with id 0). Default 1.
+    #[arg(long)]
+    pub person: Option<u32>,
+    /// The timeline time the follower is placed at as it is now. Default:
+    /// the follower's start.
+    #[arg(long)]
+    pub at: Option<Time>,
+}
+
+impl Operation for FollowBodyArgs {
+    const NAME: &'static str = "follow_body";
+    fn run(self, session: &mut Session, ctx: &Ctx) -> CliResult<Outcome> {
+        let (overlay, target, start) = session.with(|p| -> CliResult<_> {
+            let overlay = select::clip(p, &self.clip)?;
+            let target = select::clip(p, &self.body_of)?;
+            let start = p.segment(&overlay).map_or(0, |(_, s)| s.target_range.start);
+            Ok((overlay, target, start))
+        })?;
+        let part = match &self.part {
+            Some(name) => BodyPart::parse(name).ok_or_else(|| {
+                CliError::usage(format!(
+                    "there is no body part {name:?}; choose head, shoulders, chest, hips, body, \
+                     left_hand, right_hand, left_elbow, right_elbow, left_knee, right_knee, \
+                     left_foot or right_foot"
+                ))
+            })?,
+            None => BodyPart::Chest,
+        };
+        let mode: FollowMode = match &self.mode {
+            Some(m) => enum_named(
+                "follow mode",
+                m,
+                &["position", "position_scale", "position_scale_rotation"],
+            )?,
+            None => FollowMode::Position,
+        };
+        let person = match self.person {
+            None => 0,
+            Some(n) if (1..=256).contains(&n) => (n - 1) as u8,
+            Some(_) => return Err(CliError::usage("--person counts from 1")),
+        };
+        let at = self.at.map_or(start, |t| t.resolve(session.fps()));
+        ensure_bodies(session, &target, ctx)?;
+        body::body_follow(
+            &session.state,
+            FollowBody {
+                overlay_id: overlay.clone(),
+                target_segment_id: target.clone(),
+                part,
+                mode,
+                person,
+                at,
+            },
+            &NEVER,
+        )?;
+        Ok(Outcome::changed(
+            format!(
+                "follows the {} of person {} in {target}",
+                part.label().to_lowercase(),
+                person as u32 + 1
+            ),
+            json!({"clip": overlay, "body_of": target, "part": part, "person": person, "mode": mode}),
+        ))
+    }
+}
+
 /// Top-level subcommands for the ML edits.
 #[derive(Subcommand)]
 pub enum AiCommand {
@@ -348,6 +485,10 @@ pub enum AiCommand {
     Retouch(On<RetouchArgs>),
     /// Make a title or sticker follow a face.
     FollowFace(On<FollowFaceArgs>),
+    /// Find the people in a video clip and print their body keypoints.
+    BodyLandmarks(On<BodyLandmarksArgs>),
+    /// Make a title or sticker follow a body part (a hand, the head, …).
+    FollowBody(On<FollowBodyArgs>),
 }
 
 impl AiCommand {
@@ -357,6 +498,8 @@ impl AiCommand {
             Self::FaceLandmarks(o) => crate::on(o, dry, ctx),
             Self::Retouch(o) => crate::on(o, dry, ctx),
             Self::FollowFace(o) => crate::on(o, dry, ctx),
+            Self::BodyLandmarks(o) => crate::on(o, dry, ctx),
+            Self::FollowBody(o) => crate::on(o, dry, ctx),
         }
     }
 }

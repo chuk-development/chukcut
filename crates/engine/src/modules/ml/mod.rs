@@ -15,6 +15,9 @@
 //! - **Faces** ([`faces`]): YuNet, for auto reframe.
 //! - **Landmarks** ([`landmarks`]): MediaPipe's face mesh, 478 points per
 //!   face, for retouch and face-follow (`modules::landmarks`).
+//! - **Body** ([`body`]): RTMPose's 17 keypoints per person and the YOLOX
+//!   person detector, for "Follow body part" (`modules::body`) and auto
+//!   reframe without a face.
 //! - **Tracker** ([`tracker`]): VitTrack, tracker T2 for fast motion, with a
 //!   whole-frame scan that finds the object again after it was hidden.
 //! - **Matte** ([`matte`]): Robust Video Matting (people) and BiRefNet
@@ -43,6 +46,7 @@ use std::time::Duration;
 use chukcut_ml_worker::protocol::{Outcome, RequestBody};
 use chukcut_ml_worker::registry;
 
+pub mod body;
 pub mod commands;
 pub mod download;
 pub mod faces;
