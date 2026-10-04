@@ -707,7 +707,7 @@ mod tests {
         assert_eq!((w, h), (64, 64));
 
         let mut source = Vec::with_capacity(rgb.len());
-        for px in rgba.chunks_exact(4) {
+        for px in rgba.as_chunks::<4>().0 {
             source.extend_from_slice(&px[..3]);
         }
         let db = psnr_rgb(&source, &rgb);

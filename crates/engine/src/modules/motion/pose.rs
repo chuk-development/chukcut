@@ -469,10 +469,12 @@ mod tests {
 
     #[test]
     fn a_pose_is_relative_to_where_the_clip_sits() {
-        let mut keyed = Transform::default();
-        keyed.position = [0.5, -0.5];
-        keyed.scale = [0.4, 0.4];
-        keyed.opacity = 0.8;
+        let keyed = Transform {
+            position: [0.5, -0.5],
+            scale: [0.4, 0.4],
+            opacity: 0.8,
+            ..Default::default()
+        };
         let pose = preset_pose(P::SlideLeft, 0.5, 0.0, 1.0);
         let t = pose.apply(keyed);
         assert!(close(t.position[0], 0.8));
@@ -485,8 +487,10 @@ mod tests {
 
     #[test]
     fn a_zoom_keeps_its_pivot_still() {
-        let mut t = Transform::default();
-        t.position = [0.2, 0.1];
+        let t = Transform {
+            position: [0.2, 0.1],
+            ..Default::default()
+        };
         let pivot = [0.5, 0.5];
         let z = zoom_about(t, pivot, 2.0);
         assert!(close(z.position[0], -0.1));

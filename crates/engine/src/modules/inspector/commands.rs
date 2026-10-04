@@ -30,7 +30,7 @@ pub fn inspector_set_crop(
         let command = edit::set_crop_command(project, &segment_id, crop)?;
         state.history.write().apply(project, command)?;
     }
-    respond(&state)
+    respond(state)
 }
 
 /// Set or clear a clip's colour adjustment. `None` — and the identity values —
@@ -63,7 +63,7 @@ pub fn inspector_set_color(
             state.history.write().apply(project, command)?;
         }
     }
-    respond(&state)
+    respond(state)
 }
 
 /// Commit a grade edit built by one of the `edit::*_command` builders.
@@ -198,7 +198,7 @@ pub fn inspector_paste_attributes(
             state.history.write().apply(project, command)?;
         }
     }
-    respond(&state)
+    respond(state)
 }
 
 /// Name a clip, or clear its name. The name lives in `MaterialPool::extras`
@@ -224,7 +224,7 @@ pub fn inspector_rename_clip(
             state.history.write().apply(project, command)?;
         }
     }
-    respond(&state)
+    respond(state)
 }
 
 /// Play a clip — and every clip linked to it — at `speed`, keeping the part
@@ -242,7 +242,7 @@ pub fn inspector_set_speed(
         let command = edit::set_speed_command(project, &segment_id, speed)?;
         state.history.write().apply(project, command)?;
     }
-    respond(&state)
+    respond(state)
 }
 
 /// Give every other picture clip the grade of `segment_id`, as one undo step.
@@ -257,7 +257,7 @@ pub fn inspector_apply_color_to_all(
         let command = edit::apply_color_to_all_command(project, &segment_id)?;
         state.history.write().apply(project, command)?;
     }
-    respond(&state)
+    respond(state)
 }
 
 /// What the panel wants to know about a .cube file before attaching it.

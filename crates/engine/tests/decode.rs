@@ -978,7 +978,7 @@ fn hardware_and_software_decode_the_same_picture() {
         return;
     }
     for path in paths {
-        same_picture_as_software(&media, path);
+        same_picture_as_software(media, path);
     }
 }
 

@@ -679,44 +679,6 @@ impl Render for ShortcutEditor {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use chukcut_engine::modules::keymap::ACTIONS;
-
-    #[test]
-    fn every_action_in_the_registry_has_an_app_action() {
-        for spec in ACTIONS {
-            assert!(
-                KNOWN.contains(&spec.id),
-                "{} is in the registry but the app cannot bind it",
-                spec.id
-            );
-        }
-        for known in KNOWN {
-            assert!(
-                ACTIONS.iter().any(|a| a.id == *known),
-                "{known} can be bound but is not in the registry"
-            );
-        }
-    }
-
-    #[test]
-    fn every_preset_key_parses_in_gpui() {
-        for preset in Preset::ALL {
-            let map = Keymap {
-                preset,
-                ..Keymap::default()
-            };
-            for b in map.effective() {
-                for key in &b.keys {
-                    assert!(parses(key), "{preset:?} {}: {key}", b.action);
-                }
-            }
-        }
-    }
-}
-
 /// The settings dialog's "Keyboard shortcuts" section: the preset in use,
 /// how many keys the user changed, and the button to the editor.
 pub(crate) fn settings_section() -> AnyElement {
@@ -779,4 +741,42 @@ pub(crate) fn settings_section() -> AnyElement {
                 ),
         )
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chukcut_engine::modules::keymap::ACTIONS;
+
+    #[test]
+    fn every_action_in_the_registry_has_an_app_action() {
+        for spec in ACTIONS {
+            assert!(
+                KNOWN.contains(&spec.id),
+                "{} is in the registry but the app cannot bind it",
+                spec.id
+            );
+        }
+        for known in KNOWN {
+            assert!(
+                ACTIONS.iter().any(|a| a.id == *known),
+                "{known} can be bound but is not in the registry"
+            );
+        }
+    }
+
+    #[test]
+    fn every_preset_key_parses_in_gpui() {
+        for preset in Preset::ALL {
+            let map = Keymap {
+                preset,
+                ..Keymap::default()
+            };
+            for b in map.effective() {
+                for key in &b.keys {
+                    assert!(parses(key), "{preset:?} {}: {key}", b.action);
+                }
+            }
+        }
+    }
 }
