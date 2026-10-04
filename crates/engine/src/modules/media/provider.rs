@@ -27,7 +27,7 @@
 //!   same frame repeatedly, and re-uploading 8 MB each time is pure waste.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -57,8 +57,9 @@ enum MaterialSource {
     /// rendered, so the compositor's fit is the identity and the segment's own
     /// transform is what places the title. The material travels with it because
     /// rasterising needs the whole thing — string, font, size, colour, alignment
-    /// — and there is nothing to open.
-    Text(TextMaterial),
+    /// — and there is nothing to open. Boxed: a title is several times the
+    /// size of a path, and every source in the map would pay for it.
+    Text(Box<TextMaterial>),
 }
 
 /// How close two requested times must be to reuse a cached texture.
@@ -300,7 +301,10 @@ impl MediaSourceProvider {
             );
         }
         for text in &project.materials.texts {
-            sources.insert(text.id.clone(), MaterialSource::Text(text.clone()));
+            sources.insert(
+                text.id.clone(),
+                MaterialSource::Text(Box::new(text.clone())),
+            );
         }
 
         Self {
@@ -366,15 +370,17 @@ impl MediaSourceProvider {
         for text in &project.materials.texts {
             let unchanged = matches!(
                 self.sources.get(&text.id),
-                Some(MaterialSource::Text(known)) if known == text
+                Some(MaterialSource::Text(known)) if **known == *text
             );
             if unchanged {
                 continue;
             }
             let prefix = format!("{}\u{1}", text.id);
             textures.retain(|key, _| key != &text.id && !key.starts_with(&prefix));
-            self.sources
-                .insert(text.id.clone(), MaterialSource::Text(text.clone()));
+            self.sources.insert(
+                text.id.clone(),
+                MaterialSource::Text(Box::new(text.clone())),
+            );
             // A title's raster changed: nothing rendered from the old one may
             // be served from a cache again.
             *self.identity.get_mut() = next_identity();
@@ -1032,7 +1038,7 @@ impl SourceProvider for MediaSourceProvider {
 }
 
 /// A file's own name, for a log line.
-fn file_name(path: &PathBuf) -> String {
+fn file_name(path: &Path) -> String {
     path.file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default()
@@ -1516,9 +1522,9 @@ mod tests {
     fn frame_epsilon_treats_one_render_step_as_distinct() {
         // Two adjacent frames at 60 fps are 16 666 µs apart, which must not
         // collapse to the same cache entry.
-        assert!(FRAME_EPSILON < 16_666);
+        const { assert!(FRAME_EPSILON < 16_666) };
         // Repeated requests for the same nominal frame must hit, even with
         // rounding noise in the microsecond conversion.
-        assert!(FRAME_EPSILON > 2);
+        const { assert!(FRAME_EPSILON > 2) };
     }
 }
