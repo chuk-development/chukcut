@@ -96,6 +96,16 @@ impl Editor {
         let removal = enh::removal_of(materials, segment);
         let upscale = enh::upscale_of(materials, segment);
         let video = materials.video(&segment.material_id).cloned();
+        if video.is_none() {
+            return div()
+                .px(px(PAD))
+                .py(px(PAD))
+                .child(caption(
+                    "Remove object and Enhance quality work on video clips.",
+                    TEXT_MUTED,
+                ))
+                .into_any_element();
+        }
         let frames = video
             .as_ref()
             .map(|v| (segment.source_range.duration as f64 * v.fps / 1e6).round() as u32)
