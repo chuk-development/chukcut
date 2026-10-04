@@ -228,6 +228,10 @@ impl Operation for ImportArgs {
         if self.files.is_empty() {
             return Err(CliError::usage("import needs at least one file"));
         }
+        let canvas_of = |p: &chukcut_engine::modules::project::Project| {
+            (p.canvas.width, p.canvas.height, p.fps)
+        };
+        let before = session.with(canvas_of);
         let mut imported = Vec::new();
         for file in &self.files {
             let path = absolute(file);
@@ -267,17 +271,28 @@ impl Operation for ImportArgs {
             .iter()
             .map(|m| m["name"].as_str().unwrap_or("?").to_string())
             .collect();
+        // The first video in an empty project of an unchosen canvas sets
+        // its shape and rate; say so, since `new --width` alone does not
+        // keep a size (the canvas is chosen with `configure`).
+        let after = session.with(canvas_of);
+        let adopted = (after != before).then(|| {
+            format!(
+                "; the canvas took the clip's shape: {}x{} at {} fps (`configure` changes it)",
+                after.0, after.1, after.2
+            )
+        });
         Ok(Outcome::changed(
             format!(
-                "imported {}{}",
+                "imported {}{}{}",
                 names.join(", "),
                 if self.append {
                     " onto the timeline"
                 } else {
                     ""
-                }
+                },
+                adopted.as_deref().unwrap_or("")
             ),
-            json!({"materials": imported}),
+            json!({"materials": imported, "canvas": {"width": after.0, "height": after.1, "fps": after.2, "adopted": adopted.is_some()}}),
         ))
     }
 }
