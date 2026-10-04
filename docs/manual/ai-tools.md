@@ -18,6 +18,14 @@ server. (The optional cloud accounts are a separate thing; see
   it, the models run on the CPU. The CPU is 10 to 50 times slower. A tool
   that takes long on the CPU tells you how long before it starts and while
   it runs.
+- **Fast mode (TensorRT).** On an NVIDIA GPU, the **TensorRT** add-on in
+  Settings › **AI acceleration** makes slow motion, Enhance quality, Remove
+  object and the Objects background 1.5 to 2.6 times faster. **Fast
+  (fp16/TensorRT)** is on by default and has an effect only when the
+  add-on is installed. The first job of a model at a new frame size
+  prepares the model once: 30 s to 6 min. The progress line says
+  "Preparing TensorRT for … (first time only …)". The next jobs at that
+  size start at once.
 - **Results are a cache, settings are the project.** The project file keeps
   what you chose (the model, your clicks, the scale). The pictures that the
   models make (mattes, new frames) go into `~/.cache/chukcut/`. If the cache
@@ -78,8 +86,8 @@ A frame without a matte yet is shown whole.
 
 | Model | GPU, per frame | CPU |
 |---|---|---|
-| Robust Video Matting | 15 ms (540×960); 240 frames in 6.4 s | works, slower |
-| BiRefNet lite | 426 ms (960×540); 240 frames in 107 s | refused (12 to 25 s and up to 11 GB per frame) |
+| Robust Video Matting | 13 ms (540×960); 240 frames in 6.4 s | works, slower |
+| BiRefNet lite | 416 ms (960×540), 157 ms in Fast mode; 240 frames in 107 s | refused (12 to 25 s and up to 11 GB per frame) |
 
 **Cache:** one greyscale picture per frame in `~/.cache/chukcut/mattes/`.
 It counts towards the cache limit. Settings › **AI acceleration** › **Baked
@@ -155,9 +163,9 @@ How chukcut fills the hole, cheapest first:
 
 **Model:** LaMa (Apache-2.0, 208 MB).
 
-**Cost:** LaMa takes 160 ms per frame on the GPU and 2 s on the CPU. A 3 s
-1080p clip with a static logo took 27 s on the GPU. A 3 s 720p clip with a
-moving object on a still background took 19 s.
+**Cost:** LaMa takes 160 ms per frame on the GPU (77 ms in Fast mode) and
+2 s on the CPU. A 3 s 1080p clip with a static logo took 27 s on the GPU. A
+3 s 720p clip with a moving object on a still background took 19 s.
 
 **Limits:** a painted area never shows what is behind it, so LaMa invents the
 fill. In a still shot the fill is steady. When the camera moves, it can
@@ -182,11 +190,13 @@ than 1920 px is refused.
 
 **Cost per frame:**
 
-| Source | GPU | CPU (4 threads) |
-|---|---|---|
-| 640×360 | 0.12 s | 2 s |
-| 1280×720 | 0.5 s | much slower |
-| 1920×1080 | 1.2 s | about 16 s |
+| Source | GPU | GPU, Fast mode | CPU (4 threads) |
+|---|---|---|---|
+| 640×360 | 0.10 s | 0.04 s | 2 s |
+| 1280×720 | 0.5 s | 0.2 s | much slower |
+| 1920×1080 | 1.05 s | 0.42 s | about 16 s |
+
+A 3 s 640×360 clip made at 2x took 6 s in Fast mode.
 
 **Disk:** 0.1 to 0.4 MB per frame on simple footage, 1 to 3 MB per frame at
 4K on real footage.
@@ -205,9 +215,9 @@ has no double image.
 
 **Model:** RIFE v4 (MIT, 22 MB).
 
-**Cost:** 18 ms per new frame at 640×360 and 173 ms at 1080p on the GPU;
-0.25 s and 1.2 s (640×360, 1280×720) on the CPU. Details on the
-[Speed](speed.md#how-optical-flow-works) page.
+**Cost:** 64 ms per new frame at 1280×720 and 145 ms at 1080p on the GPU
+(38 ms and 96 ms in Fast mode); 0.25 s and 1.2 s (640×360, 1280×720) on
+the CPU. Details on the [Speed](speed.md#cost) page.
 
 **Cache:** JPEG frames in `~/.cache/chukcut/flow/`, in the cache limit.
 
@@ -274,8 +284,9 @@ voice… N %". The export uses the same sound.
 
 **Model:** HTDemucs, fine-tuned for vocals (MIT, 316 MB).
 
-**Cost:** 60 s of sound took 11 s on the GPU and 36 s on the CPU. The worker
-uses 7 to 8 GB of memory while it runs.
+**Cost:** 60 s of sound took 11 to 17 s on the GPU and 36 to 40 s on the
+CPU, with about 9 s of that to load the model. The worker uses about 1.5 GB
+of memory (2 GB on the CPU) while it runs.
 
 **Cache:** a sound file in `~/.cache/chukcut/voice/`.
 

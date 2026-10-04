@@ -43,6 +43,43 @@ impl ProgressSink for ChannelSink {
     }
 }
 
+/// Keeps the terminal message (done, failed, cancelled) back until the export
+/// thread has dropped the job.
+///
+/// The job owns the decoders and the GPU textures they cache, and
+/// `run_export` sends `Done` while the job is still alive. A caller that ends
+/// the process when it hears `Done` — the CLI does, at once — then ran the
+/// process exit while this thread was still freeing those textures in the
+/// Vulkan driver, and crashed in it (docs/STATUS.md, "The crash after the
+/// export").
+struct HoldTerminal<'a> {
+    sink: &'a dyn ProgressSink,
+    held: parking_lot::Mutex<Option<ExportProgress>>,
+}
+
+impl<'a> HoldTerminal<'a> {
+    fn new(sink: &'a dyn ProgressSink) -> Self {
+        Self {
+            sink,
+            held: parking_lot::Mutex::new(None),
+        }
+    }
+
+    fn take(&self) -> Option<ExportProgress> {
+        self.held.lock().take()
+    }
+}
+
+impl ProgressSink for HoldTerminal<'_> {
+    fn send(&self, progress: ExportProgress) {
+        if progress.stage.is_terminal() {
+            *self.held.lock() = Some(progress);
+        } else {
+            self.sink.send(progress);
+        }
+    }
+}
+
 /// The export's pipeline, built once and shared by every export.
 ///
 /// The *device* underneath it is the process's one device, from `gpu`, which
@@ -136,15 +173,20 @@ pub fn export_start(
     std::thread::Builder::new()
         .name(format!("chukcut-export-{job_id}"))
         .spawn(move || {
-            let outcome = job::run_export(&export, &sink);
-            job::end_job(&export.job_id);
+            let held = HoldTerminal::new(&sink);
+            let outcome = job::run_export(&export, &held);
+            // In this order: the job's resources go, then the job leaves
+            // the registry `export_shutdown` waits on, then the caller hears
+            // that it finished. See `HoldTerminal`.
+            drop(export);
+            job::end_job(&job_id);
             match outcome {
                 Ok(result) if result.cancelled => {
-                    tracing::info!(job = %export.job_id, "export cancelled");
+                    tracing::info!(job = %job_id, "export cancelled");
                 }
                 Ok(result) => {
                     tracing::info!(
-                        job = %export.job_id,
+                        job = %job_id,
                         frames = result.frames,
                         seconds = result.elapsed.as_secs_f64(),
                         path = %result.output_path.display(),
@@ -154,8 +196,11 @@ pub fn export_start(
                 Err(error) => {
                     // The terminal progress message already carried this to the
                     // user; the log is for the developer.
-                    tracing::error!(job = %export.job_id, %error, "export failed");
+                    tracing::error!(job = %job_id, %error, "export failed");
                 }
+            }
+            if let Some(last) = held.take() {
+                sink.send(last);
             }
         })
         .map_err(|error| format!("could not start the export thread: {error}"))?;

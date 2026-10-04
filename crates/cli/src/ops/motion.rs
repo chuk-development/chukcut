@@ -207,14 +207,23 @@ impl Operation for SpeedEffectArgs {
         }
         let Some(name) = &self.effect else {
             let worn = session.with(|p| speed::speed_effect_of(p, &id));
-            let list: Vec<_> = speed::speed_effects()
+            let effects = speed::speed_effects();
+            let names: Vec<String> = effects
+                .iter()
+                .filter_map(|d| match serde_json::to_value(d.effect) {
+                    Ok(serde_json::Value::String(name)) => Some(name),
+                    _ => None,
+                })
+                .collect();
+            let list: Vec<_> = effects
                 .into_iter()
                 .map(|d| json!({"effect": d.effect, "label": d.label, "smoothing": d.smoothing}))
                 .collect();
-            let message = match worn {
+            let worn_text = match worn {
                 Some(effect) => format!("the clip wears {}", effect.label()),
                 None => "the clip wears no speed effect".to_string(),
             };
+            let message = format!("{worn_text}; the effects: {}", names.join(", "));
             return Ok(Outcome::read(
                 message,
                 json!({"clip": clip(session), "effect": worn, "effects": list}),

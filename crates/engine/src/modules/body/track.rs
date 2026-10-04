@@ -249,7 +249,12 @@ pub fn coverage(
     let period = period.max(1);
     let (mut total, mut have) = (0, 0);
     let mut t = start;
-    while t < end {
+    // A step counts while a frame can start in it. The period is rounded
+    // (33 333 µs at 30 fps), so the steps fall a third of a microsecond
+    // short each; `t < end` then counted one step past the last frame (31
+    // for a 1 s clip of 30 frames), and a short clip never reached
+    // `DONE_SHARE` and was analysed again on every request.
+    while t + period / 2 < end {
         total += 1;
         let i = frames.partition_point(|f| f.t < t - period / 2);
         if frames.get(i).is_some_and(|f| (f.t - t).abs() <= period / 2) {
@@ -400,5 +405,16 @@ mod tests {
         );
         // Gone longer than the memory: a new person.
         assert_eq!(ids.assign(5_000_000, &[[0.13, 0.1, 0.3, 0.8]]), vec![3]);
+    }
+
+    #[test]
+    fn a_whole_clip_at_30_fps_counts_its_own_frames() {
+        let frames: Vec<BodyFrame> = (0..30)
+            .map(|k| BodyFrame {
+                t: (k as f64 * 1_000_000.0 / 30.0).round() as Micros,
+                people: Vec::new(),
+            })
+            .collect();
+        assert_eq!(coverage(&frames, 0, 1_000_000, 33_333), (30, 30));
     }
 }

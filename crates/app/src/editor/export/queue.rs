@@ -348,8 +348,12 @@ fn finished_line(item: &QueueItem) -> String {
 /// missing `notify-send` or daemon is not an error: the status line already
 /// says it.
 fn notify_desktop(text: &str) {
+    let Some(bus) = session_bus() else {
+        return;
+    };
     let spawned = std::process::Command::new("notify-send")
         .args(["--app-name=chukcut", "--icon=chukcut", "chukcut", text])
+        .env("DBUS_SESSION_BUS_ADDRESS", bus)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -362,10 +366,47 @@ fn notify_desktop(text: &str) {
     }
 }
 
+/// The session bus to send the notification over, or `None` when the
+/// session has none. Without one, `notify-send` (GLib) starts a bus of its
+/// own with `dbus-launch --autolaunch` on X11, and that `dbus-daemon` and the
+/// accessibility bus it starts stay after chukcut quits. A desktop session
+/// always has a bus; a bare X server (a test display, a kiosk) does not, and
+/// has no notification daemon to show anything either.
+fn session_bus() -> Option<String> {
+    bus_address(
+        std::env::var("DBUS_SESSION_BUS_ADDRESS").ok(),
+        std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from),
+    )
+}
+
+/// [`session_bus`] on given values: the address from the environment, or
+/// the socket the user's bus listens on (`$XDG_RUNTIME_DIR/bus`) when it
+/// exists.
+fn bus_address(address: Option<String>, runtime_dir: Option<std::path::PathBuf>) -> Option<String> {
+    if let Some(address) = address.filter(|a| !a.trim().is_empty()) {
+        return Some(address);
+    }
+    let socket = runtime_dir?.join("bus");
+    socket
+        .exists()
+        .then(|| format!("unix:path={}", socket.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use chukcut_engine::modules::export::{ExportProgress, ExportRequest, ExportStage};
+
+    #[test]
+    fn no_session_bus_means_no_notification() {
+        let empty = std::path::PathBuf::from("no-such-runtime-dir");
+        assert_eq!(bus_address(None, None), None);
+        assert_eq!(bus_address(Some(" ".into()), Some(empty.clone())), None);
+        assert_eq!(
+            bus_address(Some("unix:path=/run/user/1/bus".into()), Some(empty)),
+            Some("unix:path=/run/user/1/bus".into())
+        );
+    }
 
     fn item(label: &str, status: QueueStatus, fraction: f32) -> QueueItem {
         QueueItem {

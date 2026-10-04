@@ -19,7 +19,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::json;
 
-use super::{enum_named, Ctx, Operation, Outcome};
+use super::{enum_named, summary, Ctx, Operation, Outcome};
 use crate::error::{CliError, CliResult};
 use crate::select;
 use crate::session::Session;
@@ -330,9 +330,10 @@ impl Operation for FollowFaceArgs {
             },
             &NEVER,
         )?;
+        let name = session.with(|p| summary::clip_name(p, &target));
         Ok(Outcome::changed(
             format!(
-                "follows the {} of the face in {target}",
+                "follows the {} of the face in {name}",
                 anchor.label().to_lowercase()
             ),
             json!({"clip": overlay, "face_of": target, "anchor": anchor, "mode": mode}),
@@ -463,9 +464,10 @@ impl Operation for FollowBodyArgs {
             },
             &NEVER,
         )?;
+        let name = session.with(|p| summary::clip_name(p, &target));
         Ok(Outcome::changed(
             format!(
-                "follows the {} of person {} in {target}",
+                "follows the {} of person {} in {name}",
                 part.label().to_lowercase(),
                 person as u32 + 1
             ),

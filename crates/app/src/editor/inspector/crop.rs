@@ -395,25 +395,35 @@ impl Editor {
     /// The ratio the tab lights: the one picked for this clip, else the one
     /// the crop has.
     fn crop_ratio(&self, segment: &Segment) -> Ratio {
+        let shape = segment.crop.map(|crop| {
+            source_size(&self.project, segment).map(|(w, h)| {
+                (crop.right - crop.left) * w as f32 / ((crop.bottom - crop.top) * h as f32)
+            })
+        });
+        let fits = |rw: f32, rh: f32| matches!(shape, Some(Some(shape)) if (shape / (rw / rh) - 1.0).abs() < 0.01);
+        // The pick holds while the crop still has its shape: an undo that
+        // takes a 9:16 crop back must not leave 9:16 lit over a free box.
         if let Some((id, ratio)) = &self.inspector.crop.ratio {
-            if *id == segment.id {
+            let holds = match ratio {
+                Ratio::Fixed(rw, rh) => fits(*rw, *rh),
+                Ratio::Original => shape.is_none(),
+                _ => true,
+            };
+            if *id == segment.id && holds {
                 return *ratio;
             }
         }
-        let Some(crop) = segment.crop else {
-            return Ratio::Original;
-        };
-        let Some((w, h)) = source_size(&self.project, segment) else {
-            return Ratio::Free;
-        };
-        let shape = (crop.right - crop.left) * w as f32 / ((crop.bottom - crop.top) * h as f32);
-        RATIOS
-            .iter()
-            .find_map(|(_, r)| match r {
-                Ratio::Fixed(rw, rh) if (shape / (rw / rh) - 1.0).abs() < 0.01 => Some(*r),
-                _ => None,
-            })
-            .unwrap_or(Ratio::Free)
+        match shape {
+            None => Ratio::Original,
+            Some(None) => Ratio::Free,
+            Some(Some(_)) => RATIOS
+                .iter()
+                .find_map(|(_, r)| match r {
+                    Ratio::Fixed(rw, rh) if fits(*rw, *rh) => Some(*r),
+                    _ => None,
+                })
+                .unwrap_or(Ratio::Free),
+        }
     }
 
     fn set_crop(&mut self, segment_id: String, crop: Option<Crop>, cx: &mut Context<Self>) {

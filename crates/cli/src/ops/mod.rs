@@ -137,12 +137,76 @@ pub fn tool_spec<T: schemars::JsonSchema>(name: &'static str) -> ToolSpec {
     }
 }
 
-fn parse<T: DeserializeOwned>(name: &str, args: Value) -> CliResult<T> {
+fn parse<T: DeserializeOwned + schemars::JsonSchema>(name: &str, args: Value) -> CliResult<T> {
     let args = match args {
         Value::Null => json!({}),
         other => other,
     };
+    // Serde ignores a field it does not know, so a misspelt argument (`point`
+    // for `points`) made an operation run without it and answer as if
+    // nothing was asked. `deny_unknown_fields` does not work with the
+    // flattened argument groups, so the names are checked against the
+    // schema the MCP server publishes.
+    if let (Value::Object(map), Some(known)) = (&args, known_arguments::<T>()) {
+        if let Some(key) = map.keys().find(|k| !known.contains(k.as_str())) {
+            let mut names: Vec<&str> = known.iter().map(String::as_str).collect();
+            names.sort_unstable();
+            return Err(CliError::usage(format!(
+                "{name}: unknown argument {key:?}; the arguments are: {}",
+                names.join(", ")
+            )));
+        }
+    }
     serde_json::from_value(args).map_err(|e| CliError::usage(format!("{name}: {e}")))
+}
+
+/// The argument names `T` accepts, from its JSON schema; `None` when the
+/// schema allows names it does not list, or cannot be read.
+fn known_arguments<T: schemars::JsonSchema>() -> Option<std::collections::HashSet<String>> {
+    fn walk(
+        schema: &Value,
+        defs: &Value,
+        depth: usize,
+        out: &mut std::collections::HashSet<String>,
+    ) -> Option<()> {
+        if depth > 8 {
+            return None;
+        }
+        let map = schema.as_object()?;
+        if map
+            .get("additionalProperties")
+            .is_some_and(|v| v != &Value::Bool(false))
+        {
+            return None;
+        }
+        if let Some(reference) = map.get("$ref").and_then(Value::as_str) {
+            let key = reference.rsplit('/').next()?;
+            walk(defs.get(key)?, defs, depth + 1, out)?;
+        }
+        if let Some(props) = map.get("properties").and_then(Value::as_object) {
+            out.extend(props.keys().cloned());
+        }
+        for group in ["allOf", "anyOf", "oneOf"] {
+            if let Some(list) = map.get(group).and_then(Value::as_array) {
+                for item in list {
+                    walk(item, defs, depth + 1, out)?;
+                }
+            }
+        }
+        Some(())
+    }
+    let schema = serde_json::to_value(schemars::schema_for!(T)).ok()?;
+    let defs = schema
+        .get("$defs")
+        .or_else(|| schema.get("definitions"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let mut known = std::collections::HashSet::new();
+    walk(&schema, &defs, 0, &mut known)?;
+    // The MCP server takes `project` off before it gets here; a batch may
+    // still carry it.
+    known.insert("project".into());
+    Some(known)
 }
 
 macro_rules! operations {

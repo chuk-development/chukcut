@@ -248,6 +248,30 @@ pub fn clip(project: &Project, track_index: usize, clip_index: usize, segment: &
     Value::Object(out)
 }
 
+/// A clip as an answer names it: the short id `info` lists, and the file or
+/// compound clip it shows ("595dee70 (intro.mp4)").
+pub fn clip_name(project: &Project, segment_id: &str) -> String {
+    let short = segment_id.get(..8).unwrap_or(segment_id);
+    let pool = &project.materials;
+    let file = |path: &str| {
+        std::path::Path::new(path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+    };
+    let name = project.segment(segment_id).and_then(|(_, s)| {
+        let id = &s.material_id;
+        pool.video(id)
+            .and_then(|m| file(&m.path))
+            .or_else(|| pool.image(id).and_then(|m| file(&m.path)))
+            .or_else(|| pool.audio(id).and_then(|m| file(&m.path)))
+            .or_else(|| pool.sequence(id).map(|m| m.name.clone()))
+    });
+    match name {
+        Some(name) => format!("{short} ({name})"),
+        None => short.to_string(),
+    }
+}
+
 /// A clip by id, with its position, or `null`.
 pub fn clip_by_id(project: &Project, segment_id: &str) -> Value {
     for (ti, track) in project.tracks.iter().enumerate() {

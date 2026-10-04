@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use chukcut_engine::modules::template::commands as template_commands;
 use chukcut_engine::modules::template::commands::{ApplyAs, SaveRequest};
+use chukcut_engine::modules::template::slot::Slot;
 use chukcut_engine::state::AppState;
 use clap::Args;
 use schemars::JsonSchema;
@@ -330,7 +331,8 @@ impl Operation for TemplateSaveArgs {
 /// place, length, animation and look. One undo step.
 #[derive(Debug, Clone, Default, Args, Deserialize, JsonSchema)]
 pub struct TemplateReplaceArgs {
-    /// The clip (id, id prefix or `lane:index`), or `slot:N` for slot N.
+    /// The clip (id, id prefix or `lane:index`), or `slot:N` for the slot
+    /// `template slots` numbers N.
     #[arg(long)]
     pub clip: String,
     /// The video or photo to put there.
@@ -344,22 +346,21 @@ pub struct TemplateReplaceArgs {
 impl Operation for TemplateReplaceArgs {
     const NAME: &'static str = "template_replace";
     fn run(self, session: &mut Session, _: &Ctx) -> CliResult<Outcome> {
-        let slots = template_commands::template_slots(&session.state)?;
+        let slots = numbered_slots(session)?;
         let id = match self.clip.trim().strip_prefix("slot:") {
             Some(n) => {
                 let n: u32 = n
                     .parse()
                     .map_err(|_| CliError::usage(format!("{} is not a slot number", self.clip)))?;
-                // Two timelines made from templates both have a slot 1: the
-                // open timeline's is meant.
-                let root =
-                    session.with(|p| chukcut_engine::modules::sequence::root_id(p).to_string());
                 slots
                     .iter()
-                    .filter(|s| s.index == n)
-                    .min_by_key(|s| s.timeline_id != root)
-                    .map(|s| s.segment_id.clone())
-                    .ok_or_else(|| CliError::refused(format!("the project has no slot {n}")))?
+                    .find(|s| s.number == n)
+                    .map(|s| s.slot.segment_id.clone())
+                    .ok_or_else(|| {
+                        CliError::refused(format!(
+                            "the project has no slot {n} (`template slots` lists them)"
+                        ))
+                    })?
             }
             // A slot inside a compound clip is not on the open timeline's
             // lanes; its id (or a prefix) still names it.
@@ -369,9 +370,9 @@ impl Operation for TemplateReplaceArgs {
                     let wanted = self.clip.trim();
                     let mut found = slots
                         .iter()
-                        .filter(|s| s.segment_id.starts_with(wanted) && !wanted.is_empty());
+                        .filter(|s| s.slot.segment_id.starts_with(wanted) && !wanted.is_empty());
                     match (found.next(), found.next()) {
-                        (Some(slot), None) => Ok(slot.segment_id.clone()),
+                        (Some(s), None) => Ok(s.slot.segment_id.clone()),
                         _ => Err(error),
                     }
                 })?,
@@ -404,6 +405,46 @@ impl Operation for TemplateReplaceArgs {
     }
 }
 
+/// A slot with its number in the whole project.
+struct Numbered {
+    number: u32,
+    slot: Slot,
+}
+
+/// The project's slots, numbered from 1 across the whole project: each
+/// sequence's slots together (a timeline's own, then the compound clips it
+/// reaches, timelines in tab order), each in its fill order. Two templates in
+/// one project both have a fill-order 1; these numbers do not repeat, and
+/// `slot:N` takes them.
+fn numbered_slots(session: &Session) -> CliResult<Vec<Numbered>> {
+    let slots = template_commands::template_slots(&session.state)?;
+    // The engine lists a timeline's slots by fill order across its
+    // sequences; grouping by where each sequence first appears keeps the
+    // timeline order and puts each sequence's slots together.
+    let mut sequences: Vec<String> = Vec::new();
+    for slot in &slots {
+        if !sequences.contains(&slot.sequence_id) {
+            sequences.push(slot.sequence_id.clone());
+        }
+    }
+    let mut slots: Vec<(usize, Slot)> = slots
+        .into_iter()
+        .map(|slot| {
+            let group = sequences
+                .iter()
+                .position(|id| *id == slot.sequence_id)
+                .unwrap_or(usize::MAX);
+            (group, slot)
+        })
+        .collect();
+    slots.sort_by_key(|(group, _)| *group);
+    Ok(slots
+        .into_iter()
+        .zip(1..)
+        .map(|((_, slot), number)| Numbered { number, slot })
+        .collect())
+}
+
 /// List this project's slots, filled or not.
 #[derive(Debug, Clone, Default, Args, Deserialize, JsonSchema)]
 pub struct TemplateSlotsArgs {}
@@ -411,21 +452,33 @@ pub struct TemplateSlotsArgs {}
 impl Operation for TemplateSlotsArgs {
     const NAME: &'static str = "template_slots";
     fn run(self, session: &mut Session, _: &Ctx) -> CliResult<Outcome> {
-        let slots = template_commands::template_slots(&session.state)?;
+        let slots = numbered_slots(session)?;
+        let open = session.with(|p| chukcut_engine::modules::sequence::root_id(p).to_string());
+        // Slots in more than one place say where each one is; the slots of
+        // a single template on a single timeline need no place.
+        let places = slots
+            .iter()
+            .map(|s| s.slot.sequence_id.as_str())
+            .collect::<std::collections::HashSet<_>>()
+            .len();
         let lines: Vec<String> = slots
             .iter()
-            .map(|s| {
+            .map(|n| {
+                let s = &n.slot;
+                let place = if s.in_compound {
+                    format!(" in compound clip \u{201c}{}\u{201d}", s.sequence_name)
+                } else if s.timeline_id == open {
+                    format!(" on the open timeline \u{201c}{}\u{201d}", s.sequence_name)
+                } else {
+                    format!(" on timeline \u{201c}{}\u{201d}", s.sequence_name)
+                };
                 format!(
                     "slot {}: {:.2} s, {}:{}{}{}{}",
-                    s.index,
+                    n.number,
                     seconds(s.duration),
                     s.aspect[0],
                     s.aspect[1],
-                    if s.in_compound {
-                        format!(" in compound clip \u{201c}{}\u{201d}", s.sequence_name)
-                    } else {
-                        String::new()
-                    },
+                    if places > 1 { place } else { String::new() },
                     s.label
                         .as_ref()
                         .map(|l| format!(" \u{201c}{l}\u{201d}"))
@@ -445,7 +498,9 @@ impl Operation for TemplateSlotsArgs {
             },
             json!(slots
                 .iter()
-                .map(|s| json!({
+                .map(|n| (n.number, &n.slot))
+                .map(|(number, s)| json!({
+                    "number": number,
                     "index": s.index,
                     "clip": s.segment_id,
                     "label": s.label,
@@ -459,6 +514,7 @@ impl Operation for TemplateSlotsArgs {
                     "sequence_name": s.sequence_name,
                     "in_compound": s.in_compound,
                     "timeline": s.timeline_id,
+                    "open_timeline": s.timeline_id == open,
                 }))
                 .collect::<Vec<_>>()),
         ))

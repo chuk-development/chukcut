@@ -63,7 +63,10 @@ it. The software encoders (x264, x265) always work.
 ## AI tools
 
 - **An AI tool says that it cannot run**, or nothing happens: the worker
-  program `chukcut-ml-worker` must be next to `chukcut` or on your `PATH`.
+  program `chukcut-ml-worker` must be next to `chukcut`, in
+  `<prefix>/libexec/chukcut/` or `<prefix>/lib/chukcut/`, or on your `PATH`.
+  A `chukcut` on your `PATH` that is a symbolic link finds the worker next
+  to the real file.
   The install script and the tarball put it next to `chukcut` in
   `~/.local/bin`. A build from source with only `-p chukcut` does not have
   it. See [Getting started](getting-started.md#install).
@@ -78,6 +81,10 @@ it. The software encoders (x264, x265) always work.
   Update the driver, or install the other bundle.
 - **A bundle is partly installed**: the row shows **Finish** and **Remove**.
   Click **Finish**.
+- **The first slow-motion, enhance or remove-object job waits for minutes**
+  with "Preparing TensorRT for …": Fast mode prepares each model once for
+  each frame size. The next jobs at that size start at once. To skip it,
+  switch off **Fast (fp16/TensorRT)** in Settings › **AI acceleration**.
 - **Intel GPUs**: the models run on the CPU. An OpenVINO build of ONNX
   Runtime can run them on the GPU: set `CHUKCUT_ORT_DYLIB` to its
   `libonnxruntime.so`. This path is not tested.

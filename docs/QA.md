@@ -440,3 +440,144 @@ time on screen (they start an optical-flow bake, covered by the Smooth
 slow-mo tests); the crop box on a rotated or stabilised clip (the overlay
 uses the compositor's placement chain, and its pixel ↔ source mapping has a
 unit test).
+
+## QA pass 3, 2026-10-04 (`agent/qa3`)
+
+The features of waves 10 and 11, end to end in the release build: the app
+on a private Xvfb display (`:171`, lavapipe, `CHUKCUT_FILE_DIALOG=builtin`,
+no session bus, `HOME` and every `XDG_*` folder under `_scratch/qa/`, ALSA
+on a null device), the CLI and the ML worker on the RTX 3060 (CUDA 13
+bundle, TensorRT add-on, Fast mode on). The ML folder was linked into the
+isolated cache; nothing was downloaded again. Generated media and NASA's
+public-domain portraits only. Per feature: does it render, is it one undo
+step (a batch with the operation and one `undo` gives back the document
+byte for byte, and Ctrl+Z in the app), does it survive save and reopen,
+does the export match the preview (`render-frame` against the frame
+decoded from the exported file, mean difference in code values).
+
+| Feature | Renders | Undo | Save / reopen | Export = preview |
+|---|---|---|---|---|
+| Remove object, click (MobileSAM + VitTrack + clean plate), 90 frames of 1280×720 | yes, the red box gone, 19 s | one step (CLI; app: tick off, Ctrl+Z) | yes; frames re-made on open after the cache was cleared | 2.0 (mandelbrot detail) |
+| Remove object, box (LaMa every frame), 60 frames of 270×480 in the showcase | yes, the "watermark" gone | one step | yes | 1.7 |
+| Enhance quality 2x (640×360 → 1280×720), 4x in the showcase | yes, 90 frames in 6 s (Fast) | one step | yes; "Made at 1280×720" in the app | 1.7–1.8 |
+| Auto adjust | yes ("exposure +0.36 …") | one step (CLI, app) | yes | 1.5 (showcase at 2 s, with glow) |
+| Colour match | yes, L\*a\*b\* 13.9 → 2.6 in 4.4 s | one step | yes | 0.9–2.1 |
+| Grade presets (save, apply to another project) | yes, the same render as the clip it was saved from (0.0) | one step | presets in `XDG_DATA_HOME` | |
+| Retouch (Sculpt) | yes | one step (CLI; app: Natural, Ctrl+Z back to Sculpt) | yes; faces re-found on open | 1.5 |
+| Follow face (forehead) | yes, the title moves with the face | one step | yes | 1.5 |
+| Body landmarks, follow body part (left hand) | yes, 120 frames in 2.3 s | one step | yes | 1.3 |
+| Auto reframe with people | 9:16 on a person with the head covered: "faces in 15 % · people in 85 %", he stays in the window | one step | yes | 1.5 |
+| Isolate voice (HTDemucs) | speech SDR 1.5 → 15.8 dB in the WAV export; 8 s in 11.8 s; worker peak 1.47 GB | one step (CLI; app: Medium, Ctrl+Z) | yes | the export is the isolated sound |
+| Speed effects (Montage, Hero with RIFE TensorRT at 1080×1920, Flash in) | yes; Hero 264 new frames in 113 s incl. 84 s TensorRT preparation | one step (CLI, app) | yes | 1.7 |
+| Crop (CLI box, app 9:16) and GPU Reduce noise | yes, the cropped part fills the clip's frame | one step | yes | 0.5 |
+| Stabilise on a compound clip | yes, "cropped 14 %" | one step | yes | 1.5–1.7 |
+| Template into an open project (compound at playhead, new timeline) | yes, app dialog and CLI | one step (app: the lane goes too) | yes | 1.3–1.6 |
+| Slots inside a compound clip (`template replace --clip slot:2`) | yes | one step (the file stays in the media library, as an import does) | yes | 1.3 |
+| Prepare on open | "Preparing 301 frames" after the remade frames and the face track were deleted; the showcase: "Preparing 451 frames and 1 voice" | | | |
+| Fast mode, TensorRT | Settings shows the switch, the add-on (3.0 GB) and "TensorRT · fp16 · prepared in …" per model | | | |
+| Decode and AI runtime pickers | Settings › Performance lists Automatic, VAAPI, NVDEC, Software and the three ONNX Runtime packs | | | |
+| Export queue, quit guard | Add to queue, Ctrl+Q: "Export running — quit anyway?", Keep exporting finished the file | | queue file kept the done item | app export vs `render-frame`: 0.4–1.5 |
+| Installed layout (`scripts/install.sh --no-build --bindir _scratch/install/prefix/bin`) | the installed app found `prefix/bin/chukcut-ml-worker` with `PATH=/usr/bin:/bin` and analysed faces with it; `chukcut-cli ml status --probe` reported the worker beside it, also through a symlink on `PATH` and from `<prefix>/libexec/chukcut/` | | | |
+| MCP | 154 tools in `tools/list` | | | |
+
+Fixed on this branch:
+
+1. **Misspelt arguments in a batch file or an MCP call were ignored.**
+   `{"op":"remove_object","point":[…]}` (the field is `points`) ran without
+   the click and answered "the clip has no object removed" as a success.
+   Serde skips unknown fields, and `deny_unknown_fields` does not work with
+   the flattened argument groups, so the names are now checked against the
+   schema the MCP server publishes: "unknown argument "point"; the
+   arguments are: …".
+2. **A short clip's faces or people were analysed again on every
+   request.** The landmark and body coverage stepped a rounded period
+   (33 333 µs) while `t < end` and counted one step past the last frame (30
+   of 31 for a 1 s clip at 30 fps). Below the 98 % done share, a clip
+   shorter than about 1.6 s was never done, so every `face-landmarks`, the
+   preparation on open and each export ran the analysis again. Steps now
+   count while a frame can start in them; both modules have a test.
+3. **The crop ratio stayed lit after an undo.** 9:16, then Ctrl+Z: the box
+   went back to its free shape but 9:16 stayed selected, and the next handle
+   drag would have forced 9:16 again. A picked ratio now holds only while
+   the crop has its shape.
+4. **`ml status` and Settings listed an engine the model never uses**: a
+   leftover fp16 RIFE engine next to the fp32 ones ("input-1x6x180x320"
+   twice, "5 sizes"). Only engines of the planned precision are listed.
+5. **The CLI said nothing when an import changed the canvas.** `new --width
+   1280 --height 720` and a 1280×720 import gave a 1920×1080 project (by
+   design: the first clip sets an unchosen canvas, `configure` chooses it).
+   The import's answer now says "the canvas took the clip's shape:
+   1920x1080 at 30 fps (`configure` changes it)".
+6. `speed-effect` without options now lists the effects in its answer, as
+   `docs/cli.md` says.
+7. Manual: isolate voice said the worker uses 7 to 8 GB (1.5 GB since
+   agent/mlspeed); Fast mode and the TensorRT add-on were not described in
+   Settings or AI tools; the GPU costs did not have the Fast numbers;
+   Troubleshooting did not name the `libexec` worker places or the
+   "Preparing TensorRT" wait.
+
+Open:
+
+- ~~**Medium: `chukcut-cli export` crashed once with a segmentation fault
+  after the export was written.** In one of four runs of `scripts/demo.sh
+  --export` (load 17–22 from `cargo test` runs), the CLI printed "exported
+  …/showcase.mp4 (831 frames, 29.7 MB) in 44.7 s" and then died with
+  SIGSEGV (exit 139), so the file was complete but the script stopped. Not
+  reproduced in 12 more exports of the showcase under gdb (with and
+  without `--sidecar srt`) nor in 12 of a 3 s project. It looks like
+  teardown at exit (the Vulkan device, the export threads); STATUS.md "The
+  hang that was not the device" has the earlier device-teardown crashes.
+  Steps: `scripts/demo.sh --export` in a loop under load, or `chukcut-cli
+  export _scratch/demo/showcase.chukcut out.mp4 --preset user_showcase
+  --sidecar srt` in a loop.~~ Fixed on agent/shutdown, cause found: the
+  export thread sent "done" and only then dropped the job, whose decoders
+  free cached GPU textures in the Vulkan driver; the CLI returned from
+  `main` meanwhile, and libc's `exit` ran the NVIDIA libraries' destructors
+  under that thread. Reproduced at 5 crashes (and 1 hang in the NVDEC
+  library's destructor) in 90 exports, six at a time on four cores; the
+  cores all show the export thread in `drop(ExportJob)` → `TextureView`
+  → `libnvidia-glcore` while the main thread is in `_dl_fini`. The job is
+  now dropped before "done" is sent, and the CLI and the app leave through
+  `lifecycle::exit` (stop the exports and the ML worker, flush, `_exit`).
+  After: 0 in 180 under the same load. STATUS.md, "The crash after the
+  export".
+
+Open (low; none blocks a feature):
+
+- ~~**A project path on the command line that cannot be read** opens the
+  start screen with no message; the reason is only on stderr ("cannot read
+  /aq.chukcut: No such file or directory"). Steps: `chukcut /nonexistent.chukcut`.~~
+  Fixed on agent/shutdown: the start screen shows the reason (and the
+  editor's status line does, when media files came with it).
+- ~~**`template slots` numbers the slots per sequence and does not name the
+  open timeline**: with Quick Cuts as a compound clip and Travel Diary as an
+  opened timeline, the list has two "slot 1" lines; the compound clip's say
+  `in compound clip "Quick Cuts"`, the timeline's say nothing. `--clip
+  slot:N` picks the open timeline's.~~ Fixed on agent/shutdown: the numbers
+  run across the project (each sequence's slots together), every line says
+  where its slot is when there is more than one place ("on the open
+  timeline "Travel Diary""), and `slot:N` takes those numbers. JSON keeps
+  the fill order as `index` and adds `number` and `open_timeline`.
+- ~~**The CLI names clips by their full id** in some answers ("matched to
+  8a2966a5-a61a-…", "follows the forehead of the face in bf34ba1c-…")
+  where `info` uses the short prefix or the file name.~~ Fixed on
+  agent/shutdown: `colour-match`, `follow-face` and `follow-body` say
+  "8a2966a5 (portrait.mp4)", as `info` lists it.
+- ~~**Remove object keeps its estimate line** ("90 frames: about 23 s on a
+  GPU, 4 min on the CPU") under "All 90 frames are made."~~ Fixed on
+  agent/shutdown: the estimates of Remove object and Enhance quality go
+  once every frame is made.
+- ~~**The app starts a session bus of its own** when
+  `DBUS_SESSION_BUS_ADDRESS` is unset (`dbus-launch --autolaunch`, seen
+  after an export finished on Xvfb); the `dbus-daemon` and the AT-SPI bus
+  stay after the app quits. Only matters for test displays.~~ Fixed on
+  agent/shutdown: it was the "export finished" desktop notification —
+  `notify-send` is GLib, and GLib autolaunches a bus on X11 when it finds
+  none. The notification is now skipped without a session bus (no
+  `DBUS_SESSION_BUS_ADDRESS` and no `$XDG_RUNTIME_DIR/bus`).
+
+Not tested, and why: playback with sound, voiceover recording, VAAPI and
+QSV (no Intel or AMD GPU here), the portal file chooser, cloud providers;
+Paint on player and Select on player for Remove object (covered by the
+ml4 pass; here through the CLI); the people fallback of auto reframe on a
+clip where YuNet finds nothing at all (here 15 % of frames had a "face").

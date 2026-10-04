@@ -10,13 +10,16 @@ the CLI and the ML worker, the app on a private Xvfb display with lavapipe).
 The showcase was extended the same day with the newer features: a compound
 clip, a second timeline made from a template, an animated sticker with
 motion blur, frame blending, optical-flow slow motion and select object with
-a background-only grade. The last section lists what did not work.
+a background-only grade. QA pass 3 (agent/qa3) added a crop, a speed
+effect (Bullet time), auto adjust, colour match, remove object and enhance
+quality on a small clip, and isolate voice on the voiceover. The last
+section lists what did not work.
 
 ## Make the showcase
 
 ```bash
-memguard-allow 16G cargo build --release -p chukcut -p chukcut-cli -p chukcut-ml-worker -j 6
-scripts/demo.sh --export          # media + project + export, about 1.5 min
+memguard-allow 16G cargo build --release -p chukcut -p chukcut-cli -p chukcut-ml-worker -j 3
+scripts/demo.sh --export          # media + project + export, about 3 min
 ./target/release/chukcut _scratch/demo/showcase.chukcut
 ```
 
@@ -26,7 +29,6 @@ scripts/demo.sh --export          # media + project + export, about 1.5 min
 |---|---|
 | `media/` | the generated media (below) |
 | `showcase.chukcut` | the project |
-| `template-part.chukcut` | the project the Quick Cuts template made; its render is `media/template-part.mp4` |
 | `showcase.mp4`, `showcase.srt` | the export and its caption sidecar (with `--export`) |
 | `xdg/` | the CLI's own `HOME` and XDG folders, so the script does not change your settings |
 
@@ -36,15 +38,21 @@ another binary. The script needs `ffmpeg` (with the `flite` filter for the
 voice), `python3`, `jq`, `bc` and a Vulkan device (the template section is
 rendered).
 
-**ML steps.** Optical-flow slow motion (RIFE) and select object (MobileSAM
-and VitTrack) run only when the models and a GPU runtime are already
-installed (`chukcut-cli ml install gpu`, `ml install rife`, …): the script
-links your ML folder (`~/.cache/chukcut/ml`, or `$CHUKCUT_DEMO_ML_CACHE`)
-into its own cache read-only and downloads nothing. Otherwise the comet gets
-frame blending instead of optical flow, select object is left out, and the
-script prints a `note:` line for each. The mattes and flow frames are baked
-into `xdg/cache/`; the app run with your own settings bakes them again into
-your cache in the background (about 20 s on an RTX 3060).
+**ML steps.** Optical-flow slow motion and Bullet time (RIFE), select
+object (MobileSAM and VitTrack), remove object (LaMa), enhance quality
+(Real-ESRGAN) and isolate voice (HTDemucs) run only when the models and a
+GPU runtime are already installed (`chukcut-cli ml install gpu`, `ml
+install rife`, …): the script links your ML folder (`~/.cache/chukcut/ml`,
+or `$CHUKCUT_DEMO_ML_CACHE`) into its own cache and downloads nothing.
+Otherwise the comet gets frame blending instead of optical flow, the
+pattern gets Smooth montage instead of Bullet time, the other ML steps are
+left out, and the script prints a `note:` line for each. The mattes, flow
+frames, remade frames and the isolated voice are baked into `xdg/cache/`;
+the app run with your own settings bakes them again into your cache in the
+background: "Preparing 451 frames and 1 voice" in the title bar, about
+1.5 min on an RTX 3060. With Fast mode and the TensorRT add-on, the first
+run also prepares each model for its frame size once (Real-ESRGAN at
+270×480 31 s, RIFE at 1080×1920 84 s); later runs reuse it.
 
 The project opens in the app with your normal settings. Only the "Showcase"
 export preset is in the script's own config folder; the app shows it under
@@ -62,7 +70,8 @@ All media is made by FFmpeg at 1080x1920, 30 fps. Nothing is downloaded.
 | `04-ball.mp4` | a red ball on a figure-of-eight path over a dimmed `testsrc2` | motion tracking, select object |
 | `05-greenscreen.mp4` | a rotating test card on green | chroma key and a mask |
 | `06-life.mp4` | Conway's `life` | picture in picture |
-| `07-comet.mp4` | a bright disc that crosses `gradients` at about 17 px a frame, 3 s | optical-flow slow motion |
+| `07-comet.mp4` | a bright disc that crosses `gradients` at about 17 px a frame, 3 s | optical-flow slow motion, colour match |
+| `08-lowres.mp4` | a `mandelbrot` zoom at 270×480, CRF 38, with a white box as a "watermark", 2 s | remove object, enhance quality 4x |
 | `pulse.gif` | `geq`: a pulsing cyan ring, transparent background, 2 s loop | animated sticker, motion blur |
 | `voice.wav` | `flite` speech synthesis, -16 LUFS | voiceover |
 | `music.wav` | `aevalsrc`: a kick at 120 BPM over a chord, 30 s | music bed |
@@ -72,18 +81,19 @@ All media is made by FFmpeg at 1080x1920, 30 fps. Nothing is downloaded.
 
 ### What the project contains
 
-The result is two timelines. **Timeline 01** is 25.7 s on 8 lanes
+The result is two timelines. **Timeline 01** is 27.7 s on 8 lanes
 (`chukcut-cli info _scratch/demo/showcase.chukcut`):
 
 | Time | Lane | What | CLI command |
 |---|---|---|---|
-| 0 – 4 s | Video 1 | gradients with a **glow** effect | `trim --ripple`, `effect add glow --clip` |
+| 0 – 4 s | Video 1 | gradients with **auto adjust** (60 %) and a **glow** effect | `trim --ripple`, `auto-adjust --amount 0.6`, `effect add glow --clip` |
 | 4 – 8.5 s | Video 1 | fractal: **grade** (exposure, contrast, saturation, temperature, vignette), the **LUT** at 80 %, an S **curve**, **film grain**, a **punch-in zoom** | `grade --set … --lut`, `curve`, `effect add film_grain`, `zoom` |
-| 8.5 – 13.7 s | Video 1 | 3 s of the pattern on the **bullet speed ramp**, with **frame blending** in the slow middle | `speed-curve --preset bullet`, `frame-blend --mode blend` |
+| 8.5 – 13.7 s | Video 1 | 3 s of the pattern with the **Bullet time speed effect**: the bullet ramp and **optical flow (AI)** in the slow middle, one undo step (without RIFE: Smooth montage, the montage ramp with frame blending) | `speed-effect --effect bullet` |
 | 13.7 – 19.7 s | Video 1 | the ball clip: **select object** on the ball (MobileSAM + VitTrack), the grade limited to the **background** (saturation 0, darker), the matte uncut, so the red ball is the only colour | `select-object --point`, `apply-to --grade background`, `grade`, `remove-background --off` |
-| 19.7 – 25.7 s | Video 1 | the comet at half speed with **optical flow (AI)**: RIFE makes the 89 frames in between | `smooth-slow-mo --speed 0.5` |
+| 19.7 – 25.7 s | Video 1 | the comet at half speed with **optical flow (AI)**: RIFE makes the 89 frames in between; **colour match** gives it the fractal's teal-and-orange look | `smooth-slow-mo --speed 0.5`, `colour-match --to` |
+| 25.7 – 27.7 s | Video 1 | the small, blocky clip: the white box **removed** (LaMa, a box in every frame), then **enhanced 4x** from 270×480 to 1080×1920 (Real-ESRGAN) | `remove-object --box`, `enhance-quality --scale 4` |
 | cuts | Video 1 | **transitions**: `gl:crosswarp`, `seamless:zoom_in`, `dissolve` | `transition add --kind` |
-| 4.5 – 8 s | Video 3 | **picture in picture** top left (round corners, border, shadow) with **blend mode** Screen | `layout pip`, `blend screen` |
+| 4.5 – 8 s | Video 3 | **picture in picture** top left (round corners, border, shadow), **cropped** to a square from the middle, with **blend mode** Screen | `layout pip`, `crop`, `blend screen` |
 | 6 – 9 s | Video 2 | **sticker** (the PNG), In animation *pop*, Combo *wobble*, rotation **keyframes** | `place`, `set`, `animate`, `keyframe` |
 | 9 – 13.2 s | Video 2 | green screen with **chroma key** and a rounded **rectangle mask** that opens from 20 % to 90 % (mask keyframes) | `chroma-key`, `mask --add rectangle --at` |
 | 0.2 – 4 s | Video 2 | **compound clip** "Intro titles" (double-click to open it) holding the two titles below | `compound create --name` |
@@ -93,25 +103,29 @@ The result is two timelines. **Timeline 01** is 25.7 s on 8 lanes
 | 13.7 – 19.7 s | Text 2 | "tracked" label that **follows the ball** (KLT tracker, 180 frames) | `track --overlay` |
 | 13.5 – 14.1 s | Effects 1 | **shake** effect clip over the cut into the ball | `effect add shake --at` |
 | 0.7 – 9.9 s | Captions | five **captions** from the SRT, *karaoke* style, the spoken word in yellow | `captions import --preset karaoke`, `captions style` |
-| 0.5 – 10.5 s | Audio 1 | voiceover: **normalised** to -14 LUFS, **EQ** | `normalize`, `audio-effect add eq3` |
-| 0 – 25.7 s | Audio 2 | music: **ducked** 10 dB under the voice (6 volume keyframes), **reverb** | `duck`, `audio-effect add reverb` |
-| ruler | | five **markers**: Intro, Grade + LUT, Speed ramp, Tracking, Slow motion | `marker add` |
+| 0.5 – 10.5 s | Audio 1 | voiceover: **normalised** to -14 LUFS, **EQ**, **isolate voice** (HTDemucs keeps the speech, drops the room tone) | `normalize`, `audio-effect add eq3`, `isolate-voice --keep voice` |
+| 0 – 27.7 s | Audio 2 | music: **ducked** 10 dB under the voice (6 volume keyframes), **reverb** | `duck`, `audio-effect add reverb` |
+| ruler | | six **markers**: Intro, Grade + LUT, Speed ramp, Tracking, Slow motion, Remove + enhance | `marker add` |
 | export | | own **export preset** "Showcase" (TikTok, CRF 19) | `preset save`, `export --preset user_showcase --sidecar srt` |
 
 **Template cut**, the second timeline (the tab next to Timeline 01), is 6 s:
-the **Quick Cuts template** filled with the six demo clips
-(`template apply … quick-cuts`), rendered and put on this timeline, with a
-title over it (`timeline new`, `import --append`, `title add`). The
-template's own project is `template-part.chukcut`; open it to see the slots
-(`template slots`).
+the **Quick Cuts template** filled with the six demo clips and put into the
+showcase as a timeline of its own (`template apply --into … --as timeline
+--name "Template cut"`, one undo step), with a label over it on a text lane
+of its own (`lane-add --kind text`, `title add --track`).
+Its clips, titles and transitions stay editable, and its six slots are
+listed by Templates › This project and `template slots`.
 
-The export renders Timeline 01: 771 frames (25.7 s at 30 fps), H.264
-1080x1920 and AAC, -14.4 LUFS integrated, 27.4 MB, 17–19 s with the
-software encoder on this machine. The whole script with `--export` takes
-about 1.5 min, of which the ML bakes are ~16 s (select object, 180 frames)
-and ~10 s (optical flow, 89 frames) on CUDA. Frames from the export match
-`render-frame` (mean difference 0.9–1.6 code values, the H.264 encode) and
-the app's player.
+The export renders Timeline 01: 831 frames (27.7 s at 30 fps), H.264
+1080x1920 and AAC, 29.7 MB, 22–46 s with the software encoder on this
+machine (the slower runs with other builds running). The whole script with
+`--media --export` took 3 min 11 s on the RTX 3060, a run without `--media`
+and with every frame already baked 55 s
+(Fast mode, TensorRT engines mostly prepared already), of which select
+object took 17 s (180 frames), isolate voice 13 s and enhance quality 31 s
+to prepare TensorRT for 270×480 the first time. Frames from the export
+match `render-frame` (mean difference 0.9–1.7 code values, the H.264
+encode; 3.8 over the film grain at 6 s) and the app's player.
 
 ## A tour of the app
 
@@ -130,7 +144,9 @@ the bottom left.
 The app name, **Menu** (New project, Open, Save, Save as, Import media,
 Export, Settings, Keyboard shortcuts, Quit, each with its shortcut), the save
 state ("Saved"), the project name with its canvas and frame rate, and
-**Export** at the right.
+**Export** at the right. While an opened project's AI frames are made, a
+chip says so: "Preparing 451 frames and 1 voice · 49 % Stop". While an
+export queue runs, the chip shows it ("Queue 1 of 1 · MP4 · aq · 8 %").
 
 ### Asset panel (top left)
 
@@ -213,12 +229,16 @@ the clip's kind:
   remove** with Keep People (RVM), Objects (BiRefNet, GPU only) or **Select**
   (click the object on the player; MobileSAM + VitTrack), Cut out instead,
   show matte, and chroma key with colour picker, intensity, softness, spill,
-  edge shrink; Mask: linear, mirror, circle, rectangle, star, heart, each
-  with add/subtract/intersect, invert and keyframable values; Retouch),
+  edge shrink; Crop: ratio presets, a box with handles on the player,
+  rotate and flip; Mask: linear, mirror, circle, rectangle, star, heart,
+  each with add/subtract/intersect, invert and keyframable values; Retouch:
+  four looks and five sliders on the faces; Enhance: **Remove object**
+  (select or paint on the player) and **Enhance quality** Off / 2x / 4x),
   *Audio* when the file has sound, *Speed* (Standard with **Frame blending**:
   None, Blend, Optical flow (AI), and **Smooth slow-mo**; Curve; Speed
   effects; change audio pitch), *Animation* (In, Out, Combo, Zoom), *Adjust*
-  (Basic: LUT and adjust controls; HSL; Curves; Colour wheels; Mask with
+  (Basic: **Auto adjust**, **Match colour** to another clip, LUT and adjust
+  controls; HSL; Curves; Colour wheels; Mask with
   **Apply to** whole clip, subject or background; Save as preset, Apply to
   all), *Effects* (the clip's effect stack with each parameter, reset and
   keyframe buttons, and Apply to whole clip, subject or background).
@@ -232,7 +252,8 @@ the clip's kind:
   here, bake to keyframes, stop following, remove track), *Effects*.
 - **Audio clip**: *Basic* (volume, fades, normalise loudness with the measured
   before → after, reduce noise, remove silences with Review pauses and Filler
-  words, equalizer, …), *Voice changer*, *Speed*.
+  words, **Isolate voice** with Keep voice or background and a strength,
+  equalizer, …), *Voice changer*, *Speed*.
 
 ### Export (the Export button, or Ctrl+E)
 
@@ -250,14 +271,16 @@ New projects (canvas, frame rate), preview and playback (preview resolution,
 largest preview edge, audio scrubbing), proxies and cache (proxy policy,
 proxies on disk, cache size and limit), **AI acceleration** (what models run
 on, the GPU bundles to install or remove, each model with its size and
-licence, the baked mattes), **Keyboard shortcuts** (Edit shortcuts…: search,
+licence, **Fast (fp16/TensorRT)** with the TensorRT add-on and what each
+heavy model runs on, the baked mattes and remade frames), **Performance**
+(video decoding and AI runtime pickers), **Keyboard shortcuts** (Edit shortcuts…: search,
 change, add, remove, reset, three presets, conflicts), the cloud accounts,
 the hardware report and the log folder.
 
 ### CLI and MCP
 
 `chukcut-cli` does every edit in this page from a shell (`docs/cli.md`).
-`chukcut-cli mcp` serves the same operations to an MCP client: 139 tools,
+`chukcut-cli mcp` serves the same operations to an MCP client: 154 tools,
 including `view_frame`, which returns the frame as a PNG
 (`claude mcp add chukcut -- /path/to/chukcut-cli mcp`).
 
@@ -270,9 +293,13 @@ Found while building the showcase. The open ones are also in `docs/QA.md`.
   reached. The CLI gaps found then (no sticker command, no `--track` on
   `title add`, no lane command, no `--duration` on `title template`, the
   glow and contrast notes in `docs/cli.md`) were closed by agent/upkeep.
-- **Second pass (agent/qa2):** a template cannot be applied *into* an open
-  project, only as a new project; so the "Template cut" timeline holds the
-  template's render, not its editable clips. `docs/QA.md` has the details.
+- **Second pass (agent/qa2):** a template could not be applied *into* an
+  open project. Fixed on agent/polish3; since QA pass 3 the "Template cut"
+  timeline is the template itself, not its render.
+- **Third pass (agent/qa3):** fixed on the way, see `docs/QA.md` "QA pass
+  3": misspelt arguments in a batch file were ignored, short clips had their
+  faces analysed again on every request, the crop ratio stayed lit after an
+  undo.
 - **Second pass:** a GIF must keep a transparent colour in its palette
   (`palettegen=reserve_transparent=1`), or ffmpeg writes it opaque and the
   sticker is a box. Not a chukcut bug; the script's recipe does it right.
