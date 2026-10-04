@@ -73,10 +73,11 @@ column current.
 | 7 | templates | project templates + shortcut editor (backlog 9, 10) | merged — 11 built-in templates, keymap registry (66 actions, 3 presets); open: user-template media by absolute path, split slot keeps marker, no "Replace media" in clip menu |
 | 7 | upkeep | full CLI/MCP coverage, Dependabot bumps, `effects/graph.rs:735` alpha check, GPU tests on both adapters (backlog 13) | merged — reachability test with allowlist; ffmpeg-next 9 + rust-minor bumps; graph.rs alpha fixed; `scripts/gpu-tests.sh`; open: play/pause tooltip, off-grid snapping low |
 | 8 | motion2 | frame blending + motion blur, animated stickers (Lottie, animated emoji, GIF/WebP) (backlog 6, 8) | merged — frame blend per clip, motion_blur effect, Lottie/GIF/WebP stickers, Noto animated emoji (CC BY 4.0); open: no optical flow, no blur inside transitions, imported GIF is now a sticker |
-| 8 | compound2 | compound clip gaps: nested-render cache, prefetch, audio of compound volume/speed, flatten at speed, timeline prune, real filmstrips | running (agent/compound2) |
+| 8 | compound2 | compound clip gaps: nested-render cache, prefetch, audio of compound volume/speed, flatten at speed, timeline prune, real filmstrips | done on agent/compound2, merging (provider.rs conflict with motion2 being resolved by the agent) |
 | 8 | polish2 | template follow-ups (relocatable media, split slot marker, Replace media menu, hide placeholders) + QA lows (play/pause tooltip, snapping, track path, scene button) | merged — template media copied per project, split keeps slot on the left half, Replace media in clip menu, snapping slides flush, CLI paths absolute; open: play/pause tooltip + track path not checked on screen |
 | 8 | ml2 | CUDA runtime pack out of the box, SAM click-to-select object masks, BiRefNet object removal, matte cache limits | running (agent/ml2) |
 | 8 | gputex | shared GPU texture between engine and GPUI, readback as fallback (backlog 7) | running (agent/gputex) |
+| 8 | stable | flaky tests (templates LUT write race, lavapipe playback count), deterministic pitch-preserving audio on speed curves | running (agent/stable) |
 
 ## Backlog for the next waves (lead picks from the top)
 
