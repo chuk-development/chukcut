@@ -101,7 +101,7 @@ pub struct Editor {
     /// mistaken for the identical one before it.
     generation: u64,
 
-    frame: Option<Arc<RenderImage>>,
+    frame: Option<crate::player::Picture>,
     last_request: Option<(i64, (u32, u32), u64, bool)>,
     scale: f32,
 
@@ -267,7 +267,7 @@ impl Editor {
         changed |= self.poll_analysis(cx);
         changed |= self.poll_voiceover(cx);
         if let Some(frame) = self.player.take(self.clock.position()) {
-            if let Some(old) = self.frame.replace(frame.image) {
+            if let Some(crate::player::Picture::Image(old)) = self.frame.replace(frame.picture) {
                 // A frame is uploaded into the window's atlas when drawn; drop
                 // the old one or every frame of playback stays resident.
                 cx.drop_image(old, None);

@@ -1013,6 +1013,7 @@ dependencies = [
  "chukcut-engine",
  "futures-channel",
  "gpui-kit",
+ "gpui-pre-wgpu",
  "image",
  "parking_lot",
  "serde_json",

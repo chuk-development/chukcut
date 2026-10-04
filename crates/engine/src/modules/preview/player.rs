@@ -1,11 +1,18 @@
 //! The native player's render thread: "the project at this time, this big"
 //! in, BGRA frames ready for the UI out.
 //!
-//! The app shows these through GPUI, which draws with a wgpu device of its own,
-//! so every frame is read back to system memory and uploaded again on the other
-//! side (`docs/research/gpui-shared-texture.md` is what removing that takes).
-//! This module is everything about that path that can be made cheap without
-//! touching GPUI:
+//! The app shows these through GPUI, which draws with a wgpu device of its own.
+//! Two ways across, chosen per player ([`FramePlayer::use_shared_frames`]):
+//!
+//! - **Shared** ([`FramePixels::Shared`]): the frame stays in GPU memory that
+//!   is exported to GPUI's device (`render::shared_frame`); GPUI copies it into
+//!   a texture GPU-side. No readback, no upload, nothing per pixel on a CPU.
+//!   `docs/decisions/0027-preview-frames-shared-with-gpui.md`.
+//! - **Readback** ([`FramePixels::Bgra`]): the frame is read back to system
+//!   memory and GPUI uploads it again. The fallback wherever sharing is not
+//!   possible — not Vulkan, no external memory, GPUI on another GPU.
+//!
+//! Everything else here serves both:
 //!
 //! - **The swizzle and the row packing happen on the GPU**, and the readback is
 //!   asynchronous, through a ring of mapped buffers
@@ -29,11 +36,11 @@
 //!   arrived is still shown — showing nothing until the pointer stops would
 //!   freeze the picture during a drag.
 //!
-//! The engine has no UI dependency, so a frame is plain bytes; the app wraps
-//! them in a `RenderImage`.
+//! The engine has no UI dependency, so a frame is plain bytes or a plain
+//! description of exported memory; the app wraps either for GPUI.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -43,7 +50,11 @@ use parking_lot::{Condvar, Mutex};
 use super::clock::{frame_at, frame_time};
 use crate::modules::media::MediaSourceProvider;
 use crate::modules::project::{Micros, Project, SAMPLE_SLACK};
-use crate::modules::render::{BgraFrame, BgraReadback, Compositor, RenderContext, SourceProvider};
+use crate::modules::render::texture_pool::PooledTexture;
+use crate::modules::render::{
+    BgraReadback, Compositor, ReadbackStats, RenderContext, SharedFrame, SharedFrames,
+    SourceProvider,
+};
 
 /// How many frames playback renders ahead of the clock. Four is 133 ms at
 /// 30 fps: enough to ride out a slow frame (a GOP boundary, a title's first
@@ -83,8 +94,49 @@ pub struct PlayerFrame {
     pub generation: u64,
     pub width: u32,
     pub height: u32,
-    /// Tightly packed BGRA8 — what GPUI's `RenderImage` stores.
-    pub bgra: Vec<u8>,
+    pub pixels: FramePixels,
+}
+
+/// Where a frame's pixels are.
+pub enum FramePixels {
+    /// Tightly packed BGRA8 in system memory — what GPUI's `RenderImage`
+    /// stores.
+    Bgra(Vec<u8>),
+    /// BGRA8 in exported GPU memory. Holding it keeps the buffer from being
+    /// reused; drop it once the picture is replaced.
+    Shared(SharedFrame),
+}
+
+impl PlayerFrame {
+    /// The bytes, on the readback path.
+    pub fn bgra(&self) -> Option<&[u8]> {
+        match &self.pixels {
+            FramePixels::Bgra(bytes) => Some(bytes),
+            FramePixels::Shared(_) => None,
+        }
+    }
+}
+
+/// How frames reach the UI. See [`FramePlayer::use_shared_frames`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sharing {
+    /// Read back to system memory, as asked.
+    Readback,
+    /// In exported GPU memory.
+    Shared,
+    /// Sharing was asked for, and this device cannot export memory; frames
+    /// are read back.
+    Unavailable,
+}
+
+impl Sharing {
+    fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::Shared,
+            2 => Self::Unavailable,
+            _ => Self::Readback,
+        }
+    }
 }
 
 /// Counters for "is playback keeping up", cumulative since the player started.
@@ -107,6 +159,8 @@ pub struct PlayerStats {
     /// and copying it out.
     pub readback_wait_ms: f64,
     pub readback_copy_ms: f64,
+    /// Frames handed out in shared GPU memory rather than as bytes.
+    pub shared: u64,
 }
 
 struct Arrived {
@@ -126,6 +180,10 @@ struct Shared {
     stats: Mutex<PlayerStats>,
     /// Decode from proxies where they exist. See [`FramePlayer::use_proxies`].
     proxies: AtomicBool,
+    /// Share frames with the UI's device. See [`FramePlayer::use_shared_frames`].
+    share: AtomicBool,
+    /// What the render thread is actually doing, a [`Sharing`].
+    sharing: AtomicU8,
 }
 
 impl Shared {
@@ -251,6 +309,32 @@ impl FramePlayer {
         self.shared.notify();
     }
 
+    /// Hand frames out in exported GPU memory ([`FramePixels::Shared`]) instead
+    /// of reading them back. Takes effect with the next request and throws
+    /// away the frames rendered the other way. When the device cannot export
+    /// memory the player keeps reading back and [`Self::sharing`] says
+    /// [`Sharing::Unavailable`]; turning it off is how a consumer that cannot
+    /// import (GPUI on another GPU) falls back.
+    pub fn use_shared_frames(&self, on: bool) {
+        if self.shared.share.swap(on, Ordering::Relaxed) == on {
+            return;
+        }
+        // The current request again, under a new sequence number: the render
+        // thread adopts it, sees the changed key and renders the frame anew,
+        // so a paused preview is not left showing a frame nobody can draw.
+        let seq = self.shared.seq.fetch_add(1, Ordering::Relaxed) + 1;
+        let mut slot = self.shared.request.lock();
+        if let Some(arrived) = slot.as_mut() {
+            arrived.seq = seq;
+        }
+        self.shared.wake.notify_one();
+    }
+
+    /// How the frames being rendered now reach the UI.
+    pub fn sharing(&self) -> Sharing {
+        Sharing::from_u8(self.shared.sharing.load(Ordering::Relaxed))
+    }
+
     /// Why there is no picture, when the GPU could not be opened.
     pub fn failure(&self) -> Option<String> {
         self.shared.failure.lock().clone()
@@ -295,24 +379,131 @@ struct Key {
     /// Whether proxies are on, and how many the proxy queue has finished: a
     /// new proxy changes which file a clip decodes from.
     proxies: Option<u64>,
+    /// Frames go out shared rather than as bytes.
+    shared: bool,
 }
 
 impl Key {
-    fn of(request: &PlayerRequest, proxies: bool) -> Self {
+    fn of(request: &PlayerRequest, proxies: bool, shared: bool) -> Self {
         Self {
             generation: request.generation,
             size: request.size,
             project: Arc::as_ptr(&request.project) as usize,
             proxies: proxies.then(|| crate::modules::proxy::ProxyQueue::shared().generation()),
+            shared,
         }
     }
+}
+
+/// The two ways a composited frame leaves the render thread, behind one
+/// submit-and-collect shape.
+struct Output {
+    readback: BgraReadback<Tag>,
+    /// Made on the first request for sharing; `Err` once that failed, so it
+    /// is not retried every frame.
+    shared: Option<std::result::Result<SharedFrames<Tag>, ()>>,
+    /// Which of the two the ring is using now.
+    sharing: bool,
+}
+
+type Collected = (Tag, crate::modules::render::Result<(u32, u32, FramePixels)>);
+
+impl Output {
+    /// Switch to sharing or away from it. Answers whether frames are now
+    /// shared. The caller has discarded whatever was in flight.
+    fn set_sharing(&mut self, ctx: &Arc<RenderContext>, on: bool) -> bool {
+        if on && self.shared.is_none() {
+            self.shared = Some(SharedFrames::new(Arc::clone(ctx), READBACK_DEPTH).ok_or(()));
+            if matches!(self.shared, Some(Err(()))) {
+                tracing::info!("this device cannot share frames with the UI; reading them back");
+            }
+        }
+        self.sharing = on && matches!(self.shared, Some(Ok(_)));
+        self.sharing
+    }
+
+    fn shared(&mut self) -> Option<&mut SharedFrames<Tag>> {
+        match (&mut self.shared, self.sharing) {
+            (Some(Ok(shared)), true) => Some(shared),
+            _ => None,
+        }
+    }
+
+    fn in_flight(&self) -> usize {
+        match (&self.shared, self.sharing) {
+            (Some(Ok(shared)), true) => shared.in_flight(),
+            _ => self.readback.in_flight(),
+        }
+    }
+
+    fn has_room(&self) -> bool {
+        match (&self.shared, self.sharing) {
+            (Some(Ok(shared)), true) => shared.has_room(),
+            _ => self.readback.has_room(),
+        }
+    }
+
+    fn stats(&self) -> ReadbackStats {
+        match (&self.shared, self.sharing) {
+            (Some(Ok(shared)), true) => shared.stats(),
+            _ => self.readback.stats(),
+        }
+    }
+
+    fn submit(&mut self, target: &PooledTexture, tag: Tag) -> std::result::Result<(), Tag> {
+        match self.shared() {
+            Some(shared) => shared.submit(target, tag),
+            None => self.readback.submit(target, tag),
+        }
+    }
+
+    fn try_collect(&mut self) -> Option<Collected> {
+        match self.shared() {
+            Some(shared) => shared.try_collect().map(shared_pixels),
+            None => self.readback.try_collect().map(bgra_pixels),
+        }
+    }
+
+    fn collect_oldest(&mut self) -> Option<Collected> {
+        match self.shared() {
+            Some(shared) => shared.collect_oldest().map(shared_pixels),
+            None => self.readback.collect_oldest().map(bgra_pixels),
+        }
+    }
+
+    fn discard_all(&mut self) -> usize {
+        let mut thrown = self.readback.discard_all().len();
+        if let Some(Ok(shared)) = &mut self.shared {
+            thrown += shared.discard_all().len();
+        }
+        thrown
+    }
+}
+
+fn shared_pixels((tag, frame): (Tag, crate::modules::render::Result<SharedFrame>)) -> Collected {
+    (
+        tag,
+        frame.map(|frame| (frame.width, frame.height, FramePixels::Shared(frame))),
+    )
+}
+
+fn bgra_pixels(
+    (tag, frame): (
+        Tag,
+        crate::modules::render::Result<crate::modules::render::BgraFrame>,
+    ),
+) -> Collected {
+    (
+        tag,
+        frame.map(|frame| (frame.width, frame.height, FramePixels::Bgra(frame.data))),
+    )
 }
 
 struct Renderer {
     ctx: Arc<RenderContext>,
     shared: Arc<Shared>,
     compositor: Compositor,
-    readback: BgraReadback<Tag>,
+    output: Output,
     /// The provider and the material set it was built for. Rebuilt only when
     /// the files change, because it holds open decoders.
     sources: Option<(MaterialKey, Arc<MediaSourceProvider>)>,
@@ -331,7 +522,11 @@ impl Renderer {
     fn new(ctx: Arc<RenderContext>, shared: Arc<Shared>) -> Self {
         Self {
             compositor: Compositor::new(Arc::clone(&ctx)),
-            readback: BgraReadback::new(Arc::clone(&ctx), READBACK_DEPTH),
+            output: Output {
+                readback: BgraReadback::new(Arc::clone(&ctx), READBACK_DEPTH),
+                shared: None,
+                sharing: false,
+            },
             ahead: DecodeAhead::new(Arc::clone(&ctx)),
             ctx,
             shared,
@@ -349,7 +544,7 @@ impl Renderer {
             if self.shared.stop.load(Ordering::Acquire) {
                 return;
             }
-            while let Some((tag, frame)) = self.readback.try_collect() {
+            while let Some((tag, frame)) = self.output.try_collect() {
                 self.publish(tag, frame);
             }
             self.adopt_newest_request();
@@ -389,13 +584,26 @@ impl Renderer {
             self.discard_everything();
             self.cursor = None;
             self.prepare_sources(&request.project, files_changed, key.proxies.is_some());
+            let sharing = self.output.set_sharing(&self.ctx, key.shared);
+            self.shared.sharing.store(
+                match (key.shared, sharing) {
+                    (_, true) => 1,
+                    (true, false) => 2,
+                    (false, false) => 0,
+                },
+                Ordering::Relaxed,
+            );
             self.key = Some(key);
         }
         self.current = Some((request, at, seq));
     }
 
     fn key_of(&self, request: &PlayerRequest) -> Key {
-        Key::of(request, self.shared.proxies.load(Ordering::Relaxed))
+        // A device that cannot share keeps a key that says so, or every
+        // request would look like a change and throw the ring away.
+        let shared = self.shared.share.load(Ordering::Relaxed)
+            && !matches!(self.output.shared, Some(Err(())));
+        Key::of(request, self.shared.proxies.load(Ordering::Relaxed), shared)
     }
 
     /// Bring the provider up to date with `project`: rebuilt when the files
@@ -438,7 +646,11 @@ impl Renderer {
     /// Paused or scrubbing: render exactly the requested instant, once.
     fn still_step(&mut self, request: &PlayerRequest) {
         self.cursor = None;
-        let key = self.key_of(request);
+        // The key the request was adopted under, not one computed afresh: a
+        // flag flipped since (sharing, proxies) is the next adoption's to
+        // act on. Recomputing here rendered a frame the old way, marked it
+        // done the new way, and the adoption then threw it away.
+        let key = self.key.clone().unwrap_or_else(|| self.key_of(request));
         if self.still.as_ref() == Some(&(request.time, key.clone())) {
             self.idle();
             return;
@@ -474,7 +686,7 @@ impl Renderer {
         let provider = self.provider();
         provider.prefetch(&self.ctx, &request.project, request.time, request.size);
         self.render(request, request.time, &provider);
-        if let Some((tag, frame)) = self.readback.collect_oldest() {
+        if let Some((tag, frame)) = self.output.collect_oldest() {
             self.publish(tag, frame);
         }
         self.still = Some((request.time, key));
@@ -511,12 +723,12 @@ impl Renderer {
         };
         self.cursor = Some(cursor);
 
-        let queued = self.shared.ready.lock().len() + self.readback.in_flight();
+        let queued = self.shared.ready.lock().len() + self.output.in_flight();
         if queued >= READ_AHEAD || cursor > now + lead + READ_AHEAD as i64 {
             // Far enough ahead. Collect what the GPU has, or wait for the UI to
             // take a frame.
-            if self.readback.in_flight() > 0 {
-                if let Some((tag, frame)) = self.readback.collect_oldest() {
+            if self.output.in_flight() > 0 {
+                if let Some((tag, frame)) = self.output.collect_oldest() {
                     self.publish(tag, frame);
                 }
             } else {
@@ -554,8 +766,8 @@ impl Renderer {
                     return;
                 }
             };
-        if !self.readback.has_room() {
-            if let Some((tag, frame)) = self.readback.collect_oldest() {
+        if !self.output.has_room() {
+            if let Some((tag, frame)) = self.output.collect_oldest() {
                 self.publish(tag, frame);
             }
         }
@@ -564,14 +776,18 @@ impl Renderer {
             generation: request.generation,
             started,
         };
-        if self.readback.submit(&target, tag).is_err() {
-            tracing::warn!("the preview readback refused a frame");
+        if self.output.submit(&target, tag).is_err() {
+            tracing::warn!("the preview output refused a frame");
         }
         self.compositor.pool().release(target);
     }
 
-    fn publish(&mut self, tag: Tag, frame: crate::modules::render::Result<BgraFrame>) {
-        let frame = match frame {
+    fn publish(
+        &mut self,
+        tag: Tag,
+        frame: crate::modules::render::Result<(u32, u32, FramePixels)>,
+    ) {
+        let (width, height, pixels) = match frame {
             Ok(frame) => frame,
             Err(error) => {
                 tracing::warn!(%error, "preview readback failed");
@@ -581,7 +797,7 @@ impl Renderer {
         let elapsed = tag.started.elapsed().as_micros() as f64;
         self.latency = self.latency * 0.8 + elapsed * 0.2;
         let current = self.key.as_ref().map(|k| k.generation);
-        let stats = self.readback.stats();
+        let stats = self.output.stats();
         {
             let mut shared = self.shared.stats.lock();
             shared.rendered += 1;
@@ -589,6 +805,9 @@ impl Renderer {
             let frames = stats.frames.max(1) as f64;
             shared.readback_wait_ms = stats.wait_ns as f64 / frames / 1e6;
             shared.readback_copy_ms = stats.copy_ns as f64 / frames / 1e6;
+            if matches!(pixels, FramePixels::Shared(_)) {
+                shared.shared += 1;
+            }
             if current != Some(tag.generation) {
                 shared.discarded += 1;
                 return;
@@ -597,9 +816,9 @@ impl Renderer {
         let frame = PlayerFrame {
             time: tag.time,
             generation: tag.generation,
-            width: frame.width,
-            height: frame.height,
-            bgra: frame.data,
+            width,
+            height,
+            pixels,
         };
         let mut ready = self.shared.ready.lock();
         let at = ready.partition_point(|f| f.time < frame.time);
@@ -611,7 +830,7 @@ impl Renderer {
     }
 
     fn discard_in_flight(&mut self) {
-        let thrown = self.readback.discard_all().len() as u64;
+        let thrown = self.output.discard_all() as u64;
         if thrown > 0 {
             self.shared.stats.lock().discarded += thrown;
         }
@@ -833,15 +1052,83 @@ mod tests {
         let frame = wait_for(&player, 1_000_000).expect("a frame");
         assert_eq!(frame.time, 1_000_000 + SAMPLE_SLACK);
         assert_eq!((frame.width, frame.height), (160, 90));
-        assert_eq!(frame.bgra.len(), 160 * 90 * 4);
+        let bgra = frame.bgra().expect("bytes unless sharing was asked for");
+        assert_eq!(bgra.len(), 160 * 90 * 4);
         // The missing-media field is RGBA (122, 26, 26): as BGRA the red is
         // the third byte.
         let centre = ((45 * 160 + 80) * 4) as usize;
-        assert_eq!(
-            &frame.bgra[centre..centre + 4],
-            &[26, 26, 122, 255],
-            "BGRA order"
-        );
+        assert_eq!(&bgra[centre..centre + 4], &[26, 26, 122, 255], "BGRA order");
+        assert_eq!(player.sharing(), Sharing::Readback);
+    }
+
+    /// Copy a shared frame back out on the engine's device, tightly packed.
+    fn read_shared(ctx: &RenderContext, frame: &SharedFrame) -> Vec<u8> {
+        let bytes = u64::from(frame.bytes_per_row) * u64::from(frame.height);
+        let staging = ctx.device().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("test staging"),
+            size: bytes,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut encoder = ctx.device().create_command_encoder(&Default::default());
+        encoder.copy_buffer_to_buffer(frame.buffer.buffer(), 0, &staging, 0, bytes);
+        ctx.queue().submit(Some(encoder.finish()));
+        staging.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        ctx.device()
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("poll");
+        let view = staging.slice(..).get_mapped_range().expect("mapped");
+        view.chunks(frame.bytes_per_row as usize)
+            .flat_map(|row| row[..frame.width as usize * 4].to_vec())
+            .collect()
+    }
+
+    /// The shared path: same picture, no bytes in system memory. Skipped on a
+    /// device that cannot export memory, where the player says so and reads
+    /// back instead.
+    #[test]
+    fn a_player_asked_to_share_hands_out_the_same_picture_in_gpu_memory() {
+        let Some(ctx) = crate::modules::render::test_context() else {
+            return;
+        };
+        let player = FramePlayer::with_context(Arc::clone(&ctx));
+        player.use_shared_frames(true);
+        let project = project();
+        player.request(request(&project, 1_000_000, false));
+        let frame = wait_for(&player, 1_000_000).expect("a frame");
+        let FramePixels::Shared(shared) = &frame.pixels else {
+            assert_eq!(player.sharing(), Sharing::Unavailable);
+            assert_eq!(frame.bgra().map(<[u8]>::len), Some(160 * 90 * 4));
+            eprintln!("skipping: this device cannot share frames; the fallback read back");
+            return;
+        };
+        assert_eq!(player.sharing(), Sharing::Shared);
+        assert_eq!((shared.width, shared.height), (160, 90));
+        assert_eq!(shared.bytes_per_row, 768);
+        let bgra = read_shared(&ctx, shared);
+        let centre = ((45 * 160 + 80) * 4) as usize;
+        assert_eq!(&bgra[centre..centre + 4], &[26, 26, 122, 255], "BGRA order");
+        assert_eq!(player.stats().shared, 1);
+    }
+
+    /// Turning sharing off — what the app does when GPUI cannot import — goes
+    /// back to bytes with the next request, and the frames rendered shared are
+    /// not handed out after it.
+    #[test]
+    fn turning_sharing_off_falls_back_to_bytes() {
+        let Some(ctx) = crate::modules::render::test_context() else {
+            return;
+        };
+        let player = FramePlayer::with_context(ctx);
+        player.use_shared_frames(true);
+        let project = project();
+        player.request(request(&project, 0, false));
+        let _ = wait_for(&player, 0).expect("a frame");
+        player.use_shared_frames(false);
+        player.request(request(&project, 33_334, false));
+        let frame = wait_for(&player, 33_334).expect("a frame after the switch");
+        assert!(frame.bgra().is_some(), "bytes after sharing was turned off");
+        assert_eq!(player.sharing(), Sharing::Readback);
     }
 
     #[test]

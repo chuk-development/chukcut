@@ -68,6 +68,7 @@ pub mod lut;
 pub mod matte;
 pub mod nv12;
 pub mod readback;
+pub mod shared_frame;
 pub mod source;
 pub mod texture_pool;
 
@@ -80,6 +81,7 @@ pub use layout::{
 };
 pub use nv12::{Nv12Converter, Nv12Frame, Nv12Layout, Nv12PlaneWriter};
 pub use readback::{BgraFrame, BgraReadback, ReadbackStats};
+pub use shared_frame::{SharedBuffer, SharedFrame, SharedFrames};
 pub use source::{
     EmptySourceProvider, FrameGuard, SolidColorProvider, SolidSource, SourceFrame, SourceProvider,
     SourceRequest, YuvMatrix, YuvRange,

@@ -34,3 +34,9 @@ futures-channel = "0.3"
 
 [features]
 cuda = ["chukcut-engine/local-whisper-cuda"]
+
+[dev-dependencies]
+# The patched GPUI renderer's import (`vendor/README.md`), driven without a
+# window by the shared-preview tests in `src/player.rs`. The same crate the
+# app links through `gpui-kit`, so this adds no build.
+gpui-pre-wgpu = "=0.3.7"

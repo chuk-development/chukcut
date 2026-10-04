@@ -636,7 +636,7 @@ impl ExportDialog {
                     .bg(rgb(VIEWER))
                     .border_1()
                     .border_color(rgb(BORDER))
-                    .children(frame.map(|frame| img(frame).size_full()))
+                    .children(frame.map(|frame| frame.element()))
                     .child(
                         div()
                             .absolute()
