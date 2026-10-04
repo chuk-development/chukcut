@@ -240,7 +240,12 @@ fn a_typewriter_draws_less_of_the_title_while_it_types() {
     let sources = MediaSourceProvider::from_project(&p);
     let ink = |time: Micros| -> u64 {
         let f = c.render(&p, time, (640, 360), &sources).unwrap();
-        f.data.chunks_exact(4).map(|px| px[0] as u64).sum()
+        f.data
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|px| px[0] as u64)
+            .sum()
     };
     let resting = ink(3_000_000);
     if resting == 0 {

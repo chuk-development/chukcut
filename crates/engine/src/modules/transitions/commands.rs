@@ -44,7 +44,7 @@ pub fn transitions_add(
     kind: TransitionKind,
     duration: Option<Micros>,
 ) -> Result<EditResponse, String> {
-    apply(&state, |project| {
+    apply(state, |project| {
         edit::add_command(project, &segment_id, kind, duration)
     })
 }
@@ -65,14 +65,14 @@ pub fn transitions_remove(
     state: &Arc<AppState>,
     segment_id: String,
 ) -> Result<EditResponse, String> {
-    apply(&state, |project| edit::remove_command(project, &segment_id))
+    apply(state, |project| edit::remove_command(project, &segment_id))
 }
 pub fn transitions_retime(
     state: &Arc<AppState>,
     segment_id: String,
     duration: Micros,
 ) -> Result<EditResponse, String> {
-    apply(&state, |project| {
+    apply(state, |project| {
         edit::retime_command(project, &segment_id, duration)
     })
 }
@@ -84,7 +84,7 @@ pub fn transitions_set(
     segment_id: String,
     transition: TransitionMaterial,
 ) -> Result<EditResponse, String> {
-    apply(&state, move |project| {
+    apply(state, move |project| {
         edit::set_command(project, &segment_id, transition.clone())
     })
 }

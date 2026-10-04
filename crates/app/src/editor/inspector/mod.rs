@@ -335,6 +335,9 @@ impl Prop {
         5.0
     }
 
+    // `self` is the property and the argument the slider position: this is
+    // the inverse of `to_slider`, not a constructor.
+    #[allow(clippy::wrong_self_convention)]
     fn from_slider(self, position: f32) -> f32 {
         if self != Prop::Speed {
             return position;

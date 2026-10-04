@@ -58,11 +58,15 @@ assets/icons/         app icons
 Before calling anything done, and before every commit:
 
 ```bash
-cargo fmt --check
-cargo clippy --workspace --all-targets      # reported, not yet fatal
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings   # fatal in CI
 cargo test -p chukcut-engine -j 4
+cargo test -p chukcut -p chukcut-cli -p chukcut-ml-worker
 cargo build -p chukcut
 ```
+
+Clippy has no backlog: a new warning is fixed, or that one lint is allowed on
+that one item with a comment that says why (`#[allow(clippy::...)]`).
 
 ## Git: commit and push after every change
 

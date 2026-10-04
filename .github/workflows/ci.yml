@@ -21,7 +21,8 @@ env:
 # tests), not the sum:
 #
 #   packaging  validates the desktop files and the shell scripts (seconds)
-#   test       fmt, clippy, the engine and app tests (debug)
+#   test       fmt, clippy, the engine tests on lavapipe, the app, CLI and
+#              ML worker tests (debug)
 #   release    the release build users get, packed as a tarball artifact
 #
 # The system packages are one list, in one place: .github/apt-packages.txt.
@@ -59,10 +60,14 @@ jobs:
       - name: Free disk space
         run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
 
+      # The build set, plus what only the tests use: Mesa's software Vulkan
+      # driver (lavapipe) for the GPU tests, and the ffmpeg CLI that generates
+      # the engine's and the CLI's test media. Without ffmpeg those tests skip.
       - name: System dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y $(grep -v '^#' .github/apt-packages.txt)
+          sudo apt-get install --no-install-recommends -y $(grep -v '^#' .github/apt-packages.txt) \
+            mesa-vulkan-drivers ffmpeg
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -75,31 +80,45 @@ jobs:
       - name: Formatting
         run: cargo fmt --all --check
 
-      # Reported, not fatal: clippy fails the step only on deny-level lints.
-      # There is a backlog of style warnings; add `-D warnings` once it is
-      # cleared, not before, or people learn to ignore a red tick.
+      # Fatal: the backlog is cleared, so any warning is new. Fix it, or
+      # allow that one lint on that one item with a comment saying why.
+      # The toolchain is `stable`, so a Rust release can bring a new lint
+      # that turns this red without a change here.
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -j 2
+        run: cargo clippy --workspace --all-targets -j 2 -- -D warnings
 
-      # The runner has no GPU. Tests that need one skip with a printed reason
-      # (crates/engine/tests/support, `require_gpu!`), as do tests that need
-      # the ffmpeg CLI to generate fixtures. The variables below make "no
-      # adapter" certain: without them, wgpu could find a software Vulkan or
-      # GL driver on the image and run the GPU tests on a configuration
-      # nobody has checked. The GPU suite runs on developer machines;
-      # tests/every_card.rs is the acceptance test there.
+      # The runner has no GPU, so the GPU tests run on lavapipe, Mesa's
+      # software Vulkan driver: the second of the two adapters
+      # scripts/gpu-tests.sh checks on developer machines. VK_ICD_FILENAMES
+      # pins the driver, and CHUKCUT_TEST_ADAPTER makes a library test that
+      # got any other adapter fail instead of passing on the wrong one
+      # (render::test_context). There is no VAAPI or NVDEC device, so the
+      # hardware decode and encode paths skip or fall back to software;
+      # tests/every_card.rs is the acceptance test for them, on real cards.
       #
       # `-j 2` limits parallel rustc jobs: linking the integration-test
       # binaries in parallel is what runs a 16 GB runner out of memory.
-      - name: Engine tests
+      - name: Engine tests (lavapipe)
         env:
-          VK_ICD_FILENAMES: /nonexistent.json
-          VK_DRIVER_FILES: /nonexistent.json
-          __EGL_VENDOR_LIBRARY_FILENAMES: /nonexistent.json
+          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.json
+          CHUKCUT_TEST_ADAPTER: llvmpipe
         run: cargo test -p chukcut-engine -j 2
 
       - name: App tests
         run: cargo test -p chukcut -j 2
+
+      # The real chukcut-cli binary against generated media, the MCP server,
+      # and tests/reachability.rs: every engine command is reachable from
+      # the CLI or allowlisted with a reason.
+      - name: CLI tests
+        env:
+          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.json
+        run: cargo test -p chukcut-cli -j 2
+
+      # The protocol, the model registry and the pre- and post-processing.
+      # Nothing here loads ONNX Runtime, so no model or GPU is needed.
+      - name: ML worker tests
+        run: cargo test -p chukcut-ml-worker -j 2
 
   release:
     name: Release build

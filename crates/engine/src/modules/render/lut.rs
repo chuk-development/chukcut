@@ -91,7 +91,7 @@ impl Cube {
         }
         let at = |r: usize, g: usize, b: usize| self.data[r + g * n + b * n * n];
         let mut out = [0f32; 3];
-        for c in 0..3 {
+        for (c, out) in out.iter_mut().enumerate() {
             let mut accum = 0f32;
             for corner in 0..8usize {
                 let (dr, dg, db) = (corner & 1, (corner >> 1) & 1, (corner >> 2) & 1);
@@ -100,7 +100,7 @@ impl Cube {
                     * (if db == 1 { t[2] } else { 1.0 - t[2] });
                 accum += weight * at(base[0] + dr, base[1] + dg, base[2] + db)[c];
             }
-            out[c] = accum;
+            *out = accum;
         }
         out
     }

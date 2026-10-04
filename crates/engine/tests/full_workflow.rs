@@ -427,7 +427,9 @@ fn frame_at(file: &Path, seconds: f64, (w, h): (u32, u32)) -> Vec<u8> {
 
 fn magenta_pixels(frame: &[u8]) -> usize {
     frame
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .filter(|p| p[0] > 180 && p[1] < 90 && p[2] > 180)
         .count()
 }
@@ -890,7 +892,9 @@ fn a_whole_session_through_the_command_layer() {
         // spoken: yellow pixels in the lower part of the frame.
         let caption = frame_at(&output, 1.2, canvas);
         let yellow = caption[(w * h * 3 / 2) as usize..]
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .filter(|p| p[0] > 200 && p[1] > 160 && p[2] < 90)
             .count();
         assert!(yellow > 200, "{label}: no karaoke highlight ({yellow} px)");
@@ -905,7 +909,7 @@ fn a_whole_session_through_the_command_layer() {
             let frame = frame_at(&output, at, canvas);
             let centre = |hit: &dyn Fn(&[u8]) -> bool| {
                 let (mut sx, mut sy, mut n) = (0u64, 0u64, 0u64);
-                for (i, p) in frame.chunks_exact(3).enumerate() {
+                for (i, p) in frame.as_chunks::<3>().0.iter().enumerate() {
                     if hit(p) {
                         sx += (i as u32 % w) as u64;
                         sy += (i as u32 / w) as u64;

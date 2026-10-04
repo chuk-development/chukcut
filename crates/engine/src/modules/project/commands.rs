@@ -519,7 +519,7 @@ pub fn project_get(state: &Arc<AppState>) -> Result<Option<Project>, String> {
     if WORKING_COPY_CONSIDERED.swap(true, Ordering::SeqCst) {
         return Ok(None);
     }
-    Ok(restore_working_copy(&state))
+    Ok(restore_working_copy(state))
 }
 
 /// Load the autosaved document into the app, if there is one.

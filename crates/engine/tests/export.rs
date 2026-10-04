@@ -121,7 +121,7 @@ fn luma_psnr_rgba(a: &[u8], b: &[u8]) -> f64 {
     assert_eq!(a.len(), b.len(), "frames must be the same size to compare");
     let mut sum = 0.0f64;
     let mut count = 0.0f64;
-    for (pa, pb) in a.chunks_exact(4).zip(b.chunks_exact(4)) {
+    for (pa, pb) in a.as_chunks::<4>().0.iter().zip(b.as_chunks::<4>().0) {
         // BT.601 luma from RGB, the same weights the counter fixture uses.
         let ya = 0.299 * pa[0] as f64 + 0.587 * pa[1] as f64 + 0.114 * pa[2] as f64;
         let yb = 0.299 * pb[0] as f64 + 0.587 * pb[1] as f64 + 0.114 * pb[2] as f64;

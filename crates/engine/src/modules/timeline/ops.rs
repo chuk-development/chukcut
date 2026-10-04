@@ -2596,8 +2596,10 @@ mod tests {
         // failed to load forever after with "invalid type: null, expected f32".
         let (mut project, track_id, segment_id) = project_with_clip();
 
-        let mut transform = Transform::default();
-        transform.opacity = f32::NAN;
+        let transform = Transform {
+            opacity: f32::NAN,
+            ..Default::default()
+        };
         let error = EditCommand::SetTransform {
             segment_id: segment_id.clone(),
             before: Transform::default(),

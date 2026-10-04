@@ -422,9 +422,12 @@ mod tests {
         assert!(!grade.is_identity());
     }
 
+    /// One control moved away from its neutral value.
+    type Move = Box<dyn Fn(&mut Grade)>;
+
     #[test]
     fn every_control_breaks_identity() {
-        let moved: Vec<Box<dyn Fn(&mut Grade)>> = vec![
+        let moved: Vec<Move> = vec![
             Box::new(|g| g.exposure = 0.1),
             Box::new(|g| g.tint = 0.1),
             Box::new(|g| g.highlights = 0.1),
@@ -466,8 +469,10 @@ mod tests {
 
     #[test]
     fn normalising_clamps_and_keeps_the_wheel_puck_on_the_wheel() {
-        let mut g = Grade::default();
-        g.tint = 3.0;
+        let mut g = Grade {
+            tint: 3.0,
+            ..Default::default()
+        };
         g.wheels.gain = Wheel {
             x: 3.0,
             y: 4.0,

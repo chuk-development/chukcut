@@ -951,6 +951,7 @@ impl Compositor {
     ///
     /// Returns once the GPU has finished, which is the only synchronisation the
     /// encoder on the other side can be given.
+    #[allow(clippy::too_many_arguments)]
     pub fn render_nv12_into_planes(
         &self,
         project: &Project,
@@ -3820,10 +3821,13 @@ mod tests {
         project
     }
 
+    /// A name, a source, and how to read a rendered pixel back into a region.
+    type SplitCase = (&'static str, TestSource, fn([u8; 4]) -> Region);
+
     /// The two split sources and how to read a rendered pixel back into a
     /// [`Region`]. Red|blue for the RGBA path; white|black NV12 for the
     /// hardware path.
-    fn split_cases() -> Vec<(&'static str, TestSource, fn([u8; 4]) -> Region)> {
+    fn split_cases() -> Vec<SplitCase> {
         fn classify_rgba(p: [u8; 4]) -> Region {
             match p {
                 [r, _, b, _] if r > 200 && b < 50 => Region::Left,

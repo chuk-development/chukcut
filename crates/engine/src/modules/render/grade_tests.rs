@@ -120,17 +120,23 @@ fn every_per_pixel_stage_matches_the_cpu_reference() {
         return;
     };
     let mut cases: Vec<(&str, [f32; 4], Grade)> = Vec::new();
-    let mut g = Grade::default();
-    g.exposure = 0.7;
+    let g = Grade {
+        exposure: 0.7,
+        ..Default::default()
+    };
     cases.push(("exposure", [0.0, 1.0, 1.0, 0.0], g));
-    let mut g = Grade::default();
-    g.tint = -0.6;
+    let g = Grade {
+        tint: -0.6,
+        ..Default::default()
+    };
     cases.push(("tint", [0.0, 1.0, 1.0, 0.0], g));
-    let mut g = Grade::default();
-    g.highlights = -0.5;
-    g.shadows = 0.6;
-    g.whites = 0.3;
-    g.blacks = -0.2;
+    let g = Grade {
+        highlights: -0.5,
+        shadows: 0.6,
+        whites: 0.3,
+        blacks: -0.2,
+        ..Default::default()
+    };
     cases.push(("tone", [0.0, 1.0, 1.0, 0.0], g));
     let mut g = Grade::default();
     g.wheels.lift = Wheel { x: 0.4, y: -0.3, luma: 0.1 };
@@ -147,16 +153,20 @@ fn every_per_pixel_stage_matches_the_cpu_reference() {
         };
     }
     cases.push(("hsl", [0.0, 1.0, 1.0, 0.0], g));
-    let mut g = Grade::default();
-    g.vibrance = 0.8;
+    let g = Grade {
+        vibrance: 0.8,
+        ..Default::default()
+    };
     cases.push(("vibrance", [0.0, 1.0, 1.0, 0.0], g));
     let mut g = Grade::default();
     g.curves.master = vec![[0.0, 0.0], [0.25, 0.15], [0.75, 0.85], [1.0, 1.0]];
     g.curves.red = vec![[0.0, 0.1], [0.5, 0.4], [1.0, 1.0]];
     g.curves.blue = vec![[0.0, 0.0], [1.0, 0.8]];
     cases.push(("curves", [0.0, 1.0, 1.0, 0.0], g));
-    let mut g = Grade::default();
-    g.fade = 0.7;
+    let g = Grade {
+        fade: 0.7,
+        ..Default::default()
+    };
     cases.push(("fade", [0.0, 1.0, 1.0, 0.0], g));
 
     // Everything at once, over the original sliders: the order matters here,
@@ -250,8 +260,10 @@ fn grain_is_deterministic_per_frame_and_keeps_the_mean() {
     let provider = MixedProvider::default().with("clip", TestSource::Rgba([128, 128, 128, 255], 640, 480));
     let base = frame(&c, &split_project("clip"), 0, &provider);
     let mut project = split_project("clip");
-    let mut g = Grade::default();
-    g.grain = 1.0;
+    let g = Grade {
+        grain: 1.0,
+        ..Default::default()
+    };
     attach(&mut project, [0.0, 1.0, 1.0, 0.0], g, None);
 
     let a = frame(&c, &project, 40_000, &provider);
@@ -280,9 +292,11 @@ fn sharpen_and_clarity_act_on_edges_and_leave_flat_areas() {
     let flat = MixedProvider::default().with("clip", TestSource::Rgba([90, 140, 200, 255], 640, 480));
     let base = frame(&c, &split_project("clip"), 0, &flat);
     let mut project = split_project("clip");
-    let mut g = Grade::default();
-    g.sharpen = 1.0;
-    g.clarity = 1.0;
+    let g = Grade {
+        sharpen: 1.0,
+        clarity: 1.0,
+        ..Default::default()
+    };
     attach(&mut project, [0.0, 1.0, 1.0, 0.0], g, None);
     let graded = frame(&c, &project, 0, &flat);
     for (x, y) in [(320, 240), (10, 10), (600, 400)] {
@@ -299,8 +313,10 @@ fn sharpen_and_clarity_act_on_edges_and_leave_flat_areas() {
         let provider = MixedProvider::default().with("clip", source);
         let base = frame(&c, &split_project("clip"), 0, &provider);
         let mut project = split_project("clip");
-        let mut g = Grade::default();
-        g.sharpen = 1.0;
+        let g = Grade {
+            sharpen: 1.0,
+            ..Default::default()
+        };
         attach(&mut project, [0.0, 1.0, 1.0, 0.0], g, None);
         let sharp = frame(&c, &project, 0, &provider);
         let (dark, bright) = (base.pixel(319, 240)[1], base.pixel(320, 240)[1]);
@@ -308,8 +324,10 @@ fn sharpen_and_clarity_act_on_edges_and_leave_flat_areas() {
         assert!(sharp.pixel(320, 240)[1] > bright, "{name}: the bright side did not brighten");
         assert_eq!(sharp.pixel(100, 240), base.pixel(100, 240), "{name}: far from the edge moved");
 
-        let mut g = Grade::default();
-        g.clarity = 1.0;
+        let g = Grade {
+            clarity: 1.0,
+            ..Default::default()
+        };
         attach(&mut project, [0.0, 1.0, 1.0, 0.0], g, None);
         let clear = frame(&c, &project, 0, &provider);
         // Within the ring radius of the edge, local contrast grows.
@@ -379,9 +397,11 @@ fn known_luts_match_the_cpu_reference() {
         ("cube", write_lut("known-cube", &cube_text), crate::modules::render::lut::parse(&cube_text).unwrap()),
         ("table", write_lut("known-table", &table_text), crate::modules::render::lut::parse(&table_text).unwrap()),
     ];
-    let mut grade = Grade::default();
-    grade.fade = 0.2;
-    grade.tint = 0.1;
+    let grade = Grade {
+        fade: 0.2,
+        tint: 0.1,
+        ..Default::default()
+    };
     for (source_name, source) in sources() {
         let provider = MixedProvider::default().with("clip", source);
         let input = rgb(frame(&c, &split_project("clip"), 0, &provider).pixel(320, 240));
@@ -417,16 +437,18 @@ fn the_preview_and_the_export_agree_on_a_fully_graded_frame() {
         "parity-table",
         &crate::modules::render::lut::fixtures::table_text(64, |x| [x.powf(0.8), x, x.powf(1.2)]),
     );
-    let mut g = Grade::default();
-    g.exposure = 0.3;
-    g.tint = 0.2;
-    g.highlights = -0.3;
-    g.shadows = 0.3;
-    g.whites = 0.1;
-    g.blacks = 0.1;
-    g.vibrance = 0.4;
-    g.sharpen = 0.5;
-    g.clarity = 0.4;
+    let mut g = Grade {
+        exposure: 0.3,
+        tint: 0.2,
+        highlights: -0.3,
+        shadows: 0.3,
+        whites: 0.1,
+        blacks: 0.1,
+        vibrance: 0.4,
+        sharpen: 0.5,
+        clarity: 0.4,
+        ..Default::default()
+    };
     g.vignette.amount = 0.5;
     g.grain = 0.3;
     g.fade = 0.1;

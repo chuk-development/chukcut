@@ -706,9 +706,11 @@ mod tests {
 
     #[test]
     fn baked_curves_match_the_exact_cubic() {
-        let mut curves = Curves::default();
-        curves.master = vec![[0.0, 0.05], [0.3, 0.2], [0.6, 0.75], [1.0, 0.95]];
-        curves.red = vec![[0.0, 0.0], [0.5, 0.6], [1.0, 1.0]];
+        let curves = Curves {
+            master: vec![[0.0, 0.05], [0.3, 0.2], [0.6, 0.75], [1.0, 0.95]],
+            red: vec![[0.0, 0.0], [0.5, 0.6], [1.0, 1.0]],
+            ..Default::default()
+        };
         let table = bake_curves(&curves);
         let mut worst = 0f32;
         for i in 0..=4000 {
@@ -760,18 +762,24 @@ mod tests {
         // Identity in, identity out.
         assert_eq!(run(&Grade::default(), [0.2, 0.4, 0.6]), [0.2, 0.4, 0.6]);
 
-        let mut g = Grade::default();
-        g.tint = 1.0;
+        let g = Grade {
+            tint: 1.0,
+            ..Default::default()
+        };
         let out = run(&g, grey);
         assert!(out[1] < 0.5 && out[0] > 0.5, "tint +1 is magenta: {out:?}");
 
-        let mut g = Grade::default();
-        g.shadows = 1.0;
+        let g = Grade {
+            shadows: 1.0,
+            ..Default::default()
+        };
         assert!(run(&g, [0.1; 3])[0] > 0.1 + 0.2, "shadows lift the darks");
         assert!(run(&g, [0.95; 3])[0] < 0.96, "and leave the brights");
 
-        let mut g = Grade::default();
-        g.blacks = -1.0;
+        let g = Grade {
+            blacks: -1.0,
+            ..Default::default()
+        };
         assert_eq!(run(&g, [0.2; 3])[0], 0.0, "crushed blacks clip");
 
         // Greys carry no hue: HSL leaves them exactly alone.
@@ -798,13 +806,17 @@ mod tests {
         assert!(dark[0] > dark[1] && dark[0] > dark[2], "{dark:?}");
         assert_eq!(run(&g, [1.0; 3]), [1.0; 3]);
 
-        let mut g = Grade::default();
-        g.fade = 1.0;
+        let g = Grade {
+            fade: 1.0,
+            ..Default::default()
+        };
         let black = run(&g, [0.0; 3]);
         assert!((black[0] - FADE_LIFT).abs() < 1e-6);
 
-        let mut g = Grade::default();
-        g.vibrance = 1.0;
+        let g = Grade {
+            vibrance: 1.0,
+            ..Default::default()
+        };
         let dull = run(&g, [0.5, 0.45, 0.4]);
         let vivid = run(&g, [1.0, 0.0, 0.0]);
         assert!(
