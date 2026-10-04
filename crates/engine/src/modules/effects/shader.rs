@@ -129,11 +129,33 @@ pub struct CompiledShader {
     /// The 450-core source, kept because a validation failure downstream is
     /// nearly unreadable without it.
     pub rewritten: String,
+    /// The fragment shader writes premultiplied colour
+    /// ([`glsl::premultiply_output`]); its pipeline must blend with `ONE`.
+    pub premultiplied: bool,
 }
 
 /// Compile one GLSL ES shader all the way to WGSL.
 pub fn compile(source: &str, stage: Stage, name: &str) -> Result<CompiledShader> {
-    let rewritten = glsl::rewrite(source, stage);
+    compile_with(source, stage, name, false)
+}
+
+/// [`compile`], and with `premultiply` a fragment shader that writes
+/// premultiplied colour when it has an output to change. `premultiplied`
+/// on the result says whether it does.
+pub fn compile_with(
+    source: &str,
+    stage: Stage,
+    name: &str,
+    premultiply: bool,
+) -> Result<CompiledShader> {
+    let mut rewritten = glsl::rewrite(source, stage);
+    let mut premultiplied = false;
+    if premultiply && stage == Stage::Fragment {
+        if let Some(wrapped) = glsl::premultiply_output(&rewritten.source) {
+            rewritten.source = wrapped;
+            premultiplied = true;
+        }
+    }
     let spirv = to_spirv(&rewritten.source, stage, name)?;
 
     let mut corrections: Option<spirv_webgpu_transform::CorrectionMap> = None;
@@ -181,6 +203,7 @@ pub fn compile(source: &str, stage: Stage, name: &str) -> Result<CompiledShader>
         layout,
         vertex_inputs,
         rewritten: rewritten.source,
+        premultiplied,
     })
 }
 

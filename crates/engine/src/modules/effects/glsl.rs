@@ -450,9 +450,107 @@ pub fn rewrite(source: &str, stage: Stage) -> Rewritten {
     }
 }
 
+/// The name of the colour output at location 0 of rewritten 450 source:
+/// `chukcut_FragColor` or `chukcut_FragData0` for ES 1.0, or the shader's own
+/// `out vec4` for ES 3.0 (the one at location 0, else the first declared).
+fn first_output(source: &str) -> Option<String> {
+    let mut first = None;
+    for line in source.lines() {
+        let line = line.trim();
+        let (location, rest) = match line.strip_prefix("layout") {
+            Some(rest) => {
+                let rest = rest.trim_start();
+                let Some(close) = rest.find(')') else {
+                    continue;
+                };
+                let qualifier = rest[..close].trim_start_matches('(');
+                let location = qualifier
+                    .split(',')
+                    .find_map(|q| q.trim().strip_prefix("location"))
+                    .and_then(|v| v.trim().trim_start_matches('=').trim().parse::<u32>().ok());
+                (location, rest[close + 1..].trim())
+            }
+            None => (None, line),
+        };
+        // `out vec4 name;` at file scope; a function's `out vec4` parameter
+        // has a parenthesis on the line and no `;` of its own.
+        let Some(decl) = rest.strip_prefix("out ") else {
+            continue;
+        };
+        let decl = decl.trim();
+        let Some(name) = decl.strip_prefix("vec4 ") else {
+            continue;
+        };
+        let Some(name) = name.trim().strip_suffix(';') else {
+            continue;
+        };
+        let name = name.trim();
+        if name.is_empty() || !name.bytes().all(is_ident_char) {
+            continue;
+        }
+        if location == Some(0) {
+            return Some(name.to_string());
+        }
+        if first.is_none() {
+            first = Some(name.to_string());
+        }
+    }
+    first
+}
+
+/// Make a fragment shader write premultiplied colour: its `main` is renamed
+/// and a new `main` calls it and multiplies the location-0 output's colour
+/// by its alpha. `None` when the source has no colour output to change.
+///
+/// For a pass whose package blends `SRC_ALPHA, ...`. The sum `rgb * a +
+/// dst * f` is the same when the multiply happens here and the pipeline's
+/// source factor becomes `ONE`, but here it happens in 32-bit float. A
+/// blender may round its factors to the target's precision first: NVIDIA
+/// rounds the source alpha of an `Rgba8UnormSrgb` target to 1/255, which
+/// turns faint alpha into visible steps (`docs/STATUS.md`, d9d86dd).
+pub fn premultiply_output(source: &str) -> Option<String> {
+    let output = first_output(source)?;
+    if !contains_ident(source, "main") {
+        return None;
+    }
+    let mut out = replace_ident(source, "main", "chukcut_effect_main");
+    out.push_str(&format!(
+        "\nvoid main()\n{{\n    chukcut_effect_main();\n    {output}.rgb *= {output}.a;\n}}\n"
+    ));
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn premultiplying_wraps_main_and_scales_the_es1_output() {
+        let out = rewrite(ES1, Stage::Fragment);
+        let wrapped = premultiply_output(&out.source).unwrap();
+        assert!(wrapped.contains("void chukcut_effect_main()"));
+        assert!(wrapped.contains("chukcut_FragColor.rgb *= chukcut_FragColor.a;"));
+        assert_eq!(wrapped.matches("void main()").count(), 1);
+    }
+
+    #[test]
+    fn premultiplying_finds_an_es3_output_by_its_location() {
+        let source = "#version 300 es\nprecision highp float;\nout vec4 glow;\nlayout(location = 0) out vec4 colour;\nvoid shade(out vec4 c) { c = vec4(1.0); }\nvoid main() { shade(colour); glow = colour; }\n";
+        let out = rewrite(source, Stage::Fragment);
+        let wrapped = premultiply_output(&out.source).unwrap();
+        assert!(wrapped.contains("colour.rgb *= colour.a;"), "{wrapped}");
+        // Without a location the first declared output is the one.
+        let first =
+            "#version 300 es\nout vec4 fragColor;\nvoid main() { fragColor = vec4(1.0); }\n";
+        let wrapped = premultiply_output(&rewrite(first, Stage::Fragment).source).unwrap();
+        assert!(wrapped.contains("fragColor.rgb *= fragColor.a;"));
+    }
+
+    #[test]
+    fn a_shader_without_a_colour_output_is_left_alone() {
+        let out = rewrite("void main() {}\n", Stage::Fragment);
+        assert!(premultiply_output(&out.source).is_none());
+    }
 
     const ES1: &str = r#"
 // a comment mentioning varying and texture2D, which must survive untouched

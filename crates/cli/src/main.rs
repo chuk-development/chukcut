@@ -207,6 +207,10 @@ enum Command {
     /// Project templates: list, make a project from one, save one, fill slots.
     #[command(subcommand)]
     Template(TemplateCommand),
+    #[command(flatten)]
+    Clip(ops::clip::ClipCommand),
+    #[command(flatten)]
+    Library(ops::library::LibraryCommand),
     /// Run a JSON list of operations against one project, with one undo history.
     Batch(BatchArgs),
     /// List effects, audio effects, transitions, animations, grade controls, presets, encoders, models, LUTs or fonts.
@@ -251,6 +255,8 @@ enum EffectCommand {
     Set(On<EffectSetArgs>),
     /// Take an effect off a clip.
     Remove(On<EffectRemoveArgs>),
+    #[command(flatten)]
+    More(ops::clip::EffectMoreCommand),
 }
 
 #[derive(Subcommand)]
@@ -279,6 +285,8 @@ enum TitleCommand {
     Position(On<TitlePositionArgs>),
     /// Copy a title with its own words and style.
     Duplicate(On<TitleDuplicateArgs>),
+    #[command(flatten)]
+    More(ops::clip::TitleMoreCommand),
 }
 
 #[derive(Subcommand)]
@@ -293,6 +301,8 @@ enum CaptionsCommand {
     Style(On<CaptionsStyleArgs>),
     /// List the captions.
     List(On<CaptionsListArgs>),
+    #[command(flatten)]
+    Edit(ops::caption_edit::CaptionsEditCommand),
 }
 
 #[derive(Subcommand)]
@@ -309,6 +319,8 @@ enum TransitionCommand {
     Add(On<TransitionAddArgs>),
     /// Remove the transition at the start of a clip.
     Remove(On<TransitionRemoveArgs>),
+    #[command(flatten)]
+    More(ops::clip::TransitionMoreCommand),
 }
 
 #[derive(Subcommand)]
@@ -375,6 +387,8 @@ enum CloudCommand {
     StockSearch(On<StockSearchArgs>),
     /// Download a stock result and import it.
     StockDownload(On<StockDownloadArgs>),
+    #[command(flatten)]
+    More(ops::cloud_tools::CloudMoreCommand),
 }
 
 // Parsed once per process; the size difference costs nothing.
@@ -638,6 +652,13 @@ fn dispatch(command: Command, dry: bool, ctx: &Ctx) -> CliResult<(&'static str, 
         Command::Template(TemplateCommand::Delete(args)) => {
             Ok(("template_delete", args.run()?, false))
         }
+        Command::Clip(c) => c.dispatch(dry, ctx),
+        Command::Library(c) => c.dispatch(dry, ctx),
+        Command::Effect(EffectCommand::More(c)) => c.dispatch(dry, ctx),
+        Command::Title(TitleCommand::More(c)) => c.dispatch(dry, ctx),
+        Command::Captions(CaptionsCommand::Edit(c)) => c.dispatch(dry, ctx),
+        Command::Transition(TransitionCommand::More(c)) => c.dispatch(dry, ctx),
+        Command::Cloud(CloudCommand::More(c)) => c.dispatch(dry, ctx),
         Command::Catalog(args) => Ok(("catalog", args.run()?, false)),
         Command::Batch(args) => {
             let raw = read_input(&args.file)?;

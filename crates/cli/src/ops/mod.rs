@@ -10,10 +10,14 @@
 pub mod analysis;
 pub mod audio;
 pub mod audiofx;
+pub mod caption_edit;
+pub mod clip;
 pub mod cloud;
+pub mod cloud_tools;
 pub mod delivery;
 pub mod frame;
 pub mod layout;
+pub mod library;
 pub mod look;
 pub mod markers;
 pub mod mask;
@@ -252,6 +256,32 @@ operations!(
     template::TemplateSaveArgs,
     template::TemplateReplaceArgs,
     template::TemplateSlotsArgs,
+    caption_edit::CaptionsAddArgs,
+    caption_edit::CaptionsTextArgs,
+    caption_edit::CaptionsSplitArgs,
+    caption_edit::CaptionsMergeArgs,
+    caption_edit::CaptionsClearArgs,
+    caption_edit::CaptionsRegroupArgs,
+    clip::RenameArgs,
+    clip::LinkArgs,
+    clip::UnlinkArgs,
+    clip::PasteAttributesArgs,
+    clip::GradeToAllArgs,
+    clip::LookArgs,
+    clip::EffectMoveArgs,
+    clip::EffectResetArgs,
+    clip::EffectKeyframeArgs,
+    clip::TransitionSetArgs,
+    clip::TitleTextArgs,
+    clip::TitleFontArgs,
+    clip::MaskMoveArgs,
+    clip::LaneAddArgs,
+    library::StickerArgs,
+    library::MusicArgs,
+    library::SfxArgs,
+    cloud_tools::SoundArgs,
+    cloud_tools::FalArgs,
+    cloud_tools::CreditsArgs,
     sequence::TimelineListArgs,
     sequence::TimelineNewArgs,
     sequence::TimelineRenameArgs,

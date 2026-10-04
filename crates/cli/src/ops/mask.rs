@@ -20,11 +20,7 @@ use crate::session::Session;
 use crate::values::{hex, parse_assignment, parse_color, Time};
 
 fn material(session: &Session, segment_id: &str) -> CompositingMaterial {
-    session.with(|p| {
-        p.segment(segment_id)
-            .and_then(|(_, s)| p.materials.compositing_of(s).cloned())
-            .unwrap_or_default()
-    })
+    compositing::compositing_get(&session.state, segment_id.to_string()).unwrap_or_default()
 }
 
 /// The masks, key and blend mode of a clip, as a script reads them back.
@@ -86,7 +82,7 @@ fn op_named(name: &str) -> CliResult<MaskOp> {
 }
 
 /// A mask by index (0 is the first) or id.
-fn mask_ref(m: &CompositingMaterial, reference: &str) -> CliResult<String> {
+pub(crate) fn mask_ref(m: &CompositingMaterial, reference: &str) -> CliResult<String> {
     let reference = reference.trim();
     if let Some(found) = m.masks.iter().find(|mask| mask.id == reference) {
         return Ok(found.id.clone());
