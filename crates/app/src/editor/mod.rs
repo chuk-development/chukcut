@@ -277,7 +277,7 @@ impl Editor {
         changed |= self.poll_analysis(cx);
         changed |= self.poll_landmarks();
         changed |= self.poll_voiceover(cx);
-        changed |= self.poll_prepare();
+        changed |= self.poll_prepare(cx);
         if let Some(frame) = self.player.take(self.clock.position()) {
             if let Some(crate::player::Picture::Image(old)) = self.frame.replace(frame.picture) {
                 // A frame is uploaded into the window's atlas when drawn; drop

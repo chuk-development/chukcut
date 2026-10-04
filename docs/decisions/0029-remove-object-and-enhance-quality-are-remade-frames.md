@@ -135,7 +135,8 @@ it reads the cache off the UI thread, counts what every timeline and every
 compound clip lacks, and bakes it **one clip at a time**, kind after kind
 (sound first, the cheapest), through each module's own job, so an edit
 meanwhile joins the running bake instead of starting a second. The app
-shows one "Preparing N frames" chip with Stop. One at a time rather than all
+shows one "Preparing N frames" chip with Stop, and runs the face-landmark
+and voice-isolation queues (decision 0030) when the run ends. One at a time rather than all
 at once because the bakes share one ML worker and each decodes its own
 file: in parallel they would contend for the decoder and the GPU and finish
 no sooner, while the preview of the just-opened project waits behind them.

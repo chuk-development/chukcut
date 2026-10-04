@@ -3,7 +3,8 @@
 //!
 //! The engine does the work and keeps the count; this file reads it a few
 //! times a second, redraws the preview as frames land, and says once at the
-//! end what could not be made.
+//! end what could not be made. Face landmarks and voice isolation, which
+//! the app queues itself after an edit, are queued when the run ends.
 
 use std::time::{Duration, Instant};
 
@@ -33,7 +34,7 @@ impl Editor {
     }
 
     /// Called from the tick. Answers whether anything on screen changed.
-    pub(crate) fn poll_prepare(&mut self) -> bool {
+    pub(crate) fn poll_prepare(&mut self, cx: &mut Context<Self>) -> bool {
         if self
             .prepare
             .read_at
@@ -56,6 +57,13 @@ impl Editor {
         }
         if now.finished && self.prepare.reported != Some(now.run) {
             self.prepare.reported = Some(now.run);
+            if !now.stopped {
+                // Face landmarks and voice isolation have their own queues,
+                // which the app runs after an edit; after opening they wait
+                // until the frames above are made, so they do not compete.
+                self.queue_missing_landmarks(cx);
+                self.queue_missing_isolation(cx);
+            }
             if !now.stopped && !now.failures.is_empty() {
                 let n = now.failures.len();
                 self.status = Some(

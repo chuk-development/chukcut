@@ -130,7 +130,10 @@ The open items of QA pass 2 and two follow-ups of the ML waves.
   of grace for the first frame, the cache read off the UI thread, then one
   clip at a time through the modules' own jobs (so an edit meanwhile joins
   the running bake). One chip in the title bar, "Preparing 209 frames ·
-  65 % Stop"; failures are said once at the end. Seen on Xvfb with the CUDA
+  65 % Stop"; failures are said once at the end. Face landmarks (retouch)
+  and voice isolation keep their own queues (agent/colourai); the app runs
+  them when the preparation ends, so they wait rather than compete, and
+  they are not in the chip's count. Seen on Xvfb with the CUDA
   bundle: a project with a cleared matte cache and a 0.5x optical-flow clip
   baked 90 mattes and 119 flow frames in 14 s and the chip went away.
 - **Found on the way:** `matting_queue_missing` started bakes by clip id,
