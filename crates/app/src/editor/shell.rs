@@ -27,9 +27,12 @@ use super::*;
 /// What the command line asked for.
 pub enum Startup {
     /// Nothing: show the start screen.
-    Home,
+    Home { notice: Option<String> },
     /// A project is open in the engine; import these files into it.
-    Editor { media: Vec<PathBuf> },
+    Editor {
+        media: Vec<PathBuf>,
+        notice: Option<String>,
+    },
 }
 
 /// Read the command line and prepare the engine's state, before the window
@@ -44,6 +47,9 @@ pub fn startup(state: &Arc<AppState>) -> (Startup, Option<RecoveryInfo>) {
     let recovery = project_commands::project_recovery_claim();
     let mut media = Vec::new();
     let mut opened = false;
+    // Why the project named on the command line did not open. Shown on the
+    // screen the app starts on: stderr is not where a user looks.
+    let mut notice = None;
     for argument in std::env::args().skip(1) {
         let path = PathBuf::from(&argument);
         if path.extension().is_some_and(|e| e == "chukcut") && !opened {
@@ -54,7 +60,10 @@ pub fn startup(state: &Arc<AppState>) -> (Startup, Option<RecoveryInfo>) {
                     opened = true;
                     record_recent(&absolute(&path), &project.name);
                 }
-                Err(error) => eprintln!("chukcut: {error}"),
+                Err(error) => {
+                    eprintln!("chukcut: {error}");
+                    notice = Some(error);
+                }
             }
         } else {
             // Absolute, like every other import: a relative path in the
@@ -64,7 +73,7 @@ pub fn startup(state: &Arc<AppState>) -> (Startup, Option<RecoveryInfo>) {
         }
     }
     if !opened && media.is_empty() {
-        return (Startup::Home, recovery);
+        return (Startup::Home { notice }, recovery);
     }
     if !opened {
         let settings = workspace_commands::workspace_settings_get();
@@ -80,10 +89,15 @@ pub fn startup(state: &Arc<AppState>) -> (Startup, Option<RecoveryInfo>) {
             false,
         ) {
             eprintln!("chukcut: {error}");
-            return (Startup::Home, recovery);
+            return (
+                Startup::Home {
+                    notice: Some(error),
+                },
+                recovery,
+            );
         }
     }
-    (Startup::Editor { media }, recovery)
+    (Startup::Editor { media, notice }, recovery)
 }
 
 fn absolute(path: &std::path::Path) -> String {
@@ -175,10 +189,19 @@ impl Shell {
         // Only on the start screen: a launch that opened a project or media
         // asked for that, not for a question about another session. The
         // work stays offered on the start screen and at the next launch.
-        let prompt = recovery.is_some() && matches!(startup, Startup::Home);
-        match startup {
-            Startup::Home => shell.show_home(window, cx),
-            Startup::Editor { media } => shell.show_editor(media, false, window, cx),
+        let prompt = recovery.is_some() && matches!(startup, Startup::Home { .. });
+        let notice = match startup {
+            Startup::Home { notice } => {
+                shell.show_home(window, cx);
+                notice
+            }
+            Startup::Editor { media, notice } => {
+                shell.show_editor(media, false, window, cx);
+                notice
+            }
+        };
+        if let Some(notice) = notice {
+            shell.home_notice(notice, cx);
         }
         if prompt {
             let this = cx.weak_entity();
