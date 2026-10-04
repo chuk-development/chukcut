@@ -5,8 +5,61 @@ How chukcut gets onto a machine, and what each route ships.
 | Route | For | Command |
 |---|---|---|
 | Install script | anyone building from source | `scripts/install.sh` |
+| `.deb` | Ubuntu 24.04, Mint 22 and relatives (amd64, arm64) | `packaging/deb/build-deb.sh` |
+| AppImage | any Linux with glibc 2.39 or newer (x86_64, aarch64); FFmpeg bundled | `packaging/appimage/build-appimage.sh` |
 | Release tarball | a machine with the same distribution family as the build machine | `packaging/tarball.sh` |
+| macOS `.dmg`, Windows `.zip` and installer | **experimental, does not build yet** | `packaging/macos/`, `packaging/windows/` |
 | Dev runner | contributors | `scripts/run-dev.sh` |
+
+All of them except the install script and the dev runner come out of one
+GitHub Actions workflow, `.github/workflows/release.yml`, described next.
+
+## The release workflow
+
+`.github/workflows/release.yml` runs only when someone starts it: on GitHub,
+**Actions › Release › Run workflow**, or from a shell with
+`gh workflow run release.yml -f version=0.2.0 -f draft_release=true`.
+
+| Input | Default | Effect |
+|---|---|---|
+| `version` | empty | The version in file names and package metadata. Empty: the version in `crates/app/Cargo.toml`. A leading `v` is dropped. |
+| `deb` | on | `.deb` for amd64 and arm64 |
+| `appimage_x86_64` | on | AppImage for x86_64 |
+| `appimage_aarch64` | on | AppImage for aarch64, built on the `ubuntu-24.04-arm` runner |
+| `macos_dmg` | on | universal `.dmg` (experimental) |
+| `windows_zip` | on | portable `.zip` (experimental) |
+| `windows_installer` | on | Inno Setup installer `.exe` (experimental) |
+| `draft_release` | off | With a `version`: attach every result to a **draft** release `v<version>` |
+
+Every result is a workflow artifact on the run's page (kept 90 days, the
+repository default). The draft release is never published by the workflow:
+a person reads it and presses Publish. If a draft for the same tag exists,
+its files are replaced; a published release is never touched.
+
+| Artifact | Job | Contents |
+|---|---|---|
+| `chukcut-linux-x86_64` | Linux x86_64 (ubuntu-24.04) | `chukcut_<v>_amd64.deb`, `chukcut-<v>-x86_64.AppImage`, `.sha256` files |
+| `chukcut-linux-aarch64` | Linux aarch64 (ubuntu-24.04-arm) | `chukcut_<v>_arm64.deb`, `chukcut-<v>-aarch64.AppImage`, `.sha256` files |
+| `chukcut-macos-arm64`, `chukcut-macos-x86_64` | macOS per architecture | `chukcut-<v>-<arch>-macos.app.tar.gz` (input to the next row) |
+| `chukcut-macos-universal` | macOS universal | `chukcut-<v>-universal-macos.dmg` |
+| `chukcut-windows-x86_64-zip` | Windows | `chukcut-<v>-x86_64-windows.zip` |
+| `chukcut-windows-x86_64-setup` | Windows | `chukcut-<v>-x86_64-windows-setup.exe` |
+
+The Linux jobs test what they built before they upload it. The `.deb` is
+installed with `apt` (which resolves its Depends line), `chukcut-cli
+--version` and `chukcut-cli ml status` must run, and the worker must be in
+`/usr/libexec/chukcut/`. The AppImage runs `--cli --version` and `--cli ml
+status`, and the editor must still be running after ten seconds on a virtual
+X display with lavapipe.
+
+**macOS and Windows are experimental.** Their jobs are `continue-on-error`,
+so a red macOS or Windows job does not fail the run. Today they stop at the
+compile of the engine: `docs/decisions/0033-release-builds.md` lists what
+blocks them. The jobs stay in place so that they produce a build once the
+code allows it. Nothing is signed: macOS builds are signed ad hoc (Gatekeeper
+asks the user to allow them; notarisation needs a paid Developer ID), and the
+Windows installer triggers SmartScreen until a code-signing certificate signs
+it. Signing needs secrets the workflow does not have yet.
 
 ## `packaging/linux/`
 
@@ -70,6 +123,9 @@ Runtime and no models.
 
 ### What is bundled, and what is not
 
+This is the rule for the tarball and the `.deb`. The AppImage bundles FFmpeg
+and its codec libraries; see "The AppImage" below.
+
 Decisions [0002](../docs/decisions/0002-ffmpeg-and-hardware-encoding.md) and
 [0010](../docs/decisions/0010-open-source-under-gpl.md) set the rules. As GPL
 software, chukcut may link the distribution's `--enable-gpl` FFmpeg. "Users
@@ -117,13 +173,109 @@ runtime from the CUDA toolkit. A tarball made from such a build would carry a
 dependency on the toolkit's `libcudart`. Build release tarballs without
 `--cuda`.
 
-### AppImage and Flatpak
+## The .deb
 
-There is no AppImage recipe, on purpose. An AppImage that does not bundle
-FFmpeg is as tied to one distribution as the tarball. One that does bundle it
-has to ship a codec build whose patent position we cannot vouch for. The
-portable route that decision 0010 names is a **Flatpak** on the freedesktop
-runtime. There, the runtime's `codecs-extra` extension supplies H.264 and HEVC
-and carries their terms. That is the next packaging step, and nothing in this
-directory blocks it: the desktop file, MIME type, metainfo and icons are
-already what a Flatpak manifest installs.
+`packaging/deb/build-deb.sh [--no-build] [--version V]` writes
+`target/dist/chukcut_<version>_<arch>.deb` (`amd64` or `arm64`, from dpkg).
+A version `0.2.0-rc.1` becomes `0.2.0~rc.1`, so that it sorts before
+`0.2.0`.
+
+```
+/usr/bin/chukcut                              the editor
+/usr/bin/chukcut-cli                          the command line and MCP server
+/usr/libexec/chukcut/chukcut-ml-worker        the AI worker; the editor looks here
+/usr/share/applications/chukcut.desktop       and the MIME type, metainfo, icons
+/usr/share/doc/chukcut/                       copyright, NOTICE.md, README.md
+```
+
+It links the system FFmpeg, like the tarball: the Depends line comes from
+`dpkg-shlibdeps` (`libavcodec60 (>= 7:6.0)`, `libasound2t64`, …, about 40 MB
+as a package), plus `libvulkan1`, which wgpu opens with `dlopen`. A package
+built on Ubuntu 24.04 installs on 24.04, Mint 22 and their relatives, and apt
+refuses it elsewhere. No maintainer scripts: dpkg triggers refresh the
+desktop, MIME and icon caches.
+
+## The AppImage
+
+`packaging/appimage/build-appimage.sh [--no-build] [--version V]` writes
+`target/dist/chukcut-<version>-<arch>.AppImage` (x86_64 or aarch64). It
+downloads linuxdeploy, appimagetool and the type 2 runtime at pinned
+versions into `target/appimage-tools/` (or takes `LINUXDEPLOY`,
+`APPIMAGETOOL`, `APPIMAGE_RUNTIME`) and needs no FUSE.
+
+**FFmpeg is inside**, with every library it links (x264, x265, dav1d, libvpx,
+SVT-AV1, …): 188 libraries, about 145 MB as an AppImage in October 2026.
+`BUILD-INFO.txt` at the AppImage's root lists them and the Ubuntu source
+packages they came from, at their exact versions.
+
+**From the system** (the AppImage does not start, or loses hardware video,
+without them):
+
+- glibc 2.39 or newer, because the build runs on Ubuntu 24.04.
+- libva and libdrm. The VAAPI driver is loaded into the process and binds to
+  the libva and libdrm already there; a bundled older libva cannot load a
+  newer driver.
+- The Vulkan loader and driver, GL, EGL, GBM and the Wayland libraries,
+  which must match the installed Mesa or NVIDIA driver.
+- libstdc++ and libgcc_s: the system's Mesa needs its own (newer) C++
+  runtime, and a process has only one.
+- What linuxdeploy's exclude list assumes on every desktop: X11 and xcb,
+  fontconfig, FreeType, HarfBuzz, FriBidi, ALSA, zlib, expat and a few more.
+  The exception is JACK: the list assumes it, Debian and Fedora often lack
+  it, and libavdevice links it, so the script bundles `libjack.so.0`
+  anyway.
+
+The script fails if one of the system-only libraries ended up inside.
+
+The entry point is `packaging/appimage/AppRun`: it starts the editor, or the
+CLI with `--cli` as the first argument or when the AppImage is called through
+a symlink named `chukcut-cli`. All three binaries sit in `usr/bin`, so the
+editor finds the worker next to itself. The libraries are found through the
+binaries' RPATH, not `LD_LIBRARY_PATH`, so the worker's own `dlopen` of ONNX
+Runtime and CUDA sees the system unchanged.
+
+Checked by hand on 2026-10-04: the x86_64 AppImage, unpacked into a
+`debian:trixie` and a `fedora:42` container that have no FFmpeg at all (only
+the system libraries above and Mesa's lavapipe), imports an H.264 file and
+exports a 1080x1920 H.264 MP4; the editor opens its start screen on Xvfb.
+
+On a machine with AppImageLauncher, its binfmt hook intercepts every
+AppImage, also in containers and scripts, and can stop to ask a question.
+Set `APPIMAGELAUNCHER_DISABLE=1` when running one from a script.
+
+### The codec question
+
+The AppImage, the macOS bundle and the Windows zip carry FFmpeg with x264
+and x265. This file used to say "no AppImage, on purpose" for that reason;
+the owner decided otherwise (decision 0033). Our binaries are now in the
+position of Kdenlive's, Shotcut's and VLC's: the H.264 and HEVC patent pools
+license implementations, and a free build pays nothing. The `.deb` and the
+tarball still link the distribution's FFmpeg and carry none of it.
+
+### Flatpak
+
+A **Flatpak** on the freedesktop runtime remains the cleaner portable route
+(decision 0010): the runtime's `codecs-extra` extension supplies H.264 and
+HEVC and carries their terms. Nothing here blocks it: the desktop file, MIME
+type, metainfo and icons are what a Flatpak manifest installs.
+
+## macOS and Windows (experimental)
+
+`packaging/macos/build-app.sh` makes `chukcut.app` for the Mac's own
+architecture: the three binaries in `Contents/MacOS`, Homebrew's FFmpeg and
+every other non-system dylib copied into `Contents/Frameworks` by
+`dylibbundler`, an `.icns` made from the Linux icon renders, and an ad-hoc
+signature. `packaging/macos/make-universal.sh` joins an arm64 and an x86_64
+app with `lipo` and packs a `.dmg`. Universal needs both architectures' own
+dylibs, which is why the workflow builds natively on `macos-15` (arm64) and
+`macos-15-intel` and joins the results; both must have bundled the same
+dylib set, or the script stops and names the difference.
+
+`packaging/windows/package.ps1` packs the MSVC build with BtbN's shared
+FFmpeg DLLs into a portable zip; `packaging/windows/chukcut.iss` (Inno Setup
+6) installs the same files, per user by default, and registers `.chukcut`.
+`ffmpeg-sys-next` finds FFmpeg through `FFMPEG_DIR`.
+
+Neither builds today: the engine does not compile for either platform.
+[Decision 0033](../docs/decisions/0033-release-builds.md) lists what blocks
+it, file by file.

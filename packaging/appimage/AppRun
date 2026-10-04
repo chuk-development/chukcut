@@ -1,0 +1,23 @@
+#!/bin/sh
+# The AppImage's entry point. It starts the editor, or the command line when
+# the AppImage is called as chukcut-cli (a symlink to it) or with --cli first:
+#
+#   ./chukcut-x86_64.AppImage [project.chukcut | media files...]
+#   ./chukcut-x86_64.AppImage --cli --help
+#   ln -s chukcut-x86_64.AppImage chukcut-cli && ./chukcut-cli --help
+#
+# The editor finds chukcut-ml-worker next to itself in usr/bin. The bundled
+# libraries are found through the binaries' RPATH ($ORIGIN/../lib), so the
+# environment stays untouched and the AI worker's own dlopen of ONNX Runtime
+# and the CUDA libraries sees the system as it is.
+here="$(dirname -- "$(readlink -f -- "$0")")"
+bin="$here/usr/bin"
+
+case "${ARGV0##*/}" in
+    chukcut-cli*) exec "$bin/chukcut-cli" "$@" ;;
+esac
+if [ "${1:-}" = "--cli" ]; then
+    shift
+    exec "$bin/chukcut-cli" "$@"
+fi
+exec "$bin/chukcut" "$@"

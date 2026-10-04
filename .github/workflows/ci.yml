@@ -45,7 +45,7 @@ jobs:
       - name: MIME type
         run: xmllint --noout packaging/linux/chukcut-mime.xml
       - name: Shell scripts
-        run: shellcheck scripts/*.sh packaging/*.sh packaging/linux/*.sh
+        run: shellcheck scripts/*.sh packaging/*.sh packaging/linux/*.sh packaging/deb/*.sh packaging/appimage/*.sh packaging/appimage/AppRun packaging/macos/*.sh
 
   test:
     name: Lint and test

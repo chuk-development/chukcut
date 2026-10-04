@@ -1,0 +1,384 @@
+name: Release
+
+# Release builds, started by hand only: Actions > Release > Run workflow.
+# Each checkbox selects a target, all on by default. Every result is uploaded
+# as a workflow artifact. With a version and "draft release" ticked, the
+# results are also attached to a DRAFT GitHub release v<version>; nothing is
+# ever published automatically. packaging/README.md describes each artifact.
+#
+# Linux is the product: the .deb and the two AppImages must build, and each
+# job installs or runs what it built before uploading it. macOS and Windows
+# are experimental (continue-on-error): the engine does not compile there yet,
+# docs/decisions/0033-release-builds.md says what blocks it, and the jobs stay
+# so that they build as soon as the code allows.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version, e.g. 0.2.0. Empty: the version in crates/app/Cargo.toml."
+        type: string
+        default: ""
+      deb:
+        description: ".deb packages for Ubuntu 24.04 (amd64 and arm64)"
+        type: boolean
+        default: true
+      appimage_x86_64:
+        description: "AppImage, x86_64"
+        type: boolean
+        default: true
+      appimage_aarch64:
+        description: "AppImage, aarch64 (ARM)"
+        type: boolean
+        default: true
+      macos_dmg:
+        description: "macOS universal .dmg (experimental)"
+        type: boolean
+        default: true
+      windows_zip:
+        description: "Windows portable .zip (experimental)"
+        type: boolean
+        default: true
+      windows_installer:
+        description: "Windows installer .exe (experimental)"
+        type: boolean
+        default: true
+      draft_release:
+        description: "Attach the results to a DRAFT release v<version> (needs a version)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  plan:
+    name: Plan
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      linux: ${{ steps.plan.outputs.linux }}
+    steps:
+      - uses: actions/checkout@v5
+
+      # The inputs reach the shell through the environment, never through
+      # ${{ }} inside the script, so a version string cannot inject code.
+      - name: Version and Linux matrix
+        id: plan
+        env:
+          VERSION: ${{ inputs.version }}
+          DEB: ${{ inputs.deb }}
+          APPIMAGE_X86_64: ${{ inputs.appimage_x86_64 }}
+          APPIMAGE_AARCH64: ${{ inputs.appimage_aarch64 }}
+        run: |
+          version="${VERSION#v}"
+          [ -n "$version" ] || version="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/app/Cargo.toml | head -1)"
+          if ! printf '%s' "$version" | grep -Eq '^[0-9][0-9A-Za-z.+~-]*$'; then
+            echo "::error::version '$version' must start with a digit and hold only letters, digits and . + ~ -"
+            exit 1
+          fi
+          # One Linux job per architecture that has something to build. The
+          # arm64 .deb comes from the same build as the aarch64 AppImage.
+          linux="$(jq -nc \
+            --argjson deb "$DEB" --argjson ax "$APPIMAGE_X86_64" --argjson aa "$APPIMAGE_AARCH64" '
+              [ (if $deb or $ax then {arch: "x86_64", runner: "ubuntu-24.04", deb: $deb, appimage: $ax} else empty end),
+                (if $deb or $aa then {arch: "aarch64", runner: "ubuntu-24.04-arm", deb: $deb, appimage: $aa} else empty end) ]')"
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+          echo "linux=$linux" >>"$GITHUB_OUTPUT"
+          echo "Version $version; Linux jobs: $linux"
+
+  linux:
+    name: Linux ${{ matrix.arch }}
+    needs: plan
+    if: needs.plan.outputs.linux != '[]'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.linux) }}
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+
+      # The build set from .github/apt-packages.txt, plus what the smoke
+      # tests below run on: a virtual X server and Mesa's software Vulkan
+      # driver (lavapipe).
+      - name: System dependencies
+        run: |
+          sudo apt-get update
+          # One package per word: the split is the point.
+          # shellcheck disable=SC2046
+          sudo apt-get install --no-install-recommends -y $(grep -v '^#' .github/apt-packages.txt) \
+            dpkg-dev xvfb xauth mesa-vulkan-drivers
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ matrix.arch }}
+
+      - name: Build
+        run: cargo build --release --locked -p chukcut -p chukcut-ml-worker -p chukcut-cli
+
+      - name: .deb
+        if: matrix.deb
+        run: packaging/deb/build-deb.sh --no-build --version "$VERSION"
+
+      # Install it the way a user does: apt resolves the Depends line that
+      # dpkg-shlibdeps wrote. The CLI must start, and the worker must be
+      # found in /usr/libexec/chukcut, where the editor looks for it.
+      - name: .deb smoke test
+        if: matrix.deb
+        run: |
+          dpkg-deb --info target/dist/chukcut_*.deb
+          dpkg-deb --contents target/dist/chukcut_*.deb
+          sudo apt-get install -y ./target/dist/chukcut_*.deb
+          chukcut-cli --version
+          test -x /usr/libexec/chukcut/chukcut-ml-worker
+          status="$(chukcut-cli ml status)"
+          echo "$status"
+          if grep -q 'chukcut-ml-worker is not installed' <<<"$status"; then
+            echo "::error::the CLI did not find the ML worker"
+            exit 1
+          fi
+          sudo apt-get remove -y chukcut
+
+      - name: AppImage
+        if: matrix.appimage
+        run: packaging/appimage/build-appimage.sh --no-build --version "$VERSION"
+
+      # The runner has no FUSE, so the AppImage unpacks itself and runs. The
+      # editor runs for ten seconds on a virtual display with lavapipe:
+      # still running at the timeout (exit 124) means it started.
+      - name: AppImage smoke test
+        if: matrix.appimage
+        env:
+          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.json
+        run: |
+          appimage="$(ls target/dist/chukcut-*.AppImage)"
+          "$appimage" --appimage-extract-and-run --cli --version
+          status="$("$appimage" --appimage-extract-and-run --cli ml status)"
+          echo "$status"
+          if grep -q 'chukcut-ml-worker is not installed' <<<"$status"; then
+            echo "::error::the CLI did not find the ML worker inside the AppImage"
+            exit 1
+          fi
+          set +e
+          xvfb-run -a timeout 10 "$appimage" --appimage-extract-and-run
+          status=$?
+          set -e
+          if [ "$status" != 124 ]; then
+            echo "::error::the editor exited with $status within 10 s"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chukcut-linux-${{ matrix.arch }}
+          path: |
+            target/dist/*.deb
+            target/dist/*.deb.sha256
+            target/dist/*.AppImage
+            target/dist/*.AppImage.sha256
+          if-no-files-found: error
+
+  # EXPERIMENTAL. One native build per architecture, each with Homebrew's
+  # FFmpeg bundled into the .app by dylibbundler; macos-universal joins them
+  # with lipo. Homebrew bottles are per architecture, so a single cross build
+  # could not link both.
+  macos:
+    name: macOS ${{ matrix.arch }} (experimental)
+    needs: plan
+    if: inputs.macos_dmg
+    continue-on-error: true
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+          - arch: x86_64
+            runner: macos-15-intel
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Homebrew dependencies
+        run: |
+          brew install ffmpeg dylibbundler nasm pkgconf shaderc
+          echo "SHADERC_LIB_DIR=$(brew --prefix shaderc)/lib" >>"$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-macos-${{ matrix.arch }}
+
+      - name: Build
+        run: cargo build --release --locked -p chukcut -p chukcut-ml-worker -p chukcut-cli
+
+      - name: App bundle
+        run: packaging/macos/build-app.sh --no-build --version "$VERSION"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chukcut-macos-${{ matrix.arch }}
+          path: target/dist/*.app.tar.gz
+          if-no-files-found: error
+
+  macos-universal:
+    name: macOS universal .dmg (experimental)
+    needs: [plan, macos]
+    if: inputs.macos_dmg
+    continue-on-error: true
+    runs-on: macos-15
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: chukcut-macos-*
+          path: target/macos-in
+          merge-multiple: true
+
+      - name: Universal app and .dmg
+        run: |
+          packaging/macos/make-universal.sh "$VERSION" \
+            target/macos-in/chukcut-*-arm64-macos.app.tar.gz \
+            target/macos-in/chukcut-*-x86_64-macos.app.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chukcut-macos-universal
+          path: |
+            target/dist/*.dmg
+            target/dist/*.dmg.sha256
+          if-no-files-found: error
+
+  # EXPERIMENTAL. MSVC build against BtbN's shared FFmpeg build (FFMPEG_DIR),
+  # packed as a portable zip with the FFmpeg DLLs, and as an Inno Setup
+  # installer from the same files.
+  windows:
+    name: Windows x86_64 (experimental)
+    needs: plan
+    if: inputs.windows_zip || inputs.windows_installer
+    continue-on-error: true
+    runs-on: windows-2022
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+      # The FFmpeg 7.1 release branch, rebuilt daily by BtbN; GPL, shared
+      # libraries, with headers and import libraries for MSVC.
+      FFMPEG_ZIP: https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n7.1-latest-win64-gpl-shared-7.1.zip
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: FFmpeg, NASM, libclang
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP 'ffmpeg.zip'
+          Invoke-WebRequest -Uri $env:FFMPEG_ZIP -OutFile $zip
+          Expand-Archive $zip -DestinationPath $env:RUNNER_TEMP
+          $ffmpeg = (Get-ChildItem $env:RUNNER_TEMP -Directory -Filter 'ffmpeg-n7.1*' | Select-Object -First 1).FullName
+          "FFMPEG_DIR=$ffmpeg" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          # FFmpeg's DLLs on PATH, so a build script or test that loads them finds them.
+          "$ffmpeg\bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+          choco install nasm -y --no-progress
+          "C:\Program Files\NASM" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+          # bindgen (ffmpeg-sys-next, whisper-rs-sys) loads libclang from the image's LLVM.
+          "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-windows
+
+      - name: Build
+        run: cargo build --release --locked -p chukcut -p chukcut-ml-worker -p chukcut-cli
+
+      - name: Portable zip
+        run: packaging/windows/package.ps1 -Version $env:VERSION -FfmpegDir $env:FFMPEG_DIR
+
+      - name: Installer
+        if: inputs.windows_installer
+        run: |
+          $iscc = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress }
+          $stage = "target\windows\chukcut-$env:VERSION-x86_64-windows"
+          & $iscc "/DAppVersion=$env:VERSION" "/DSourceDir=$PWD\$stage" "/DOutputDir=$PWD\target\dist" packaging\windows\chukcut.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - uses: actions/upload-artifact@v4
+        if: inputs.windows_zip
+        with:
+          name: chukcut-windows-x86_64-zip
+          path: |
+            target/dist/*.zip
+            target/dist/*.zip.sha256
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        if: inputs.windows_installer
+        with:
+          name: chukcut-windows-x86_64-setup
+          path: target/dist/*-setup.exe
+          if-no-files-found: error
+
+  # A draft only: someone reads it and presses Publish. An existing draft for
+  # the same tag gets its files replaced; a published release is never
+  # touched.
+  release:
+    name: Draft release
+    needs: [plan, linux, macos-universal, windows]
+    if: always() && needs.plan.result == 'success' && inputs.draft_release && inputs.version != ''
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create or update the draft
+        run: |
+          shopt -s nullglob
+          files=(artifacts/*.deb artifacts/*.AppImage artifacts/*.dmg artifacts/*.zip artifacts/*-setup.exe artifacts/*.sha256)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::error::no build produced anything to release"
+            exit 1
+          fi
+          printf '%s\n' "${files[@]}"
+          tag="v$VERSION"
+          if draft="$(gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null)"; then
+            if [ "$draft" != true ]; then
+              echo "::error::release $tag is published already; not touching it"
+              exit 1
+            fi
+            gh release upload "$tag" "${files[@]}" --clobber
+          else
+            gh release create "$tag" "${files[@]}" --draft --target "$GITHUB_SHA" \
+              --title "chukcut $VERSION" \
+              --notes "Draft made by the Release workflow from $GITHUB_SHA. Linux: .deb for Ubuntu 24.04 and AppImages (FFmpeg bundled). macOS and Windows builds are experimental and unsigned. See packaging/README.md."
+          fi
