@@ -196,4 +196,8 @@ local-whisper-cuda = ["local-whisper", "whisper-rs/cuda"]
 [target.'cfg(target_os = "linux")'.dependencies]
 wgpu-hal = { version = "30.0.0", features = ["vulkan"] }
 ash = "0.38"
+
+# `_exit` for `lifecycle::exit`, and the DMA-BUF code above. Every Unix has it;
+# on Windows `lifecycle::exit` takes another way out, so nothing there needs it.
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"

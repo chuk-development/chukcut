@@ -130,9 +130,12 @@ NVENC on Windows would work through FFmpeg), and the AI models: the ONNX
 Runtime packs in `crates/ml-worker/src/registry.rs` are Linux `.so` archives
 pinned by URL and hash, so the worker would find no runtime.
 
-One small change was made, because it costs Linux nothing:
+Two small changes were made, because they cost Linux nothing:
 `ml::worker::BINARY` is `chukcut-ml-worker.exe` on Windows, so the editor
-can find the worker next to itself there.
+can find the worker next to itself there; and `libc` is an engine dependency
+on every Unix rather than on Linux only, because `lifecycle::exit` (the way
+every shell leaves, with `_exit`) needs it on macOS too. On Windows that
+function ends with `std::process::exit`.
 
 ## What it costs
 

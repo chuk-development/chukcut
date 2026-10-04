@@ -34,7 +34,21 @@ pub fn exit(code: u8) -> ! {
     quiesce();
     let _ = std::io::stdout().flush();
     let _ = std::io::stderr().flush();
+    end(code)
+}
+
+#[cfg(unix)]
+fn end(code: u8) -> ! {
     // SAFETY: `_exit` has no preconditions. It ends every thread of the
     // process at once, which is the point: nothing runs after it.
     unsafe { libc::_exit(i32::from(code)) }
+}
+
+/// Windows builds are experimental (docs/decisions/0033-release-builds.md).
+/// `std::process::exit` runs the DLL detach handlers that `_exit` skips on
+/// Unix; if that brings the driver crash back there, `TerminateProcess` on
+/// the current process is the equivalent.
+#[cfg(not(unix))]
+fn end(code: u8) -> ! {
+    std::process::exit(i32::from(code))
 }
