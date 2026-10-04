@@ -185,6 +185,9 @@ const BLACK: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 
 pub const GAUSSIAN_BLUR: &str = "gaussian_blur";
 pub const ZOOM_BLUR: &str = "zoom_blur";
+/// Edge-preserving noise reduction: Video › Basic › "Reduce image noise"
+/// adds and tunes it, and it is an ordinary effect everywhere else.
+pub const DENOISE: &str = "denoise";
 pub const GLOW: &str = "glow";
 pub const LIGHT_SWEEP: &str = "light_sweep";
 pub const SHAKE: &str = "shake";
@@ -224,6 +227,16 @@ static EFFECTS: &[EffectDescriptor] = &[
         category: Category::Blur,
         description: "Softens the whole picture evenly.",
         params: &[slider("radius", "Radius", 20.0)],
+    },
+    EffectDescriptor {
+        id: DENOISE,
+        label: "Reduce noise",
+        category: Category::Blur,
+        description: "Smooths sensor noise and keeps the edges sharp.",
+        params: &[
+            slider("strength", "Strength", 50.0),
+            slider("detail", "Keep detail", 50.0),
+        ],
     },
     EffectDescriptor {
         id: ZOOM_BLUR,

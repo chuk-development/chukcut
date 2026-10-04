@@ -1567,3 +1567,50 @@ fn an_effected_clip_at_a_faint_opacity_matches_the_cpu_reference() {
         }
     }
 }
+
+#[test]
+fn denoise_smooths_noise_and_keeps_a_hard_edge() {
+    let c = gpu!();
+    let (w, h) = (64u32, 48u32);
+    // A dark left half and a light right half, both with ±6 of noise.
+    let noisy = Image::new(w, h, |x, y| {
+        let n = (pcg(x * 131 + y * 7919) % 13) as i32 - 6;
+        let base = if x < w / 2 { 60 } else { 190 };
+        let v = (base + n).clamp(0, 255) as u8;
+        [v, v, v, 255]
+    });
+    let provider = Provider::default().with("clip", noisy);
+    let spread = |frame: &Frame| {
+        let values: Vec<f32> = (8..h - 8)
+            .flat_map(|y| (6..w / 2 - 6).map(move |x| (x, y)))
+            .map(|(x, y)| frame.pixel(x, y)[1] as f32)
+            .collect();
+        let mean = values.iter().sum::<f32>() / values.len() as f32;
+        (values.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / values.len() as f32).sqrt()
+    };
+    let plain = render(&c, &one_clip(w, h), 0, &provider);
+    let mut p = one_clip(w, h);
+    attach(
+        &mut p,
+        "s",
+        effect(
+            catalog::DENOISE,
+            &[("strength", 100.0), ("detail", 50.0)],
+            1,
+        ),
+    );
+    let frame = render(&c, &p, 0, &provider);
+    let (before, after) = (spread(&plain), spread(&frame));
+    assert!(
+        after < before * 0.5,
+        "noise spread {before:.2} became {after:.2}"
+    );
+    for y in [10, 24, 38] {
+        let dark = frame.pixel(w / 2 - 1, y)[1];
+        let light = frame.pixel(w / 2, y)[1];
+        assert!(
+            dark < 90 && light > 160,
+            "the edge blurred: {dark} | {light}"
+        );
+    }
+}

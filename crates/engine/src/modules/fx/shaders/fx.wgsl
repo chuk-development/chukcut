@@ -164,6 +164,43 @@ fn fs_blur(in: VertexOutput) -> @location(0) vec4<f32> {
 }
 
 // ---------------------------------------------------------------------------
+// Reduce noise: an edge-preserving (bilateral) average
+// ---------------------------------------------------------------------------
+//
+// p[0] = (stride in pixels, range sigma, spatial sigma in taps, 0)
+//
+// A 5 x 5 neighbourhood at whole-pixel strides, each tap weighted by its
+// distance and by how far its colour is from the centre's in √-linear
+// units. Noise is small differences and is averaged away; an edge is a
+// large one and keeps its own side. `fx/render.rs::denoise_params` picks the
+// numbers.
+@fragment
+fn fs_denoise(in: VertexOutput) -> @location(0) vec4<f32> {
+    let centre = vec2<i32>(in.clip_position.xy);
+    let c = load0(centre);
+    if (c.a <= 0.0) {
+        return c;
+    }
+    let stride = max(i32(fx.p[0].x), 1);
+    let range = max(fx.p[0].y, 0.0001);
+    let spatial = max(fx.p[0].z, 0.5);
+    let reference = sqrt(max(unpremultiply(c), vec3<f32>(0.0)));
+    var sum = vec4<f32>(0.0);
+    var total = 0.0;
+    for (var y = -2; y <= 2; y = y + 1) {
+        for (var x = -2; x <= 2; x = x + 1) {
+            let tap = load0(centre + vec2<i32>(x, y) * stride);
+            let diff = sqrt(max(unpremultiply(tap), vec3<f32>(0.0))) - reference;
+            let r2 = f32(x * x + y * y);
+            let w = exp(-r2 / (2.0 * spatial * spatial)) * exp(-dot(diff, diff) / (2.0 * range * range));
+            sum = sum + tap * w;
+            total = total + w;
+        }
+    }
+    return sum / total;
+}
+
+// ---------------------------------------------------------------------------
 // Downsample with a soft threshold: the bright part of the picture
 // ---------------------------------------------------------------------------
 //

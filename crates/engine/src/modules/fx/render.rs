@@ -133,6 +133,7 @@ impl FxInstance {
         use catalog::*;
         match self.desc.id {
             GAUSSIAN_BLUR => self.get("radius") <= 0.0,
+            DENOISE => self.get("strength") <= 0.0,
             ZOOM_BLUR => self.get("strength") <= 0.0,
             GLOW => self.get("intensity") <= 0.0,
             LIGHT_SWEEP => self.get("intensity") <= 0.0,
@@ -259,6 +260,25 @@ pub fn blur_taps(sigma: f32) -> (i32, i32) {
 }
 
 /// Pixelate's block size in whole pixels.
+/// The denoise pass's parameters for a frame whose short side is `short`:
+/// `(tap stride in pixels, range sigma, passes)`.
+///
+/// The range sigma is how different (in √-linear units, roughly perceptual)
+/// a neighbour may be and still be averaged in: strength widens it, "keep
+/// detail" narrows it. Noise is a few percent; an edge is tens of percent,
+/// so even the widest setting leaves real edges alone. The stride grows with
+/// the frame so a 4K export and a small preview average the same picture
+/// area. A strong setting runs the pass twice, which smooths more than one
+/// wide pass without its blotches.
+pub fn denoise_params(strength: f32, detail: f32, short: f32) -> (f32, f32, u32) {
+    let strength = (strength / 100.0).clamp(0.0, 1.0);
+    let detail = (detail / 100.0).clamp(0.0, 1.0);
+    let sigma = (0.015 + 0.075 * strength) * (1.25 - 0.75 * detail);
+    let stride = (short / 1080.0).round().max(1.0);
+    let passes = if strength > 0.6 { 2 } else { 1 };
+    (stride, sigma, passes)
+}
+
 pub fn pixel_block(size: f32, short: f32) -> f32 {
     (2.0 + size / 100.0 * 0.08 * short).round()
 }
@@ -860,6 +880,18 @@ impl<'a> FxFrame<'a> {
             GAUSSIAN_BLUR => {
                 let sigma = blur_sigma(fx.get("radius"), short);
                 return self.blur(encoder, input, sigma, frame);
+            }
+            DENOISE => {
+                let (stride, sigma, passes) =
+                    denoise_params(fx.get("strength"), fx.get("detail"), short);
+                p[0] = [stride, sigma, 1.2, 0.0];
+                let mut current = input;
+                for _ in 0..passes {
+                    let next = self.step(encoder, "fs_denoise", &current, None, size, frame, p);
+                    self.retire(current);
+                    current = next;
+                }
+                return current;
             }
             ZOOM_BLUR => {
                 let strength = fx.get("strength") / 100.0 * 0.5;
