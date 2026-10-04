@@ -47,7 +47,7 @@ pub fn timeline_apply(state: &Arc<AppState>, command: EditCommand) -> Result<Edi
         let project = project_guard.as_mut().ok_or("no project is open")?;
         state.history.write().apply(project, command)?;
     }
-    respond(&state)
+    respond(state)
 }
 
 /// Apply one edit per clip as a single undo step.
@@ -71,7 +71,7 @@ pub fn timeline_apply_many(
         let command = compose_edits(project, &label, commands)?;
         state.history.write().apply(project, command)?;
     }
-    respond(&state)
+    respond(state)
 }
 pub fn timeline_split(
     state: &Arc<AppState>,
@@ -84,7 +84,7 @@ pub fn timeline_split(
         let command = split_at(project, &segment_id, at)?;
         state.history.write().apply(project, command)?;
     }
-    respond(&state)
+    respond(state)
 }
 
 /// Split every unlocked clip under the playhead, across all tracks, as one
@@ -97,7 +97,7 @@ pub fn timeline_split_all(state: &Arc<AppState>, at: Micros) -> Result<EditRespo
         let command = split_all_at(project, at)?;
         state.history.write().apply(project, command)?;
     }
-    respond(&state)
+    respond(state)
 }
 
 /// Break the link between a clip and whatever it moves with.
@@ -111,7 +111,7 @@ pub fn timeline_unlink(state: &Arc<AppState>, segment_id: String) -> Result<Edit
         let command = unlink(project, &segment_id)?;
         state.history.write().apply(project, command)?;
     }
-    respond(&state)
+    respond(state)
 }
 
 /// Make several clips move, trim and delete as one.
@@ -125,7 +125,7 @@ pub fn timeline_link(
         let command = link(project, &segment_ids)?;
         state.history.write().apply(project, command)?;
     }
-    respond(&state)
+    respond(state)
 }
 pub fn timeline_undo(state: &Arc<AppState>) -> Result<EditResponse, String> {
     {
@@ -133,7 +133,7 @@ pub fn timeline_undo(state: &Arc<AppState>) -> Result<EditResponse, String> {
         let project = project_guard.as_mut().ok_or("no project is open")?;
         state.history.write().undo(project)?;
     }
-    respond(&state)
+    respond(state)
 }
 pub fn timeline_redo(state: &Arc<AppState>) -> Result<EditResponse, String> {
     {
@@ -141,7 +141,7 @@ pub fn timeline_redo(state: &Arc<AppState>) -> Result<EditResponse, String> {
         let project = project_guard.as_mut().ok_or("no project is open")?;
         state.history.write().redo(project)?;
     }
-    respond(&state)
+    respond(state)
 }
 
 /// Hold the frame of `segment_id` at timeline time `at` for `duration` µs:

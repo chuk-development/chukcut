@@ -1497,7 +1497,8 @@ mod tests {
             .push("group-1".into());
 
         let (material, command) =
-            paste_attributes_command(&project, &attributes(), &[video_id.clone()]).unwrap();
+            paste_attributes_command(&project, &attributes(), std::slice::from_ref(&video_id))
+                .unwrap();
         project.materials.color_adjusts.push(material.unwrap());
         History::new().apply(&mut project, command).unwrap();
 
@@ -1531,7 +1532,7 @@ mod tests {
         let mut plain = attributes();
         plain.color = None;
         let (material, command) =
-            paste_attributes_command(&project, &plain, &[segment_id.clone()]).unwrap();
+            paste_attributes_command(&project, &plain, std::slice::from_ref(&segment_id)).unwrap();
         assert!(material.is_none(), "no grade on the source mints nothing");
         history.apply(&mut project, command).unwrap();
 
@@ -1548,11 +1549,15 @@ mod tests {
 
         let mut bad = attributes();
         bad.speed = f32::NAN;
-        assert!(paste_attributes_command(&project, &bad, &[segment_id.clone()]).is_err());
+        assert!(
+            paste_attributes_command(&project, &bad, std::slice::from_ref(&segment_id)).is_err()
+        );
 
         let mut bad = attributes();
         bad.volume = f32::INFINITY;
-        assert!(paste_attributes_command(&project, &bad, &[segment_id.clone()]).is_err());
+        assert!(
+            paste_attributes_command(&project, &bad, std::slice::from_ref(&segment_id)).is_err()
+        );
 
         assert!(
             paste_attributes_command(&project, &attributes(), &["gone".into()]).is_err(),

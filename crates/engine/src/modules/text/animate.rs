@@ -605,7 +605,7 @@ mod tests {
     }
 
     fn ink(pixels: &[u8]) -> u64 {
-        pixels.chunks_exact(4).map(|p| p[3] as u64).sum()
+        pixels.as_chunks::<4>().0.iter().map(|p| p[3] as u64).sum()
     }
 
     #[test]
@@ -639,7 +639,9 @@ mod tests {
         // colour is a rounding of a rounding and may differ wildly while
         // contributing nothing to the picture.
         let worst = out
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .zip(text.pixels.chunks_exact(4))
             .map(|(a, b)| {
                 (0..4)

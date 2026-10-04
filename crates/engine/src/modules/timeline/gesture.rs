@@ -98,12 +98,7 @@ pub fn clear_of_neighbours(
     duration: Micros,
     slack: Micros,
 ) -> Option<Micros> {
-    let others = || {
-        track
-            .segments
-            .iter()
-            .filter(|s| !skip.iter().any(|id| *id == s.id))
-    };
+    let others = || track.segments.iter().filter(|s| !skip.contains(&s.id));
     let overlapping = |at: Micros| {
         others()
             .filter(move |o| at < o.target_range.end() && o.target_range.start < at + duration)
