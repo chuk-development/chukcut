@@ -40,7 +40,8 @@ use serde::{Deserialize, Serialize};
 /// super-resolution (`upscale`).
 /// 6: audio source separation (`separate`, samples in and out) and dense
 /// face landmarks (`face_landmarks`).
-pub const PROTOCOL_VERSION: u32 = 6;
+/// 7: people (`detect_people`) and body keypoints (`body_landmarks`).
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// A header longer than this is a broken stream, not a message.
 const MAX_HEADER: usize = 1 << 20;

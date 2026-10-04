@@ -22,7 +22,7 @@ The worker follows people the way it follows faces (decision 0030). The
 keypoints of a person in one frame give the region for the next frame
 (the box of the seen keypoints, 1.25 times larger). The detector runs only
 on the first frame, when all people are lost, and when the engine asks
-for newcomers (`search`, once a second). Protocol: `detect_people`,
+for newcomers (`search`, once a second). Protocol 7: `detect_people`,
 `body_landmarks`.
 
 **The keypoints are cache; a followed body part is an ordinary motion
