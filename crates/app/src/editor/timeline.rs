@@ -66,7 +66,8 @@ actions!(
         LinkClips,
         UnlinkClips,
         ResetSpeed,
-        FreezeFrame
+        FreezeFrame,
+        ReplaceMedia
     ]
 );
 
@@ -256,6 +257,7 @@ struct MenuState {
     can_unlink: bool,
     can_reset_speed: bool,
     can_freeze: bool,
+    can_replace: bool,
     analysis: super::analysis::MenuFlags,
     audio: super::audio_tools::MenuFlags,
     compound: sequences::MenuFlags,
@@ -2144,6 +2146,7 @@ impl Editor {
                 })
             }),
             can_freeze: self.freeze_target().is_some(),
+            can_replace: self.replace_media_target().is_some(),
             analysis: self.analysis_flags(),
             audio: self.audio_menu_flags(),
             compound: self.compound_menu_flags(),
@@ -2352,6 +2355,7 @@ impl Editor {
             .on_action(cx.listener(|this, _: &UnlinkClips, _, cx| this.unlink_selection(cx)))
             .on_action(cx.listener(|this, _: &ResetSpeed, _, cx| this.reset_speed(cx)))
             .on_action(cx.listener(|this, _: &FreezeFrame, _, cx| this.freeze_frame(cx)))
+            .on_action(cx.listener(|this, _: &ReplaceMedia, _, cx| this.replace_media(cx)))
     }
 
     // --- media -----------------------------------------------------------------------
@@ -4098,6 +4102,11 @@ fn clip_menu(
     let menu = menu
         .menu_with_disabled("Split", Box::new(Split), !s.can_split)
         .menu_with_disabled("Freeze frame", Box::new(FreezeFrame), !s.can_freeze)
+        .menu_with_disabled(
+            "Replace media\u{2026}",
+            Box::new(ReplaceMedia),
+            !s.can_replace,
+        )
         .menu_with_disabled("Delete", Box::new(DeleteSelected), !s.clips)
         .menu_with_disabled("Duplicate", Box::new(DuplicateClips), !s.clips)
         .separator()

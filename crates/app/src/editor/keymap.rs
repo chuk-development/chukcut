@@ -82,6 +82,7 @@ bindings!(
     UnlinkClips,
     ResetSpeed,
     FreezeFrame,
+    ReplaceMedia,
     CreateCompound,
     FlattenCompound,
     OpenCompound,

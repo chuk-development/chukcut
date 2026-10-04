@@ -586,6 +586,68 @@ impl Render for FillDialog {
 }
 
 // ---------------------------------------------------------------------------
+// "Replace media…" from the timeline
+// ---------------------------------------------------------------------------
+
+impl Editor {
+    /// The clip "Replace media…" fills: the selected clip, when it is a
+    /// video or photo clip on an unlocked picture lane. A template slot is
+    /// the case it is for; any other picture clip works the same way.
+    pub(crate) fn replace_media_target(&self) -> Option<String> {
+        let (track, segment) = self
+            .selected
+            .as_deref()
+            .and_then(|id| self.project.segment(id))?;
+        let pool = &self.project.materials;
+        let picture = pool.video(&segment.material_id).is_some()
+            || pool.image(&segment.material_id).is_some();
+        (track.kind == TrackKind::Video && !track.locked && picture).then(|| segment.id.clone())
+    }
+
+    /// Ask for a file and put it into the selected clip, keeping the clip's
+    /// place, length and look: the slots dialog's "Replace…", one undo step.
+    pub(crate) fn replace_media(&mut self, cx: &mut Context<Self>) {
+        let Some(segment_id) = self.replace_media_target() else {
+            self.status = Some("Select a video or photo clip to replace its media".into());
+            cx.notify();
+            return;
+        };
+        let state = Arc::clone(&self.state);
+        let picked = files::choose_one(FileRequest::open("Replace with", Filter::Media), cx);
+        cx.spawn(async move |this, cx| {
+            let Some(path) = picked.await else {
+                return;
+            };
+            let path = path.to_string_lossy().into_owned();
+            let _ = this.update(cx, |editor, cx| {
+                editor.status = Some("Replacing media\u{2026}".into());
+                cx.notify();
+            });
+            // Probing the file is IO; the edit itself is quick.
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    template_commands::template_replace_media(&state, &segment_id, &path, None)
+                        .map(|r| r.slowed_to)
+                })
+                .await;
+            let _ = this.update(cx, |editor, cx| {
+                editor.refresh(cx);
+                editor.status = match result {
+                    Ok(Some(speed)) => Some(
+                        format!("The new clip is shorter; it plays at {speed:.2}\u{d7}.").into(),
+                    ),
+                    Ok(None) => None,
+                    Err(error) => Some(error.into()),
+                };
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The open project's slots
 // ---------------------------------------------------------------------------
 
