@@ -297,6 +297,8 @@ operations!(
     ai::FaceLandmarksArgs,
     ai::RetouchArgs,
     ai::FollowFaceArgs,
+    ai::BodyLandmarksArgs,
+    ai::FollowBodyArgs,
     library::StickerArgs,
     motion::FrameBlendArgs,
     motion::SmoothSlowMoArgs,

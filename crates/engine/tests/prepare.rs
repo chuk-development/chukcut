@@ -139,6 +139,92 @@ fn what_an_opened_project_lacks_is_counted_in_every_sequence() {
     );
 }
 
+/// Face landmarks a retouch reads and an isolated voice are part of what
+/// an opened project lacks — inside a compound clip and on a timeline that
+/// is not the open one — and the queues the app runs after an edit find
+/// them there too.
+#[test]
+fn landmarks_and_voices_are_counted_inside_compounds_and_parked_timelines() {
+    use chukcut_engine::modules::landmarks::commands::{self as landmarks, RetouchSetting};
+    use chukcut_engine::modules::voice::commands::{
+        voice_isolation_missing, voice_set_isolation, IsolationSetting,
+    };
+    use chukcut_engine::modules::voice::isolate::Keep;
+    isolate();
+    let media = require_media!();
+    // The run below finds faces into the shared cache; start without them.
+    let _run = RUNS.lock().unwrap_or_else(|e| e.into_inner());
+    let _ = std::fs::remove_dir_all(chukcut_engine::modules::landmarks::track::root());
+    let mut project = Project::new("faces and voices", canvas(), 30.0);
+    project
+        .materials
+        .videos
+        .push(material_for("counter", &media.counter).unwrap());
+    let sine = chukcut_engine::modules::media::probe(&media.audio_only).unwrap();
+    project.materials.audios.push(AudioMaterial {
+        id: "sine".into(),
+        path: media.audio_only.to_string_lossy().into_owned(),
+        duration: sine.duration,
+        sample_rate: 48_000,
+        channels: 1,
+    });
+    let mut video = Track::new(TrackKind::Video, "Video 1");
+    video.segments.push(segment("counter", 0, S));
+    let mut audio = Track::new(TrackKind::Audio, "Audio 1");
+    audio.segments.push(segment("sine", 0, S));
+    project.tracks.push(video);
+    project.tracks.push(audio);
+    let state = AppState::new();
+    *state.project.write() = Some(project);
+    landmarks::landmarks_set_retouch(
+        &state,
+        "seg-counter-0".into(),
+        RetouchSetting::preset("natural"),
+    )
+    .unwrap();
+    voice_set_isolation(
+        &state,
+        "seg-sine-0".into(),
+        Some(IsolationSetting {
+            strength: 1.0,
+            keep: Keep::Voice,
+        }),
+    )
+    .unwrap();
+    {
+        let mut guard = state.project.write();
+        let project = guard.as_mut().unwrap();
+        // The retouched clip goes into a compound clip ...
+        let made = build::create_compound(project, &["seg-counter-0".to_string()], None).unwrap();
+        made.command.apply(project).unwrap();
+        // ... and a second timeline is opened, so all of it is parked.
+        let (new, _) = build::new_timeline(project, Some("Second".into())).unwrap();
+        new.apply(project).unwrap();
+        assert!(project.segment("seg-sine-0").is_none(), "parked");
+    }
+    let project = state.project.read().clone().unwrap();
+
+    let missing = landmarks::missing(&project);
+    assert_eq!(missing.len(), 1, "the clip inside the compound clip");
+    assert_eq!(missing[0].0, "seg-counter-0");
+    assert_eq!(
+        voice_isolation_missing(&state),
+        vec!["seg-sine-0".to_string()]
+    );
+    let status = prepare_missing(&project);
+    assert_eq!(status.voices, 1);
+    // A second of 30 fps faces, give or take the frame at each end.
+    assert!((29..=32).contains(&status.frames), "{status:?}");
+    assert_eq!(
+        status.sentence(),
+        format!("Preparing {} frames and 1 voice", status.frames)
+    );
+}
+
+/// One preparation runs at a time in a process: a test that starts one
+/// would stop another's.
+static RUNS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Wait for the current run to end.
 fn finished() -> PrepareStatus {
     let deadline = Instant::now() + Duration::from_secs(60);
@@ -155,6 +241,7 @@ fn finished() -> PrepareStatus {
 fn an_opened_project_mixes_its_compound_clips_down_or_stops_when_asked() {
     isolate();
     let media = require_media!();
+    let _run = RUNS.lock().unwrap_or_else(|e| e.into_inner());
     let (state, outer) =
         with_processed_compound(Project::new("sound", canvas(), 30.0), &media.audio_only);
     let project = state.project.read().clone().unwrap();
@@ -184,4 +271,114 @@ fn an_opened_project_mixes_its_compound_clips_down_or_stops_when_asked() {
 
     // Opened again: nothing left to do.
     assert_eq!(prepare_missing(&project).sounds, 0);
+}
+
+/// Where the face mesh and HTDemucs are installed: an opened project finds
+/// the faces and isolates the voice its parked clips lack, and counts them.
+#[test]
+fn an_opened_project_finds_faces_and_isolates_voices_it_lacks() {
+    use chukcut_engine::modules::landmarks::commands::{self as landmarks, RetouchSetting};
+    use chukcut_engine::modules::ml;
+    use chukcut_engine::modules::voice::commands::{
+        voice_isolation_missing, voice_set_isolation, IsolationSetting,
+    };
+    use chukcut_engine::modules::voice::isolate::Keep;
+    use chukcut_ml_worker::registry;
+    isolate();
+    let media = require_media!();
+    // The models live in the user's ML cache, which the isolated cache
+    // root links to.
+    let user_ml = std::env::var_os("HOME")
+        .map(|h| Path::new(&h).join(".cache/chukcut/ml"))
+        .filter(|p| p.is_dir());
+    let Some(user_ml) = user_ml else {
+        eprintln!("skipping: no ML cache");
+        return;
+    };
+    let link = ml::root();
+    if !link.exists() {
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&user_ml, &link).unwrap();
+    }
+    let present = |id: &str| registry::model_present(&link, registry::model(id).unwrap());
+    if ml::worker::binary().is_none()
+        || !["facemesh", "yunet", "htdemucs-vocals"]
+            .iter()
+            .all(|id| present(id))
+        || registry::preferred_runtime(&link).is_none()
+    {
+        eprintln!("skipping: the ML worker, a runtime, the face mesh or HTDemucs is missing");
+        return;
+    }
+    let _run = RUNS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut project = Project::new("prepare faces and voices", canvas(), 30.0);
+    project
+        .materials
+        .videos
+        .push(material_for("counter", &media.counter).unwrap());
+    // Audio of this instant's own, so no earlier run's isolation is found.
+    let sine = chukcut_engine::modules::media::probe(&media.audio_only).unwrap();
+    project.materials.audios.push(AudioMaterial {
+        id: "sine".into(),
+        path: media.audio_only.to_string_lossy().into_owned(),
+        duration: sine.duration,
+        sample_rate: 48_000,
+        channels: 1,
+    });
+    let mut video = Track::new(TrackKind::Video, "Video 1");
+    video.segments.push(segment("counter", 0, S));
+    let mut audio = Track::new(TrackKind::Audio, "Audio 1");
+    audio.segments.push(segment("sine", 0, S));
+    project.tracks.push(video);
+    project.tracks.push(audio);
+    let state = AppState::new();
+    *state.project.write() = Some(project);
+    landmarks::landmarks_set_retouch(
+        &state,
+        "seg-counter-0".into(),
+        RetouchSetting::preset("soft"),
+    )
+    .unwrap();
+    // A strength of this run's own: the mix is keyed by it.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .subsec_nanos();
+    voice_set_isolation(
+        &state,
+        "seg-sine-0".into(),
+        Some(IsolationSetting {
+            strength: 0.05 * (1 + nanos % 18) as f32,
+            keep: Keep::Background,
+        }),
+    )
+    .unwrap();
+    {
+        let mut guard = state.project.write();
+        let project = guard.as_mut().unwrap();
+        let made = build::create_compound(project, &["seg-counter-0".to_string()], None).unwrap();
+        made.command.apply(project).unwrap();
+        let (new, _) = build::new_timeline(project, Some("Second".into())).unwrap();
+        new.apply(project).unwrap();
+    }
+    let _ = std::fs::remove_dir_all(chukcut_engine::modules::landmarks::track::root());
+    let wanted = prepare_missing(&state.project.read().clone().unwrap());
+    assert!(wanted.frames > 0 && wanted.voices <= 1, "{wanted:?}");
+    let run = prepare_start(&state);
+    let deadline = Instant::now() + Duration::from_secs(180);
+    let done = loop {
+        let status = prepare_status().expect("a run");
+        if status.finished || Instant::now() > deadline {
+            break status;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert_eq!(done.run, run);
+    assert!(done.finished && !done.stopped, "{done:?}");
+    assert!(done.failures.is_empty(), "{:?}", done.failures);
+    assert_eq!(done.frames_done, done.frames, "{done:?}");
+    assert_eq!(done.voices_done, done.voices, "{done:?}");
+    let project = state.project.read().clone().unwrap();
+    assert!(landmarks::missing(&project).is_empty());
+    assert!(voice_isolation_missing(&state).is_empty());
 }

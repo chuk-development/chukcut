@@ -70,6 +70,8 @@ const READ_ONLY: &[&str] = &[
     "estimate",
     // Reads the clip's faces; writes only the landmark cache.
     "face_landmarks",
+    // Reads the clip's people; writes only the landmark cache.
+    "body_landmarks",
 ];
 
 /// The tools that talk to a service outside this machine: MCP's
@@ -95,6 +97,9 @@ const OPEN_WORLD: &[&str] = &[
     "face_landmarks",
     "retouch",
     "follow_face",
+    // Download RTMPose and the person detector on first use.
+    "body_landmarks",
+    "follow_body",
     // Download LaMa or Real-ESRGAN on first use.
     "remove_object",
     "enhance_quality",

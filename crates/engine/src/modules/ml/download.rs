@@ -13,6 +13,16 @@
 //! sits on disk next to what it unpacks to, and a damaged, cut or cancelled
 //! download leaves nothing a later run would trust.
 //!
+//! A *packed* model (`registry::PACKED_MODELS`: OpenMMLab's RTMPose and
+//! YOLOX come zipped) is downloaded whole and verified against the
+//! archive's pinned SHA-256 first, because a zip's directory is at its end.
+//! Then exactly one member, named in the registry, is copied out to the
+//! model's own path: no other entry is ever written, so a path in the
+//! archive (`../`, absolute, a symlink) cannot reach the file system. The
+//! member's size is checked against the registry before and while it is
+//! copied (a header can lie), and its own SHA-256 after. The archive is
+//! deleted either way. `.tar.gz` works the same, streamed.
+//!
 //! Requests carry the editor's neutral User-Agent (`chukcut/<version>`) and
 //! nothing about the user.
 
@@ -20,7 +30,7 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use chukcut_ml_worker::registry::{self, Archive, ModelSpec, RuntimePack};
+use chukcut_ml_worker::registry::{self, Archive, ModelSpec, PackedKind, PackedModel, RuntimePack};
 use sha2::{Digest as _, Sha256};
 
 use super::MlError;
@@ -49,22 +59,215 @@ pub fn ensure_model(
             spec.name, spec.licence
         )));
     }
-    crate::modules::speech::models::download_verified(
-        spec.url,
-        spec.sha256,
-        Some(spec.bytes),
-        &path,
-        progress,
-        cancel,
-    )
-    .map_err(|e| {
+    let failed = |e: String| {
         if cancel.load(Ordering::Relaxed) {
             MlError::Cancelled
         } else {
             MlError::Failed(format!("could not download {}: {e}", spec.name))
         }
-    })?;
+    };
+    let Some(packed) = registry::packed_model(spec.id) else {
+        crate::modules::speech::models::download_verified(
+            spec.url,
+            spec.sha256,
+            Some(spec.bytes),
+            &path,
+            progress,
+            cancel,
+        )
+        .map_err(failed)?;
+        return Ok(path);
+    };
+    let archive = path.with_file_name(match packed.kind {
+        PackedKind::Zip => "download.zip",
+        PackedKind::TarGz => "download.tar.gz",
+    });
+    crate::modules::speech::models::download_verified(
+        spec.url,
+        spec.sha256,
+        Some(packed.archive_bytes),
+        &archive,
+        progress,
+        cancel,
+    )
+    .map_err(failed)?;
+    let unpacked = unpack_member(&archive, packed, spec.bytes, &path);
+    let _ = std::fs::remove_file(&archive);
+    unpacked.map_err(|e| MlError::Failed(format!("could not unpack {}: {e}", spec.name)))?;
     Ok(path)
+}
+
+/// The largest file a packed model may unpack to, whatever the registry
+/// says: a bound on the work before the pinned size and checksum decide.
+const MAX_MEMBER: u64 = 4 << 30;
+
+/// Copy `packed.member` out of the verified archive at `archive` to `dest`,
+/// and nothing else. `expected` is the member's size from the registry.
+/// Written to `dest`'s `.part` first and renamed only when its size and
+/// SHA-256 match, so a bad archive leaves no model behind.
+pub fn unpack_member(
+    archive: &Path,
+    packed: &PackedModel,
+    expected: u64,
+    dest: &Path,
+) -> Result<(), String> {
+    if expected == 0 || expected > MAX_MEMBER {
+        return Err(format!("a model of {expected} bytes is not plausible"));
+    }
+    let part = dest.with_extension("part");
+    let _ = std::fs::remove_file(&part);
+    let copied = match packed.kind {
+        PackedKind::Zip => unzip_member(archive, packed, expected, &part),
+        PackedKind::TarGz => untar_member(archive, packed, expected, &part),
+    };
+    let checked = copied.and_then(|digest| {
+        if digest.eq_ignore_ascii_case(packed.member_sha256) {
+            Ok(())
+        } else {
+            Err(format!(
+                "{} in the archive has checksum {digest}, expected {}",
+                packed.member, packed.member_sha256
+            ))
+        }
+    });
+    match checked {
+        Ok(()) => std::fs::rename(&part, dest)
+            .map_err(|e| format!("cannot write {}: {e}", dest.display())),
+        Err(e) => {
+            let _ = std::fs::remove_file(&part);
+            Err(e)
+        }
+    }
+}
+
+/// Whether an archive path is relative and stays inside where it is
+/// unpacked: no root, no `..`. Only the member is written either way; a
+/// member that fails this is refused rather than trusted.
+fn is_contained(path: &str) -> bool {
+    let path = Path::new(path);
+    !path.as_os_str().is_empty()
+        && path.components().all(|c| {
+            matches!(
+                c,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        })
+}
+
+/// Copy at most `expected` bytes of `reader` to `part`, failing on more or
+/// fewer; answers the SHA-256 of what was copied.
+fn copy_exact(reader: impl Read, expected: u64, part: &Path) -> Result<String, String> {
+    if let Some(parent) = part.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+    }
+    let mut file =
+        std::fs::File::create(part).map_err(|e| format!("cannot write {}: {e}", part.display()))?;
+    let mut hasher = Sha256::new();
+    let mut limited = reader.take(expected + 1);
+    let mut buffer = vec![0u8; 1 << 16];
+    let mut done = 0u64;
+    loop {
+        let n = limited.read(&mut buffer).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        done += n as u64;
+        if done > expected {
+            return Err(format!("the model unpacks to more than {expected} bytes"));
+        }
+        hasher.update(&buffer[..n]);
+        io::Write::write_all(&mut file, &buffer[..n])
+            .map_err(|e| format!("cannot write {}: {e}", part.display()))?;
+    }
+    if done != expected {
+        return Err(format!(
+            "the model unpacks to {done} bytes, expected {expected}"
+        ));
+    }
+    file.sync_all().map_err(|e| e.to_string())?;
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn unzip_member(
+    archive: &Path,
+    packed: &PackedModel,
+    expected: u64,
+    part: &Path,
+) -> Result<String, String> {
+    let file = std::fs::File::open(archive).map_err(|e| e.to_string())?;
+    let mut zip = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+    let mut found = None;
+    for i in 0..zip.len() {
+        let entry = zip.by_index_raw(i).map_err(|e| e.to_string())?;
+        if entry.name() != packed.member {
+            continue;
+        }
+        // Two entries of one name: which one a reader takes is up to the
+        // reader (`zip` keeps one of them in its index and never shows the
+        // other), so where both are visible neither is trusted; where only
+        // one is, the member's checksum decides.
+        if found.is_some() {
+            return Err(format!("{} is in the archive twice", packed.member));
+        }
+        if !is_contained(entry.name()) || entry.enclosed_name().is_none() {
+            return Err(format!("{} leaves the archive's directory", packed.member));
+        }
+        if !entry.is_file() || entry.is_symlink() {
+            return Err(format!("{} is not a plain file", packed.member));
+        }
+        if entry.size() != expected {
+            return Err(format!(
+                "{} is {} bytes in the archive's directory, expected {expected}",
+                packed.member,
+                entry.size()
+            ));
+        }
+        found = Some(i);
+    }
+    let index = found.ok_or_else(|| format!("the archive holds no {}", packed.member))?;
+    let entry = zip.by_index(index).map_err(|e| e.to_string())?;
+    copy_exact(entry, expected, part)
+}
+
+fn untar_member(
+    archive: &Path,
+    packed: &PackedModel,
+    expected: u64,
+    part: &Path,
+) -> Result<String, String> {
+    let file = std::fs::File::open(archive).map_err(|e| e.to_string())?;
+    let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(io::BufReader::new(file)));
+    let mut digest = None;
+    for entry in tar.entries().map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry
+            .path()
+            .map_err(|e| e.to_string())?
+            .to_string_lossy()
+            .into_owned();
+        if path != packed.member {
+            continue;
+        }
+        if digest.is_some() {
+            return Err(format!("{} is in the archive twice", packed.member));
+        }
+        if !is_contained(&path) {
+            return Err(format!("{} leaves the archive's directory", packed.member));
+        }
+        if entry.header().entry_type() != tar::EntryType::Regular {
+            return Err(format!("{} is not a plain file", packed.member));
+        }
+        let size = entry.header().size().map_err(|e| e.to_string())?;
+        if size != expected {
+            return Err(format!(
+                "{} is {size} bytes in the archive, expected {expected}",
+                packed.member
+            ));
+        }
+        digest = Some(copy_exact(entry, expected, part)?);
+    }
+    digest.ok_or_else(|| format!("the archive holds no {}", packed.member))
 }
 
 /// Unpack `pack` into the ML cache, downloading it, unless it is there.
@@ -453,6 +656,141 @@ mod tests {
         .unwrap_err();
         assert_eq!(error, MlError::Cancelled);
         assert!(!registry::runtime_dir(&root, &pack).exists());
+    }
+
+    fn packed(kind: PackedKind, member: &'static str, data: &[u8]) -> PackedModel {
+        PackedModel {
+            model: "test",
+            kind,
+            archive_bytes: 1,
+            member,
+            member_sha256: Box::leak(format!("{:x}", Sha256::digest(data)).into_boxed_str()),
+        }
+    }
+
+    fn zip_of(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut zip = zip::ZipWriter::new(io::Cursor::new(Vec::new()));
+        for (name, data) in entries {
+            zip.start_file(*name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            io::Write::write_all(&mut zip, data).unwrap();
+        }
+        zip.finish().unwrap().into_inner()
+    }
+
+    const MEMBER: &str = "20230831/rtmpose_onnx/model/end2end.onnx";
+
+    #[test]
+    fn a_packed_model_unpacks_only_its_member_to_the_model_path() {
+        let root = scratch("packed-zip");
+        let model = b"ONNX pretend".as_slice();
+        let bytes = zip_of(&[
+            ("20230831/rtmpose_onnx/model/deploy.json", b"{}"),
+            ("../../escape.txt", b"outside"),
+            (MEMBER, model),
+        ]);
+        let archive = root.join("download.zip");
+        std::fs::write(&archive, &bytes).unwrap();
+        let dest = root.join("models/x/1/end2end.onnx");
+        let spec = packed(PackedKind::Zip, MEMBER, model);
+        unpack_member(&archive, &spec, model.len() as u64, &dest).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), model);
+        // Nothing but the member was written, anywhere.
+        assert!(!root.join("../escape.txt").exists());
+        assert!(!root.parent().unwrap().join("escape.txt").exists());
+        let written: Vec<_> = std::fs::read_dir(dest.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(written, ["end2end.onnx"]);
+    }
+
+    #[test]
+    fn a_packed_model_of_the_wrong_size_or_content_leaves_nothing() {
+        let root = scratch("packed-bad");
+        let model = b"ONNX pretend".as_slice();
+        let archive = root.join("download.zip");
+        std::fs::write(&archive, zip_of(&[(MEMBER, model)])).unwrap();
+        let dest = root.join("end2end.onnx");
+        // The registry says another size: refused before a byte is copied.
+        let spec = packed(PackedKind::Zip, MEMBER, model);
+        let error = unpack_member(&archive, &spec, 5, &dest).unwrap_err();
+        assert!(error.contains("expected 5"), "{error}");
+        // The right size, other content: the member's checksum catches it.
+        let other = packed(PackedKind::Zip, MEMBER, b"something else");
+        let error = unpack_member(&archive, &other, model.len() as u64, &dest).unwrap_err();
+        assert!(error.contains("checksum"), "{error}");
+        // A member the archive does not have.
+        let missing = packed(PackedKind::Zip, "nope/end2end.onnx", model);
+        assert!(unpack_member(&archive, &missing, model.len() as u64, &dest).is_err());
+        // An implausible size, before the archive is even opened.
+        assert!(unpack_member(&archive, &spec, MAX_MEMBER + 1, &dest).is_err());
+        assert!(!dest.exists() && !dest.with_extension("part").exists());
+    }
+
+    #[test]
+    fn a_member_named_twice_or_outside_cannot_slip_through() {
+        let root = scratch("packed-evil");
+        let model = b"ONNX pretend".as_slice();
+        let dest = root.join("end2end.onnx");
+        let archive = root.join("twice.zip");
+        // The writer refuses a second entry of one name, so the second is
+        // written under a stand-in of the same length and renamed in the
+        // bytes, local header and directory alike. Its content is not the
+        // model's: whichever entry a reader takes, only the pinned bytes may
+        // come out.
+        let stand_in = "x".repeat(MEMBER.len());
+        let evil = b"ONNX imposter".as_slice();
+        assert_eq!(evil.len(), model.len() + 1);
+        let mut twice = zip_of(&[(MEMBER, model), (&stand_in, &evil[..model.len()])]);
+        let at: Vec<usize> = twice
+            .windows(stand_in.len())
+            .enumerate()
+            .filter(|(_, w)| *w == stand_in.as_bytes())
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(at.len(), 2);
+        for i in at {
+            twice[i..i + MEMBER.len()].copy_from_slice(MEMBER.as_bytes());
+        }
+        std::fs::write(&archive, twice).unwrap();
+        let spec = packed(PackedKind::Zip, MEMBER, model);
+        match unpack_member(&archive, &spec, model.len() as u64, &dest) {
+            Ok(()) => assert_eq!(std::fs::read(&dest).unwrap(), model),
+            Err(_) => assert!(!dest.exists()),
+        }
+        let _ = std::fs::remove_file(&dest);
+        let archive = root.join("outside.zip");
+        std::fs::write(&archive, zip_of(&[("../end2end.onnx", model)])).unwrap();
+        let evil = packed(PackedKind::Zip, "../end2end.onnx", model);
+        let error = unpack_member(&archive, &evil, model.len() as u64, &dest).unwrap_err();
+        assert!(error.contains("leaves"), "{error}");
+        assert!(!dest.exists());
+        assert!(is_contained("a/b.onnx") && !is_contained("/etc/x") && !is_contained("a/../../b"));
+    }
+
+    #[test]
+    fn a_packed_model_also_comes_out_of_a_tar_gz() {
+        let root = scratch("packed-tgz");
+        let model = b"ONNX pretend, tarred".as_slice();
+        let mut tar = tar::Builder::new(Vec::new());
+        for (path, data) in [("m/readme.txt", b"hi".as_slice()), (MEMBER, model)] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(data.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            tar.append_data(&mut header, path, data).unwrap();
+        }
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        io::Write::write_all(&mut gz, &tar.into_inner().unwrap()).unwrap();
+        let archive = root.join("download.tar.gz");
+        std::fs::write(&archive, gz.finish().unwrap()).unwrap();
+        let dest = root.join("end2end.onnx");
+        let spec = packed(PackedKind::TarGz, MEMBER, model);
+        unpack_member(&archive, &spec, model.len() as u64, &dest).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), model);
+        let short = packed(PackedKind::TarGz, MEMBER, model);
+        assert!(unpack_member(&archive, &short, 3, &root.join("other.onnx")).is_err());
     }
 
     #[test]

@@ -24,5 +24,8 @@ pub mod yunet;
 pub mod demucs;
 pub mod facemesh;
 
+// Body landmarks: people and their 17 keypoints.
+pub mod rtmpose;
+
 #[cfg(feature = "runtime")]
 pub mod runtime;

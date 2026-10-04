@@ -12,8 +12,12 @@
 //! the window follows the faces it finds. A face missed for a moment (a head
 //! turned to profile) is held for [`FACE_HOLD`] frames rather than handing
 //! the frame to a weaker cue, which would make the window twitch. Frames with
-//! no face, and every frame on a machine without the worker, use a saliency
-//! map built without a model from three cues:
+//! no face fall back to **people** when the person detector can run (YOLOX,
+//! `ml::body`): a person seen from behind, too far away or too small for
+//! the face detector still has a body, and the window holds their head and
+//! shoulders — the top of the person's box stands in for the face. Frames
+//! with neither, and every frame on a machine without the worker, use a
+//! saliency map built without a model from three cues:
 //!
 //! - **motion that is not the camera's**: each frame is compared with the
 //!   previous one warped by the camera motion the tracking module's KLT
@@ -54,6 +58,35 @@ const FACE_WEIGHT: f32 = 10.0;
 pub struct Subject {
     pub bbox: [f32; 4],
     pub score: f32,
+    /// Stands for a person's head, read off their body's box
+    /// ([`Subject::from_body`]), not a face the detector saw.
+    pub body: bool,
+}
+
+impl Subject {
+    /// A face found by the face detector.
+    pub fn face(bbox: [f32; 4], score: f32) -> Subject {
+        Subject {
+            bbox,
+            score,
+            body: false,
+        }
+    }
+
+    /// Where a person's head is, from their whole body's box (x, y, w, h in
+    /// fractions): the middle two-fifths of its width, its top fifth. A
+    /// standing person's head is about an eighth of their height; the
+    /// larger box also holds the shoulders, and a box that is cut off at
+    /// the waist still puts the head at its top. A body counts a little
+    /// less than a face.
+    pub fn from_body(bbox: [f32; 4], score: f32) -> Subject {
+        let [x, y, w, h] = bbox;
+        Subject {
+            bbox: [x + w * 0.3, y + h * 0.02, w * 0.4, h * 0.2],
+            score: score * 0.8,
+            body: true,
+        }
+    }
 }
 
 /// Finds faces in an RGBA frame (`rgba`, width, height). `None` when the
@@ -87,6 +120,9 @@ pub struct Analysis {
     pub cuts: Vec<usize>,
     /// Analysed frames whose target came from faces.
     pub face_frames: usize,
+    /// Of those, frames whose "faces" were people's bodies.
+    #[serde(default)]
+    pub body_frames: usize,
 }
 
 /// The window, as a fraction of the frame along `axis`, for a frame of
@@ -406,6 +442,9 @@ pub fn analyse(
                 *m = 0.1 * *m + FACE_WEIGHT * f;
             }
             out.face_frames += 1;
+            if subjects.iter().all(|s| s.body) {
+                out.body_frames += 1;
+            }
         }
         let (centre, mut confidence) = best_window(&map, width, height, axis, fraction);
         if on_faces.is_some() {
@@ -626,6 +665,7 @@ mod tests {
                 .collect(),
             cuts: Vec::new(),
             face_frames: 0,
+            body_frames: 0,
         };
         let path = smooth(&analysis, 0.3);
         for pair in path.windows(2) {
@@ -645,10 +685,7 @@ mod tests {
             }
         }
         normalise(&mut saliency);
-        let face = Subject {
-            bbox: [0.75, 0.3, 0.08, 0.2],
-            score: 0.9,
-        };
+        let face = Subject::face([0.75, 0.3, 0.08, 0.2], 0.9);
         let faces = face_map(&[face], w, h, Axis::Horizontal);
         let map: Vec<f32> = saliency
             .iter()
@@ -660,16 +697,24 @@ mod tests {
     }
 
     #[test]
+    fn a_body_stands_in_for_the_head_at_the_top_of_its_box() {
+        let body = Subject::from_body([0.6, 0.1, 0.2, 0.8], 0.9);
+        let [x, y, w, h] = body.bbox;
+        assert!(body.body);
+        assert!((x + w / 2.0 - 0.7).abs() < 1e-6, "centred");
+        assert!(y >= 0.1 && y + h <= 0.1 + 0.8 * 0.25, "in the top quarter");
+        // The window follows it like a face.
+        let (w, h) = (64usize, 36usize);
+        let map = face_map(&[body], w, h, Axis::Horizontal);
+        let (centre, _) = best_window(&map, w, h, Axis::Horizontal, 0.3);
+        assert!((centre - 0.7).abs() < 0.08, "{centre}");
+    }
+
+    #[test]
     fn the_foreground_face_wins_over_a_small_one() {
         let (w, h) = (160usize, 90usize);
-        let big = Subject {
-            bbox: [0.1, 0.2, 0.12, 0.35],
-            score: 0.8,
-        };
-        let small = Subject {
-            bbox: [0.8, 0.4, 0.03, 0.06],
-            score: 0.95,
-        };
+        let big = Subject::face([0.1, 0.2, 0.12, 0.35], 0.8);
+        let small = Subject::face([0.8, 0.4, 0.03, 0.06], 0.95);
         let map = face_map(&[big, small], w, h, Axis::Horizontal);
         let (centre, _) = best_window(&map, w, h, Axis::Horizontal, 0.3);
         assert!(centre < 0.3, "{centre}");

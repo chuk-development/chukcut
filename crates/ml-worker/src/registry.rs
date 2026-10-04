@@ -67,6 +67,12 @@ pub enum Task {
     /// Super-resolution: a picture in, the same picture at a larger size
     /// out (Real-ESRGAN).
     Upscale,
+    /// People: a box and a score per person in a frame (YOLOX), the
+    /// detector the body pose model reads crops from.
+    DetectPeople,
+    /// Body pose: a person's crop in, 17 COCO keypoints out (RTMPose), on
+    /// people the detector found.
+    BodyLandmarks,
 }
 
 /// One downloadable model.
@@ -344,7 +350,103 @@ pub const MODELS: &[ModelSpec] = &[
         cpu_ok: true,
         companion: None,
     },
+    // RTMPose-m (Jiang et al., "RTMPose", 2023; github.com/open-mmlab/mmpose,
+    // Apache-2.0, weights released under it) for body landmarks: 17 COCO
+    // keypoints from a 192x256 person crop, SimCC outputs `simcc_x`
+    // [N, 17, 384] and `simcc_y` [N, 17, 512] (keypoint = argmax / 2 in
+    // crop pixels). Trained on "body7", seven public sets, some of them for
+    // research only; OpenMMLab ships the weights under Apache-2.0 anyway —
+    // a business risk noted in decision 0032, not a licence problem. The
+    // file is OpenMMLab's MMDeploy export, zipped (see [`PACKED_MODELS`]),
+    // mirrored by the RTMPose author at huggingface.co/Tau-J/RTMPose, commit
+    // cd4d709; `sha256` is the zip's (the LFS object id), `bytes` the
+    // unpacked model's.
+    ModelSpec {
+        id: "rtmpose-m",
+        version: "body7-256x192-e48f03d0",
+        name: "RTMPose-m (body landmarks)",
+        task: Task::BodyLandmarks,
+        licence: "Apache-2.0",
+        commercial_ok: true,
+        url: "https://huggingface.co/Tau-J/RTMPose/resolve/cd4d7095f5cfc9cfc4f46289bee91ea4a1e1d9fd/rtmposev1/onnx_sdk/rtmpose-m_simcc-body7_pt-body7_420e-256x192-e48f03d0_20230504.zip",
+        sha256: "f7fbb6c5c11a1bb70f3d445e4ddec5d144ea89ad5649c081ef976f9b24a0b741",
+        bytes: 54_330_655,
+        file: "end2end.onnx",
+        providers_tested: &["CPU", "CUDA"],
+        cpu_ok: true,
+        companion: Some("yolox-tiny-human"),
+    },
+    // YOLOX-tiny (Ge et al., 2021; Megvii's YOLOX and MMDetection, both
+    // Apache-2.0) trained by OpenMMLab on Human-Art for people, the detector
+    // RTMPose's own pipeline uses: a 416x416 letterboxed BGR 0..255 input
+    // padded with 114, `dets` [1, N, 5] (x0, y0, x1, y1, score in input
+    // pixels) and `labels` [1, N] out, non-maximum suppression inside the
+    // graph. Same archive and mirror as RTMPose. Not YOLOv8: Ultralytics'
+    // weights are AGPL-3.0.
+    ModelSpec {
+        id: "yolox-tiny-human",
+        version: "humanart-416-6f3252f9",
+        name: "YOLOX-tiny (people)",
+        task: Task::DetectPeople,
+        licence: "Apache-2.0",
+        commercial_ok: true,
+        url: "https://huggingface.co/Tau-J/RTMPose/resolve/cd4d7095f5cfc9cfc4f46289bee91ea4a1e1d9fd/rtmposev1/onnx_sdk/yolox_tiny_8xb8-300e_humanart-6f3252f9.zip",
+        sha256: "36e09ca555916253fa1b5d51bec01e48e98e1f0af966c51ce3e844d8c8fc4cfc",
+        bytes: 20_283_006,
+        file: "end2end.onnx",
+        providers_tested: &["CPU", "CUDA"],
+        cpu_ok: true,
+        companion: None,
+    },
 ];
+
+/// How a packed model's archive is packed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PackedKind {
+    Zip,
+    TarGz,
+}
+
+/// A model that comes inside an archive instead of as a bare file. The
+/// [`ModelSpec`] of the same id keeps the archive's URL and SHA-256 and the
+/// *unpacked* file's size (what [`model_present`] checks); this says how to
+/// get the file out. Only `member` is ever written, to the model's own
+/// path, so nothing else in the archive can land anywhere.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct PackedModel {
+    /// The model's id in [`MODELS`].
+    pub model: &'static str,
+    pub kind: PackedKind,
+    /// The archive's size, for progress and as a limit on the download.
+    pub archive_bytes: u64,
+    /// The model's path inside the archive.
+    pub member: &'static str,
+    /// The SHA-256 of the unpacked model, checked after unpacking too.
+    pub member_sha256: &'static str,
+}
+
+pub const PACKED_MODELS: &[PackedModel] = &[
+    PackedModel {
+        model: "rtmpose-m",
+        kind: PackedKind::Zip,
+        archive_bytes: 50_799_818,
+        member: "20230831/rtmpose_onnx/rtmpose-m_simcc-body7_pt-body7_420e-256x192-e48f03d0_20230504/end2end.onnx",
+        member_sha256: "5c0a4bf67953e6d2ac43ce15e77dc9d5d354ae18430a47d2c5963a7bc5683e3c",
+    },
+    PackedModel {
+        model: "yolox-tiny-human",
+        kind: PackedKind::Zip,
+        archive_bytes: 18_887_737,
+        member: "20230928/yolox_onnx/yolox_tiny_8xb8-300e_humanart-6f3252f9/end2end.onnx",
+        member_sha256: "ceb11c07298f95c50d7c5abeb906d03340c85f23aa79e3e66966e7fb6c307250",
+    },
+];
+
+/// How model `id` is packed, when it comes inside an archive.
+pub fn packed_model(id: &str) -> Option<&'static PackedModel> {
+    PACKED_MODELS.iter().find(|p| p.model == id)
+}
 
 /// The model called `id`.
 pub fn model(id: &str) -> Option<&'static ModelSpec> {
@@ -846,7 +948,19 @@ mod tests {
                 "{}",
                 m.url
             );
-            assert!(m.url.ends_with(m.file));
+            match packed_model(m.id) {
+                Some(packed) => {
+                    let suffix = match packed.kind {
+                        PackedKind::Zip => ".zip",
+                        PackedKind::TarGz => ".tar.gz",
+                    };
+                    assert!(m.url.ends_with(suffix), "{}", m.url);
+                    assert!(packed.member.ends_with(m.file), "{}", packed.member);
+                    assert_eq!(packed.member_sha256.len(), 64, "{}", m.id);
+                    assert!(packed.archive_bytes > 0);
+                }
+                None => assert!(m.url.ends_with(m.file)),
+            }
             assert!(m.bytes > 0);
         }
         for p in RUNTIME_PACKS {
@@ -872,9 +986,22 @@ mod tests {
                 match m.task {
                     Task::SegmentEncoder => assert_eq!(companion.task, Task::SegmentDecoder),
                     Task::FaceLandmarks => assert_eq!(companion.task, Task::DetectFaces),
+                    Task::BodyLandmarks => assert_eq!(companion.task, Task::DetectPeople),
                     other => panic!("{} ({other:?}) should not have a companion", m.id),
                 }
             }
+        }
+    }
+
+    #[test]
+    fn every_packed_model_names_a_listed_model() {
+        for p in PACKED_MODELS {
+            let spec = model(p.model).unwrap_or_else(|| panic!("{}", p.model));
+            // The member is a plain relative path: the extractor writes it to
+            // the model's own path anyway, but a pinned name like `../x`
+            // would be a mistake worth catching here.
+            assert!(!p.member.starts_with('/') && !p.member.contains(".."));
+            assert!(p.archive_bytes > 0 && spec.bytes > 0);
         }
     }
 

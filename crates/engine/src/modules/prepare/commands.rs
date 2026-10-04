@@ -79,5 +79,22 @@ mod tests {
         assert!(s.busy());
         s.finished = true;
         assert!(!s.busy());
+        let v = PrepareStatus {
+            frames: 90,
+            voices: 1,
+            ..PrepareStatus::default()
+        };
+        assert_eq!(v.sentence(), "Preparing 90 frames and 1 voice");
+        assert!(v.busy());
+        let all = PrepareStatus {
+            frames: 2,
+            voices: 2,
+            sounds: 1,
+            ..PrepareStatus::default()
+        };
+        assert_eq!(
+            all.sentence(),
+            "Preparing 2 frames, 2 voices and the sound of 1 compound clip"
+        );
     }
 }

@@ -32,7 +32,7 @@ use chukcut_ml_worker::protocol::{
 use chukcut_ml_worker::registry::{self, ModelSpec, Task};
 use chukcut_ml_worker::runtime::{Failure, Runtime};
 use chukcut_ml_worker::{birefnet, esrgan, lama, rife, rvm, sam, vittrack, yunet};
-use chukcut_ml_worker::{demucs, facemesh};
+use chukcut_ml_worker::{demucs, facemesh, rtmpose};
 use ort::value::Tensor;
 
 type Out = Arc<Mutex<BufWriter<std::io::Stdout>>>;
@@ -566,6 +566,49 @@ impl Worker {
                     self.face_landmarks(spec, payload, w, h, &hints, max_faces.max(1) as usize)?;
                 Ok(Outcome::FaceLandmarks {
                     faces,
+                    millis: millis(started),
+                    provider,
+                })
+            }
+            RequestBody::DetectPeople {
+                model: name,
+                width,
+                height,
+                score_threshold,
+            } => {
+                let (w, h) = frame(payload, width, height)?;
+                let spec = model(&name, Task::DetectPeople)?;
+                let started = Instant::now();
+                let (people, provider) =
+                    self.detect_people(spec, payload, w, h, score_threshold)?;
+                Ok(Outcome::People {
+                    people,
+                    millis: millis(started),
+                    provider,
+                })
+            }
+            RequestBody::BodyLandmarks {
+                model: name,
+                width,
+                height,
+                hints,
+                max_people,
+                search,
+            } => {
+                let (w, h) = frame(payload, width, height)?;
+                let spec = model(&name, Task::BodyLandmarks)?;
+                let started = Instant::now();
+                let (people, provider) = self.body_landmarks(
+                    spec,
+                    payload,
+                    w,
+                    h,
+                    &hints,
+                    max_people.max(1) as usize,
+                    search,
+                )?;
+                Ok(Outcome::BodyLandmarks {
+                    people,
                     millis: millis(started),
                     provider,
                 })
@@ -1130,6 +1173,154 @@ impl Worker {
         Ok((faces, provider))
     }
 
+    /// The people in one frame: the detector's boxes in frame pixels.
+    fn detect_people(
+        &mut self,
+        spec: &'static ModelSpec,
+        rgba: &[u8],
+        w: usize,
+        h: usize,
+        threshold: f32,
+    ) -> Result<(Vec<chukcut_ml_worker::protocol::Person>, String), Failure> {
+        let loaded = self.runtime()?.session(spec)?;
+        let (input, ratio) = rtmpose::detector_input(rgba, w, h);
+        let n = rtmpose::DETECT_SIZE as i64;
+        let tensor = Tensor::from_array(([1i64, 3, n, n], input)).map_err(inference)?;
+        let outputs = loaded
+            .session
+            .run(ort::inputs!["input" => tensor])
+            .map_err(inference)?;
+        let (_, dets) = outputs
+            .get("dets")
+            .ok_or_else(|| inference("the model has no output dets"))?
+            .try_extract_tensor::<f32>()
+            .map_err(inference)?;
+        // The labels are int64 in this export; a model without them (or of
+        // another type) is taken to find people only.
+        let labels = outputs
+            .get("labels")
+            .and_then(|v| v.try_extract_tensor::<i64>().ok())
+            .map(|(_, l)| l.to_vec());
+        let people = rtmpose::people(dets, labels.as_deref(), ratio, w, h, threshold)
+            .into_iter()
+            .map(|(bbox, score)| chukcut_ml_worker::protocol::Person { bbox, score })
+            .collect();
+        Ok((people, loaded.provider.to_string()))
+    }
+
+    /// Body keypoints in one frame: on the regions `hints` names, then on
+    /// the people the detector finds when no hint holds a person any more
+    /// or `search` asks for newcomers.
+    #[allow(clippy::too_many_arguments)] // the request's fields, unpacked
+    fn body_landmarks(
+        &mut self,
+        spec: &'static ModelSpec,
+        rgba: &[u8],
+        w: usize,
+        h: usize,
+        hints: &[[f32; 4]],
+        max_people: usize,
+        search: bool,
+    ) -> Result<(Vec<chukcut_ml_worker::protocol::BodyPose>, String), Failure> {
+        // A person counts when the detector is this sure (rtmlib's 0.5 for
+        // its pose tracker's detections).
+        const PERSON: f32 = 0.5;
+        // A detection overlapping a followed person this much is that person.
+        const COVERED: f32 = 0.3;
+        let mut people = Vec::new();
+        let mut provider = self.pose_regions(spec, rgba, w, h, hints, &mut people)?;
+        if (people.is_empty() || search) && people.len() < max_people {
+            let detector = spec
+                .companion
+                .and_then(registry::model)
+                .filter(|m| m.task == Task::DetectPeople)
+                .ok_or_else(|| bad(format!("{} has no person detector", spec.id)))?;
+            let (found, _) = self.detect_people(detector, rgba, w, h, PERSON)?;
+            let fresh: Vec<[f32; 4]> = found
+                .iter()
+                .map(|p| p.bbox)
+                .filter(|b| {
+                    people
+                        .iter()
+                        .all(|p: &chukcut_ml_worker::protocol::BodyPose| {
+                            rtmpose::iou(p.region, *b) < COVERED
+                                && rtmpose::iou(p.bbox, *b) < COVERED
+                        })
+                })
+                .take(max_people - people.len())
+                .collect();
+            let more = self.pose_regions(spec, rgba, w, h, &fresh, &mut people)?;
+            if provider.is_empty() {
+                provider = more;
+            }
+        }
+        people.truncate(max_people);
+        if provider.is_empty() {
+            provider = self.runtime()?.session(spec)?.provider.to_string();
+        }
+        Ok((people, provider))
+    }
+
+    /// The pose model on each of `regions`, adding the people it sees to
+    /// `people` (a region that ends on someone already there is dropped).
+    /// Answers the provider, empty when nothing ran.
+    fn pose_regions(
+        &mut self,
+        spec: &'static ModelSpec,
+        rgba: &[u8],
+        w: usize,
+        h: usize,
+        regions: &[[f32; 4]],
+        people: &mut Vec<chukcut_ml_worker::protocol::BodyPose>,
+    ) -> Result<String, Failure> {
+        // Two regions that end on one person: the second is the same person.
+        const SAME: f32 = 0.6;
+        let mut provider = String::new();
+        for &region in regions {
+            let crop = rtmpose::Crop::from_box(region);
+            let loaded = self.runtime()?.session(spec)?;
+            provider = loaded.provider.to_string();
+            let tensor = Tensor::from_array((
+                [1i64, 3, rtmpose::POSE_H as i64, rtmpose::POSE_W as i64],
+                rtmpose::pose_input(rgba, w, h, &crop),
+            ))
+            .map_err(inference)?;
+            let outputs = loaded
+                .session
+                .run(ort::inputs!["input" => tensor])
+                .map_err(inference)?;
+            let (_, sx) = outputs
+                .get("simcc_x")
+                .ok_or_else(|| inference("the model has no output simcc_x"))?
+                .try_extract_tensor::<f32>()
+                .map_err(inference)?;
+            let (_, sy) = outputs
+                .get("simcc_y")
+                .ok_or_else(|| inference("the model has no output simcc_y"))?
+                .try_extract_tensor::<f32>()
+                .map_err(inference)?;
+            let points = rtmpose::keypoints(sx, sy, &crop);
+            if !rtmpose::present(&points) {
+                continue;
+            }
+            let (Some(bbox), Some(next)) =
+                (rtmpose::bbox(&points), rtmpose::region_of(&points, w, h))
+            else {
+                continue;
+            };
+            if people.iter().any(|p| rtmpose::iou(p.bbox, bbox) > SAME) {
+                continue;
+            }
+            people.push(chukcut_ml_worker::protocol::BodyPose {
+                bbox,
+                region: next,
+                score: rtmpose::score(&points),
+                points,
+            });
+        }
+        Ok(provider)
+    }
+
     fn benchmark(
         &mut self,
         id: u64,
@@ -1235,6 +1426,23 @@ impl Worker {
                 // The mesh alone, on the middle of the frame, as it runs
                 // while a face is being followed (the detector only runs on
                 // the first frame and after a loss).
+                Task::DetectPeople => worker.detect_people(spec, &rgba, w, h, 0.5).map(|_| ()),
+                // The pose model alone on one person-shaped box, as it runs
+                // while people are followed.
+                Task::BodyLandmarks => {
+                    let hint = [
+                        w as f32 * 0.35,
+                        h as f32 * 0.1,
+                        w as f32 * 0.3,
+                        h as f32 * 0.8,
+                    ];
+                    // The pose model only: on a frame with nobody in it,
+                    // `body_landmarks` would run the detector too.
+                    let mut people = Vec::new();
+                    worker
+                        .pose_regions(spec, &rgba, w, h, &[hint], &mut people)
+                        .map(|_| ())
+                }
                 Task::FaceLandmarks => {
                     let side = w.min(h) as f32 * 0.6;
                     let hint = [w as f32 / 2.0, h as f32 / 2.0, side, 0.0];

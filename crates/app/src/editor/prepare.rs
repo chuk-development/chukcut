@@ -3,8 +3,9 @@
 //!
 //! The engine does the work and keeps the count; this file reads it a few
 //! times a second, redraws the preview as frames land, and says once at the
-//! end what could not be made. Face landmarks and voice isolation, which
-//! the app queues itself after an edit, are queued when the run ends.
+//! end what could not be made. Face landmarks and isolated voices are part
+//! of the run (and of the chip's count) since agent/body; the app's own
+//! queues for them, which run after an edit, run once more when it ends.
 
 use std::time::{Duration, Instant};
 
@@ -49,18 +50,28 @@ impl Editor {
         let before = self.prepare.status.clone();
         let landed = before.as_ref().is_some_and(|b| {
             b.run == now.run
-                && (b.frames_done != now.frames_done || b.sounds_done != now.sounds_done)
+                && (b.frames_done != now.frames_done
+                    || b.sounds_done != now.sounds_done
+                    || b.voices_done != now.voices_done)
         });
         if landed {
             // New frames in the cache: render the picture again.
             self.generation += 1;
         }
+        let voiced = before
+            .as_ref()
+            .is_some_and(|b| b.run == now.run && b.voices_done != now.voices_done);
+        if voiced {
+            // The mixers resolve a clip's sound per project snapshot: a
+            // fresh one plays the isolated voice.
+            self.refresh(cx);
+        }
         if now.finished && self.prepare.reported != Some(now.run) {
             self.prepare.reported = Some(now.run);
             if !now.stopped {
-                // Face landmarks and voice isolation have their own queues,
-                // which the app runs after an edit; after opening they wait
-                // until the frames above are made, so they do not compete.
+                // The run made the landmarks and voices it found missing;
+                // the app's own queues catch what an edit meanwhile asked
+                // for (they skip what is made or being made).
                 self.queue_missing_landmarks(cx);
                 self.queue_missing_isolation(cx);
             }
