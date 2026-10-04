@@ -110,6 +110,8 @@ pub struct Slot {
     pub segment_id: String,
     pub track_id: String,
     pub label: Option<String>,
+    /// Where the clip starts in its own sequence: on the timeline, or inside
+    /// the compound clip it was moved into.
     pub start: Micros,
     pub duration: Micros,
     pub aspect: [u32; 2],
@@ -117,45 +119,120 @@ pub struct Slot {
     pub filled: bool,
     /// The file in the slot once it is filled.
     pub media_path: Option<String>,
+    /// The sequence the clip is on: a timeline, or a compound clip's
+    /// contents.
+    pub sequence_id: String,
+    pub sequence_name: String,
+    /// Whether that sequence is a compound clip's contents.
+    pub in_compound: bool,
+    /// The timeline the slot belongs to: its own, or the one whose compound
+    /// clips reach it.
+    pub timeline_id: String,
 }
 
-/// Every slot of `project`, in fill order: by index, then by time, then by
-/// lane, so two slots that share an index (a split clip) still come out in a
-/// fixed order.
-pub fn slots(project: &Project) -> Vec<Slot> {
-    let mut out: Vec<(usize, Slot)> = Vec::new();
-    for (lane, track) in project.tracks.iter().enumerate() {
-        for segment in &track.segments {
-            let Some((_, marker)) = marker_of(project, segment) else {
+/// The sequences slots are looked for in, in the order they are listed:
+/// each timeline in tab order, followed by the compound clips it reaches
+/// (through compound clips inside compound clips). A compound clip two
+/// timelines use is listed under the first. Compound sequences no clip shows
+/// (cut, waiting to be pasted) are left out: their slots are nowhere to be
+/// seen. Each entry is (timeline rank, timeline id, sequence id).
+fn sequence_order(project: &Project) -> Vec<(usize, String, String)> {
+    use crate::modules::sequence;
+    let mut seen: std::collections::BTreeSet<String> = Default::default();
+    let mut order = Vec::new();
+    for (rank, timeline) in sequence::timelines(project).into_iter().enumerate() {
+        let mut queue = vec![timeline.id.clone()];
+        while let Some(id) = queue.pop() {
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            let Some(tracks) = sequence::tracks_of(project, &id) else {
                 continue;
             };
-            let pool = &project.materials;
-            let media_path = marker
-                .filled
-                .then(|| {
-                    pool.video(&segment.material_id)
-                        .map(|m| m.path.clone())
-                        .or_else(|| pool.image(&segment.material_id).map(|m| m.path.clone()))
-                })
-                .flatten();
-            out.push((
-                lane,
-                Slot {
-                    index: marker.index,
-                    segment_id: segment.id.clone(),
-                    track_id: track.id.clone(),
-                    label: marker.label.clone(),
-                    start: segment.target_range.start,
-                    duration: segment.target_range.duration,
-                    aspect: marker.aspect,
-                    accepts: marker.accepts,
-                    filled: marker.filled,
-                    media_path,
-                },
-            ));
+            order.push((rank, timeline.id.clone(), id.clone()));
+            let mut inner: Vec<String> = tracks
+                .iter()
+                .flat_map(|t| t.segments.iter())
+                .filter(|s| sequence::exists(project, &s.material_id))
+                .map(|s| s.material_id.clone())
+                .collect();
+            // Popped from the back: reverse so the first clip's contents
+            // come first.
+            inner.reverse();
+            queue.extend(inner);
         }
     }
-    out.sort_by_key(|(lane, slot)| (slot.index, slot.start, *lane));
+    order
+}
+
+/// Every slot of `project`, in every timeline and inside every compound
+/// clip, in fill order: grouped by timeline (tab order), then by index, then
+/// by sequence, time and lane, so two slots that share an index (a split
+/// clip) still come out in a fixed order. A slot moved into a compound clip
+/// stays a slot (decision 0022, amendment).
+pub fn slots(project: &Project) -> Vec<Slot> {
+    /// Timeline rank, index, sequence position, start, lane.
+    type Order = (usize, u32, usize, Micros, usize);
+    let mut out: Vec<(Order, Slot)> = Vec::new();
+    for (position, (rank, timeline_id, sequence_id)) in
+        sequence_order(project).into_iter().enumerate()
+    {
+        let Some(tracks) = crate::modules::sequence::tracks_of(project, &sequence_id) else {
+            continue;
+        };
+        let sequence_name =
+            crate::modules::sequence::name_of(project, &sequence_id).unwrap_or_default();
+        let in_compound = if project.sequence.id == sequence_id {
+            project.sequence.kind == crate::modules::sequence::SequenceKind::Compound
+        } else {
+            project
+                .materials
+                .sequence(&sequence_id)
+                .is_some_and(|s| s.kind == crate::modules::sequence::SequenceKind::Compound)
+        };
+        for (lane, track) in tracks.iter().enumerate() {
+            for segment in &track.segments {
+                let Some((_, marker)) = marker_of(project, segment) else {
+                    continue;
+                };
+                let pool = &project.materials;
+                let media_path = marker
+                    .filled
+                    .then(|| {
+                        pool.video(&segment.material_id)
+                            .map(|m| m.path.clone())
+                            .or_else(|| pool.image(&segment.material_id).map(|m| m.path.clone()))
+                    })
+                    .flatten();
+                out.push((
+                    (
+                        rank,
+                        marker.index,
+                        position,
+                        segment.target_range.start,
+                        lane,
+                    ),
+                    Slot {
+                        index: marker.index,
+                        segment_id: segment.id.clone(),
+                        track_id: track.id.clone(),
+                        label: marker.label.clone(),
+                        start: segment.target_range.start,
+                        duration: segment.target_range.duration,
+                        aspect: marker.aspect,
+                        accepts: marker.accepts,
+                        filled: marker.filled,
+                        media_path,
+                        sequence_id: sequence_id.clone(),
+                        sequence_name: sequence_name.clone(),
+                        in_compound,
+                        timeline_id: timeline_id.clone(),
+                    },
+                ));
+            }
+        }
+    }
+    out.sort_by_key(|(key, _)| *key);
     out.into_iter().map(|(_, slot)| slot).collect()
 }
 

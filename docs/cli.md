@@ -549,16 +549,35 @@ placeholder. More files than slots, a file that does not read, sound only,
 or a video in a photo-only slot is refused by name. The result lists each
 filled slot (`slowed_to` when it plays slowed) and the empty ones.
 
+#### `template apply --into PROJECT TEMPLATE [FILE...] [--as timeline|compound] [--at TIME] [--name NAME]`
+
+Puts a template into an existing project instead, its slots filled from the
+files the same way. `--as timeline` (the default) adds it as a new timeline
+and opens it; `--as compound` adds it as a compound clip starting at `--at`
+(default 0) on the first video lane with room there, or on a new lane on top.
+`--name` names the timeline or compound clip (the template's name by
+default). One undo step. The template's ids are made new, so the same
+template can go in twice; a media file the project already has is shared. A
+template made for another canvas shape is laid out on the project's canvas,
+and the result's `note` says so. The result has `sequence` (the new timeline
+or the compound clip's contents), `clip` (the compound clip), `filled` and
+`empty`.
+
 #### `template slots PROJECT`
 
-Lists a project's slots: number, clip, start, length, shape, and the file in
-it or `(empty)`.
+Lists a project's slots, in every timeline and inside compound clips: number,
+clip, start (in its own sequence), length, shape, and the file in it or
+`(empty)`. Each timeline's slots come together, in tab order; `sequence`,
+`sequence_name`, `in_compound` and `timeline` say where a slot is. A slot
+moved into a compound clip stays a slot.
 
 #### `template replace PROJECT --clip CLIP --media FILE [--from TIME]`
 
 Puts a file into a slot (`--clip slot:3`) or into any video or photo clip,
 with the same trimming, slowing and cropping. `--from` is where a longer clip
-starts. One undo step.
+starts. One undo step. `slot:N` is slot N of the open timeline when two
+timelines have one; a slot inside a compound clip is filled where it is,
+without opening it, and its clip id (or a prefix) names it too.
 
 #### `template save PROJECT --name NAME [--slot CLIP...] [--label TEXT...]`
 
@@ -577,10 +596,13 @@ chukcut-cli template apply trip.chukcut travel-diary a.mp4 b.mp4 c.jpg d.mp4
 chukcut-cli template slots trip.chukcut
 chukcut-cli template replace trip.chukcut --clip slot:2 --media better.mp4 --from 3
 chukcut-cli template save trip.chukcut --name "My trip look"
+chukcut-cli template apply --into trip.chukcut quick-cuts e.mp4 --as compound --at 12
 ```
 
 The MCP tools are `template_list` and `template_delete` (no `project`),
-`template_apply` (`project` is the file to write), `template_slots`,
+`template_apply` (`project` is the file to write; with `"into": true` it is
+the existing project, and `as` and `at` apply), `template_apply_into` (the
+same on an open project, also a batch op), `template_slots`,
 `template_replace` and `template_save`.
 
 ### Look
@@ -1133,6 +1155,45 @@ Finds the faces first if the clip has none analysed. One undo step.
 chukcut-cli follow-face reel.chukcut 2:0 --face-of 0:0 --anchor forehead --mode position_scale
 ```
 
+#### `body-landmarks PROJECT CLIP [--at TIME]`
+
+Finds the people in a video clip and prints the people at `--at` (default:
+the start of the clip). The ML worker runs two models: YOLOX-tiny finds the
+people, and RTMPose-m reads 17 body keypoints for each person (COCO order:
+nose, eyes, ears, shoulders, elbows, wrists, hips, knees, ankles; the
+person's own left before right). Both models have the Apache-2.0 licence
+(48 MB and 18 MB as downloads). For each person, the command prints the id,
+the score, the box and each keypoint with its confidence. A keypoint with a
+confidence below 0.3 was not seen. Points are fractions of the video frame.
+The id of a person stays the same from frame to frame: id 0 is the first
+person that the analysis sees. The keypoints are a cache file for each media
+file (`~/.cache/chukcut/landmarks`). They are not part of the project. The
+first run on a clip analyses all its frames. The models and ONNX Runtime
+download when they are first necessary.
+
+#### `follow-body PROJECT CLIP --body-of CLIP [--part PART] [--mode MODE] [--person N] [--at TIME]`
+
+Makes a title, sticker or picture follow a body part of a person in a video
+clip. `--part` is one of `head`, `shoulders`, `chest` (default), `hips`,
+`body`, `left_hand`, `right_hand`, `left_elbow`, `right_elbow`,
+`left_knee`, `right_knee`, `left_foot` or `right_foot`. Left and right are
+the person's own: a person who looks at the camera has the left hand on
+the right of the picture. The command writes the pose of the part (its
+point, its size and its angle) as a motion track. The clip follows the
+track like a tracked object, thus `--mode` and `track-set` (smoothing,
+detach, bake to keyframes) operate as for `track`. A hand turns with the
+forearm; the head, the shoulders, the chest and the hips turn with the line
+between the two sides. `--person` selects the person, from 1 (the first
+person that the analysis sees). `--at` is the time at which the clip has the
+correct position relative to the body part (default: the start of the
+clip). The command does not move the clip to that position. If the clip has
+no analysed people, the command finds them first. One undo step. When the
+part is not visible in a frame, the follower stays where it was.
+
+```bash
+chukcut-cli follow-body reel.chukcut 2:0 --body-of 0:0 --part right_hand --mode position_scale_rotation
+```
+
 #### `blend PROJECT CLIP [MODE] [--opacity N]`
 
 Sets how a clip blends with the lanes below it: `normal`, `multiply`,
@@ -1202,7 +1263,8 @@ Removes the scene marks from the clip.
 
 #### `stabilise apply PROJECT CLIP`
 
-Measures the camera shake of a video clip and stabilises it. `--strength` from
+Measures the camera shake of a video clip, or of a compound clip's rendered
+contents, and stabilises it. `--strength` from
 0 to 1 (light 0.35, medium 0.6 (the default), strong 0.85, tripod 1).
 `--crop` is how much of the picture is cut off to hide the moving edges:
 `auto` (the default, the least that hides them) or a fraction up to 0.3. The
@@ -1246,7 +1308,10 @@ chukcut-cli beats cut reel.chukcut 0:0 --every 2
 #### `reframe PROJECT [CLIP...]`
 
 Finds the subject of each clip and moves a window of the canvas's shape with
-it, as position keyframes. `--ratio W:H` (for example `9:16`, `1:1`, `4:5`)
+it, as position keyframes. The subject is the faces that YuNet finds. On a
+frame without a face, the subject is the people that the person detector
+finds (the head and the shoulders of each person). On a frame without both,
+the subject comes from the saliency of the picture. `--ratio W:H` (for example `9:16`, `1:1`, `4:5`)
 also changes the project to that shape, in the same undo step. Without clips,
 the CLI uses each clip that fills its frame on a visible video lane.
 
@@ -1654,7 +1719,8 @@ licences. `install ITEM`, `remove ITEM`, `bench MODEL [--size WxH]
 [--iterations N]`.
 
 An ITEM is a model (`yunet`, `vittrack`, `rvm`, `birefnet-lite`,
-`mobilesam`, `rife`, `lama`, `realesr-general-x4v3`), a runtime pack (`runtime:cpu`, `runtime:cuda13`,
+`mobilesam`, `rife`, `lama`, `realesr-general-x4v3`, `facemesh`,
+`htdemucs-vocals`, `rtmpose-m`, `yolox-tiny-human`), a runtime pack (`runtime:cpu`, `runtime:cuda13`,
 `runtime:cudnn9-cu12`, …) or a **GPU bundle**: `gpu` installs the one for
 this machine's NVIDIA driver, `gpu:nvidia-cu13` (driver 580 or newer,
 1.3 GB) or `gpu:nvidia-cu12` (driver 525 or newer, 1.9 GB) a named one. A
@@ -1691,10 +1757,17 @@ chukcut-cli ml bench rvm --size 540x960
 chukcut-cli ml bench mobilesam --size 960x540
 chukcut-cli ml bench lama --size 512x512
 chukcut-cli ml bench realesr-general-x4v3 --size 1280x720
+chukcut-cli ml bench rtmpose-m --size 1280x720
 chukcut-cli ml install tensorrt
 chukcut-cli ml bench rife --size 1920x1080 --accel fast --compare
 chukcut-cli ml bench
 ```
+
+`rtmpose-m` and `yolox-tiny-human` come as zip archives. The archive must
+have the SHA-256 in the registry. Then the CLI copies one file out of the
+archive (the model, at the path that the registry gives). The file must have
+the size and the SHA-256 in the registry. The CLI writes no other file from
+the archive, and it deletes the archive after.
 
 ### Undo and redo
 
@@ -1741,7 +1814,7 @@ The operation names are the MCP tool names: `info`, `validate`, `configure`,
 `remove_background`, `select_object`, `apply_to`, `blend`,
 `auto_adjust`, `colour_match`, `grade_preset_save`, `grade_preset_apply`,
 `grade_presets`, `isolate_voice`, `face_landmarks`, `retouch`,
-`follow_face`,
+`follow_face`, `body_landmarks`, `follow_body`,
 `frame_blend`, `smooth_slow_mo`, `captions_transcribe`,
 `captions_import`, `captions_export`, `captions_style`, `captions_list`,
 `silence_detect`, `silence_remove`, `normalize`, `denoise`, `loudness`,
@@ -1807,7 +1880,8 @@ Read-only tools have `readOnlyHint`: `info`, `template_list`,
 `template_slots`, `validate`, `captions_list`,
 `silence_detect`, `loudness`, `catalog`, `view_frame`, `marker_list`,
 `analysis`, `stock_kinds`, `stock_search`, `presets`, `estimate`,
-`face_landmarks` (which writes only the landmark cache).
+`face_landmarks` and `body_landmarks` (which write only the landmark
+cache).
 
 Tools that send data to a service outside this machine have
 `openWorldHint`: `captions_transcribe`, `translate_captions`, `tts`,
@@ -1815,8 +1889,9 @@ Tools that send data to a service outside this machine have
 `music`, `sfx`, `title_font`, `catalog` (the library and `voices` kinds),
 and `ml`, `remove_background`, `select_object`, `apply_to`, `frame_blend`,
 `smooth_slow_mo`, `remove_object`, `enhance_quality`, `isolate_voice`,
-`face_landmarks`, `retouch` and `follow_face`, which download a model or
-ONNX Runtime on first use (they send nothing about the project).
+`face_landmarks`, `retouch`, `follow_face`, `body_landmarks` and
+`follow_body`, which download a model or ONNX Runtime on first use (they
+send nothing about the project).
 
 ### Resources
 

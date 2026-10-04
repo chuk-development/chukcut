@@ -174,3 +174,8 @@ bundles side by side are possible and wasteful (Settings shows both with
 their size). A "Select object" bake on the CPU runs MobileSAM's encoder per
 frame (~0.7 s at 960×540 on four threads), so a 10 s clip takes minutes
 there; on CUDA it is a few seconds.
+
+## Amendment, 2026-10-04 (agent/polish3)
+
+Missing frames are also baked when a project opens, not only after an edit
+or before an export: `modules::prepare`, decision 0029's amendment.

@@ -114,3 +114,34 @@ the media is copied into `media/`.
 - A slot that wants its clip's sound and the music at once (ducking under
   it): then a `sound` field on the marker that the fill turns into a volume
   and a duck.
+
+## Amendment, 2026-10-04 (agent/polish3): into an open project, and slots anywhere
+
+- **A template goes into an open project as a sequence** (decision 0024):
+  a new timeline tab, opened, or a compound clip at the playhead on the
+  first video lane with room (`template_apply_into`, `template/apply.rs`).
+  It is built exactly as for a new project and then carried in, one
+  `Composite`: media and titles through `AddMaterial`, transitions and link
+  groups with `SequenceEdit::Add`, the parameter blocks (grades, effects,
+  animations, masks, slot markers) into the pool first, the convention
+  every parameter edit follows. Why a sequence and not clips pasted onto
+  the open lanes: a template is a whole layout — its own lanes, music bed,
+  titles and transitions timed to each other — and a sequence keeps it
+  together, movable as one clip, and openable to edit inside.
+- **Every id the template defines is made new** on the way in, by a walk
+  over the document's JSON that replaces the strings the known id fields
+  define (materials, lanes, clips, markers, link groups, pool entries).
+  A user template is read from disk with the same ids every time; without
+  this, applying it twice would put two clips with one id into a project.
+  A media file the project already has (same path) is shared: a template's
+  placeholders and music beds are the same files for every use.
+- **The canvas is the project's.** A template made for 9:16 put into a 16:9
+  project is laid out there (pillarboxed); the answer says so. Re-laying a
+  template out for another shape would need a layout per shape, which
+  templates do not have.
+- **A slot is a slot wherever it is.** `slot::slots` walks every timeline in
+  tab order and the compound clips each reaches, grouped by timeline. A
+  slot moved into a compound clip (Alt+G on slot clips) stays one, and
+  "Replace media" fills it where it is: the remove and insert run inside an
+  activation of its sequence and one back (`sequence::build::inside`), so
+  nobody has to open the compound clip and undo walks the same way.

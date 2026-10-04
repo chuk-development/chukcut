@@ -194,6 +194,7 @@ impl Editor {
                     .child(Badge::new(format).mono()),
             )
             .child(div().flex_1())
+            .children(self.render_prepare_chip(cx))
             .children(self.status.clone().map(|status| {
                 div()
                     .max_w(px(420.0))

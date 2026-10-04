@@ -1,0 +1,111 @@
+# Export
+
+Click **Export** at the top right, or use **Menu › Export…** (`Ctrl+E`).
+The export renders the timeline that is open, also when a compound clip is
+open. The export uses the same shaders as the player, so it shows what the
+player shows.
+
+## The dialog
+
+The left side shows the cover: the frame at the playhead.
+
+- **Preset**: a list of ready settings.
+
+  | Group | Presets |
+  |---|---|
+  | Social | TikTok, Instagram Reels, YouTube Shorts, Instagram square, X / Twitter |
+  | YouTube | YouTube 1080p, YouTube 4K |
+  | Master | Master · ProRes 422 HQ, Master · H.264, Master · HEVC |
+  | Audio only | Audio · AAC, Audio · MP3, Audio · WAV |
+  | GIF | GIF |
+  | Custom | Custom |
+  | My presets | the presets that you saved |
+
+  The social presets keep the canvas's shape and set a loudness target of
+  −14 LUFS. **+** saves the current settings as a preset. A bin deletes one
+  of your presets.
+- **Name** and **Export to** (the folder). The dialog warns when a file will
+  be replaced.
+- **Export as**: **Video**, **Audio only** or **GIF**.
+- **Range**: **Whole timeline** or **In to out**. It shows only when you set
+  in and out marks.
+
+### Video
+
+- **Resolution**: 480p, 720p, 1080p, 2K, 4K.
+- **Bitrate**: **Lower**, **Recommended**, **Higher** or **Custom** (in
+  Mbit/s).
+- **Codec**: **H.264**, **HEVC**, **AV1** or **ProRes**.
+- **Format**: mp4 or mov.
+- **Frame rate**: 23.976 to 60 fps.
+- **Encoder**: shows which encoder will run, for example "GPU · H.264
+  (NVIDIA NVENC)" or "Software · libx264". You cannot choose it here.
+  chukcut uses a GPU encoder when one passed its test encode. Settings ›
+  **Hardware** shows why an encoder was refused.
+- **Colour space**.
+
+### GIF
+
+**Resolution**, **Frame rate** (10 to 25 fps) and the size. A GIF has 252
+colours and no sound.
+
+### Audio
+
+- **Format**: **AAC (.m4a)**, **MP3** or **WAV**.
+- **Bitrate**: 128 to 320 kbps.
+- **Loudness**: **Off · keep the mix as edited**, **−14 LUFS · social**,
+  **−16 LUFS · podcast** or **−23 LUFS · broadcast**. A limiter keeps the
+  peaks safe.
+- **Mix now** with **Measure** shows the loudness of the mix as it is.
+
+### The bottom line
+
+**Duration** and **Size: about X MB**. chukcut measures the size on a few
+sample frames, so the estimate is close.
+
+## Export or queue
+
+- **Export** starts at once. **Cancel export** stops it. When it is done:
+  **Show in folder**, **Play**, **Close**.
+- **Add to queue** adds the export to a queue. The queue runs one export
+  after the other, also when you close the dialog. **Queue · N** at the top
+  opens the queue: **Clear finished**, **Back to settings**, and per item
+  **Run earlier**, **Run later**, **Show in folder**, **Remove from the
+  list**, **Stop this export**.
+
+The queue is not saved. It stops when you quit chukcut.
+
+## Before the export renders
+
+- AI frames that are missing (background mattes, slow-motion frames,
+  remade frames) are made first. If they cannot be made, the export stops
+  and says why.
+- Missing media stops the export. The message names the files.
+- When the project uses online media (stock, music library, generated
+  sound), the dialog shows a **Licences** box, and the export writes a
+  credits file next to the video.
+- Captions: see [Text and captions](text-and-captions.md#import-and-export)
+  to burn them in or to write an `.srt` next to the video.
+
+## Hardware encoding
+
+| GPU | Encoder | Codecs |
+|---|---|---|
+| NVIDIA | NVENC | H.264, HEVC, AV1 (on cards that have it) |
+| Intel | VAAPI (and QSV) | H.264, HEVC, AV1 (on chips that have it) |
+| AMD | VAAPI | H.264, HEVC, AV1 (on chips that have it) |
+| any | software | H.264 (x264), HEVC (x265), ProRes (prores_ks) |
+
+ProRes and GIF always use software. chukcut makes a short test encode with
+each hardware encoder before it offers it.
+
+## Save a single frame
+
+Not in the export dialog: use the player's **⋯** button (**Player
+options**) › **Save frame as image…**. It writes the frame at the playhead
+as a PNG at the canvas size.
+
+## From the command line
+
+`chukcut-cli export` and `chukcut-cli export-queue`. See
+[`docs/cli.md`](../cli.md).

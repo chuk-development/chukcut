@@ -1373,32 +1373,8 @@ impl Editor {
             None
         };
         match &self.inspector.masks.bake {
-            Some(bake) if bake.segment_id == segment.id => {
-                let fraction = bake.done as f32 / bake.total.max(1) as f32;
-                rows.push(caption(format!(
-                    "Removing the background\u{2026} {} of {} frames",
-                    bake.done, bake.total
-                )));
-                rows.push(
-                    gpui::component::progress::Progress::new("background-progress")
-                        .value(fraction * 100.0)
-                        .into_any_element(),
-                );
-                let job = bake.job;
-                rows.push(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .justify_end()
-                        .child(
-                            Button::new("background-cancel")
-                                .small()
-                                .label("Stop")
-                                .on_click(move |_, _, _| matting::matting_cancel(job)),
-                        )
-                        .into_any_element(),
-                );
-            }
+            // The progress is pinned under the body (`matte_strip`).
+            Some(bake) if bake.segment_id == segment.id => {}
             // A clip whose mattes are all baked has nothing to finish; the
             // button stood there after every complete bake.
             _ if on && coverage.is_some_and(|(baked, total)| baked >= total) => {}
@@ -1582,6 +1558,28 @@ impl Editor {
         if !failed {
             self.started_bake(&segment_id, Ok(job), cx);
         }
+    }
+
+    /// The running matte bake of `segment`, pinned under the Remove
+    /// background tab's body; `None` when none runs.
+    pub(super) fn matte_strip(&self, segment: &Segment) -> Option<AnyElement> {
+        let bake = self
+            .inspector
+            .masks
+            .bake
+            .as_ref()
+            .filter(|b| b.segment_id == segment.id)?;
+        let job = bake.job;
+        Some(controls::bake_strip(
+            "background-cancel",
+            format!(
+                "Removing the background\u{2026} {} of {} frames",
+                bake.done, bake.total
+            ),
+            bake.done as f32 / bake.total.max(1) as f32,
+            None,
+            move |_, _, _| matting::matting_cancel(job),
+        ))
     }
 
     /// Called from `refresh` after any edit: when a clip with Remove

@@ -755,13 +755,30 @@ close behind; analysis is decode-bound (300 frames of 1080×1920 in ~6 s).
 Fallback found: Face Mesh v1 (468 points, 192², Qualcomm's export via
 `Heliosoph/mediapipe-face-onnx`, Apache-2.0).
 
-**Body pose, not built.** RTMPose-t / -s body7 (Apache-2.0; files at
-`huggingface.co/Tau-J/RTMPose`, commit `cd4d709`, zipped `end2end.onnx`,
-input `[B, 3, 256, 192]` ImageNet-normalised, SimCC outputs `[B, 17, 384]`
-and `[B, 17, 512]`, keypoint = argmax / 2). Needs a person box per frame
-(top-down) and an unzip step in the downloader. The body7 training sets
-include research-only datasets; OpenMMLab ships the weights under
-Apache-2.0 anyway — a business risk to weigh, not a licence problem.
+**Built (2026-10-04, decision 0032): body landmarks.** RTMPose-m body7
+256×192 (`rtmpose-m`, Apache-2.0) with YOLOX-tiny Human-Art as the person
+detector (`yolox-tiny-human`, Apache-2.0), both from
+`huggingface.co/Tau-J/RTMPose` at commit `cd4d709`, both zipped MMDeploy
+exports (`end2end.onnx`; the downloader now unpacks one pinned member of a
+zip or tar.gz). Pose: input `input` `[B, 3, 256, 192]`, RGB, ImageNet
+mean and deviation, crop = the box × 1.25 at 3:4, black outside the frame;
+outputs `simcc_x` `[B, 17, 384]` and `simcc_y` `[B, 17, 512]`, keypoint =
+peak / 2 (refined by a parabola), confidence = the smaller peak, "seen"
+from 0.3. Detector: `input` `[1, 3, 416, 416]`, BGR 0..255, letterbox at
+the top left, padded 114; outputs `dets` `[1, N, 5]` (x0, y0, x1, y1,
+score in input pixels) and `labels` `[1, N]` (int64, 0 = person), NMS in
+the graph. Measured on the RTX 3060 (`ml bench`, 1280×720): pose 7.1 ms per
+person on CUDA, 21.6 ms on the CPU; detector 24 ms on CUDA (its NMS runs
+on the CPU), 55 ms on the CPU. The analysis follows people by region and
+runs the detector once a second, so it is decode-bound: 60 frames of
+1280×720 in 2.1 s (CUDA) and 2.7 s (CPU). On NASA's public-domain
+full-length portrait S63-01755 sliding at 150 px/s, the hips moved 222 px
+in 1.5 s (225 expected). Uses: "Follow body part" (a motion track per
+part) and auto reframe on a body where no face shows. The training data
+note stands: body7 includes research-only sets, Human-Art has its own
+terms; OpenMMLab ships both weights under Apache-2.0 — a business risk to
+weigh, not a licence problem. Not taken: RTMO (one pass, for crowds),
+RTMW (133 whole-body points, 4× larger), YOLOv8 (AGPL-3.0).
 
 ### 3.14 Colour auto-adjust and colour match
 

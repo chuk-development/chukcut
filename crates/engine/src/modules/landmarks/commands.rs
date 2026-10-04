@@ -92,7 +92,8 @@ pub fn landmarks_faces(
 ) -> Result<Vec<FaceInfo>, String> {
     let (job, source) = state.with_project(|p| -> Result<_, String> {
         let job = Job::for_segment(p, &segment_id)?;
-        let (_, segment) = p.segment(&segment_id).ok_or("unknown clip")?;
+        let (_, _, segment) =
+            crate::modules::sequence::find_segment(p, &segment_id).ok_or("unknown clip")?;
         Ok((job, p.materials.time_map(segment).clamped_source_time(at)))
     })??;
     let frames = track::read(&job.track)?;
@@ -116,11 +117,10 @@ pub fn landmarks_faces(
         .collect())
 }
 
-/// The clips that need landmarks: those with a retouch effect switched on.
+/// The clips that need landmarks: those with a retouch effect switched on,
+/// on every timeline and inside compound clips.
 pub fn needing(project: &Project) -> Vec<Id> {
-    project
-        .tracks
-        .iter()
+    crate::modules::sequence::all_tracks(project)
         .flat_map(|t| t.segments.iter())
         .filter(|s| project.materials.video(&s.material_id).is_some())
         .filter(|s| {
@@ -134,22 +134,31 @@ pub fn needing(project: &Project) -> Vec<Id> {
         .collect()
 }
 
+/// The clips of `project` that need landmarks and lack them, with how many
+/// frames each lacks — on every timeline and inside compound clips. Reads
+/// the track files: call it off the UI thread.
+pub fn missing(project: &Project) -> Vec<(Id, Job, usize)> {
+    needing(project)
+        .into_iter()
+        .filter_map(|id| Job::for_segment(project, &id).ok().map(|job| (id, job)))
+        .filter_map(|(id, job)| {
+            let (analysed, total) = job.coverage();
+            (!(Coverage { analysed, total }).done())
+                .then(|| (id, job, total.saturating_sub(analysed)))
+        })
+        .collect()
+}
+
 /// Start an analysis for every clip that needs landmarks and lacks them:
-/// after a retouch effect was added, a clip made longer, a cache cleared.
-/// Returns the jobs started. A clip already being analysed is skipped.
+/// after a retouch effect was added, a clip made longer, a cache cleared —
+/// on every timeline and inside compound clips. Returns the jobs started.
+/// A clip already being analysed is skipped.
 pub fn landmarks_queue_missing(state: &Arc<AppState>) -> Result<Vec<u64>, String> {
-    let wanted = state.with_project(|p| {
-        needing(p)
-            .into_iter()
-            .filter_map(|id| Job::for_segment(p, &id).ok().map(|job| (id, job)))
-            .collect::<Vec<_>>()
-    })?;
+    // A copy, so the track files are read without the project lock.
+    let project = state.project.read().clone().ok_or("no project is open")?;
+    let wanted = missing(&project);
     let mut started = Vec::new();
-    for (id, job) in wanted {
-        let (analysed, total) = job.coverage();
-        if (Coverage { analysed, total }).done() {
-            continue;
-        }
+    for (id, _, _) in wanted {
         if let Ok(job) = landmarks_analyse(state, id, None) {
             started.push(job);
         }
@@ -162,12 +171,7 @@ pub fn landmarks_queue_missing(state: &Arc<AppState>) -> Result<Vec<u64>, String
 /// the one the preview showed. Fails in words when the face model cannot
 /// run.
 pub fn landmarks_ensure(project: &Project, cancel: &AtomicBool) -> Result<(), String> {
-    for id in needing(project) {
-        let job = Job::for_segment(project, &id)?;
-        let (analysed, total) = job.coverage();
-        if (Coverage { analysed, total }).done() {
-            continue;
-        }
+    for (_, job, _) in missing(project) {
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
             return Err("cancelled".into());
         }

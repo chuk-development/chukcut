@@ -1,0 +1,155 @@
+//! Finding the people of a stretch of video and their keypoints, frame by
+//! frame, through the ML worker, into the clip's body track.
+
+use std::path::{Path, PathBuf};
+
+use super::track::{self, BodyFrame, Identities, Person};
+use crate::modules::analysis::frames::{self, Walk};
+use crate::modules::analysis::jobs::JobContext;
+use crate::modules::ml;
+use crate::modules::project::document::{Micros, Project, Segment, TimeRange};
+
+/// The long side frames are analysed at. The pose model reads a 192×256
+/// crop around each person and the detector a 416² letterbox; at 960 a
+/// person half the height of a 9:16 frame is still 480 px.
+pub const ANALYSIS_LONG_SIDE: u32 = 960;
+/// Frames are written to the track file every this many, so a follower
+/// can be made from the first seconds while the rest is analysed.
+const FLUSH_EVERY: usize = 60;
+/// Every this many frames the detector also looks for people the
+/// following has not got (someone who walked in): once a second at 30 fps.
+const SEARCH_EVERY: usize = 30;
+
+/// What to analyse: a video file's stretch.
+#[derive(Debug, Clone)]
+pub struct Job {
+    pub media: PathBuf,
+    pub fps: f64,
+    pub range: TimeRange,
+    /// The displayed frame's size, for the analysis size.
+    pub size: (u32, u32),
+    /// The track file.
+    pub track: PathBuf,
+}
+
+impl Job {
+    /// The job for clip `segment_id`, on any timeline or inside a compound
+    /// clip.
+    pub fn for_segment(project: &Project, segment_id: &str) -> Result<Job, String> {
+        let (_, _, segment) = crate::modules::sequence::find_segment(project, segment_id)
+            .ok_or("the clip is no longer on the timeline")?;
+        Job::of(project, segment)
+    }
+
+    /// The job for `segment`'s source range. Only a video clip has people
+    /// moving over time.
+    pub fn of(project: &Project, segment: &Segment) -> Result<Job, String> {
+        let video = project
+            .materials
+            .video(&segment.material_id)
+            .ok_or("only a video clip has people to find")?;
+        let range = segment
+            .source_range
+            .intersect(&TimeRange::new(0, video.duration.max(1)))
+            .ok_or("the clip shows none of its file")?;
+        Ok(Job {
+            media: PathBuf::from(&video.path),
+            fps: video.fps,
+            range,
+            size: (video.width.max(1), video.height.max(1)),
+            track: track::path_for(Path::new(&video.path), ml::body::model_version())?,
+        })
+    }
+
+    /// One frame's length.
+    pub fn period(&self) -> Micros {
+        let fps = if self.fps.is_finite() && self.fps > 1.0 {
+            self.fps
+        } else {
+            30.0
+        };
+        (1_000_000.0 / fps).round() as Micros
+    }
+
+    /// `(analysed, total)` frames of the range.
+    pub fn coverage(&self) -> (usize, usize) {
+        let frames = track::read(&self.track).unwrap_or_default();
+        track::coverage(&frames, self.range.start, self.range.end(), self.period())
+    }
+
+    fn analysis_height(&self) -> u32 {
+        let (w, h) = self.size;
+        let long = w.max(h);
+        if long <= ANALYSIS_LONG_SIDE {
+            h
+        } else {
+            ((h as u64 * ANALYSIS_LONG_SIDE as u64) / long as u64) as u32
+        }
+    }
+}
+
+/// Analyse the job's range (all of it: a re-run replaces what was there),
+/// reporting through `ctx`. Returns the number of frames with a person.
+pub fn run(job: &Job, ctx: Option<&JobContext>) -> Result<usize, String> {
+    let never = std::sync::atomic::AtomicBool::new(false);
+    let cancel = ctx.map_or(&never, |c| c.cancel_flag());
+    ml::body::prepare(&|_, _| {}, cancel).map_err(|e| e.to_string())?;
+    let walk = Walk {
+        path: job.media.to_string_lossy().into_owned(),
+        fps: job.fps,
+        range: job.range,
+        height: job.analysis_height(),
+        max_rate: None,
+        sequence: None,
+    };
+    let mut hints: Vec<[f32; 4]> = Vec::new();
+    let mut ids = Identities::default();
+    let mut pending: Vec<BodyFrame> = Vec::new();
+    let mut with_person = 0usize;
+    let mut index = 0usize;
+    frames::walk(&walk, ctx, (0.0, 1.0), |frame| {
+        let search = index.is_multiple_of(SEARCH_EVERY);
+        index += 1;
+        let poses = ml::body::landmarks(
+            &frame.rgba,
+            frame.width,
+            frame.height,
+            &hints,
+            search,
+            Some(cancel),
+        )
+        .map_err(|e| e.to_string())?;
+        hints = poses.iter().map(|p| p.region).collect();
+        let (w, h) = (frame.width as f32, frame.height as f32);
+        let boxes: Vec<[f32; 4]> = poses
+            .iter()
+            .map(|p| [p.bbox[0] / w, p.bbox[1] / h, p.bbox[2] / w, p.bbox[3] / h])
+            .collect();
+        let people: Vec<Person> = ids
+            .assign(frame.pts, &boxes)
+            .into_iter()
+            .zip(&poses)
+            .map(|(id, pose)| Person {
+                id,
+                score: pose.score,
+                points: std::array::from_fn(|k| {
+                    let p = pose.points.get(k).copied().unwrap_or([0.0; 3]);
+                    [p[0] / w, p[1] / h, p[2]]
+                }),
+            })
+            .collect();
+        if !people.is_empty() {
+            with_person += 1;
+        }
+        pending.push(BodyFrame {
+            t: frame.pts,
+            people,
+        });
+        if pending.len() >= FLUSH_EVERY {
+            track::merge_into(&job.track, std::mem::take(&mut pending))?;
+        }
+        Ok(())
+    })?;
+    track::merge_into(&job.track, pending)?;
+    Ok(with_person)
+}

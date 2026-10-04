@@ -538,6 +538,61 @@ pub(crate) fn panel_footer(content: impl IntoElement) -> AnyElement {
         .into_any_element()
 }
 
+/// A running bake, pinned between the inspector's scrolling body and its
+/// footer: what runs and how far on one line with Stop, a progress bar, and
+/// the CPU's time warning when there is one. Pinned, because the sections
+/// above it are taller than a short window and a progress row at their end
+/// was out of sight until the user scrolled (Enhance, Remove background,
+/// Speed's optical flow). Ids: `id` for Stop, `id-bar` for the bar.
+pub(crate) fn bake_strip(
+    id: &'static str,
+    label: String,
+    fraction: f32,
+    warning: Option<String>,
+    on_stop: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    div()
+        .id(SharedString::from(format!("{id}-strip")))
+        .flex_none()
+        .px(px(PAD))
+        .py(px(8.0))
+        .flex()
+        .flex_col()
+        .gap(px(6.0))
+        .border_t_1()
+        .border_color(rgb(HAIRLINE))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_size(px(TEXT_CAPTION))
+                        .text_color(rgb(TEXT_DIM))
+                        .child(label),
+                )
+                .child(Button::new(id).xsmall().label("Stop").on_click(on_stop)),
+        )
+        .child(
+            gpui::component::progress::Progress::new(SharedString::from(format!("{id}-bar")))
+                .value(fraction.clamp(0.0, 1.0) * 100.0),
+        )
+        .children(warning.map(|w| {
+            div()
+                .text_size(px(TEXT_CAPTION))
+                .text_color(rgb(WARNING))
+                .child(w)
+        }))
+        .into_any_element()
+}
+
 /// A text button: GPUI Component's, at the size every inspector footer and
 /// row uses. `primary` is the accent fill.
 pub(crate) fn panel_button(

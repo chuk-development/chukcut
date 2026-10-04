@@ -28,6 +28,8 @@ pub enum JobKind {
     Reframe,
     /// Face landmarks for retouch and face-follow (`modules::landmarks`).
     Landmarks,
+    /// Body landmarks for following a body part (`modules::body`).
+    Body,
 }
 
 impl JobKind {
@@ -39,6 +41,7 @@ impl JobKind {
             JobKind::Beats => "Detecting beats",
             JobKind::Reframe => "Finding the subject",
             JobKind::Landmarks => "Finding faces",
+            JobKind::Body => "Finding people",
         }
     }
 }

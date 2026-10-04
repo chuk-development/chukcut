@@ -158,3 +158,23 @@ its inverse leaves the pool byte-identical. Tabs never jump around.
   all.
 - A format change for another reason — then bump the schema so old builds
   refuse multi-timeline files instead of dropping timelines.
+
+## Amendment, 2026-10-04 (agent/polish3)
+
+- **An edit can reach into a parked sequence without the user opening it.**
+  `sequence::build::inside` wraps edits made against a parked sequence's
+  lanes in `Activate` to it and `Activate` back. The pair cancels out —
+  the breadcrumbs, the tab order and the pool are what they were — and,
+  being on the same undo step, undo walks in and out the same way. Used by
+  "Replace media" on a template slot inside a compound clip or on another
+  timeline. Cheaper than a primitive that edits a
+  parked sequence in place, which every segment command would have needed
+  a variant of.
+- **Stabilisation reads a compound clip's contents** like scene detection
+  and reframing: the sequence rendered on the canvas, measured in the
+  compound clip's source time, applied through its time map.
+- **The sequence walk computes each step's time from its index.** Adding a
+  rounded period drifted a third of a microsecond per frame at 30 fps and
+  rendered every step one frame early once the drift passed
+  `SAMPLE_SLACK`; analyses of compound clips were a frame early after the
+  first second.

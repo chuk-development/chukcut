@@ -5,7 +5,54 @@ Sessions are long and are not reopened, so nothing important is allowed to live
 only in a conversation. If you learn something that would change how the next
 person works, it belongs in this repository, not in a chat log.
 
-Last updated: 2026-10-04 (QA pass 2 over the wave 7–9 features and a showcase that shows them — see "QA pass 2" below). Previously 2026-10-04 (CI: clippy is fatal, the engine tests run on lavapipe with ffmpeg, the CLI and ML worker tests run too — see "CI" below). Previously 2026-10-04 (preview frames no longer leave the GPU: shared with GPUI through a patched GPUI, readback as the fallback — see "Preview frames shared with GPUI" under Perf). Previously 2026-10-04 (ML worker: VitTrack re-finding, Remove background, CUDA — see "The ML worker" below). Previously 2026-10-02 (**the UI is native now** — decision 0011. The Tauri
+## At a glance (2026-10-04)
+
+**State:** a working editor, not yet a daily driver. Waves 1–10 of
+`docs/plan/build-out.md` are merged; that table lists every feature and what
+each wave left open. Users read `docs/manual/`; this file is for whoever
+works on the code.
+
+- **Builds and runs** on Linux with Vulkan: `cargo build --release -p chukcut
+  -p chukcut-cli -p chukcut-ml-worker`. CI is green (fmt, clippy `-D
+  warnings`, engine tests on lavapipe, app, CLI and ML worker tests).
+- **Editing:** magnetic timeline, multi-select, linked A/V, keyframes with
+  easing, several timelines, compound clips, 11 templates, shortcut editor
+  with three presets. Undo for everything; autosave and crash recovery.
+- **Picture:** grading (basic, HSL, curves, wheels, LUTs, auto adjust, colour
+  match, presets), masks, chroma key, blend modes, 19 effects, effect clips,
+  ~130 transitions, titles and the text animator, captions (whisper.cpp or a
+  server), animated stickers, frame blending, motion blur, speed curves.
+- **Local AI** (`chukcut-ml-worker`, ONNX Runtime, CUDA bundle or CPU):
+  VitTrack tracking, RVM / BiRefNet background removal, MobileSAM select
+  object, matte-limited grade and effects, RIFE slow motion, LaMa remove
+  object, Real-ESRGAN enhance, face mesh retouch and follow face, RTMPose
+  follow body part (and reframe on a body), HTDemucs isolate voice. Baked frames are cache; `modules::prepare` bakes what an
+  opened project lacks.
+- **Hardware:** VAAPI decode zero-copy, NVDEC via NV12 textures, NVENC /
+  VAAPI / QSV export (trial-encoded first); preview frames shared with GPUI
+  as GPU memory (decision 0027), readback as fallback.
+- **CLI and MCP:** every command-layer function is reachable
+  (`crates/cli/tests/reachability.rs`).
+
+**Rough, in short** (details in the sections below and in `docs/QA.md`):
+AMD and Intel/hybrid laptops are not checked regularly; OpenVINO untested;
+the tarball ships neither the ML worker nor the CLI and runs only on the
+build machine's FFmpeg major; AI on the CPU takes minutes per clip, BiRefNet
+refuses it; RIFE ~6 fps and BiRefNet ~2 fps at 1080p on an RTX 3060; voice
+isolation peaks at 7–8 GB in the worker; body keypoints have no fingers;
+the inspector has no crop control (CLI only) and Speed › Speed effects is empty;
+cloud integrations are untested against live services.
+
+**Before you change code:** read "Traps that have already cost time" and
+the CLAUDE.md non-negotiables. Judge performance from a release build only.
+
+**Newest sections first:** Body landmarks, Polish pass 3, CI, Colour AI, QA pass 2, Flaky
+tests, Frame blending, Timelines and compound clips. The ML sections are at
+the end of the file ("The ML worker" and its sub-sections).
+
+## Update history
+
+Last updated: 2026-10-04 (body landmarks, follow a body part, reframe on a body, zipped models, faces and voices in the preparation — see "Body landmarks" below). Previously 2026-10-04 (the "At a glance" block above, after polish pass 3). Previously 2026-10-04 (QA pass 2 over the wave 7–9 features and a showcase that shows them — see "QA pass 2" below). Previously 2026-10-04 (CI: clippy is fatal, the engine tests run on lavapipe with ffmpeg, the CLI and ML worker tests run too — see "CI" below). Previously 2026-10-04 (preview frames no longer leave the GPU: shared with GPUI through a patched GPUI, readback as the fallback — see "Preview frames shared with GPUI" under Perf). Previously 2026-10-04 (ML worker: VitTrack re-finding, Remove background, CUDA — see "The ML worker" below). Previously 2026-10-02 (**the UI is native now** — decision 0011. The Tauri
 shell and the React frontend are gone; the engine is `crates/engine`
 (`chukcut-engine`, no UI dependency) and the app is a GPUI window in
 `crates/app`. What the native app does today: import (dialog or command line),
@@ -96,6 +143,116 @@ Judge performance from a release build only.
    inside one process, preview tiles, account keys). That test fails on a new
    `pub fn` in a `commands.rs` that nothing calls. Pending: the tracking
    commands (attach, bake, smoothing), which the tracking branch exposes.
+
+## Body landmarks, follow a body part (2026-10-04, agent/body)
+
+Decision 0032 (and an amendment to 0030). Measured on the RTX 3060 (CUDA 13
+bundle) and on the CPU pack, load 7–9 from other agents' builds.
+
+- **Zipped models** (`ml::download`, `registry::PACKED_MODELS`): the
+  archive is verified against its pinned SHA-256, then only the member the
+  registry names is copied, to the model's own path; its size is checked
+  before and during the copy, its own SHA-256 after; the archive is
+  deleted. tar.gz works the same. Any pinned download now stops when it
+  grows past its size. `chukcut-cli ml install rtmpose-m` fetched 48 MB and
+  unpacked 54 MB.
+- **Body landmarks** (`modules::body`, protocol `detect_people` and
+  `body_landmarks`): YOLOX-tiny finds people, RTMPose-m reads 17 COCO
+  keypoints per person (both Apache-2.0), followed by region from frame to
+  frame, the detector once a second for newcomers. `ml bench` at 1280×720:
+  pose 7.1 ms per person on CUDA, 21.6 ms on the CPU; detector 24 ms on
+  CUDA (the graph's NMS runs on the CPU) and 55 ms on the CPU. Analysis is
+  decode-bound: 60 frames of 1280×720 in 2.1 s (CUDA), 2.7 s (CPU). Track:
+  90 bytes per person per frame, next to the face tracks. Ids: people keep
+  their number by box overlap for 2 s. Tested on NASA's public-domain
+  full-length portrait S63-01755 sliding 150 px/s (`tests/body.rs` fetches
+  it once, pinned SHA-256): the hips moved 222 px in 1.5 s against 225.
+- **Follow a body part** (Tracking tab › Body part / Person / Follow body
+  part; CLI `follow-body`, `body-landmarks`; MCP `follow_body`,
+  `body_landmarks`): head, shoulders, chest, hips, whole body, hands,
+  elbows, knees, feet (the person's own left and right). A motion track
+  stamped `body`, 40 % smoothing, one undo step. A hand turns with the
+  forearm. Seen on Xvfb with lavapipe: a title on the left hand moved with
+  the person; the panel shows "Follows a body part … Body landmarks" and
+  hides Re-track and Tracker, as for a face.
+- **Auto reframe without a face**: on a frame where YuNet finds nothing,
+  the person detector's boxes stand in (the top fifth, the middle two
+  fifths of each). On the portrait with its head covered: "followed faces
+  in 35 % of frames · people in 65 %" (YuNet takes the helmet in his
+  hands for a face now and then) and the 9:16 window stayed on him.
+- **Faces and voices in every sequence, and in the preparation**: the
+  landmark queue, the export's landmark step and the missing-voice list
+  walk all timelines and compound clips' contents. The project's
+  preparation finds the faces and renders the voices it lacks, after the
+  frames, and the chip counts them ("Preparing 90 frames and 1 voice").
+  A voice render claims its files, so the preparation and the app's queue
+  never render one recording twice. `tests/prepare.rs` builds a retouched
+  clip inside a compound clip and an isolated clip on a parked timeline;
+  with the models installed the run made both (12 s).
+- **Not done:** whole-body keypoints (fingers, RTMW) and identity across
+  people who cross; the detector's NMS on the GPU.
+
+## Polish pass 3, 2026-10-04 (agent/polish3)
+
+The open items of QA pass 2 and two follow-ups of the ML waves.
+
+- **A template goes into an open project** (`template_apply_into`,
+  `template/apply.rs`): as a new timeline tab (opened) or as a compound clip
+  at the playhead on the first video lane with room (a new lane on top when
+  none has room). The template is built as for a new project, then carried
+  in as a sequence, one undo step. Every id the template defines is made
+  fresh (a JSON walk over the known id fields), so the same template goes
+  in twice without clashing; media the project already has (same path) is
+  shared, not added again. A template made for another canvas is laid out
+  on the project's (a 9:16 template on 16:9 is pillarboxed) and the answer
+  says so. App: the fill dialog offers New project / New timeline /
+  Compound clip at playhead when a project is open. CLI: `template apply
+  --into PROJECT [--as timeline|compound] [--at T]`; MCP `template_apply`
+  with `into`, or `template_apply_into`. Seen on Xvfb: Quick Cuts as a
+  compound clip on a new lane, Travel Diary as a second tab.
+- **Slots inside compound clips stay slots.** `slot::slots` walks every
+  timeline in tab order and the compound clips each reaches; a slot carries
+  its sequence, whether that is a compound clip, and its timeline.
+  "Replace media" fills a slot where it is: `sequence::build::inside` wraps
+  the remove + insert in an activation of the slot's sequence and one back,
+  so the user stays where they were and undo walks the same way. The slots
+  dialog says `in "Quick Cuts"` instead of a time; `template replace
+  --clip slot:N` picks the open timeline's slot N, and a clip id prefix
+  reaches a slot inside a compound clip.
+- **Opening a project bakes what it lacks** (`modules::prepare`): mattes,
+  optical-flow frames, remade frames and compound mix-downs missing from
+  the cache, in every timeline and inside compound clips. Throttled: 1.5 s
+  of grace for the first frame, the cache read off the UI thread, then one
+  clip at a time through the modules' own jobs (so an edit meanwhile joins
+  the running bake). One chip in the title bar, "Preparing 209 frames ·
+  65 % Stop"; failures are said once at the end. Face landmarks (retouch)
+  and voice isolation keep their own queues (agent/colourai); the app runs
+  them when the preparation ends, so they wait rather than compete, and
+  they are not in the chip's count. (Since agent/body they are part of
+  the run and of the count: see "Body landmarks" above.) Seen on Xvfb with the CUDA
+  bundle: a project with a cleared matte cache and a 0.5x optical-flow clip
+  baked 90 mattes and 119 flow frames in 14 s and the chip went away.
+- **Found on the way:** `matting_queue_missing` started bakes by clip id,
+  which only finds clips on the open timeline, so a matte inside a compound
+  clip never re-baked after an edit. It starts them by the job now.
+- **Stabilisation on compound clips**: measured on the rendered contents in
+  the clip's source time (`picture_of`, as scenes and reframe do), applied
+  through the compound clip's time map. `tests/analysis.rs` checks a 2x
+  compound clip's window follows the shake read at 2t.
+- **Trap, fixed: the sequence walk drifted a frame.** `walk_sequence` added
+  a rounded period (33 333 µs at 30 fps, a third of a microsecond short);
+  after thirty frames the drift outgrew `SAMPLE_SLACK` (10 µs) and every
+  later step rendered the previous frame. Scene times and reframe paths on
+  compound clips were a frame early after the first second. Each step's
+  time is now computed from its index.
+- **`ml status` through a linked ML folder** names "chukcut's CUDA
+  libraries": the root and the reported library paths are resolved before
+  the prefix test.
+- **A running bake's progress is pinned** under the inspector's scrolling
+  body (Enhance, Remove background, Speed's optical flow), with Stop and
+  the CPU warning, so a short window shows it without scrolling. A
+  compound clip that inherited a video clip's Enhance sub-tab showed the
+  Enhance body under a highlighted Basic; it falls back to Basic.
 
 ## CI (2026-10-04, agent/ci)
 
@@ -192,11 +349,9 @@ release worker and CLI, load 8–9 from other agents' builds).
   went from 4.3 dB in the mix to 20.7 dB; "keep background" took the music
   from −4.3 to 16.5 dB. The clip plays as it was until the render is
   there; the app renders in the background and re-plans the preview.
-- **Not done:** body landmarks (RTMPose): the research found the models
-  (`docs/research/ml-features.md` §3.13) but a top-down pose model needs a
-  person box per frame and the files come zipped, which the downloader does
-  not unpack yet. The worker's memory for HTDemucs was high (6.8 GB);
-  fixed by agent/mlspeed (1.5 GB, "Faster AI on NVIDIA").
+- **Not done:** ~~body landmarks (RTMPose)~~ — done by agent/body, see
+  "Body landmarks" above. The worker's memory for HTDemucs was high
+  (6.8 GB); fixed by agent/mlspeed (1.4 GB, "Faster AI on NVIDIA").
 
 ## QA pass 2 (2026-10-04, agent/qa2)
 
@@ -215,7 +370,7 @@ code values, the H.264 encode). Table, fixes and open items: `docs/QA.md`,
   is `<cache>/chukcut/ml`; `scripts/demo.sh` links the user's one into its
   own cache, read-only in effect (mattes and flow frames go to
   `<cache>/chukcut/mattes` and `flow`, which stay isolated). A linked folder
-  makes `ml status` name the CUDA runtime by path (`docs/QA.md`, open).
+  made `ml status` name the CUDA runtime by path; fixed on agent/polish3.
 - **Trap: an ffmpeg GIF with transparency needs a reserved palette entry**
   (`palettegen=reserve_transparent=1`, `paletteuse=alpha_threshold=128`);
   without it the file is opaque and the sticker shows as a box. Not ours,
@@ -498,8 +653,8 @@ breadcrumbs or the clip menu to close; Alt+Shift+G puts the clips back).
   (`ClipKind::Text`), with no Audio, Speed or Adjust tab. Now
   `ClipKind::Compound`: Video (Basic, Mask), Audio, Speed, Animation,
   Adjust, Effects; scene detection in Video › Basic; the clip menu offers
-  scenes and beats. Stabilisation still refuses a compound clip (it would
-  need the camera path of a rendered composite).
+  scenes and beats. Stabilisation works on compound clips since
+  agent/polish3 (measured on the rendered contents).
 - **The export dialog's black cover** was the playhead at the end of the
   timeline: the preview rendered the empty instant after the last clip, so
   after playback had run to the end the player and the cover (the frame at
@@ -2725,9 +2880,11 @@ from our own styles, animations, effects, transitions, looks, drawn
 placeholders (`<data>/templates/placeholders/`) and synthesised music beds
 (`<data>/templates/music/`, `template/music.rs`). Commands:
 `template_list`, `template_build_project` / `template_new_project`,
-`template_open_project`, `template_slots`, `template_replace_media` (one
-undo step), `template_save`, `template_delete`, `template_thumbnail`. CLI and
-MCP: `template list|apply|slots|replace|save|delete` (`docs/cli.md`). App:
+`template_open_project`, `template_apply_into` (into the open project, as
+a timeline or a compound clip; agent/polish3), `template_slots`,
+`template_replace_media` (one undo step), `template_save`,
+`template_delete`, `template_thumbnail`. CLI and MCP: `template
+list|apply|slots|replace|save|delete`, `apply --into` (`docs/cli.md`). App:
 a Templates section on the start screen, a Templates tab in the asset panel
 (by category, "My templates", and "This project" with slots and "Save as
 template"), the fill dialog and the slots dialog (`editor/templates.rs`,
@@ -3987,12 +4144,11 @@ release worker and release CLI, load 6–7 from other agents' builds).
 - **Rough:** a static mask never sees behind itself, so a logo is always
   LaMa's invention (steady in a still shot, shimmering in a moving one); a
   moving camera gets no memory, plate or smoothing; LaMa runs fp32 on the
-  CUDA provider (TensorRT fp16 with "Fast" since agent/mlspeed, below); a
-  remade clip with optical flow on
-  blends instead; the inspector's progress sits below the two sections and
-  needs a scroll on a short window; a project opened with its frames
-  cleared from the cache bakes them at the first edit or the export, as
-  mattes and optical-flow frames do (opening does not queue bakes).
+  CUDA provider (TensorRT fp16 with "Fast" since agent/mlspeed, "Faster
+  AI on NVIDIA"); a remade clip with optical flow on blends instead. (The
+  progress below the two sections and the bakes not queued on open were
+  fixed on agent/polish3: the progress is pinned under the inspector's
+  body, and `modules::prepare` bakes what an opened project lacks.)
   Settings › AI acceleration shows the remade frames' size with Clear.
 
 ### Faster AI on NVIDIA: TensorRT, fp16, memory (2026-10-04, agent/mlspeed)

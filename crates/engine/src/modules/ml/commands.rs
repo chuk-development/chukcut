@@ -315,6 +315,18 @@ fn advice(root: &std::path::Path, gpus: &[String], driver: Option<&str>) -> Opti
     None
 }
 
+/// Whether `path` is inside the ML folder `root`, links resolved on both
+/// sides: the worker reports a library by the path the loader opened, which
+/// is the link's target when `~/.cache/chukcut/ml` (or a folder above it) is
+/// a symbolic link to another disk.
+fn under_root(path: &std::path::Path, root: &std::path::Path) -> bool {
+    if path.starts_with(root) {
+        return true;
+    }
+    let real = |p: &std::path::Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    real(path).starts_with(real(root))
+}
+
 /// "What runs models" as a sentence, from what is installed and, when
 /// there is one, from the worker's probe.
 fn active_sentence(root: &std::path::Path, status: &MlStatus) -> String {
@@ -349,7 +361,7 @@ fn active_sentence(root: &std::path::Path, status: &MlStatus) -> String {
                     .is_some_and(|n| n.starts_with("libcudart"))
             });
             let from = match cudart {
-                Some(path) if std::path::Path::new(path).starts_with(root) => {
+                Some(path) if under_root(std::path::Path::new(path), root) => {
                     " with chukcut's CUDA libraries".to_string()
                 }
                 Some(path) => format!(" with the CUDA runtime at {path}"),
@@ -849,6 +861,55 @@ mod tests {
         assert!(runtimes
             .iter()
             .any(|r| r.id == "cpu" && r.bytes > 1_000_000));
+    }
+
+    #[test]
+    fn chukcuts_cuda_libraries_are_named_through_a_linked_ml_folder() {
+        // The QA setup: the ML folder in the cache is a link to the real
+        // one elsewhere, and the worker reports the libraries it loaded by
+        // their real path. Under the crate's ignored fixture folder.
+        let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/generated")
+            .join(format!(
+                "ml-link-{}",
+                crate::modules::project::document::new_id()
+            ));
+        let real = base.join("elsewhere/ml");
+        let lib = real.join("bundles/nvidia-cu13/lib");
+        std::fs::create_dir_all(&lib).unwrap();
+        let cudart = lib.join("libcudart.so.13");
+        std::fs::write(&cudart, b"").unwrap();
+        let cache = base.join("cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        let root = cache.join("ml");
+        std::os::unix::fs::symlink(&real, &root).unwrap();
+
+        let status = MlStatus {
+            worker: None,
+            runtime: None,
+            runtime_id: Some("cuda13".into()),
+            probe: Some(Probe {
+                providers: vec!["CUDA".into(), "CPU".into()],
+                libraries: vec![cudart.canonicalize().unwrap().display().to_string()],
+                ..Probe::default()
+            }),
+            problem: None,
+            gpus: vec!["NVIDIA".into()],
+            driver: None,
+            bundle: None,
+            active: String::new(),
+            advice: None,
+        };
+        assert_eq!(
+            active_sentence(&root, &status),
+            "CUDA 13 on the GPU with chukcut's CUDA libraries"
+        );
+        // A system library is still named by its path.
+        let mut system = status.clone();
+        system.probe.as_mut().unwrap().libraries =
+            vec!["/usr/lib/x86_64-linux-gnu/libcudart.so.13".into()];
+        assert!(active_sentence(&root, &system).contains("/usr/lib/"));
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     #[test]

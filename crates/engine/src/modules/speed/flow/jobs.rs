@@ -106,7 +106,7 @@ pub fn bake(state: &Arc<AppState>, segment_id: String) -> Result<Option<u64>, St
     start(job, segment_id)
 }
 
-fn start(job: FlowJob, segment_id: String) -> Result<Option<u64>, String> {
+pub(crate) fn start(job: FlowJob, segment_id: String) -> Result<Option<u64>, String> {
     let key = job.key()?;
     if job.samples.is_empty() || coverage(&job)?.baked >= job.samples.len() as u32 {
         return Ok(None);

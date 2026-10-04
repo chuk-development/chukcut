@@ -105,7 +105,7 @@ pub fn bake(state: &Arc<AppState>, segment_id: String) -> Result<Option<u64>, St
     start(job, segment_id)
 }
 
-fn start(job: EnhanceJob, segment_id: String) -> Result<Option<u64>, String> {
+pub(crate) fn start(job: EnhanceJob, segment_id: String) -> Result<Option<u64>, String> {
     let key = job.key()?;
     let cover = coverage(&job)?;
     if cover.baked >= cover.total {

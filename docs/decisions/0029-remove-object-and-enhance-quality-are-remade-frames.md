@@ -122,3 +122,24 @@ values on average from the previous frame.
   could enhance live and the cache would become optional.
 - Users wanting a mask that moves without a selection (a keyframed box):
   the painted part would gain keyframes, as shape masks have.
+
+## Amendment, 2026-10-04 (agent/polish3): baked on open
+
+The four kinds of derived frames and sound — mattes (0025), optical-flow
+frames (0028), remade frames (this decision) and compound mix-downs (0024)
+— were asked for after every edit and before an export, never when a
+project opened. A project opened after the cache was cleared, or on another
+machine, showed its matted clips uncut and its slow motion blended until
+the first edit. `modules::prepare` is the open path: after 1.5 s of grace
+it reads the cache off the UI thread, counts what every timeline and every
+compound clip lacks, and bakes it **one clip at a time**, kind after kind
+(sound first, the cheapest), through each module's own job, so an edit
+meanwhile joins the running bake instead of starting a second. The app
+shows one "Preparing N frames" chip with Stop, and runs the face-landmark
+and voice-isolation queues (decision 0030) when the run ends. One at a time rather than all
+at once because the bakes share one ML worker and each decodes its own
+file: in parallel they would contend for the decoder and the GPU and finish
+no sooner, while the preview of the just-opened project waits behind them.
+What would change our minds: a second worker per GPU (0025), or a project
+whose missing frames take long enough that the user wants the clip under the
+playhead first — then order the queue by distance from the playhead.

@@ -97,40 +97,8 @@ impl Editor {
         ];
 
         match &self.inspector.flow.bake {
-            Some(bake) if bake.segment_id == segment.id => {
-                if let Some(notice) = crate::editor::ml_settings::tensorrt_notice() {
-                    rows.push(caption(notice, TEXT_DIM));
-                }
-                rows.push(caption(
-                    format!(
-                        "Making slow-motion frames\u{2026} {} of {}",
-                        bake.done, bake.total
-                    ),
-                    TEXT_DIM,
-                ));
-                rows.push(
-                    gpui::component::progress::Progress::new("flow-progress")
-                        .value(bake.done as f32 / bake.total.max(1) as f32 * 100.0)
-                        .into_any_element(),
-                );
-                if let Some(warning) = &bake.warning {
-                    rows.push(caption(warning.clone(), WARNING));
-                }
-                let job = bake.job;
-                rows.push(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .justify_end()
-                        .child(
-                            Button::new("flow-cancel")
-                                .small()
-                                .label("Stop")
-                                .on_click(move |_, _, _| speed::speed_flow_cancel(job)),
-                        )
-                        .into_any_element(),
-                );
-            }
+            // The progress is pinned under the body (`flow_strip`).
+            Some(bake) if bake.segment_id == segment.id => {}
             _ if mode == FrameBlend::Flow => {
                 let id = segment.id.clone();
                 // A clip whose frames are all baked has nothing to finish;
@@ -205,6 +173,32 @@ impl Editor {
                 .children(rows)
                 .into_any_element(),
         )
+    }
+
+    /// The running optical-flow bake of `segment`, pinned under the Speed
+    /// tab's body; `None` when none runs.
+    pub(super) fn flow_strip(&self, segment: &Segment) -> Option<AnyElement> {
+        let bake = self
+            .inspector
+            .flow
+            .bake
+            .as_ref()
+            .filter(|b| b.segment_id == segment.id)?;
+        let job = bake.job;
+        Some(super::controls::bake_strip(
+            "flow-cancel",
+            // While the worker builds a TensorRT engine the count does not
+            // move for minutes; say what it waits for instead.
+            crate::editor::ml_settings::tensorrt_notice().unwrap_or_else(|| {
+                format!(
+                    "Making slow-motion frames\u{2026} {} of {}",
+                    bake.done, bake.total
+                )
+            }),
+            bake.done as f32 / bake.total.max(1) as f32,
+            bake.warning.clone(),
+            move |_, _, _| speed::speed_flow_cancel(job),
+        ))
     }
 
     /// How many of a flow clip's in-between frames are baked, cached for two

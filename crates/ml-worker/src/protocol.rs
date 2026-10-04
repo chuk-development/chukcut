@@ -42,10 +42,11 @@ pub use crate::accel::{Acceleration, Precision};
 /// super-resolution (`upscale`).
 /// 6: audio source separation (`separate`, samples in and out) and dense
 /// face landmarks (`face_landmarks`).
-/// 7: "Fast" acceleration (TensorRT): the mode and loaded sessions in a
+/// 7: people (`detect_people`) and body keypoints (`body_landmarks`).
+/// 8: "Fast" acceleration (TensorRT): the mode and loaded sessions in a
 /// probe, `hold_secs` on progress while an engine builds, the precision of
 /// a session, and `acceleration`/`compare` on a benchmark.
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 
 /// A header longer than this is a broken stream, not a message.
 const MAX_HEADER: usize = 1 << 20;
@@ -215,6 +216,34 @@ pub enum RequestBody {
         hints: Vec<[f32; 4]>,
         max_faces: u32,
     },
+    /// The people in one frame (the payload, RGBA8), by person detector
+    /// `model`, at least `score_threshold` sure, largest first. Answered
+    /// with [`Outcome::People`].
+    DetectPeople {
+        model: String,
+        width: u32,
+        height: u32,
+        score_threshold: f32,
+    },
+    /// The people in this frame (the payload, RGBA8) with their body
+    /// keypoints: pose model `model` on every person its detector finds, or
+    /// in the boxes `hints` (last frame's people's `region`) when there are
+    /// any, the way a tracker follows instead of searching. A hint whose
+    /// person is gone is dropped; when none is left the detector searches
+    /// again. With `search`, the detector also runs when hints are left,
+    /// for people they do not cover (someone who walked in). People keep
+    /// the hints' order; found ones follow, largest first. At most
+    /// `max_people`. Answered with [`Outcome::BodyLandmarks`].
+    BodyLandmarks {
+        model: String,
+        width: u32,
+        height: u32,
+        #[serde(default)]
+        hints: Vec<[f32; 4]>,
+        max_people: u32,
+        #[serde(default)]
+        search: bool,
+    },
     /// Stop request `target` at its next check.
     Cancel { target: u64 },
     /// Finish the current request and exit.
@@ -356,7 +385,41 @@ pub enum Outcome {
         millis: f32,
         provider: String,
     },
+    People {
+        people: Vec<Person>,
+        millis: f32,
+        provider: String,
+    },
+    BodyLandmarks {
+        people: Vec<BodyPose>,
+        millis: f32,
+        provider: String,
+    },
     Ok,
+}
+
+/// One person a detector found, in the frame's pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Person {
+    /// x, y, width, height.
+    pub bbox: [f32; 4],
+    pub score: f32,
+}
+
+/// One person's body keypoints, in the frame's pixels.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BodyPose {
+    /// The box the seen keypoints span: x, y, width, height.
+    pub bbox: [f32; 4],
+    /// The box the next frame's keypoints are looked for in; what a
+    /// request's `hints` take.
+    pub region: [f32; 4],
+    /// The mean keypoint confidence, about 0..1.
+    pub score: f32,
+    /// COCO's 17 keypoints in order (nose, eyes, ears, shoulders, elbows,
+    /// wrists, hips, knees, ankles; left before right): x, y in pixels, then
+    /// the model's confidence, about 0..1 (below 0.3: not seen).
+    pub points: Vec<[f32; 3]>,
 }
 
 /// One face's dense landmarks, in the frame's pixels.

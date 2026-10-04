@@ -70,6 +70,7 @@ pub(crate) mod keymap;
 mod lifecycle;
 mod ml_settings;
 mod playback;
+mod prepare;
 mod preview;
 mod settings;
 mod shell;
@@ -137,6 +138,8 @@ pub struct Editor {
     analysis: analysis::AnalysisUi,
     /// Ducking jobs and the voiceover take (`audio_tools.rs`).
     audio_tools: audio_tools::AudioToolsUi,
+    /// The background bakes an opened project starts (`prepare.rs`).
+    prepare: prepare::PrepareUi,
     _ticker: Task<()>,
 }
 
@@ -202,6 +205,7 @@ impl Editor {
             tracking: Default::default(),
             analysis: Default::default(),
             audio_tools: Default::default(),
+            prepare: Default::default(),
             _ticker: ticker,
         };
         // Hardware encoder detection opens each device and encodes a test
@@ -211,6 +215,9 @@ impl Editor {
             let _ = chukcut_engine::modules::export::hwaccel::detect();
         });
         editor.consider_proxies();
+        // Mattes, slow-motion frames, remade frames and compound mix-downs
+        // the cache lacks: baked in the background, one clip at a time.
+        editor.start_preparing();
         if !startup.is_empty() {
             editor.import_paths(startup, cx);
         }
@@ -270,6 +277,7 @@ impl Editor {
         changed |= self.poll_analysis(cx);
         changed |= self.poll_landmarks();
         changed |= self.poll_voiceover(cx);
+        changed |= self.poll_prepare(cx);
         if let Some(frame) = self.player.take(self.clock.position()) {
             if let Some(crate::player::Picture::Image(old)) = self.frame.replace(frame.picture) {
                 // A frame is uploaded into the window's atlas when drawn; drop

@@ -766,7 +766,7 @@ impl Editor {
         self.timeline.selected_transition = None;
     }
 
-    fn select_only(&mut self, segment_id: &str) {
+    pub(crate) fn select_only(&mut self, segment_id: &str) {
         self.set_selection(vec![segment_id.to_string()], Some(segment_id.to_string()));
     }
 

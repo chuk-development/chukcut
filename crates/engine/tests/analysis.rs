@@ -710,3 +710,54 @@ fn a_moving_subject_inside_a_compound_clip_is_kept_in_a_vertical_frame() {
         );
     }
 }
+
+#[test]
+fn a_shaking_picture_inside_a_compound_clip_is_stabilised_through_its_time() {
+    let Some(path) = shaky() else {
+        eprintln!("skipping: ffmpeg could not generate the fixture");
+        return;
+    };
+    if !gpu_or_skip() {
+        return;
+    }
+    let state = video_state(&path, (1120, 630), 3_000_000);
+    // Twice as fast: timeline t shows the contents at 2t.
+    let compound = into_compound(&state, &["clip"], 2.0);
+    let job = analysis::analysis_stabilise(&state, compound.clone(), 1.0, None, None).unwrap();
+    let message = analysis::analysis_wait(job).unwrap();
+    assert!(message.starts_with("Stabilised"), "{message}");
+    let project = state.project.read().clone().unwrap();
+    let settings = analysis::analysis_of(&project, &compound)
+        .stabilise
+        .expect("the compound clip is stabilised");
+    assert!(settings.enabled);
+    // The camera path is the contents' own, in their time.
+    let path = stabilise::analysed_range(&project, &settings).unwrap();
+    assert_eq!(path.start, 0);
+    assert!(path.duration >= 2_900_000, "{path:?}");
+    assert!(analysis::stabilise_covers(&project, &compound));
+    let clip = project.segment(&compound).unwrap().1.clone();
+    let centre_at = |t: Micros| {
+        let drawn = stabilise::resolve(&project, std::borrow::Cow::Borrowed(&clip), t);
+        let crop = drawn.crop.expect("a stabilised compound clip is cropped");
+        assert!(crop.left >= 0.0 && crop.right <= 1.0);
+        (crop.left + crop.right) as f64 * 0.5
+    };
+    // Picture drift plus window shift is the same at every instant, read
+    // at the contents' time 2t.
+    let samples = [100_000i64, 350_000, 650_000, 1_050_000];
+    let offsets: Vec<f64> = samples
+        .iter()
+        .map(|&t| centre_at(t) - shake_truth(2.0 * t as f64 / 1e6).0)
+        .collect();
+    for o in &offsets {
+        assert!(
+            (o - offsets[0]).abs() < 0.006,
+            "the window does not follow the shake: {offsets:?}"
+        );
+    }
+    timeline_undo(&state).unwrap();
+    assert!(state
+        .with_project(|p| analysis::analysis_of(p, &compound).stabilise.is_none())
+        .unwrap());
+}
