@@ -147,29 +147,7 @@ const ALLOWLIST: &[(&str, &str)] = &[
 /// Functions another branch is exposing right now. Not failures, and not
 /// checked for staleness, so that branch's merge does not break this test;
 /// delete an entry once its operation exists.
-const PENDING: &[(&str, &str)] = &[
-    (
-        "tracking::tracking_attach",
-        "the tracking agent's ops/ml.rs",
-    ),
-    (
-        "tracking::tracking_set_mode",
-        "the tracking agent's ops/ml.rs",
-    ),
-    (
-        "tracking::tracking_detach",
-        "the tracking agent's ops/ml.rs",
-    ),
-    ("tracking::tracking_bake", "the tracking agent's ops/ml.rs"),
-    (
-        "tracking::tracking_remove",
-        "the tracking agent's ops/ml.rs",
-    ),
-    (
-        "tracking::tracking_set_smoothing",
-        "the tracking agent's ops/ml.rs",
-    ),
-];
+const PENDING: &[(&str, &str)] = &[];
 
 fn workspace() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")

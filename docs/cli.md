@@ -838,6 +838,21 @@ step.
 chukcut-cli track reel.chukcut 0:0 --at 1.2 --rect 0.52,0.4,0.15,0.2 --overlay 2:0
 ```
 
+#### `track-set PROJECT CLIP`
+
+Changes how a clip follows a motion track, or the track itself; each option
+is one undo step. `--attach TRACK_ID --target CLIP` makes the clip follow a
+track `track` made earlier (its full `track_id`) in the video clip it was
+made in. `--mode position|position_scale|position_scale_rotation` sets how it
+follows. `--smoothing 0..1` smooths the followed track. `--bake` turns the
+motion into keyframes on the clip. `--detach` stops following and keeps the
+clip where it is at `--at` (default: its start). `--remove` deletes the
+followed track.
+
+```bash
+chukcut-cli track-set reel.chukcut 2:0 --smoothing 0.4 --mode position_scale
+```
+
 #### `mask PROJECT CLIP`
 
 Adds, changes or removes shape masks on a clip. Each change is one undo step.
@@ -1441,7 +1456,7 @@ The operation names are the MCP tool names: `info`, `validate`, `configure`,
 `import`, `undo`, `redo`, `append`, `place`, `split`, `delete`, `move`,
 `trim`, `clip_set`, `grade`, `effect_add`, `effect_set`, `effect_remove`,
 `animate`, `animate_text`, `zoom`, `keyframe`, `title_add`, `title_set`,
-`transition_add`, `transition_remove`, `track`, `mask`, `chroma_key`,
+`transition_add`, `transition_remove`, `track`, `track_set`, `mask`, `chroma_key`,
 `remove_background`, `blend`, `captions_transcribe`,
 `captions_import`, `captions_export`, `captions_style`, `captions_list`,
 `silence_detect`, `silence_remove`, `normalize`, `denoise`, `loudness`,

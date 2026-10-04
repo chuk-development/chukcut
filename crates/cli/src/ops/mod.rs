@@ -200,6 +200,7 @@ operations!(
     look::TransitionAddArgs,
     look::TransitionRemoveArgs,
     look::TrackArgs,
+    look::TrackSetArgs,
     mask::MaskArgs,
     mask::ChromaKeyArgs,
     mask::BlendArgs,

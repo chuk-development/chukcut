@@ -18,6 +18,7 @@ use chukcut_engine::modules::text::commands as text_commands;
 use chukcut_engine::modules::timeline::commands as timeline_commands;
 use chukcut_engine::modules::timeline::ops::EditCommand;
 use chukcut_engine::modules::tracking::commands::{self as tracking_commands, StartTracking};
+use chukcut_engine::modules::tracking::edit as tracking_edit;
 use chukcut_engine::modules::tracking::job::Direction;
 use chukcut_engine::modules::tracking::{FollowMode, TrackerKind};
 use chukcut_engine::modules::transitions::commands as transition_commands;
@@ -1322,6 +1323,130 @@ impl Operation for TrackArgs {
         Ok(Outcome::changed(
             format!("tracked {} frames", outcome.frames),
             data,
+        ))
+    }
+}
+
+/// Change how a clip follows a motion track, or the track itself. `attach
+/// TRACK --target CLIP` makes the clip follow a track made earlier (the
+/// `track_id` `track` printed) in the video clip it was made in; `mode` sets
+/// position, position_scale or position_scale_rotation; `detach` stops
+/// following and keeps the clip where it is at `at`; `bake` turns the motion
+/// into keyframes; `smoothing` (0..1) smooths the track the clip follows;
+/// `remove` deletes that track (its followers keep where they are at `at`).
+/// Each is one undo step.
+#[derive(Debug, Clone, Default, Args, Deserialize, JsonSchema)]
+pub struct TrackSetArgs {
+    /// The clip that follows (or is to follow): id, id prefix or `lane:index`.
+    pub clip: String,
+    /// The track to follow, by id.
+    #[arg(long)]
+    pub attach: Option<String>,
+    /// For `attach`: the video clip the track was made in.
+    #[arg(long)]
+    pub target: Option<String>,
+    /// position, position_scale or position_scale_rotation.
+    #[arg(long)]
+    pub mode: Option<String>,
+    /// Stop following, keeping the clip where it is at `at`.
+    #[arg(long)]
+    #[serde(default)]
+    pub detach: bool,
+    /// Turn the followed motion into keyframes on the clip.
+    #[arg(long)]
+    #[serde(default)]
+    pub bake: bool,
+    /// Smoothing of the followed track, 0..1.
+    #[arg(long)]
+    pub smoothing: Option<f32>,
+    /// Delete the followed track.
+    #[arg(long)]
+    #[serde(default)]
+    pub remove: bool,
+    /// The timeline time `attach`, `detach` and `remove` keep the clip's
+    /// position at. Defaults to the clip's start.
+    #[arg(long)]
+    pub at: Option<Time>,
+}
+
+impl Operation for TrackSetArgs {
+    const NAME: &'static str = "track_set";
+    fn run(self, session: &mut Session, _: &Ctx) -> CliResult<Outcome> {
+        let clip = session.with(|p| select::clip(p, &self.clip))?;
+        let target = self
+            .target
+            .as_deref()
+            .map(|t| session.with(|p| select::clip(p, t)))
+            .transpose()?;
+        let start = session
+            .with(|p| p.segment(&clip).map(|(_, s)| s.target_range.start))
+            .unwrap_or(0);
+        let at = self.at.map(|t| t.resolve(session.fps())).unwrap_or(start);
+        let mode = self
+            .mode
+            .as_deref()
+            .map(|m| {
+                enum_named::<FollowMode>(
+                    "follow mode",
+                    m,
+                    &["position", "position_scale", "position_scale_rotation"],
+                )
+            })
+            .transpose()?;
+        // The track the clip follows now, for smoothing and remove.
+        let followed = || -> CliResult<String> {
+            session
+                .with(|p| {
+                    let (_, s) = p.segment(&clip)?;
+                    tracking_edit::followed_track(p, s, at).map(|(t, _, _)| t.id.clone())
+                })
+                .ok_or_else(|| CliError::refused("the clip follows no track"))
+        };
+        let state = session.state.clone();
+        let mut did = Vec::new();
+        if let Some(track) = &self.attach {
+            let target = target.clone().ok_or_else(|| {
+                CliError::usage("attach needs --target, the clip the track was made in")
+            })?;
+            tracking_commands::tracking_attach(
+                &state,
+                clip.clone(),
+                track.clone(),
+                target,
+                mode.unwrap_or_default(),
+                at,
+            )?;
+            did.push("attached");
+        } else if let Some(mode) = mode {
+            tracking_commands::tracking_set_mode(&state, clip.clone(), mode)?;
+            did.push("set the follow mode");
+        }
+        if let Some(smoothing) = self.smoothing {
+            let track = followed()?;
+            tracking_commands::tracking_set_smoothing(&state, track, smoothing)?;
+            did.push("set the smoothing");
+        }
+        if self.bake {
+            tracking_commands::tracking_bake(&state, clip.clone())?;
+            did.push("baked to keyframes");
+        }
+        if self.detach {
+            tracking_commands::tracking_detach(&state, clip.clone(), at)?;
+            did.push("detached");
+        }
+        if self.remove {
+            let track = followed()?;
+            tracking_commands::tracking_remove(&state, track, at)?;
+            did.push("removed the track");
+        }
+        if did.is_empty() {
+            return Err(CliError::usage(
+                "give attach, mode, smoothing, bake, detach or remove",
+            ));
+        }
+        Ok(Outcome::changed(
+            did.join(", "),
+            json!({"clip": session.with(|p| summary::clip_by_id(p, &clip))}),
         ))
     }
 }

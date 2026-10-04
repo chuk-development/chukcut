@@ -155,6 +155,8 @@ enum Command {
     Record(On<RecordArgs>),
     /// Track a region of a video and optionally make an overlay follow it.
     Track(On<TrackArgs>),
+    /// Attach, detach, bake, smooth or remove a clip's motion track.
+    TrackSet(On<TrackSetArgs>),
     /// Add or remove transitions.
     #[command(subcommand)]
     Transition(TransitionCommand),
@@ -598,6 +600,7 @@ fn dispatch(command: Command, dry: bool, ctx: &Ctx) -> CliResult<(&'static str, 
         Command::Duck(o) => on(o, dry, ctx),
         Command::Record(o) => on(o, dry, ctx),
         Command::Track(o) => on(o, dry, ctx),
+        Command::TrackSet(o) => on(o, dry, ctx),
         Command::Transition(TransitionCommand::Add(o)) => on(o, dry, ctx),
         Command::Transition(TransitionCommand::Remove(o)) => on(o, dry, ctx),
         Command::Marker(MarkerCommand::Add(o)) => on(o, dry, ctx),
