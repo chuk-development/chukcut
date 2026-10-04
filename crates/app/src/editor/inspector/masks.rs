@@ -166,6 +166,9 @@ pub(crate) struct MasksPanel {
     selecting: bool,
     /// The clicks so far, with the clip and the timeline time they are on.
     clicks: Option<Clicks>,
+    /// The selected clip's baked mattes, read at most every two seconds:
+    /// (clip, when, baked, total). Reading it lists the cache directory.
+    coverage: Option<(String, std::time::Instant, u32, u32)>,
 }
 
 /// What "Auto remove" keeps.
@@ -1358,6 +1361,17 @@ impl Editor {
             }
         }
 
+        let running_here = self
+            .inspector
+            .masks
+            .bake
+            .as_ref()
+            .is_some_and(|bake| bake.segment_id == segment.id);
+        let coverage = if on && !running_here {
+            self.matte_coverage(&segment.id)
+        } else {
+            None
+        };
         match &self.inspector.masks.bake {
             Some(bake) if bake.segment_id == segment.id => {
                 let fraction = bake.done as f32 / bake.total.max(1) as f32;
@@ -1385,8 +1399,14 @@ impl Editor {
                         .into_any_element(),
                 );
             }
+            // A clip whose mattes are all baked has nothing to finish; the
+            // button stood there after every complete bake.
+            _ if on && coverage.is_some_and(|(baked, total)| baked >= total) => {}
             _ if on => {
                 let id = segment.id.clone();
+                if let Some((baked, total)) = coverage {
+                    rows.push(caption(format!("{baked} of {total} frames have a matte.")));
+                }
                 rows.push(
                     div()
                         .flex()
@@ -1686,6 +1706,24 @@ impl Editor {
         false
     }
 
+    /// How many of a clip's mattes are baked, cached for two seconds;
+    /// `None` when the engine cannot say.
+    fn matte_coverage(&mut self, segment_id: &str) -> Option<(u32, u32)> {
+        if let Some((id, when, baked, total)) = &self.inspector.masks.coverage {
+            if id == segment_id && when.elapsed() < std::time::Duration::from_secs(2) {
+                return Some((*baked, *total));
+            }
+        }
+        let coverage = matting::matting_coverage(&self.state, segment_id.to_string()).ok()?;
+        self.inspector.masks.coverage = Some((
+            segment_id.to_string(),
+            std::time::Instant::now(),
+            coverage.baked,
+            coverage.total,
+        ));
+        Some((coverage.baked, coverage.total))
+    }
+
     fn poll_panel_bake(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(bake) = &mut self.inspector.masks.bake else {
             return false;
@@ -1697,6 +1735,7 @@ impl Editor {
         if let Some(finished) = status.finished {
             matting::matting_forget(bake.job);
             self.inspector.masks.bake = None;
+            self.inspector.masks.coverage = None;
             self.generation += 1;
             let message = match finished {
                 Ok(done) if done.cancelled => Ok(format!(
