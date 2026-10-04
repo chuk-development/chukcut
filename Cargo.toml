@@ -2,6 +2,8 @@
 resolver = "2"
 members = ["crates/engine", "crates/app", "crates/cli", "crates/ml-worker"]
 default-members = ["crates/app"]
+# A vendored dependency, not a member: it is built and linted as a dependency.
+exclude = ["vendor/signalsmith-stretch"]
 
 # Development builds run the full pipeline — decode, JPEG encode, pixel work —
 # at video rates, and an unoptimized build of that is not merely slower, it is
@@ -47,3 +49,9 @@ debug = false
 lto = "thin"
 codegen-units = 8
 strip = "debuginfo"
+
+# Signalsmith Stretch with a fixed random seed, so a pitch-preserving render is
+# the same samples every time. Why, and how to update it:
+# vendor/signalsmith-stretch/Cargo.toml.
+[patch.crates-io]
+signalsmith-stretch = { path = "vendor/signalsmith-stretch" }

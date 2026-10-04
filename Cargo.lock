@@ -7323,8 +7323,6 @@ dependencies = [
 [[package]]
 name = "signalsmith-stretch"
 version = "0.1.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "51dae6f10b5532510f65c309c4d868babe3aecf6ce0782678081338311f176fd"
 dependencies = [
  "bindgen 0.70.1",
  "cc",
