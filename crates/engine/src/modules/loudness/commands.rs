@@ -40,6 +40,35 @@ pub fn loudness_measure_clip(
         Some((project.clone(), segment.clone()))
     })?;
     if let Some((project, segment)) = compound {
+        // Processing of its own (cleanup, effects): measured like any clip,
+        // on its mix-down with the cleanup applied (`sequence::bounce`).
+        if crate::modules::sequence::bounce::processes_sound(&project, &segment) {
+            let original =
+                crate::modules::sequence::bounce::render(&project, &segment.material_id, cancel)?;
+            if let Some((_, cleanup)) =
+                crate::modules::voice::cleanup::cleanup_of(&project, &segment)
+            {
+                if let Some(denoise) = cleanup.denoise {
+                    let duration =
+                        crate::modules::sequence::duration_of(&project, &segment.material_id)
+                            .unwrap_or(0);
+                    crate::modules::voice::denoise::render(
+                        &original.to_string_lossy(),
+                        duration,
+                        denoise.strength,
+                        cancel,
+                        &|_| {},
+                    )?;
+                }
+            }
+            let effective = effective_source(&project, &segment, &original.to_string_lossy());
+            let gain_db = 20.0 * effective.gain.max(1e-6).log10();
+            return Ok(ClipLoudness {
+                segment_id,
+                loudness: measure_file(&effective.path, segment.source_range, cancel)?,
+                gain_db,
+            });
+        }
         let mixed = crate::modules::sequence::audio::mix_of(
             &project,
             &segment.material_id,

@@ -259,7 +259,13 @@ fn render_into(
 /// The export calls this before it mixes. It is what "export must never
 /// silently differ from the preview" costs when a cache was cleared: the
 /// render is redone with the engine and strength the document records.
+///
+/// Compound clips count: the clips inside them are walked as the mixers
+/// hear them (`sequence::audio::flatten_audio_rendered`), and a compound clip
+/// that is denoised itself has its mix-down rendered and then denoised.
 pub fn ensure_rendered(project: &Project, cancel: &AtomicBool) -> Result<(), String> {
+    let flat = crate::modules::sequence::audio::flatten_audio_rendered(project, cancel)?;
+    let project = flat.as_ref();
     let mut done = std::collections::BTreeSet::new();
     for track in &project.tracks {
         for segment in &track.segments {

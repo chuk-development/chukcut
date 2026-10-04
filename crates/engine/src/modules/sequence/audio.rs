@@ -14,33 +14,58 @@
 //! lane volume (multiplied through), mute (a muted lane, inside or out,
 //! contributes nothing), and volume keyframes, the inner clips' and the
 //! compound clip's own (multiplied). Decision 0024.
+//!
+//! What does not map — a compound clip's own audio effects, voice cleanup,
+//! or pitch that follows its speed — is heard through a mix-down of its
+//! contents instead (`super::bounce`).
 
 use std::borrow::Cow;
+use std::sync::atomic::AtomicBool;
 
+use super::bounce::{self, Wait};
 use super::retime::{self, Outer};
 use crate::modules::project::Micros;
 use crate::modules::project::{
-    source_duration_for, AnimatableProperty, Project, Segment, SpeedCurveMaterial, TimeRange,
-    Track, TrackKind,
+    source_duration_for, AnimatableProperty, AudioMaterial, Project, Segment, SpeedCurveMaterial,
+    TimeRange, Track, TrackKind,
 };
 
 /// `project` with every compound clip's sound laid out on lanes of its own.
 /// Borrowed, untouched, when the active timeline has no compound clip.
+///
+/// For the preview: a compound clip that processes its own sound is heard
+/// through its mix-down when the cache has it, and its contents dry until
+/// then (`super::bounce`).
 pub fn flatten_audio(project: &Project) -> Cow<'_, Project> {
-    flatten_at(project, 0)
+    flatten_at(project, 0, Wait::No).unwrap_or(Cow::Borrowed(project))
 }
 
-fn flatten_at(project: &Project, depth: usize) -> Cow<'_, Project> {
+/// [`flatten_audio`] for the export and every measurement: a compound clip
+/// that processes its own sound is mixed down now if the cache does not have
+/// it, so it is always heard through its own effects.
+pub fn flatten_audio_rendered<'a>(
+    project: &'a Project,
+    cancel: &AtomicBool,
+) -> Result<Cow<'a, Project>, String> {
+    flatten_at(project, 0, Wait::Yes(cancel))
+}
+
+fn flatten_at<'a>(
+    project: &'a Project,
+    depth: usize,
+    wait: Wait<'_>,
+) -> Result<Cow<'a, Project>, String> {
     let has_compound = project
         .tracks
         .iter()
         .flat_map(|t| t.segments.iter())
         .any(|s| project.materials.sequence(&s.material_id).is_some());
     if !has_compound {
-        return Cow::Borrowed(project);
+        return Ok(Cow::Borrowed(project));
     }
     let mut extra: Vec<Track> = Vec::new();
     let mut curves: Vec<SpeedCurveMaterial> = Vec::new();
+    let mut mixes: Vec<AudioMaterial> = Vec::new();
     for track in &project.tracks {
         if track.muted || !matches!(track.kind, TrackKind::Audio | TrackKind::Video) {
             continue;
@@ -53,10 +78,42 @@ fn flatten_at(project: &Project, depth: usize) -> Cow<'_, Project> {
                 tracing::warn!(segment = %segment.id, "compound clips nest too deep; silent");
                 continue;
             }
+            // Its own effects or cleanup: heard as one clip, its mix-down,
+            // with everything it carries. The copy keeps the compound clip's
+            // id, extras, speed, volume and keyframes; only its material is
+            // the mix-down, whose time is the sequence's.
+            if bounce::processes_sound(project, segment) {
+                if let Some(mix) = bounce::heard(project, segment, wait)? {
+                    let mut heard = segment.clone();
+                    heard.material_id = mix.id.clone();
+                    extra.push(Track {
+                        id: format!("{}/mix", segment.id),
+                        kind: TrackKind::Audio,
+                        name: track.name.clone(),
+                        segments: vec![heard],
+                        muted: false,
+                        locked: true,
+                        hidden: true,
+                        volume: track.volume,
+                    });
+                    mixes.push(mix);
+                    continue;
+                }
+            }
             let Some(inner) = super::nested(project, &segment.material_id) else {
                 continue;
             };
-            let inner = flatten_at(&inner, depth + 1);
+            let inner = flatten_at(&inner, depth + 1, wait)?;
+            // Mix-downs of compound clips inside, which the pieces below
+            // may play.
+            mixes.extend(
+                inner
+                    .materials
+                    .audios
+                    .iter()
+                    .filter(|m| m.id.starts_with(bounce::MATERIAL_PREFIX))
+                    .cloned(),
+            );
             let outer = Outer::new(&project.materials, segment);
             extra.extend(expand(&inner, track, &outer, &mut curves));
         }
@@ -67,7 +124,12 @@ fn flatten_at(project: &Project, depth: usize) -> Cow<'_, Project> {
         flat.materials.speed_curves.extend(curves);
         flat.materials.speed_curves.sort_by(|a, b| a.id.cmp(&b.id));
     }
-    Cow::Owned(flat)
+    for mix in mixes {
+        if flat.materials.audio(&mix.id).is_none() {
+            flat.materials.audios.push(mix);
+        }
+    }
+    Ok(Cow::Owned(flat))
 }
 
 /// The sound-bearing clips of `inner` (already flattened) as heard through

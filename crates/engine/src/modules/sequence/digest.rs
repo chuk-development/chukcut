@@ -36,7 +36,22 @@ pub fn digest(pool: &MaterialPool, canvas: (u32, u32), id: &str) -> Option<u64> 
     let mut ids: BTreeSet<&str> = BTreeSet::new();
     let mut seen: Vec<&str> = Vec::new();
     lanes(pool, id, &mut hasher, &mut ids, &mut seen)?;
-    referenced(pool, ids, &mut hasher);
+    referenced(pool, ids, &mut hasher, false);
+    Some(hasher.finish())
+}
+
+/// The fingerprint of everything sequence `id`'s *sound* depends on: what
+/// [`digest`] covers, plus the audio materials its clips play, their files,
+/// and which link groups exist (a linked picture defers its sound to its
+/// partner). What a compound clip's mixed-down sound is cached under
+/// (`super::bounce`).
+pub fn sound_digest(pool: &MaterialPool, id: &str) -> Option<u64> {
+    let mut hasher = std::hash::DefaultHasher::new();
+    "sound".hash(&mut hasher);
+    let mut ids: BTreeSet<&str> = BTreeSet::new();
+    let mut seen: Vec<&str> = Vec::new();
+    lanes(pool, id, &mut hasher, &mut ids, &mut seen)?;
+    referenced(pool, ids, &mut hasher, true);
     Some(hasher.finish())
 }
 
@@ -75,13 +90,18 @@ fn lanes<'a>(
 /// Hash every pool entry named by `ids`, following the ids those entries
 /// name in turn (a follow names its motion track; a stabilisation names its
 /// camera path).
-fn referenced(pool: &MaterialPool, ids: BTreeSet<&str>, hasher: &mut std::hash::DefaultHasher) {
+fn referenced(
+    pool: &MaterialPool,
+    ids: BTreeSet<&str>,
+    hasher: &mut std::hash::DefaultHasher,
+    sound: bool,
+) {
     // Destructured without `..` on purpose: a new pool category fails to
     // compile here until someone decides whether a compound clip's picture
     // depends on it. Forgetting it would serve stale cached frames.
     let MaterialPool {
         videos,
-        audios: _, // sound only
+        audios, // sound only
         images,
         texts,
         transitions,
@@ -93,7 +113,7 @@ fn referenced(pool: &MaterialPool, ids: BTreeSet<&str>, hasher: &mut std::hash::
         speed_curves,
         compositing,
         sequences: _, // hashed as lanes above
-        links: _,     // which clips move together; nothing drawn
+        links,        // which clip of a linked pair is heard; nothing drawn
         origins: _,   // credits
         extras,
     } = pool;
@@ -107,6 +127,14 @@ fn referenced(pool: &MaterialPool, ids: BTreeSet<&str>, hasher: &mut std::hash::
         }
         let id = id.as_str();
         id.hash(hasher);
+        if sound {
+            hasher.write_u8(links.contains(id) as u8);
+            if let Some(m) = audios.iter().find(|m| m.id == id) {
+                feed(hasher, m);
+                paths.insert(m.path.clone());
+                continue;
+            }
+        }
         if let Some(m) = videos.iter().find(|m| m.id == id) {
             feed(hasher, m);
             paths.insert(m.path.clone());

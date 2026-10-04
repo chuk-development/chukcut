@@ -173,6 +173,14 @@ impl AudioMixer {
             .collect()
     }
 
+    /// The mix as summed, only broken floats zeroed.
+    pub fn finish_unclamped(self) -> Vec<f32> {
+        self.buffer
+            .into_iter()
+            .map(|s| if s.is_finite() { s } else { 0.0 })
+            .collect()
+    }
+
     /// The loudest absolute sample before clamping. Diagnostics only — how far
     /// into clipping a project is, for a future meter.
     pub fn peak(&self) -> f32 {
@@ -199,11 +207,43 @@ pub fn mix_timeline(
     channels: u16,
     cancel: &AtomicBool,
 ) -> Result<Vec<f32>> {
+    mix_into(project, source, sample_rate, channels, cancel).map(AudioMixer::finish)
+}
+
+/// [`mix_timeline`] without the clamp at the end: what a compound clip's
+/// mixed-down sound is (`sequence::bounce`), so its own compressor or a cut
+/// in its equaliser sees the peaks the sum really has.
+pub fn mix_timeline_unclamped(
+    project: &Project,
+    source: &dyn AudioSource,
+    sample_rate: u32,
+    channels: u16,
+    cancel: &AtomicBool,
+) -> Result<Vec<f32>> {
+    mix_into(project, source, sample_rate, channels, cancel).map(AudioMixer::finish_unclamped)
+}
+
+fn mix_into(
+    project: &Project,
+    source: &dyn AudioSource,
+    sample_rate: u32,
+    channels: u16,
+    cancel: &AtomicBool,
+) -> Result<AudioMixer> {
     let duration = project.duration();
     let mut mixer = AudioMixer::new(sample_rate, channels, duration);
     // Compound clips' sound, laid out on lanes of its own; see
-    // `sequence::audio`. Borrowed when there are none.
-    let flat = crate::modules::sequence::audio::flatten_audio(project);
+    // `sequence::audio`. Borrowed when there are none. A compound clip that
+    // processes its own sound is mixed down first and heard through its
+    // effects (`sequence::bounce`), rendered here if it is not cached.
+    let flat =
+        crate::modules::sequence::audio::flatten_audio_rendered(project, cancel).map_err(|e| {
+            if cancel.load(Ordering::Relaxed) {
+                ExportError::Cancelled
+            } else {
+                ExportError::Audio(anyhow::anyhow!(e))
+            }
+        })?;
     let project = flat.as_ref();
 
     for track in &project.tracks {
@@ -303,7 +343,7 @@ pub fn mix_timeline(
         }
     }
 
-    Ok(mixer.finish())
+    Ok(mixer)
 }
 
 /// The slice of a full-project mix that lies inside `[start, start + duration)`,
