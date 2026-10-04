@@ -779,8 +779,10 @@ covers every source that chukcut cannot host or browse.
 
 - **Owner decision:** the project identity for provider registrations and for
   the Wikimedia User-Agent (a project e-mail and URL, not a personal one).
-- Noto Animated Emoji licence: CC BY 4.0 per Remotion's docs; Google's page did
-  not show the licence text to this session's tools.
+- Noto Animated Emoji licence: **verified 2026-10-04** on Google's own page
+  (googlefonts.github.io/noto-emoji-animation, Documentation, FAQ "Can I use
+  these animated assets commercially"): "Animated Noto Emoji is licensed under
+  CC BY 4.0". The page is a JavaScript app; read it in a browser.
 - Incompetech: CC BY 4.0 per secondary sources; the primary page did not show
   the version.
 - Musopen: site blocked by Cloudflare; licence from secondary sources.

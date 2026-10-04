@@ -13,6 +13,7 @@ crates/engine/src/modules/library/
   net.rs        one cached fetch; a stale copy when offline; plain messages
   fonts.rs      Fontsource catalogue, preview tiles, install, registration
   stickers.rs   emoji index (Unicode + Fluent tree), Noto, Iconify, placement
+  animated_emoji.rs  Noto Animated Emoji: index, Lottie fetch, moving tiles
   sounds.rs     curated Incompetech list, full catalogue, CC0 sound packs
   looks.rs      28 procedural looks written as .cube files
   commands.rs   library_* commands for the app, a CLI and MCP
@@ -53,6 +54,7 @@ face.
 | Fonts | Fontsource API, jsDelivr | OFL-1.1, Apache-2.0, UFL-1.0 (others hidden) | catalogue cached 7 days; regular, bold, italic TTF on pick; licence text from google/fonts |
 | Font previews | Google Fonts CSS2 `text=` subset (about 9 KB), or Fontsource latin file | as the font | switch in the picker; drawn by our renderer into a PNG |
 | Emoji | Fluent Emoji 3D and Flat (MIT), Noto Emoji 2D PNG (Apache-2.0) | as stated | Unicode `emoji-test.txt` + Fluent repository tree, joined by name, cached 30 days |
+| Animated emoji | Noto Animated Emoji (Lottie) | CC BY 4.0 (read on googlefonts.github.io/noto-emoji-animation, Documentation FAQ, 2026-10-04), credit "Animated emoji by Google, CC BY 4.0" | the site's `data/api.json`, cached 30 days; `lottie.json` from fonts.gstatic.com; tiles are GIFs rendered by our Lottie renderer (`library/animated_emoji.rs`, `modules/animated`) |
 | Icons | Iconify API | per set; NC, GPL, unknown hidden; logos, programming, archived sets hidden; CC BY-SA shown with a warning | search, SVG rasterised with resvg, drawn white unless the set is multicolour |
 | Music | Incompetech (Kevin MacLeod) | CC BY 4.0, credit line stored | 50 curated tracks by mood, plus `pieces.json` (about 1,400 tracks) |
 | Sound effects | Kenney (8 packs), OpenGameArt rubberduck and SubspaceAudio (8 packs) | CC0 | zip on first open, one directory per sound |
@@ -74,9 +76,6 @@ Requests carry `User-Agent: chukcut/<version>` and nothing about the user.
 
 ## Not done, and why
 
-- **Animated stickers.** Noto Animated Emoji are Lottie. There is no Lottie
-  renderer in the engine: velato needs vello on our wgpu device, and
-  dotlottie-rs builds ThorVG from C++. Static stickers only.
 - **Font subsets.** Fontsource publishes per-subset files only, and parley
   picks one face per family. An install fetches the `latin` subset (or the
   family's default subset); text in another script falls back to a system

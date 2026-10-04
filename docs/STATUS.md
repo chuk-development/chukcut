@@ -98,6 +98,57 @@ Judge performance from a release build only.
    `pub fn` in a `commands.rs` that nothing calls. Pending: the tracking
    commands (attach, bake, smoothing), which the tracking branch exposes.
 
+## Frame blending, motion blur, animated stickers (2026-10-04, agent/motion2)
+
+Decision 0026. Speed → Standard has **Frame blending** (video clips): a frame
+between two source frames mixes both by where it falls, so 0.25x and speed
+ramps play smoothly. Effects → Motion has **Motion blur** (shutter angle,
+samples). Stickers → **Animated**: Noto Animated Emoji (Lottie, CC BY 4.0,
+licence read on Google's page), moving tiles; a Lottie `.json`, animated GIF
+or WebP imported by the user is an animated sticker too. Video → Sticker →
+**Play once** holds the last frame instead of looping. CLI: `frame-blend`,
+`sticker-playback`, `sticker --animated/--once`, `catalog animated_emoji`,
+`effect add … motion_blur`.
+
+- **How:** `Draw::Accumulated` in the compositor draws a clip several times
+  with the quad shader's premultiplied output, weights in the opacity, into
+  an `Rgba16Float` layer (additive), then `render::accumulate::Resolver`
+  turns it into an ordinary straight-alpha layer (effects, blend modes and
+  the over pass as usual). Frame blend: `speed::blend` (extras block),
+  fetches frame k and k+1 middles. Motion blur: `fx::motion_blur`, placement
+  sampled over a centred shutter (keyframes, animations, follows,
+  stabilisation all evaluated per sample). The provider keeps two frames per
+  video (`CachedTexture::previous`); decode-ahead asks for both.
+- **Animated stickers:** `modules::animated` — image materials whose file is
+  Lottie (velato 0.12 without its vello feature + our `RenderSink` onto
+  vello 0.11, which is on our wgpu 30; one vello renderer for the one device)
+  or GIF/WebP (decoded whole by `image`; FFmpeg 6.1 cannot decode an animated
+  WebP). The compositor maps the clip's source time through
+  `animated::clip_time` (loop/once).
+- **Verified** on the RTX 3060 and on lavapipe: `tests/temporal.rs` (a blend
+  matches the linear-light mix of its two neighbours within 4 code values at
+  ¼, ½, ¾; sequential playback shows every source frame clean; an export
+  carries the blend; motion blur smears 6–14 px at 320 px/s with the row's
+  light kept within 3% and its centroid within 0.5 px; a still clip with
+  motion blur is byte-identical to none), `tests/animated_stickers.rs`
+  (Lottie loop and once, GIF frame delays, an export with the box where the
+  animation says on 9 frames across a loop). The real Noto 1f600 Lottie
+  renders correctly (`animated::lottie::tests::lottie_sample`, ignored, takes
+  `CHUKCUT_LOTTIE_SAMPLE`). App checked on Xvfb + lavapipe: tiles play,
+  clicking adds and selects, Play once and Frame blending switch.
+- **Trap: an sRGB view of a storage texture must say `usage`.** A view
+  inherits all of its texture's usages; `Rgba8UnormSrgb` cannot be a storage
+  view, so the view is invalid and *the whole frame's submission* reads back
+  as zeros (not even the background). `lottie.rs` sets
+  `usage: TEXTURE_BINDING`.
+- **Trap: GPUI only plays a GIF in an `img` that has an id.** Without
+  `.id(...)` there is no frame state and no animation-frame request.
+- **Rough:** no optical flow; no accumulation inside a transition window or
+  while a blur animation runs; motion blur moves the one decoded frame (no
+  in-footage blur); velato draws no Lottie text or image layers; a GIF the
+  user imports is now a looping sticker, not a video clip; the VAAPI path
+  holds two decoder surfaces per material between decodes.
+
 ## Timelines and compound clips (2026-10-04, agent/compound)
 
 Decision 0024. A project holds several **sequences**: timelines (tabs above
