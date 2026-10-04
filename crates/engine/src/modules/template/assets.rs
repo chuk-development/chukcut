@@ -151,30 +151,11 @@ fn write_png(path: &Path, image: &image::RgbaImage) -> Result<(), String> {
     write_atomically(path, &bytes)
 }
 
-/// Written beside and renamed, so nobody reads half a file. The partial
-/// file's name is unique per write: two threads drawing the same missing
-/// placeholder at once (a preview tile and a new project) must not rename
-/// each other's file away.
-pub(super) fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static WRITES: AtomicU64 = AtomicU64::new(0);
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)
-            .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-    }
-    let partial = path.with_extension(format!(
-        "{}.{}-{}.part",
-        path.extension().and_then(|e| e.to_str()).unwrap_or("tmp"),
-        std::process::id(),
-        WRITES.fetch_add(1, Ordering::Relaxed)
-    ));
-    std::fs::write(&partial, bytes)
-        .map_err(|e| format!("cannot write {}: {e}", partial.display()))?;
-    std::fs::rename(&partial, path).map_err(|e| {
-        let _ = std::fs::remove_file(&partial);
-        format!("cannot write {}: {e}", path.display())
-    })
-}
+/// Written beside and renamed, so nobody reads half a file, under a partial
+/// name unique per write: two threads drawing the same missing placeholder
+/// at once (a preview tile and a new project) must not rename each other's
+/// file away.
+pub(super) use crate::modules::workspace::atomic::write_atomically;
 
 // ---------------------------------------------------------------------------
 // Drawing a placeholder

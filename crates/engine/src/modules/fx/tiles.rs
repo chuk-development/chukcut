@@ -70,17 +70,10 @@ pub(crate) fn cached(
         return Ok(path);
     }
     let image = draw()?;
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)
-            .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-    }
-    // Written beside and renamed, so a reader never sees half a PNG.
-    let partial = path.with_extension("part.png");
-    image
-        .save(&partial)
-        .map_err(|e| format!("cannot write {}: {e}", partial.display()))?;
-    std::fs::rename(&partial, &path)
-        .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    // Written beside and renamed, so a reader never sees half a PNG — under a
+    // partial name of its own, because two callers drawing the same missing
+    // tile at once is ordinary and a shared partial name made one fail.
+    crate::modules::workspace::atomic::save_png_atomically(&path, &image)?;
     Ok(path)
 }
 

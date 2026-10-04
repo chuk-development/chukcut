@@ -382,14 +382,7 @@ pub fn svg_to_png(svg: &[u8], size: u32, dest: &Path) -> Result<(), String> {
         }
     }
     let image = image::RgbaImage::from_raw(size, size, pixels).ok_or("bad picture size")?;
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let part = dest.with_extension("part.png");
-    image
-        .save(&part)
-        .map_err(|e| format!("cannot write {}: {e}", part.display()))?;
-    std::fs::rename(&part, dest).map_err(|e| format!("cannot write {}: {e}", dest.display()))
+    crate::modules::workspace::atomic::save_png_atomically(dest, &image)
 }
 
 /// Where a sticker's file is fetched from.
