@@ -30,8 +30,14 @@ use chukcut_ml_worker::protocol::{
 };
 use parking_lot::Mutex;
 
-/// The binary's name, next to the editor's own.
-pub const BINARY: &str = "chukcut-ml-worker";
+/// The binary's name, next to the editor's own. Windows executables carry
+/// their extension in the file name, and `is_file` on the bare name misses
+/// them; everywhere else the name has none.
+pub const BINARY: &str = if cfg!(windows) {
+    "chukcut-ml-worker.exe"
+} else {
+    "chukcut-ml-worker"
+};
 /// Starts allowed within [`START_WINDOW`] before the supervisor gives up.
 pub const MAX_STARTS: usize = 3;
 pub const START_WINDOW: Duration = Duration::from_secs(60);
