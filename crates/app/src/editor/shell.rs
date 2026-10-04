@@ -47,7 +47,9 @@ pub fn startup(state: &Arc<AppState>) -> (Startup, Option<RecoveryInfo>) {
     for argument in std::env::args().skip(1) {
         let path = PathBuf::from(&argument);
         if path.extension().is_some_and(|e| e == "chukcut") && !opened {
-            match project_commands::project_open(state, argument.clone()) {
+            // Absolute, so Details and Save show and use the real place
+            // whatever the working directory was.
+            match project_commands::project_open(state, absolute(&path)) {
                 Ok(project) => {
                     opened = true;
                     record_recent(&absolute(&path), &project.name);
