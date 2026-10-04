@@ -266,7 +266,7 @@ mod tests {
         assert_eq!(instants(moved), vec![0, 2_000_000]);
         history.undo(&mut project).unwrap();
         assert_eq!(
-            instants(&project.segment(&id).unwrap().1),
+            instants(project.segment(&id).unwrap().1),
             vec![0, 1_000_000]
         );
     }
@@ -284,7 +284,7 @@ mod tests {
         History::default()
             .apply(&mut project, remove(&segment, 1_000_000).unwrap())
             .unwrap();
-        assert_eq!(instants(&project.segment(&id).unwrap().1), vec![0]);
+        assert_eq!(instants(project.segment(&id).unwrap().1), vec![0]);
     }
 
     #[test]
@@ -296,7 +296,7 @@ mod tests {
         let command = fade_command(&segment, 1_000_000, 2_000_000).unwrap();
         History::default().apply(&mut project, command).unwrap();
         assert_eq!(
-            fades(&project.segment(&id).unwrap().1),
+            fades(project.segment(&id).unwrap().1),
             (1_000_000, 2_000_000)
         );
     }
