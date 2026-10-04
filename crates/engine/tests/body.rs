@@ -143,16 +143,22 @@ fn ready(with_faces: bool) -> bool {
             || std::env::var_os("CHUKCUT_ORT_DYLIB").is_some())
 }
 
-/// Keep the body track out of the user's cache; the models stay.
-fn private_cache(name: &str) {
-    let cache = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
-    let _ = std::fs::remove_dir_all(cache.join("chukcut/landmarks"));
-    std::fs::create_dir_all(cache.join("chukcut")).unwrap();
-    let link = cache.join("chukcut/ml");
-    if !link.exists() {
-        std::os::unix::fs::symlink(chukcut_engine::modules::ml::root(), &link).unwrap();
-    }
-    std::env::set_var("XDG_CACHE_HOME", &cache);
+/// Keep the body track out of the user's cache; the models stay. Once per
+/// process and one directory for both tests: `XDG_CACHE_HOME` is the
+/// process's, so a second test pointing it elsewhere while the first runs
+/// made the first read its track from a directory it never wrote to.
+fn private_cache() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let cache = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("body-cache");
+        let _ = std::fs::remove_dir_all(cache.join("chukcut/landmarks"));
+        std::fs::create_dir_all(cache.join("chukcut")).unwrap();
+        let link = cache.join("chukcut/ml");
+        if !link.exists() {
+            std::os::unix::fs::symlink(chukcut_engine::modules::ml::root(), &link).unwrap();
+        }
+        std::env::set_var("XDG_CACHE_HOME", &cache);
+    });
 }
 
 fn state(clip: &Path, sticker: &Path) -> Arc<AppState> {
@@ -220,7 +226,7 @@ fn a_body_is_found_followed_and_followed_by_a_sticker() {
         );
         return;
     };
-    private_cache("body-cache");
+    private_cache();
     let state = state(&walk, &sticker);
 
     // 1. Keypoints: every frame, one person, upright, facing the camera,
@@ -332,7 +338,7 @@ fn auto_reframe_holds_a_body_when_no_face_shows() {
         );
         return;
     };
-    private_cache("body-reframe-cache");
+    private_cache();
     let state = state(&headless, &sticker);
     let job = analysis_reframe(
         &state,
