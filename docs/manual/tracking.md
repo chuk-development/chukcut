@@ -62,7 +62,31 @@ smoothing. It is one undo step. A face track has no **Tracker** row and no
 Cost: about 6 s for 300 frames of 1080×1920 video, on the GPU or the CPU.
 The face points are cached in `~/.cache/chukcut/landmarks/`.
 
+## Follow a body part
+
+1. Select the follower clip. Open the **Tracking** tab.
+2. **Track in**: choose the video with the person.
+3. **Body part**: **Head**, **Shoulders**, **Chest**, **Hips**, **Whole
+   body**, or a hand, an elbow, a knee or a foot. Left and right are the
+   person's own: when the person looks at the camera, the left hand is on
+   the right of the picture.
+4. **Person**: **Person 1** is the first person that chukcut sees in the
+   clip, **Person 2** the second.
+5. Click **Follow body part**. The button says "Finding people…" while it
+   runs.
+
+chukcut finds the people in every frame with two models (YOLOX and
+RTMPose), and the clip rides with the part. A hand turns with the forearm.
+The track has 40 % smoothing. It is one undo step. When the part is hidden
+in a frame, the clip stays where it was. A body track has no **Tracker**
+row and no **Re-track from here**.
+
+Cost: about 2 s for 60 frames of 1280×720 video, on the GPU or the CPU. The
+models download once (48 MB and 18 MB). The body points are cached in
+`~/.cache/chukcut/landmarks/`.
+
 ## From the command line
 
-`chukcut-cli track` and `chukcut-cli follow-face` do the same. See
+`chukcut-cli track`, `chukcut-cli follow-face` and `chukcut-cli
+follow-body` do the same. See
 [`docs/cli.md`](../cli.md).

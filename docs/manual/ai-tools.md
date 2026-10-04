@@ -48,6 +48,7 @@ and on the CPU of the same computer. Your numbers will be different.
 | [Optical flow, Smooth slow-mo](#optical-flow-slow-motion) | Speed › Standard | RIFE v4 | video |
 | [Retouch](#retouch) | Video › Retouch | YuNet + MediaPipe face mesh | video |
 | [Follow face](#follow-face) | Tracking tab | YuNet + MediaPipe face mesh | title, sticker, photo |
+| [Follow body part](#follow-body-part) | Tracking tab | YOLOX + RTMPose | title, sticker, photo |
 | [Fast motion (AI) tracker](#ai-tracker) | Tracking tab | VitTrack | title, sticker, photo |
 | [Isolate voice](#isolate-voice) | Audio › Isolate voice | HTDemucs | clips with sound |
 | [Auto captions](#auto-captions) | asset panel › Captions | Whisper | the timeline |
@@ -234,6 +235,22 @@ then **Follow face**. See [Tracking](tracking.md#follow-a-face).
 
 **Models and cost:** as Retouch.
 
+## Follow body part
+
+**Where:** the **Tracking** tab of a title, sticker or photo: **Body part**,
+**Person**, then **Follow body part**. See
+[Tracking](tracking.md#follow-a-body-part).
+
+**Models:** YOLOX-tiny (Apache-2.0, 20 MB) finds the people. RTMPose-m
+(Apache-2.0, 54 MB) puts 17 points on each person: nose, eyes, ears,
+shoulders, elbows, wrists, hips, knees, ankles. Both come as zip files;
+chukcut checks the zip and takes only the model out of it.
+
+**Cost:** 7 ms for each person in a frame on the GPU, 22 ms on the CPU. A
+clip is ready in about the time it takes to decode it.
+
+**Cache:** the body points, in `~/.cache/chukcut/landmarks/`.
+
 ## AI tracker
 
 **Where:** the **Tracking** tab: **Tracker › Fast motion (AI)**. See
@@ -278,7 +295,9 @@ the cache limit.
 These run on the CPU, in seconds. They need no download.
 
 - **Auto adjust**, **Match colour**: [Colour](colour.md#auto)
-- **Stabilise**, **Scene detection**, **Auto reframe**: **Video › Basic**
+- **Stabilise**, **Scene detection**, **Auto reframe**: **Video › Basic**.
+  Auto reframe uses the face detector when the AI tools are installed,
+  and the person detector on frames without a face.
 - **Beats**, **Auto-cut to beat**, **Snap cuts to beats**: **Audio › Beats**
 - **Reduce noise** (RNNoise), **Normalize loudness**, **Remove silences**:
   [Audio](audio.md)

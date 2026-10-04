@@ -269,6 +269,8 @@ use, also commercial use.
 | LaMa | remove object | Apache-2.0 | 208 MB | [LaMa](https://github.com/advimman/lama) |
 | Real-ESRGAN general x4v3 | enhance quality | BSD-3-Clause | 4.9 MB | [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN) |
 | HTDemucs (fine-tuned, vocals) | isolate voice | MIT | 316 MB | [Demucs](https://github.com/facebookresearch/demucs) |
+| RTMPose-m (body7) | follow body part | Apache-2.0 | 54 MB | [MMPose](https://github.com/open-mmlab/mmpose/tree/main/projects/rtmpose) |
+| YOLOX-tiny (Human-Art) | follow body part, auto reframe | Apache-2.0 | 20 MB | [YOLOX](https://github.com/Megvii-BaseDetection/YOLOX), [MMPose](https://github.com/open-mmlab/mmpose/tree/main/projects/rtmpose) |
 | Whisper (ggml) | auto captions | MIT | 75–548 MB | [whisper.cpp](https://github.com/ggerganov/whisper.cpp) |
 
 Other parts: RNNoise (BSD-3-Clause) is in the binary for voice cleanup. The
