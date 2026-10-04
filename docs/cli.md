@@ -761,8 +761,8 @@ hides cuts in a talking-head video.
 #### `keyframe PROJECT CLIP --property NAME --at TIME`
 
 Adds a keyframe, or changes the keyframe at that time. Properties:
-`position_x`, `position_y`, `scale_x`, `scale_y`, `rotation`, `opacity`,
-`volume`. `--value` is required, except with `--remove`. `--easing` is
+`position_x` (or `x`, as in `set --x`), `position_y` (or `y`), `scale_x`,
+`scale_y`, `rotation`, `opacity`, `volume`. `--value` is required, except with `--remove`. `--easing` is
 `hold`, `linear`, `ease_in`, `ease_out` or `ease_in_out`. `--at` is a
 timeline time. The engine keeps keyframes relative to the clip start, so they
 move with the clip.

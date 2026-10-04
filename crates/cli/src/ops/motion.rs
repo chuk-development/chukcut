@@ -86,13 +86,19 @@ impl Operation for FrameBlendArgs {
         let current = speed::speed_frame_blend(&session.state, id.clone())?;
         let Some(mode) = &self.mode else {
             let mut value = json!({"clip": session.with(|p| summary::clip_by_id(p, &id)), "frame_blend": current.name()});
+            let mut message = format!("frame blending is {}", current.name());
             if current == FrameBlend::Flow {
                 value["flow"] = coverage(session, &id);
+                // The docs promise how many frames are baked; say it here too,
+                // not only in the JSON.
+                if let (Some(baked), Some(total)) = (
+                    value["flow"]["baked"].as_u64(),
+                    value["flow"]["total"].as_u64(),
+                ) {
+                    message.push_str(&format!("; {baked} of {total} frames baked"));
+                }
             }
-            return Ok(Outcome::read(
-                format!("frame blending is {}", current.name()),
-                value,
-            ));
+            return Ok(Outcome::read(message, value));
         };
         let mode = FrameBlend::parse(mode).map_err(CliError::usage)?;
         let changed = mode != current;

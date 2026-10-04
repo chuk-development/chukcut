@@ -735,8 +735,8 @@ impl Operation for ZoomArgs {
 }
 
 /// Put a keyframe on a clip property at a timeline time, change the one that
-/// is there, or remove it. Properties: position_x, position_y, scale_x,
-/// scale_y, rotation, opacity, volume.
+/// is there, or remove it. Properties: position_x (or x), position_y (or y),
+/// scale_x, scale_y, rotation, opacity, volume.
 #[derive(Debug, Clone, Default, Args, Deserialize, JsonSchema)]
 pub struct KeyframeArgs {
     /// The clip: id, id prefix or `lane:index`.
@@ -764,9 +764,15 @@ impl Operation for KeyframeArgs {
     const NAME: &'static str = "keyframe";
     fn run(self, session: &mut Session, _: &Ctx) -> CliResult<Outcome> {
         let id = session.with(|p| select::clip(p, &self.clip))?;
+        // `set` calls the position `--x` and `--y`; accept the same names here.
+        let property_name = match self.property.trim() {
+            "x" => "position_x",
+            "y" => "position_y",
+            other => other,
+        };
         let property: AnimatableProperty = enum_named(
             "property",
-            &self.property,
+            property_name,
             &[
                 "position_x",
                 "position_y",

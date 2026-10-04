@@ -269,3 +269,93 @@ Template follow-ups (decision 0022) and the lows above.
 - **Not checked on screen:** a compound clip's audio effects in the preview
   (would play on the owner's speakers); covered by `tests/compound.rs`
   through the plan and the block mixer.
+
+## QA pass 2, 2026-10-04 (`agent/qa2`)
+
+The features of waves 7–9, end to end in the release build: the app on a
+private Xvfb display (lavapipe, `CHUKCUT_FILE_DIALOG=builtin`, no session
+bus, `HOME` and every `XDG_*` folder under `_scratch/`, ALSA on a null
+device), the CLI and the ML worker on the RTX 3060 with the CUDA 13 bundle
+that was already installed (the ML folder linked into the isolated cache,
+nothing downloaded again). Generated media only. Per feature: does it
+render, is it one undo step, does it survive save and reopen, does the
+export match the preview (`render-frame`, the export compositor, against
+frames decoded from the exported file).
+
+| Feature | Renders | Undo | Save / reopen | Export = preview |
+|---|---|---|---|---|
+| Compound clip (Alt+G, CLI `compound create`), open, breadcrumbs, flatten | yes; nested = flattened byte for byte | yes (create, redo) | yes | yes (mean 1.5 code values, the H.264 encode) |
+| Second timeline (+ tab, `timeline new/duplicate/switch`) | yes | yes | yes, open timeline kept | export renders the open one |
+| Templates (start screen fill dialog, `template apply`) | yes | n/a (new project) | yes | yes (mean 1.5) |
+| Shortcut editor (rebind Go to end to F9, reset) | yes | n/a | `shortcuts.json` written and cleared | n/a |
+| Frame blending, Smooth slow-mo (RIFE on CUDA, 239 frames ~50 s at 1080x1920) | yes | one step for speed + mode | yes | yes (mean 0.4) |
+| Motion blur on a moving animated GIF sticker | yes | yes | yes | yes |
+| Animated stickers (Animated tab, Noto Lottie; imported GIF) | yes, Play once switch | yes | yes | yes |
+| VitTrack (`track --tracker vittrack`, follower title) | yes, 120 frames in 2 s | engine tests | yes | yes |
+| Remove background RVM (240 frames 6.4 s) and BiRefNet (240 frames 107 s) | yes | yes (toggle, Ctrl+Z) | yes | yes |
+| Select object (MobileSAM + VitTrack, 120 frames 13 s) + `apply-to --grade background` + `remove-background --off` | yes, colour pop | yes | yes | yes |
+| Shared preview texture | "preview frames reach GPUI sharing=Shared" on lavapipe | | | |
+| MCP | 139 tools listed by `tools/list` | | | |
+
+Also walked: every asset tab (Media, Audio, Text, Stickers, Captions,
+Effects, Transitions, Filters, Stock, Templates), the inspector for video,
+compound, sticker, title and audio clips, Settings (AI acceleration,
+keyboard shortcuts, hardware, logs), the export dialog (a 6 s export with
+NVENC, 180 frames). No panic in any log.
+
+Fixed on this branch:
+
+1. **"Finish missing frames" after every complete bake**, in Speed › Frame
+   blending (optical flow) and in Video › Remove background. Both panels
+   showed the button whenever the mode was on. They now read the coverage
+   (at most every two seconds, again when a bake ends): nothing when
+   everything is baked except "All N in-between frames are baked." for flow,
+   and "N of M frames …" with the button when some are missing.
+2. **The save dialog refused its own suggestion** for a project from the
+   Before / After template: "Before / After.chukcut" contains a `/`, the
+   dialog said only "Type a file name". Suggested names (Save, Save as, Save
+   frame) replace `/` with `_` like the export dialog; a typed `/` is
+   refused with "A file name cannot contain /".
+3. **Media lost its Added badge** once its clips were moved into a compound
+   clip (or used only on another timeline): the panel looked at the open
+   timeline's lanes only. It now looks at every sequence.
+4. **Settings › AI acceleration: "Models run on" squeezed to one letter per
+   line** when the answer is long (a CUDA runtime path). The answer now sits
+   under the label and wraps.
+5. **Details showed a relative project path** for a project given on the
+   command line (`chukcut media/x.chukcut`); it is opened by its absolute
+   path now.
+6. **The export dialog said "measuring…" for good** when Export was pressed
+   before the sample encode for the size estimate ended: the cancelled
+   measurement stayed in place without an answer, so the Done page still read
+   "Size: about 5.1 MB · measuring…" and the dialog never measured again.
+   A cancelled measurement is now dropped. Seen on Xvfb: "Size: about 1.7 MB".
+7. CLI: `timeline list` printed only the counts; it prints the table the
+   docs promise. `keyframe --property x|y` is accepted (`set` calls them
+   `--x`/`--y`). `frame-blend` without `--mode` says "89 of 89 frames
+   baked" in the human line too.
+
+Open:
+
+- **Medium: a template cannot be applied into an open project.** Templates
+  only make new projects (`template_build_project`); there is no "use as a
+  new timeline" or "insert at the playhead". The showcase therefore renders
+  the Quick Cuts project and puts its video on the "Template cut" timeline,
+  which is not editable there. Steps: open any project, Templates tab, click
+  a template: it asks for clips and opens a new project.
+- **Low: slots inside a compound clip are not slots any more.** After Alt+G
+  on a template project's slot clips, Templates › This project and
+  `template slots` say the project has no slots, and Replace media is only
+  reachable by opening the compound clip. Steps: `template apply x.chukcut
+  before-after a.mp4 b.mp4`, select both slot clips, Alt+G.
+- **Low: ML status names the CUDA runtime by path when the ML folder is a
+  symlink.** With `~/.cache/chukcut/ml` reached through a link, `ml status`
+  and Settings say "CUDA 13 on the GPU with the CUDA runtime at
+  /home/…/libcudart.so.13" instead of "with chukcut's CUDA libraries": the
+  ML root is compared without resolving the link. Left to the ML owner
+  (`modules/ml`).
+
+Not tested, and why: playback with sound (Space and J/L are not pressed on
+this machine), voiceover recording, the portal file chooser, cloud
+providers, VAAPI/QSV (no Intel or AMD GPU here), and Select object by
+clicking on the player (covered by the ml2 pass; here through the CLI).

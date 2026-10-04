@@ -353,7 +353,7 @@ impl Editor {
     /// Player menu → Save frame: the frame at the playhead, full size, as PNG.
     fn save_frame(&mut self, cx: &mut Context<Self>) {
         let time = self.clock.position() + chukcut_engine::modules::project::SAMPLE_SLACK;
-        let name = format!("{} frame.png", self.project.name);
+        let name = files::suggested_name(&format!("{} frame", self.project.name), "png");
         let request = FileRequest::save("Save frame", Filter::Png, name)
             .starting_in(files::home().join("Pictures"));
         let picked = files::choose_one(request, cx);

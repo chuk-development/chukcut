@@ -5,7 +5,7 @@ Sessions are long and are not reopened, so nothing important is allowed to live
 only in a conversation. If you learn something that would change how the next
 person works, it belongs in this repository, not in a chat log.
 
-Last updated: 2026-10-04 (CI: clippy is fatal, the engine tests run on lavapipe with ffmpeg, the CLI and ML worker tests run too — see "CI" below). Previously 2026-10-04 (preview frames no longer leave the GPU: shared with GPUI through a patched GPUI, readback as the fallback — see "Preview frames shared with GPUI" under Perf). Previously 2026-10-04 (ML worker: VitTrack re-finding, Remove background, CUDA — see "The ML worker" below). Previously 2026-10-02 (**the UI is native now** — decision 0011. The Tauri
+Last updated: 2026-10-04 (QA pass 2 over the wave 7–9 features and a showcase that shows them — see "QA pass 2" below). Previously 2026-10-04 (CI: clippy is fatal, the engine tests run on lavapipe with ffmpeg, the CLI and ML worker tests run too — see "CI" below). Previously 2026-10-04 (preview frames no longer leave the GPU: shared with GPUI through a patched GPUI, readback as the fallback — see "Preview frames shared with GPUI" under Perf). Previously 2026-10-04 (ML worker: VitTrack re-finding, Remove background, CUDA — see "The ML worker" below). Previously 2026-10-02 (**the UI is native now** — decision 0011. The Tauri
 shell and the React frontend are gone; the engine is `crates/engine`
 (`chukcut-engine`, no UI dependency) and the app is a GPUI window in
 `crates/app`. What the native app does today: import (dialog or command line),
@@ -143,6 +143,39 @@ What CI still cannot run:
 - **Clippy on a new Rust release.** The toolchain is `stable`, so a release
   that adds a lint can turn master red without a change in the repository.
   Fix the lint; pin the toolchain only if that becomes frequent.
+
+## QA pass 2 (2026-10-04, agent/qa2)
+
+Compound clips, timelines, templates, the shortcut editor, frame blending,
+motion blur, optical-flow slow motion, animated stickers, VitTrack,
+background removal (RVM, BiRefNet), select object, matte-limited grades and
+the shared preview texture, end to end in the release app (Xvfb + lavapipe)
+and the CLI + ML worker (RTX 3060, CUDA 13). All render, undo, survive save
+and reopen, and export what the preview shows (mean difference 0.4–1.6
+code values, the H.264 encode). Table, fixes and open items: `docs/QA.md`,
+"QA pass 2". `scripts/demo.sh` now builds all of these into the showcase
+(`docs/demo.md`).
+
+- **Trap: the ML steps of a script with an isolated `XDG_CACHE_HOME` find no
+  models** and download them again (1–2 GB with a GPU bundle). The ML folder
+  is `<cache>/chukcut/ml`; `scripts/demo.sh` links the user's one into its
+  own cache, read-only in effect (mattes and flow frames go to
+  `<cache>/chukcut/mattes` and `flow`, which stay isolated). A linked folder
+  makes `ml status` name the CUDA runtime by path (`docs/QA.md`, open).
+- **Trap: an ffmpeg GIF with transparency needs a reserved palette entry**
+  (`palettegen=reserve_transparent=1`, `paletteuse=alpha_threshold=128`);
+  without it the file is opaque and the sticker shows as a box. Not ours,
+  but it looks like a sticker bug.
+- **Measured:** RIFE through the app at 1080x1920, 239 in-between frames,
+  ~50 s on CUDA; select object 120 frames 13 s, 180 frames 16 s; RVM 240
+  frames 6.4 s; BiRefNet lite 240 frames 107 s; VitTrack 120 frames 2 s. A
+  56 s 1080x1920 project with frame blending at 0.25x, optical flow, a
+  matte-limited grade and a compound clip exported in 110 s with NVENC
+  (15 fps), against 16.6 s for the 25.7 s showcase on x264.
+- **A complete bake no longer offers "Finish missing frames"**: the flow
+  and matte panels read the engine's coverage (`speed_flow_coverage`,
+  `matting_coverage`), cached for two seconds because each read stats or
+  lists the cache files.
 
 ## Flaky tests, fixed (2026-10-04, agent/stable)
 
