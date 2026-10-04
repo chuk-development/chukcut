@@ -772,23 +772,13 @@ pub struct Benchmark {
     pub quality: Option<Quality>,
 }
 
-/// Time `model` on a synthetic `width × height` frame in the worker. The
-/// model must be installed. This is how the speeds in the docs are measured.
-pub fn ml_benchmark(
-    model: &str,
-    width: u32,
-    height: u32,
-    iterations: u32,
-    cancel: &AtomicBool,
-) -> Result<Benchmark, String> {
-    ml_benchmark_with(model, width, height, iterations, None, false, cancel)
-}
-
-/// [`ml_benchmark`] in a given mode (`None`: the configured one), and with
-/// `compare`, against the standard session's output. Fast mode and
+/// Time `model` on a synthetic `width × height` frame in the worker, in a
+/// given mode (`None`: the configured one), and with `compare`, against the
+/// standard session's output on the same input. The model must be
+/// installed. This is how the speeds in the docs are measured. Fast mode and
 /// `compare` need a worker in Fast mode: one is started for the
 /// measurement and the configured mode restored after it.
-pub fn ml_benchmark_with(
+pub fn ml_benchmark(
     model: &str,
     width: u32,
     height: u32,

@@ -214,7 +214,7 @@ impl MlArgs {
                 for &(model, w, h) in BENCH_TABLE {
                     chukcut_engine::modules::ml::prepare(model, model, &|_, _| {}, &cancel)
                         .map_err(|e| CliError::refused(e.to_string()))?;
-                    let standard = ml::ml_benchmark_with(
+                    let standard = ml::ml_benchmark(
                         model,
                         w,
                         h,
@@ -226,7 +226,7 @@ impl MlArgs {
                     .map_err(CliError::refused)?;
                     let fast = if fast_ready {
                         Some(
-                            ml::ml_benchmark_with(
+                            ml::ml_benchmark(
                                 model,
                                 w,
                                 h,
@@ -286,7 +286,7 @@ impl MlArgs {
                             .ok_or_else(|| CliError::usage("--accel is standard or fast"))?,
                     ),
                 };
-                let result = ml::ml_benchmark_with(
+                let result = ml::ml_benchmark(
                     model,
                     w,
                     h,
