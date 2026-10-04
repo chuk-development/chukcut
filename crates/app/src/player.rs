@@ -70,6 +70,8 @@ pub struct Player {
     inner: FramePlayer,
     /// Set by GPUI's renderer when it cannot import a shared frame.
     import_failed: Arc<AtomicBool>,
+    /// How the last frame arrived, so a change is logged once.
+    arrived: std::cell::Cell<Option<Sharing>>,
 }
 
 impl Player {
@@ -80,6 +82,7 @@ impl Player {
         Self {
             inner,
             import_failed: Arc::new(AtomicBool::new(false)),
+            arrived: std::cell::Cell::new(None),
         }
     }
 
@@ -113,6 +116,10 @@ impl Player {
             self.inner.use_shared_frames(false);
         }
         let frame = self.inner.take(clock)?;
+        let sharing = self.inner.sharing();
+        if self.arrived.replace(Some(sharing)) != Some(sharing) {
+            tracing::info!(?sharing, "preview frames reach GPUI");
+        }
         let picture = match frame.pixels {
             // Already BGRA, which is what `RenderImage` stores; the buffer is
             // only wrapped, never copied or swizzled here.
@@ -140,7 +147,7 @@ impl Player {
     }
 
     /// Whether frames reach GPUI through shared memory right now.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn sharing(&self) -> Sharing {
         self.inner.sharing()
     }
