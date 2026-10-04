@@ -152,6 +152,9 @@ fn landmarks_and_voices_are_counted_inside_compounds_and_parked_timelines() {
     use chukcut_engine::modules::voice::isolate::Keep;
     isolate();
     let media = require_media!();
+    // The run below finds faces into the shared cache; start without them.
+    let _run = RUNS.lock().unwrap_or_else(|e| e.into_inner());
+    let _ = std::fs::remove_dir_all(chukcut_engine::modules::landmarks::track::root());
     let mut project = Project::new("faces and voices", canvas(), 30.0);
     project
         .materials
