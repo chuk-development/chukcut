@@ -87,7 +87,8 @@ column current.
 | 10 | polish3 | apply template into an open project, slots inside compounds, queue bakes on project open, stabilisation in compounds, ml status symlink, scrolling bake progress | merged — template apply into an open project (timeline or compound), slots inside compounds, `modules/prepare` bakes on project open with one title-bar chip, stabilisation on compounds, sequence walk frame-time fix, ml status symlink, pinned bake strips |
 | 10 | mlspeed | fp16 models, optional TensorRT pack with engine cache, IO binding, per-model provider/precision in settings and `ml bench` | running (agent/mlspeed) |
 | 11 | body | zip/tar downloads, RTMPose body landmarks + follow body part, body box for reframe, face/voice queues over every timeline in the prepare chip | running (agent/body) |
-| 11 | docs | README feature overview, user manual in docs/manual/ (keyboard table checked against the keymap registry), STATUS top summary | running (agent/docs) |
+| 11 | docs | README feature overview, user manual in docs/manual/ (keyboard table checked against the keymap registry), STATUS top summary | merged — README rewritten, docs/manual/ (17 pages), keymap_doc test, STATUS "At a glance" |
+| 11 | ux | install worker + CLI with the app, inspector crop, speed-effect presets, Basic-tab stubs, hardware-decode + ML runtime in settings, persisted export queue + quit guard | running (agent/ux) |
 
 ## Backlog for the next waves (lead picks from the top)
 
