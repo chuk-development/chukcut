@@ -189,6 +189,46 @@ pub fn bundle_media(project: &mut Project, dir: &Path) -> Result<usize, String> 
     Ok(copied.len())
 }
 
+/// Copy every media file of `project` that lives under the template
+/// directory `dir` into `to`, keeping its path below `dir`, and point the
+/// project at the copies. Returns how many files were copied.
+///
+/// A project made from a user template must not read the template's
+/// `media/` folder: deleting or moving the template would take those files
+/// out of the project (they would go offline, decision 0009).
+pub fn copy_out_media(project: &mut Project, dir: &Path, to: &Path) -> Result<usize, String> {
+    let mut copied = 0;
+    for path in media_paths_mut(project) {
+        let source = PathBuf::from(path.as_str());
+        let Ok(relative) = source.strip_prefix(dir) else {
+            continue;
+        };
+        let target = to.join(relative);
+        if !target.exists() {
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+            }
+            // Copied beside and renamed, so a half-copied file is never
+            // mistaken for a finished one on the next try.
+            let partial = target.with_extension(format!(
+                "{}.part",
+                target
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("media")
+            ));
+            std::fs::copy(&source, &partial)
+                .map_err(|e| format!("cannot copy {} into the project: {e}", source.display()))?;
+            std::fs::rename(&partial, &target)
+                .map_err(|e| format!("cannot write {}: {e}", target.display()))?;
+            copied += 1;
+        }
+        *path = target.to_string_lossy().into_owned();
+    }
+    Ok(copied)
+}
+
 /// A file-system-safe id from a name: lower case, dashes, and a short random
 /// tail so two templates called "Intro" do not collide.
 pub fn id_from_name(name: &str) -> String {
@@ -252,6 +292,45 @@ mod tests {
         resolve_paths(&mut p, Path::new("/tpl/one"));
         assert_eq!(p.materials.images[0].path, "/tpl/one/media/logo.png");
         assert_eq!(p.materials.images[1].path, "/abs/x.png");
+    }
+
+    #[test]
+    fn media_copied_out_of_a_template_no_longer_points_into_it() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/generated")
+            .join(format!(
+                "template-copy-out-{}",
+                crate::modules::project::document::new_id()
+            ));
+        let template = root.join("template");
+        let project_media = root.join("project");
+        std::fs::create_dir_all(template.join("media")).unwrap();
+        std::fs::write(template.join("media/logo.png"), b"logo").unwrap();
+
+        let mut p = Project::new("t", CanvasConfig::default(), 30.0);
+        for (id, path) in [
+            ("i", template.join("media/logo.png")),
+            ("j", PathBuf::from("/abs/elsewhere.png")),
+        ] {
+            p.materials.images.push(ImageMaterial {
+                id: id.into(),
+                path: path.to_string_lossy().into_owned(),
+                width: 10,
+                height: 10,
+            });
+        }
+        assert_eq!(
+            copy_out_media(&mut p, &template, &project_media).unwrap(),
+            1
+        );
+        let copy = project_media.join("media/logo.png");
+        assert_eq!(p.materials.images[0].path, copy.to_string_lossy());
+        assert_eq!(p.materials.images[1].path, "/abs/elsewhere.png");
+
+        // The template can go; the project keeps its picture.
+        std::fs::remove_dir_all(&template).unwrap();
+        assert_eq!(std::fs::read(&copy).unwrap(), b"logo");
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

@@ -289,6 +289,12 @@ fn build_from(
     project.created_at = now;
     project.updated_at = now;
     project.canvas_chosen = true;
+    // A user template's own media (a logo, a sound) is copied out of its
+    // directory, so deleting or moving the template leaves the project whole.
+    if let Some(dir) = &template.dir {
+        let to = assets::project_media_dir(&project.id);
+        format::copy_out_media(&mut project, dir, &to)?;
+    }
 
     let mut filled = Vec::new();
     for (slot, path) in slots.iter().zip(media) {
@@ -532,6 +538,32 @@ mod tests {
         let quick = load_from("talking-points", Path::new("/nonexistent")).unwrap();
         let error = build_from(quick, &["/a.mp4".into(), "/b.mp4".into()], None).unwrap_err();
         assert!(error.contains("1 slot,"), "{error}");
+    }
+
+    #[test]
+    fn a_split_slot_stays_one_slot_on_the_left_half() {
+        let mut project = load_from("quick-cuts", Path::new("/nonexistent"))
+            .unwrap()
+            .project;
+        let before = slot::slots(&project);
+        let first = before[0].clone();
+        let cut = first.start + first.duration / 2;
+        let command =
+            crate::modules::timeline::ops::split_at(&project, &first.segment_id, cut).unwrap();
+        command.apply(&mut project).unwrap();
+
+        let after = slot::slots(&project);
+        assert_eq!(after.len(), before.len());
+        assert_eq!(after[0].segment_id, first.segment_id);
+        assert_eq!(after[0].duration, cut - first.start);
+        // The right half is a plain clip that names no marker.
+        let (track, _) = project.segment(&first.segment_id).unwrap();
+        let right = track
+            .segments
+            .iter()
+            .find(|s| s.target_range.start == cut)
+            .unwrap();
+        assert!(slot::marker_of(&project, right).is_none());
     }
 
     #[test]

@@ -76,6 +76,60 @@ fn insertion_index(track: &Track, start: Micros) -> usize {
         .count()
 }
 
+/// Where a clip of `duration` at `start` on `track` can sit without
+/// overlapping another clip (ignoring the clips in `skip`).
+///
+/// - Clear of every clip: `start`, unchanged.
+/// - Overlapping a clip by less than `slack`: flush against that clip's
+///   edge, when that place is clear.
+/// - Otherwise `None`.
+///
+/// This is what a gesture that rounds an edge onto the frame grid calls with
+/// one frame as the slack. A clip whose edge is off the grid (placed before
+/// frame snapping, or a video whose length is not a whole number of frames)
+/// would otherwise catch a rounded neighbour by a few microseconds, and the
+/// move or drop was refused ("another clip is in the way") or, for a drop,
+/// fell back to the end of the lane. Touching the off-grid edge wins over
+/// the grid: a sub-frame gap or overlap is worse than an edge between frames.
+pub fn clear_of_neighbours(
+    track: &Track,
+    skip: &[String],
+    start: Micros,
+    duration: Micros,
+    slack: Micros,
+) -> Option<Micros> {
+    let others = || {
+        track
+            .segments
+            .iter()
+            .filter(|s| !skip.iter().any(|id| *id == s.id))
+    };
+    let overlapping = |at: Micros| {
+        others()
+            .filter(move |o| at < o.target_range.end() && o.target_range.start < at + duration)
+            .collect::<Vec<_>>()
+    };
+    let hits = overlapping(start);
+    if hits.is_empty() {
+        return Some(start);
+    }
+    hits.iter()
+        .filter_map(|other| {
+            let (into_right, into_left) = (
+                other.target_range.end() - start,
+                start + duration - other.target_range.start,
+            );
+            if other.target_range.start <= start && into_right < slack {
+                Some(other.target_range.end())
+            } else if other.target_range.start > start && into_left < slack {
+                Some(other.target_range.start - duration)
+            } else {
+                None
+            }
+        })
+        .find(|&at| at >= 0 && overlapping(at).is_empty())
+}
+
 /// Put a material at the end of the first unlocked lane of its kind: the
 /// app's "add to timeline" button.
 pub fn append(project: &Project, material_id: &str) -> Result<EditCommand, String> {
@@ -438,6 +492,85 @@ mod tests {
             rotation: 0,
         });
         (project, id)
+    }
+
+    #[test]
+    fn a_rounded_edge_slides_flush_against_an_off_grid_neighbour() {
+        use crate::modules::preview::clock::nearest_frame_time;
+        let frame = 33_334;
+        let mut track = Track::new(TrackKind::Video, "V");
+        // A clip placed before frame snapping: it ends between frames 90
+        // and 91 (3.016761 s, the cut QA found).
+        track
+            .segments
+            .push(new_segment("a", TimeRange::new(0, 3_016_761), 0));
+        track
+            .segments
+            .push(new_segment("c", TimeRange::new(8 * S + 5_000, 2 * S), 0));
+        let skip: Vec<String> = Vec::new();
+
+        // Dropped just after it, the head rounds back to frame 90 and would
+        // overlap by 16 761 µs: it slides to the edge instead.
+        let raw = 3_010_000;
+        let rounded = nearest_frame_time(raw, 30.0);
+        assert_eq!(rounded, 3 * S);
+        let at = clear_of_neighbours(&track, &skip, rounded, 2 * S, frame).unwrap();
+        assert_eq!(at, 3_016_761);
+
+        // A tail that rounds into the next clip's off-grid head slides back.
+        let at = clear_of_neighbours(&track, &skip, 6 * S + 10_000, 2 * S, frame).unwrap();
+        assert_eq!(at, 6 * S + 5_000);
+        assert!(at + 2 * S <= 8 * S + 5_000);
+
+        // Clear already: unchanged. A real overlap: refused.
+        assert_eq!(
+            clear_of_neighbours(&track, &skip, 4 * S, S, frame),
+            Some(4 * S)
+        );
+        assert_eq!(clear_of_neighbours(&track, &skip, 2 * S, S, frame), None);
+
+        // A gap one frame too short for the clip: no flush place is clear.
+        assert_eq!(
+            clear_of_neighbours(&track, &skip, 3_016_761, 5 * S, frame),
+            None
+        );
+
+        // The clip being moved does not collide with itself.
+        let own = vec![track.segments[0].id.clone()];
+        assert_eq!(
+            clear_of_neighbours(&track, &own, 2 * S, S, frame),
+            Some(2 * S)
+        );
+    }
+
+    #[test]
+    fn a_flush_place_is_accepted_by_the_move_it_feeds() {
+        let (mut project, id) = project();
+        let mut history = DocumentHistory::default();
+        let track_id = project.tracks[0].id.clone();
+        // Two clips, the first ending off the frame grid.
+        let command = place(&project, &id, Some(&track_id), 0, Some(3_016_761), 0).unwrap();
+        apply(&mut project, &mut history, vec![command]);
+        let command = place(&project, &id, Some(&track_id), 6 * S, Some(S), 0).unwrap();
+        apply(&mut project, &mut history, vec![command]);
+        let moving = project.tracks[0].segments[1].id.clone();
+        let rounded = 3 * S; // the frame boundary nearest to where it was let go
+        assert!(move_to(&project, &moving, Some(&track_id), rounded).is_err());
+        let at = clear_of_neighbours(
+            &project.tracks[0],
+            std::slice::from_ref(&moving),
+            rounded,
+            S,
+            33_334,
+        )
+        .unwrap();
+        let command = move_to(&project, &moving, Some(&track_id), at).unwrap();
+        apply(&mut project, &mut history, vec![command]);
+        assert_eq!(project.tracks[0].segments[1].target_range.start, 3_016_761);
+        assert!(project
+            .validate()
+            .iter()
+            .all(|i| !i.message.contains("overlap")));
     }
 
     fn apply(project: &mut Project, history: &mut DocumentHistory, commands: Vec<EditCommand>) {

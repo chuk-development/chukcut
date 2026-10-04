@@ -410,6 +410,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         [],
         ["shift-f"]
     ),
+    a!("ReplaceMedia", "Clip", "Replace media", false, [], [], []),
     a!(
         "DuckUnderSpeech",
         "Clip",

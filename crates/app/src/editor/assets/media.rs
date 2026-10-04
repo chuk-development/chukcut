@@ -5,6 +5,7 @@ use std::collections::HashSet;
 
 use chukcut_engine::modules::media::thumbnail_strip;
 use chukcut_engine::modules::project::{new_id, Segment, TimeRange, Transform};
+use chukcut_engine::modules::template::assets as template_assets;
 use gpui::{img, ObjectFit};
 
 use super::*;
@@ -49,8 +50,16 @@ struct Item {
 }
 
 impl Editor {
-    /// Every material in the pool of the given kinds, in import order.
+    /// Every material in the pool of the given kinds, in import order —
+    /// leaving out a template's drawn slot placeholders and synthesised
+    /// music beds, which are not media the user chose (decision 0022).
     fn library(&self, kinds: &[Kind]) -> Vec<Item> {
+        let mut items = self.pool_items(kinds);
+        items.retain(|item| !template_assets::is_template_asset(&item.path));
+        items
+    }
+
+    fn pool_items(&self, kinds: &[Kind]) -> Vec<Item> {
         let pool = &self.project.materials;
         let mut items = Vec::new();
         if kinds.contains(&Kind::Video) {
@@ -542,15 +551,17 @@ fn insert_at(
                 .find(|track| track.kind == kind && !track.locked)
         })
         .ok_or("there is no unlocked lane for this kind of media")?;
-    let start = at.max(0);
-    let end = start + duration;
-    let collides = track.segments.iter().any(|other| {
-        start < other.target_range.start + other.target_range.duration
-            && other.target_range.start < end
-    });
-    if collides {
-        return Err("another clip is in the way".into());
-    }
+    // A drop rounded onto the frame grid can catch a neighbour whose edge is
+    // off the grid by a few microseconds; it lands flush against it then.
+    let frame = crate::editor::timeline::frame_length(project.fps);
+    let start = chukcut_engine::modules::timeline::gesture::clear_of_neighbours(
+        track,
+        &[],
+        at.max(0),
+        duration,
+        frame,
+    )
+    .ok_or("another clip is in the way")?;
     let index = track
         .segments
         .iter()
@@ -573,4 +584,60 @@ fn insert_at(
             keyframes: Vec::new(),
         },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chukcut_engine::modules::project::{CanvasConfig, Project, Track, VideoMaterial};
+
+    #[test]
+    fn a_drop_rounded_into_an_off_grid_clip_lands_flush_against_it() {
+        let mut project = Project::new("t", CanvasConfig::default(), 30.0);
+        project.materials.videos.push(VideoMaterial {
+            id: "m".into(),
+            path: "/nowhere/clip.mp4".into(),
+            width: 1080,
+            height: 1920,
+            duration: 2_000_000,
+            fps: 30.0,
+            has_audio: false,
+            rotation: 0,
+        });
+        let mut track = Track::new(TrackKind::Video, "V");
+        // Placed before frame snapping: it ends between frames 90 and 91.
+        track.segments.push(Segment {
+            id: "old".into(),
+            material_id: "m".into(),
+            target_range: TimeRange::new(0, 3_016_761),
+            source_range: TimeRange::new(0, 3_016_761),
+            render_index: 0,
+            speed: 1.0,
+            volume: 1.0,
+            transform: Transform::default(),
+            crop: None,
+            extras: Vec::new(),
+            keyframes: Vec::new(),
+        });
+        let lane = track.id.clone();
+        project.tracks.push(track);
+
+        // The drop rounded to frame 90, 16 761 µs inside the old clip. It
+        // used to be refused and fell back to the end of the lane.
+        let command = insert_at(&project, "m", Some(&lane), 3_000_000).unwrap();
+        let EditCommand::InsertSegment { segment, index, .. } = &command else {
+            panic!("not an insert");
+        };
+        assert_eq!(segment.target_range.start, 3_016_761);
+        assert_eq!(*index, 1);
+        let mut after = project.clone();
+        command.apply(&mut after).unwrap();
+        assert!(after
+            .validate()
+            .iter()
+            .all(|issue| !issue.message.contains("overlap")));
+
+        // Well inside it, a drop is still refused.
+        assert!(insert_at(&project, "m", Some(&lane), 1_000_000).is_err());
+    }
 }
