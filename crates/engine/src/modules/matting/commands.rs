@@ -35,8 +35,10 @@ use crate::state::AppState;
 /// What the toggle answers: the edited project, and the bake it started.
 #[derive(Serialize)]
 pub struct BackgroundResponse {
+    /// `None` when the clip already had this setting: nothing to undo, only
+    /// frames to bake.
     #[serde(flatten)]
-    pub edit: EditResponse,
+    pub edit: Option<EditResponse>,
     /// The bake job, when the matte had frames to make.
     pub job: Option<u64>,
 }
@@ -280,9 +282,19 @@ fn set_and_bake(
     segment_id: String,
     setting: Option<BackgroundRemoval>,
 ) -> Result<BackgroundResponse, String> {
-    current_setting(state, &segment_id)?;
+    let current = current_setting(state, &segment_id)?;
     let on = setting.is_some();
-    let edit = compositing_set_background(state, segment_id.clone(), setting)?;
+    // The same setting again (the same clicks, the same model) is a request
+    // to bake what is missing, not an edit.
+    let edit = if current == setting {
+        None
+    } else {
+        Some(compositing_set_background(
+            state,
+            segment_id.clone(),
+            setting,
+        )?)
+    };
     let job = if on {
         matting_bake(state, segment_id)?
     } else {

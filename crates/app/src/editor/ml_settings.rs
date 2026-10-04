@@ -224,7 +224,46 @@ impl AiSettings {
         );
         let id = bundle.id.to_string();
         let name = bundle.name.to_string();
-        let control: AnyElement = if bundle.installed {
+        let control: AnyElement = if !bundle.installed && bundle.installed_bytes > 0 {
+            // Partly there (an older install, a cancelled download): finish
+            // it or take back what is there.
+            let remove_id = id.clone();
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .child(
+                    Button::new(SharedString::from(format!("ml-finish-{id}")))
+                        .label(format!("Finish ({})", bytes_label(bundle.missing_bytes)))
+                        .small()
+                        .disabled(busy || !bundle.runnable)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.install(
+                                MlItem::Gpu {
+                                    id: Some(id.clone()),
+                                },
+                                name.clone(),
+                                cx,
+                            )
+                        })),
+                )
+                .child(
+                    Button::new(SharedString::from(format!("ml-remove-{remove_id}")))
+                        .label(format!("Remove ({})", bytes_label(bundle.installed_bytes)))
+                        .small()
+                        .disabled(busy)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.remove(
+                                MlItem::Gpu {
+                                    id: Some(remove_id.clone()),
+                                },
+                                cx,
+                            )
+                        })),
+                )
+                .into_any_element()
+        } else if bundle.installed {
             div()
                 .flex()
                 .flex_row()
@@ -247,11 +286,7 @@ impl AiSettings {
                 )
                 .into_any_element()
         } else {
-            let label = if bundle.missing_bytes < bundle.bytes {
-                format!("Finish ({})", bytes_label(bundle.missing_bytes))
-            } else {
-                format!("Install ({})", bytes_label(bundle.missing_bytes))
-            };
+            let label = format!("Install ({})", bytes_label(bundle.missing_bytes));
             Button::new(SharedString::from(format!("ml-install-{id}")))
                 .label(label)
                 .small()
@@ -273,12 +308,8 @@ impl AiSettings {
     /// Runtime packs installed outside a complete bundle (an older install,
     /// or one pack by hand), each removable on its own.
     fn render_loose_packs(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let in_bundle = |id: &str| {
-            self.snapshot
-                .bundles
-                .iter()
-                .any(|b| b.installed && b.packs.contains(&id))
-        };
+        // A bundle's packs are listed (and removed) with the bundle.
+        let in_bundle = |id: &str| self.snapshot.bundles.iter().any(|b| b.packs.contains(&id));
         self.snapshot
             .runtimes
             .iter()

@@ -38,6 +38,14 @@ use crate::modules::project::document::{Micros, SAMPLE_SLACK};
 /// prompt, as a fraction of its size.
 const BOX_MARGIN: f32 = 0.1;
 
+/// How far the prompt box's size may stray from the clicked object's, as
+/// factors of its width and height.
+const SIZE_RANGE: (f32, f32) = (0.7, 1.4);
+
+/// How far from its box's edge a carried click stays, as a fraction of the
+/// box.
+const EDGE: f32 = 0.15;
+
 /// Frames decoded at once for the backward walk: decoders only go forward
 /// cheaply, so the walk decodes a chunk forward and segments it in reverse.
 const CHUNK: usize = 24;
@@ -85,8 +93,11 @@ pub fn carry(
         .iter()
         .filter(|p| p.keep)
         .filter_map(|p| {
-            let rx = (p.x - from[0]) / from[2].max(1.0);
-            let ry = (p.y - from[1]) / from[3].max(1.0);
+            // Pulled in from the box's edges: a click on the object's very
+            // edge, carried to a box that is a few pixels off, lands beside
+            // the object and selects what is there instead.
+            let rx = ((p.x - from[0]) / from[2].max(1.0)).clamp(EDGE, 1.0 - EDGE);
+            let ry = ((p.y - from[1]) / from[3].max(1.0)).clamp(EDGE, 1.0 - EDGE);
             let x = to[0] + rx * to[2];
             let y = to[1] + ry * to[3];
             ((0.0..w as f32).contains(&x) && (0.0..h as f32).contains(&y)).then_some(SegmentPoint {
@@ -98,14 +109,44 @@ pub fn carry(
         .collect()
 }
 
+/// Clear `alpha` (`w × h`) outside box `b` (x, y, w, h).
+pub fn clip_to(alpha: &mut [u8], w: usize, h: usize, b: [f32; 4]) {
+    let x0 = (b[0].floor().max(0.0) as usize).min(w);
+    let y0 = (b[1].floor().max(0.0) as usize).min(h);
+    let x1 = ((b[0] + b[2]).ceil().max(0.0) as usize).min(w);
+    let y1 = ((b[1] + b[3]).ceil().max(0.0) as usize).min(h);
+    for (y, row) in alpha.chunks_mut(w).enumerate().take(h) {
+        if y < y0 || y >= y1 {
+            row.fill(0);
+        } else {
+            row[..x0].fill(0);
+            row[x1.max(x0)..].fill(0);
+        }
+    }
+}
+
+/// The centre of box `b` (x, y, w, h).
+fn centre(b: [f32; 4]) -> [f32; 2] {
+    [b[0] + b[2] * 0.5, b[1] + b[3] * 0.5]
+}
+
 /// One direction of the walk from the clicked frame.
+///
+/// The prompt box is the tracker's box, with its size held within
+/// [`SIZE_RANGE`] of the clicked object's. Both obvious alternatives failed
+/// on a red square moving over colour bars: VitTrack's own box drifts
+/// larger over a few seconds (it took in a stripe next to the square, and
+/// the mask spilled into the stripe), and a box taken from the last mask
+/// feeds back on itself (SAM filled the grown box, the next box grew by the
+/// margin, and in a second the selection was the whole stripe). Objects
+/// that grow or shrink more than that on screen are cut at the box's edge.
 struct Walk {
     tracker: Option<VitTracker>,
     /// The object's box on the clicked frame, and the clicks there.
     origin: [f32; 4],
     points: Vec<SegmentPoint>,
-    /// Where the object was last seen.
-    last: [f32; 4],
+    /// Where the object is: its last box.
+    object: [f32; 4],
     size: (u32, u32),
 }
 
@@ -122,7 +163,7 @@ impl Walk {
             tracker,
             origin,
             points,
-            last: origin,
+            object: origin,
             size,
         }
     }
@@ -141,19 +182,30 @@ impl Walk {
             }
             None => None,
         };
-        let at = tracked.unwrap_or(self.last);
+        let mut at = self.object;
+        if let Some(t) = tracked {
+            let c = centre(t);
+            let bw = t[2].clamp(self.origin[2] * SIZE_RANGE.0, self.origin[2] * SIZE_RANGE.1);
+            let bh = t[3].clamp(self.origin[3] * SIZE_RANGE.0, self.origin[3] * SIZE_RANGE.1);
+            at = [c[0] - bw * 0.5, c[1] - bh * 0.5, bw, bh];
+        }
         if !segment {
-            self.last = at;
+            self.object = at;
             return Ok(None);
         }
         let points = carry(&self.points, self.origin, at, w, h);
-        let mask = segment::segment(frame, w as usize, h as usize, &points, Some(grow(at, w, h)))
+        let prompt_box = grow(at, w, h);
+        tracing::debug!(?tracked, ?at, ?points, "select object: prompt");
+        let mut mask = segment::segment(frame, w as usize, h as usize, &points, Some(prompt_box))
             .map_err(|e| e.to_string())?;
-        // With a tracker its box leads; without one the mask's own box is
-        // the best guess of where the object is next.
-        self.last = tracked
-            .or_else(|| sam::mask_box(&mask.alpha, w as usize, h as usize))
-            .unwrap_or(at);
+        // SAM, given a box, still spills into a similar-looking neighbour;
+        // the object is inside the box it was prompted with.
+        clip_to(&mut mask.alpha, w as usize, h as usize, prompt_box);
+        self.object = match sam::mask_box(&mask.alpha, w as usize, h as usize) {
+            // Without a tracker the mask is the only position there is.
+            Some(b) if self.tracker.is_none() => b,
+            _ => at,
+        };
         Ok(Some(mask.alpha))
     }
 }
@@ -303,6 +355,20 @@ mod tests {
         );
         assert_eq!(carried.len(), 1, "exclusions stay on the clicked frame");
         assert_eq!((carried[0].x, carried[0].y), (70.0, 20.0));
+        // A click on the box's edge is carried a little inside it.
+        let edge = [SegmentPoint {
+            x: 10.0,
+            y: 15.0,
+            keep: true,
+        }];
+        let carried = carry(
+            &edge,
+            [10.0, 10.0, 10.0, 10.0],
+            [60.0, 10.0, 20.0, 20.0],
+            200,
+            100,
+        );
+        assert_eq!(carried[0].x, 63.0);
         // Carried out of the frame: dropped.
         assert!(carry(
             &points,
@@ -312,6 +378,14 @@ mod tests {
             100
         )
         .is_empty());
+    }
+
+    #[test]
+    fn a_mask_is_cleared_outside_its_prompt_box() {
+        let mut alpha = vec![255u8; 6 * 4];
+        clip_to(&mut alpha, 6, 4, [1.0, 1.0, 3.0, 2.0]);
+        let kept: Vec<usize> = (0..alpha.len()).filter(|&i| alpha[i] > 0).collect();
+        assert_eq!(kept, [7, 8, 9, 13, 14, 15]);
     }
 
     #[test]
