@@ -574,7 +574,12 @@ impl Editor {
             }
             return shapes;
         }
-        let Some(overlay) = self.tracking_overlay() else {
+        // The follower is not on screen outside its own time, so neither is
+        // the path it follows.
+        let Some(overlay) = self
+            .tracking_overlay()
+            .filter(|overlay| overlay.target_range.contains(at))
+        else {
             return shapes;
         };
         let Some((track, _, Some(target))) =
