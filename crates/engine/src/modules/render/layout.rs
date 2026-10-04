@@ -314,8 +314,10 @@ mod tests {
         let top = corner(&placement.mvp, 0.0, 0.5);
         assert!(close(top.y, 607.5 / 1920.0));
 
-        let mut doubled = Transform::default();
-        doubled.scale = [2.0, 2.0];
+        let doubled = Transform {
+            scale: [2.0, 2.0],
+            ..Default::default()
+        };
         let placement = place_quad((1080, 1920), (1920, 1080), &doubled, None).unwrap();
         let top = corner(&placement.mvp, 0.0, 0.5);
         assert!(close(top.y, 2.0 * 607.5 / 1920.0));
@@ -323,8 +325,10 @@ mod tests {
 
     #[test]
     fn position_is_in_half_canvas_units() {
-        let mut t = Transform::default();
-        t.position = [0.5, -0.25];
+        let t = Transform {
+            position: [0.5, -0.25],
+            ..Default::default()
+        };
         let placement = place_quad((1920, 1080), (1920, 1080), &t, None).unwrap();
         let centre = corner(&placement.mvp, 0.0, 0.0);
         assert!(close(centre.x, 0.5));
@@ -333,8 +337,10 @@ mod tests {
 
     #[test]
     fn rotation_is_clockwise_and_square_on_a_non_square_canvas() {
-        let mut t = Transform::default();
-        t.rotation = 90.0;
+        let t = Transform {
+            rotation: 90.0,
+            ..Default::default()
+        };
         // Square source on a 2:1 canvas so a naive NDC rotation would shear.
         let placement = place_quad((1920, 960), (960, 960), &t, None).unwrap();
         let right = corner(&placement.mvp, 0.5, 0.0);
@@ -347,8 +353,10 @@ mod tests {
 
     #[test]
     fn flips_mirror_without_moving_the_quad() {
-        let mut t = Transform::default();
-        t.flip_h = true;
+        let t = Transform {
+            flip_h: true,
+            ..Default::default()
+        };
         let placement = place_quad((1000, 1000), (1000, 1000), &t, None).unwrap();
         let left = corner(&placement.mvp, -0.5, 0.0);
         assert!(close(left.x, 1.0));
@@ -420,8 +428,10 @@ mod tests {
 
     #[test]
     fn fully_transparent_segments_are_skipped() {
-        let mut t = Transform::default();
-        t.opacity = 0.0;
+        let t = Transform {
+            opacity: 0.0,
+            ..Default::default()
+        };
         assert!(place_quad((100, 100), (100, 100), &t, None).is_none());
     }
 
