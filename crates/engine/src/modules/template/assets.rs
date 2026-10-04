@@ -36,6 +36,24 @@ pub fn user_dir() -> PathBuf {
     root().join("user")
 }
 
+/// Where a project made from a user template keeps its copies of the
+/// template's `media/` files, one directory per project id. Outside
+/// [`root`]: these are the user's files (a logo, a sound), shown in the
+/// media library and bundled like any import when the project is saved as a
+/// template again. Under the data directory, never the cache: the project
+/// references them.
+pub fn project_media_dir(project_id: &str) -> PathBuf {
+    paths::data_root().join("template-media").join(project_id)
+}
+
+/// Whether `path` is one of our own drawn placeholders or synthesised music
+/// beds: files a template's project uses that are not media the user chose,
+/// which the media library leaves out.
+pub fn is_template_asset(path: &str) -> bool {
+    let path = Path::new(path);
+    path.starts_with(placeholders_dir()) || path.starts_with(music_dir())
+}
+
 /// The pixel size of a placeholder of shape `aspect`: 720 on the short edge,
 /// enough to look clean in the preview, small enough to write in a blink.
 pub fn placeholder_size(aspect: [u32; 2]) -> (u32, u32) {

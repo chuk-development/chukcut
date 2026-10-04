@@ -244,8 +244,30 @@ fn a_project_saved_as_a_template_makes_projects_of_its_own() {
     assert!(!project.materials.effects.is_empty());
     assert!(!project.materials.texts.is_empty());
 
+    // The project reads nothing from the template's directory: its media
+    // was copied out, so deleting the template leaves the project whole.
+    let pool = &project.materials;
+    let used: Vec<&str> = pool
+        .videos
+        .iter()
+        .map(|m| m.path.as_str())
+        .chain(pool.images.iter().map(|m| m.path.as_str()))
+        .chain(pool.audios.iter().map(|m| m.path.as_str()))
+        .collect();
+    assert!(
+        used.iter()
+            .all(|p| !std::path::Path::new(p).starts_with(&dir)),
+        "{used:?}"
+    );
+
     templates::template_delete(&info.id).unwrap();
     assert!(!dir.exists());
+    for p in used {
+        assert!(
+            std::path::Path::new(p).exists(),
+            "{p} went with the template"
+        );
+    }
     assert!(templates::template_delete("quick-cuts").is_err());
 }
 

@@ -289,6 +289,12 @@ fn build_from(
     project.created_at = now;
     project.updated_at = now;
     project.canvas_chosen = true;
+    // A user template's own media (a logo, a sound) is copied out of its
+    // directory, so deleting or moving the template leaves the project whole.
+    if let Some(dir) = &template.dir {
+        let to = assets::project_media_dir(&project.id);
+        format::copy_out_media(&mut project, dir, &to)?;
+    }
 
     let mut filled = Vec::new();
     for (slot, path) in slots.iter().zip(media) {
