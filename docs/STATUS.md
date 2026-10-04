@@ -116,20 +116,86 @@ breadcrumbs or the clip menu to close; Alt+Shift+G puts the clips back).
   `grade::feature::PREMULTIPLIED` and `quad.wgsl` divides it out. Verified on
   the RTX 3060 and on lavapipe: nested vs flattened frames within 2 code
   values, exports within 6, mixes within 1e-4 (`tests/compound.rs`).
-- **Sound** is flattened for both mixers (`sequence::audio::flatten_audio`).
-  Not mapped: a compound clip's own volume keyframes and its own speed curve.
+- **Sound** is flattened for both mixers (`sequence::audio::flatten_audio`):
+  the compound clip's own volume keyframes multiply with the inner clips'
+  (sampled every 20 ms where both have keys), and its speed — constant or a
+  curve — is composed with each inner clip's speed (`sequence::retime`). A
+  constant clip under a curved compound clip gets the compound's curve moved
+  into its own source time, which is exact; a curved clip under a curved
+  compound clip gets a 48-point sampled product.
 - **Export** always renders the root timeline, also from inside a compound
   clip (`sequence::export_root` in `export::commands`).
 - **Cycles** are refused at `InsertSegment` (a paste of a compound clip into
   itself) and nesting stops at 8 levels (`sequence::MAX_DEPTH`).
 - **Old files** round-trip byte for byte; neither key is written for a
   project with one timeline.
-- **Rough:** every compound clip costs a nested render per frame plus a pool
-  clone; the preview's decode-ahead (`MediaSourceProvider::prefetch_clips`)
-  does not look inside compound clips; analysis, silence cutting, captions
-  and loudness see only the open sequence; flatten needs normal speed;
-  deleting a timeline leaves its compound sequences parked and unused;
-  an older build opening a multi-timeline file drops the parked timelines.
+
+### Compound clip follow-ups (2026-10-04, agent/compound2)
+
+- **Nested-render cache** (`render::nested`, `sequence::digest`). The
+  compositor keeps nested views (the pool clone) and nested frames between
+  frames, keyed by a hash of the compound clip's lanes and every pool entry
+  its clips name (grades, effects, masks, curves, transitions, follows and
+  the tracks they name, stabilisation entries and the camera paths they
+  name). An edit that could change the picture changes the key; nothing is
+  invalidated by hand. `MaterialPool` is destructured without `..` in
+  `digest.rs`, so a new pool category does not compile until someone says
+  whether pictures depend on it. Frames are kept only for a provider that
+  names itself (`SourceProvider::cache_identity`; `MediaSourceProvider`
+  changes its identity on `with_preview_proxies` and when `sync_texts`
+  changes a title). Bounded: 16 views, 24 frames or 200 MB of textures.
+  Not covered: file contents on disk (a LUT edited in place, a missing file
+  that comes back) — the next document edit refreshes.
+- **Measured** (`chukcut-bench --filter composite`, release, RTX 3060,
+  1920x1080, readback included; the old and new binaries run alternately,
+  four runs each at load 1.7–3.4; medians of the runs, per frame on screen;
+  "renders" counts the nested ones):
+
+  | row | before | after | renders before → after |
+  |---|---|---|---|
+  | 1 compound clip (3 layers), playback | 1.40–1.73 ms | 1.50–2.49 ms | 2 → 2 |
+  | 4 compound clips of one sequence, playback | 2.05–2.73 ms | 1.66–2.25 ms | 5 → 2 |
+  | 1 compound clip, same instant again (paused) | 1.34–1.78 ms | 1.24–1.54 ms | 2 → 1 |
+  | 1 compound clip, 5000 materials in the pool | 1.87–2.45 ms | 1.49–1.69 ms | 2 → 2 |
+
+  CPU time collecting sources per frame, the pool-clone figure: 0.62–0.90 ms
+  before, 0.09–0.13 ms after with the 5000-material pool; 0.08–0.10 ms before,
+  0.11–0.13 ms after for a small one (the digest costs about what the clone
+  of a small pool did). Plain playback of one compound clip does not get
+  faster — every frame is a new inner instant — and its composite CPU time
+  rose by about 0.08 ms per frame, which may be the kept textures; within the
+  run-to-run spread of the wall time.
+- **Decode-ahead looks inside compound clips** (`media::provider`,
+  `prefetch_requests`): the videos a compound clip shows at the instant, at
+  the frame's size, through compound clips inside.
+- **Flatten at any speed.** A compound clip at a constant speed hands it
+  down (speeds multiply, keyframes stay on their frames); on a curve, every
+  video, audio and compound clip inside gets the composed curve (exact) and
+  stills and titles a constant speed over the same stretch. Each curved
+  clip goes in as three primitives (insert at a constant speed rounded down,
+  `SetSpeedCurve`, `TrimSegment`), so it never reaches into its neighbour on
+  the way. Refused, with the reason: a curved clip inside a curved compound
+  clip, and a curved clip the window's edge cuts.
+- **Silence cutting and loudness on a compound clip** measure its contents'
+  mix over the part it shows (`sequence::audio::mix_of`); the mix loudness
+  measures the root timeline, like the export. Captions already heard
+  compound clips' sound (the transcriber mixes through `audio::plan`).
+- **Deleting a timeline** removes the compound sequences only it reached,
+  in the same undo step. A compound sequence that was unused before (a cut
+  compound clip waiting to be pasted) stays.
+- **Filmstrips** of compound clips are nested renders of the sequence
+  (`sequence::thumbs`, one shared compositor), cached in the timeline's
+  strip cache under `sequence#digest`; the previous contents' strip stands
+  in while a new one renders and is dropped when it lands.
+- **Found, not fixed:** a pitch-preserving render through a speed curve
+  (`audiofx::render`) is not deterministic — the same document mixed twice
+  differs by up to 0.12 in places (phase and short dips), so
+  `tests/compound.rs` compares curved sound by what the mixer is handed and
+  by level, not sample by sample.
+- **Rough:** scene detection, beat detection and the other picture analyses
+  still refuse a compound clip; a compound clip's own audio effects (EQ,
+  denoise on the compound clip itself) do not reach the mix; an older build
+  opening a multi-timeline file drops the parked timelines.
 
 ## Polish pass, 2026-10-03 (agent/polish)
 
