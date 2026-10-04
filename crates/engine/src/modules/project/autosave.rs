@@ -126,8 +126,14 @@ struct Job {
     origin: Option<PathBuf>,
 }
 
+/// At most one queued write per file. A single slot for every file let a
+/// write to one file replace a queued write to another: the second was never
+/// written, and the first file kept an older document. That is how
+/// `the_writer_collapses_a_burst_and_keeps_the_newest` read back "edit 17"
+/// when an edit in another test scheduled the user's working copy in
+/// between.
 struct Pending {
-    job: Option<Job>,
+    jobs: Vec<Job>,
     writing: bool,
 }
 
@@ -142,7 +148,7 @@ fn writer() -> &'static Writer {
     WRITER.get_or_init(|| {
         let writer: &'static Writer = Box::leak(Box::new(Writer {
             pending: Mutex::new(Pending {
-                job: None,
+                jobs: Vec::new(),
                 writing: false,
             }),
             signal: Condvar::new(),
@@ -152,11 +158,11 @@ fn writer() -> &'static Writer {
             .spawn(move || loop {
                 let job = {
                     let mut pending = writer.pending.lock();
-                    while pending.job.is_none() {
+                    while pending.jobs.is_empty() {
                         writer.signal.wait(&mut pending);
                     }
                     pending.writing = true;
-                    pending.job.take().expect("checked above")
+                    pending.jobs.remove(0)
                 };
 
                 if let Err(error) = write_to(&job.file, &job.project, job.origin.as_deref()) {
@@ -187,7 +193,12 @@ pub fn schedule(project: &Project, origin: Option<PathBuf>) {
 }
 
 /// Set by [`disable_for_process`]; never cleared.
-static DISABLED: AtomicBool = AtomicBool::new(false);
+///
+/// Already set in the engine's own unit tests: every timeline command
+/// schedules the working copy, and without this a test run overwrote the
+/// user's real `autosave.chukcut` with test documents, which the next app
+/// launch would offer to restore. Tests of the writer use [`schedule_to`].
+static DISABLED: AtomicBool = AtomicBool::new(cfg!(test));
 
 /// Turn the working copy off for the rest of this process.
 ///
@@ -212,12 +223,20 @@ pub fn is_enabled() -> bool {
 /// [`schedule`], to a path of the caller's choosing.
 pub fn schedule_to(file: PathBuf, project: &Project, origin: Option<PathBuf>) {
     let writer = writer();
-    let mut pending = writer.pending.lock();
-    pending.job = Some(Job {
+    let job = Job {
         file,
         project: project.clone(),
         origin,
-    });
+    };
+    let mut pending = writer.pending.lock();
+    match pending
+        .jobs
+        .iter_mut()
+        .find(|queued| queued.file == job.file)
+    {
+        Some(queued) => *queued = job,
+        None => pending.jobs.push(job),
+    }
     writer.signal.notify_all();
 }
 
@@ -227,7 +246,7 @@ pub fn flush() {
         return;
     };
     let mut pending = writer.pending.lock();
-    while pending.job.is_some() || pending.writing {
+    while !pending.jobs.is_empty() || pending.writing {
         writer.signal.wait(&mut pending);
     }
 }
@@ -240,8 +259,14 @@ mod tests {
     /// A scratch path per test. `CARGO_TARGET_TMPDIR` is only defined for
     /// integration tests, and the real autosave path must not be touched by a
     /// test run — it is the user's working copy.
+    ///
+    /// Per process, and under the target directory: other checkouts run
+    /// these same tests at the same time, and one fixed directory in the
+    /// system temp let their bursts land in each other's files.
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join("chukcut-autosave-tests");
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/test-scratch/autosave")
+            .join(std::process::id().to_string());
         std::fs::create_dir_all(&dir).expect("scratch directory");
         dir.join(format!("{name}.chukcut"))
     }
@@ -334,5 +359,22 @@ mod tests {
         let restored = read_from(&file).expect("read").expect("there is one");
         assert_eq!(restored.project.name, "edit 19");
         discard_at(&file);
+    }
+
+    #[test]
+    fn a_write_to_another_file_never_replaces_a_queued_one() {
+        let (a, b) = (scratch("slot_a"), scratch("slot_b"));
+        discard_at(&a);
+        discard_at(&b);
+        for n in 0..20 {
+            schedule_to(a.clone(), &sample(&format!("a {n}")), None);
+            schedule_to(b.clone(), &sample(&format!("b {n}")), None);
+        }
+        flush();
+        for (file, newest) in [(&a, "a 19"), (&b, "b 19")] {
+            let restored = read_from(file).expect("read").expect("there is one");
+            assert_eq!(restored.project.name, newest);
+            discard_at(file);
+        }
     }
 }
