@@ -20,8 +20,8 @@ use std::time::Instant;
 
 use serde::Serialize;
 
-use super::removal::Remover;
-use super::{cache, mask, Chain};
+use super::removal::{self, Plate, PlateBuilder, Remover};
+use super::{cache, mask, Chain, ObjectRemoval};
 use crate::modules::matting;
 use crate::modules::media::decoder::VideoDecoder;
 use crate::modules::ml::{inpaint, upscale};
@@ -276,16 +276,35 @@ pub fn run(
         provider: Some(provider),
         seconds_left: None,
     };
+
+    let period = job.period();
+    let mut masks = job.chain.removal.as_ref().map(|removal| Masks {
+        removal,
+        mattes,
+        painted: None,
+        period,
+    });
+    // A selected object moves: what it covers in one frame is seen in
+    // another. One pass over the whole clip first keeps that background.
+    let plates = match &mut masks {
+        Some(masks) if masks.removal.prompt.is_some() => {
+            let plates = plates(job, masks, cancel, &mut report)?;
+            if cancel.load(Ordering::Relaxed) {
+                outcome.cancelled = true;
+                outcome.seconds = started.elapsed().as_secs_f64();
+                return Ok(outcome);
+            }
+            plates
+        }
+        _ => Vec::new(),
+    };
     report(&progress);
 
     let mut decoder = job.open_decoder()?;
-    let painted = job.chain.removal.as_ref();
     let mut remover: Option<Remover> = None;
-    let mut static_mask: Option<Vec<u8>> = None;
     let mut model_millis = 0.0f64;
     let mut last_pts = None;
     let baking = Instant::now();
-    let period = job.period();
     for (index, &t) in grid.iter().enumerate() {
         if cancel.load(Ordering::Relaxed) {
             outcome.cancelled = true;
@@ -302,18 +321,11 @@ pub fn run(
         last_pts = Some(frame.pts);
         let (w, h) = (frame.width as usize, frame.height as usize);
         let mut picture = frame.data;
-        if let Some(removal) = painted {
-            let remover = remover.get_or_insert_with(|| Remover::new(w, h, removal.grow));
-            let mut object = static_mask
-                .get_or_insert_with(|| mask::painted(removal, w, h))
-                .clone();
-            if let Some((matte_dir, times)) = &mattes {
-                if let Some(pts) = matting::cache::lookup(times, frame.pts, period) {
-                    let (mw, mh, matte) = matting::cache::read(matte_dir, pts)?;
-                    mask::add_matte(&mut object, w, h, &matte, mw as usize, mh as usize);
-                }
-            }
-            picture = match remover.next(&picture, &object, Some(cancel)) {
+        if let Some(masks) = &mut masks {
+            let remover = remover.get_or_insert_with(|| Remover::new(w, h, masks.removal.grow));
+            let object = masks.at(frame.pts, w, h)?;
+            let plate = removal::plate_at(&plates, frame.pts);
+            picture = match remover.next(&picture, &object, plate, Some(cancel)) {
                 Err(e) if e == "cancelled" => {
                     outcome.cancelled = true;
                     break;
@@ -352,6 +364,75 @@ pub fn run(
     }
     outcome.seconds = started.elapsed().as_secs_f64();
     Ok(outcome)
+}
+
+/// A removal's object mask per frame: the painted part (the same in every
+/// frame, made once) and the selection's matte of that frame.
+struct Masks<'a> {
+    removal: &'a ObjectRemoval,
+    mattes: Option<(PathBuf, Vec<Micros>)>,
+    painted: Option<Vec<u8>>,
+    period: Micros,
+}
+
+impl Masks<'_> {
+    /// The mask of the frame shown from `pts`, `w × h`.
+    fn at(&mut self, pts: Micros, w: usize, h: usize) -> Result<Vec<u8>, String> {
+        let removal = self.removal;
+        let mut object = self
+            .painted
+            .get_or_insert_with(|| mask::painted(removal, w, h))
+            .clone();
+        if let Some((dir, times)) = &self.mattes {
+            if let Some(found) = matting::cache::lookup(times, pts, self.period) {
+                let (mw, mh, matte) = matting::cache::read(dir, found)?;
+                mask::add_matte(&mut object, w, h, &matte, mw as usize, mh as usize);
+            }
+        }
+        Ok(object)
+    }
+}
+
+/// The first pass of a removal of a selected object: decode the whole clip
+/// and keep the background of each still stretch (`removal::PlateBuilder`).
+fn plates(
+    job: &EnhanceJob,
+    masks: &mut Masks,
+    cancel: &AtomicBool,
+    report: &mut impl FnMut(&EnhanceProgress),
+) -> Result<Vec<Plate>, String> {
+    let grid = job.frame_times(job.range.0, job.range.1);
+    let mut progress = EnhanceProgress {
+        stage: "Looking at the background".into(),
+        done: 0,
+        total: grid.len() as u32,
+        ..EnhanceProgress::default()
+    };
+    let mut decoder = job.open_decoder()?;
+    let mut builder: Option<PlateBuilder> = None;
+    let mut last_pts = None;
+    for (index, &t) in grid.iter().enumerate() {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        let frame = decoder
+            .seek_and_decode(t + SAMPLE_SLACK)
+            .map_err(|e| format!("decode failed at {t} µs: {e}"))?;
+        progress.done = index as u32 + 1;
+        if last_pts == Some(frame.pts) {
+            continue;
+        }
+        last_pts = Some(frame.pts);
+        let (w, h) = (frame.width as usize, frame.height as usize);
+        let object = masks.at(frame.pts, w, h)?;
+        builder
+            .get_or_insert_with(|| PlateBuilder::new(w, h, masks.removal.grow))
+            .add(frame.pts, &frame.data, &object);
+        if index % 10 == 0 {
+            report(&progress);
+        }
+    }
+    Ok(builder.map(PlateBuilder::finish).unwrap_or_default())
 }
 
 #[cfg(test)]

@@ -73,7 +73,7 @@ pub const DEFAULT_GROW: f32 = 0.012;
 
 /// Changes when the way frames are made changes (the crop, the blend, the
 /// smoothing), so frames made the old way are never shown for the new one.
-pub const PIPELINE_REVISION: u32 = 1;
+pub const PIPELINE_REVISION: u32 = 2;
 
 fn default_grow() -> f32 {
     DEFAULT_GROW
