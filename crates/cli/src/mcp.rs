@@ -77,6 +77,8 @@ const OPEN_WORLD: &[&str] = &[
     "stock_search",
     "stock_download",
     "ml",
+    // Downloads the model and ONNX Runtime on first use.
+    "remove_background",
 ];
 
 type Out = Arc<Mutex<std::io::Stdout>>;

@@ -7,7 +7,7 @@
 //! the editor speaks the protocol and downloads models, but never links ONNX
 //! Runtime. The `chukcut-ml-worker` binary turns `runtime` on.
 //!
-//! Design: `docs/decisions/0022-ml-worker-process.md`.
+//! Design: `docs/decisions/0025-ml-worker-process.md`.
 
 pub mod protocol;
 pub mod registry;

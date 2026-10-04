@@ -4,7 +4,7 @@
 //! (`crates/ml-worker`), which this module starts, talks to over a framed
 //! protocol on its stdin and stdout, and restarts when it dies. The research
 //! is `docs/research/ml-features.md` §5; the decision, with what it costs, is
-//! `docs/decisions/0022-ml-worker-process.md`.
+//! `docs/decisions/0025-ml-worker-process.md`.
 //!
 //! - **Worker** ([`worker`]): finding the binary, starting it, one request at
 //!   a time per caller with progress and cancel, restart on crash with a

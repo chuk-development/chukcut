@@ -19,6 +19,7 @@ pub mod gpu;
 pub mod inspector;
 pub mod library;
 pub mod loudness;
+pub mod matting;
 pub mod media;
 pub mod ml;
 pub mod motion;

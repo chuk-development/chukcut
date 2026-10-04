@@ -310,6 +310,11 @@ pub struct Compositor {
     curve_placeholder: wgpu::TextureView,
     /// Curve points → baked tables. See [`super::grade::CurveCache`].
     curves: super::grade::CurveCache,
+    /// What binding 5 gets when the segment has no background matte: one
+    /// opaque texel, never read without `M_BACKGROUND`.
+    matte_placeholder: wgpu::TextureView,
+    /// Baked "Remove background" mattes. See [`super::background`].
+    backgrounds: super::background::MatteFrames,
     vertices: wgpu::Buffer,
     indices: wgpu::Buffer,
     /// Per-draw uniforms, addressed with dynamic offsets. Grown, never shrunk —
@@ -468,6 +473,18 @@ impl Compositor {
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // The clip's "Remove background" matte, filtered (it is
+                // stored smaller than most sources), likewise always bound.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
                         view_dimension: wgpu::TextureViewDimension::D2,
                         multisampled: false,
                     },
@@ -642,6 +659,43 @@ impl Compositor {
             })
             .create_view(&wgpu::TextureViewDescriptor::default());
 
+        // The dead background-matte binding: one opaque texel.
+        let matte_placeholder = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("chukcut matte placeholder"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        ctx.queue().write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &matte_placeholder,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &[255],
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(1),
+                rows_per_image: Some(1),
+            },
+            wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+        let matte_placeholder =
+            matte_placeholder.create_view(&wgpu::TextureViewDescriptor::default());
+
         let vertices = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("chukcut quad vertices"),
             size: std::mem::size_of_val(&QUAD_VERTICES) as u64,
@@ -677,6 +731,8 @@ impl Compositor {
             luts: super::lut::LutCache::default(),
             curve_placeholder,
             curves: super::grade::CurveCache::default(),
+            matte_placeholder,
+            backgrounds: super::background::MatteFrames::default(),
             vertices,
             indices,
             uniforms: Mutex::new(Scratch::default()),
@@ -1339,6 +1395,15 @@ impl Compositor {
                             .unwrap_or(&self.curve_placeholder),
                     ),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(
+                        quad.background
+                            .as_ref()
+                            .map(|matte| &matte.view)
+                            .unwrap_or(&self.matte_placeholder),
+                    ),
+                },
             ],
         })
     }
@@ -1687,13 +1752,30 @@ impl Compositor {
 
         // Masks and the chroma key, measured in the quad as it is drawn in
         // this render; at rest (or absent) they set no flag.
-        let matte = materials
-            .compositing_of(segment)
+        let compositing = materials.compositing_of(segment);
+        let mut matte = compositing
             .map(|m| {
                 let quad = super::matte::quad_pixel_size(&placement.mvp, size);
                 super::matte::MatteBlock::new(m, source_time, quad)
             })
             .unwrap_or_default();
+        // "Remove background": the baked matte of this source frame, when
+        // there is one. A frame not baked yet draws whole.
+        let background = compositing
+            .and_then(|m| m.background.as_ref())
+            .and_then(|setting| {
+                let video = materials.video(&segment.material_id)?;
+                let period = if video.fps.is_finite() && video.fps > 1.0 {
+                    (1_000_000.0 / video.fps).round() as Micros
+                } else {
+                    33_333
+                };
+                self.backgrounds
+                    .get(&self.ctx, &video.path, setting, source_time, period)
+            });
+        if background.is_some() {
+            matte.flags[0] |= super::matte::flag::BACKGROUND;
+        }
 
         let slot = draws.slots as u32;
         draws.slots += 1;
@@ -1705,6 +1787,7 @@ impl Compositor {
             grade,
             curves,
             matte,
+            background,
             slot,
         }))
     }
@@ -1884,6 +1967,8 @@ struct QuadDraw {
     curves: Option<std::sync::Arc<super::grade::GpuCurves>>,
     /// Masks and chroma key, packed; no flag when the clip has neither.
     matte: super::matte::MatteBlock,
+    /// The clip's baked "Remove background" matte for this frame.
+    background: Option<std::sync::Arc<super::background::GpuMatte>>,
     slot: u32,
 }
 
