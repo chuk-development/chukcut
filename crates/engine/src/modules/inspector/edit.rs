@@ -2080,8 +2080,10 @@ mod grade_tests {
         );
 
         let mut attributes = attributes();
-        let mut grade = Grade::default();
-        grade.vibrance = 0.4;
+        let grade = Grade {
+            vibrance: 0.4,
+            ..Default::default()
+        };
         attributes.grade = Some(grade);
         let (material, _) = paste_attributes_command(&project, &attributes, &[v2]).unwrap();
         let material = material.unwrap();

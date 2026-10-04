@@ -213,7 +213,7 @@ fn a_title_is_the_same_pixels_in_the_preview_and_the_export() {
         .as_chunks::<4>()
         .0
         .iter()
-        .zip(at_preview.chunks_exact(4))
+        .zip(at_preview.as_chunks::<4>().0)
         .filter(|(a, b)| a != b)
         .count();
     assert_eq!(
@@ -303,7 +303,7 @@ fn one_provider_does_not_serve_the_preview_raster_to_the_export() {
         .as_chunks::<4>()
         .0
         .iter()
-        .zip(fresh.chunks_exact(4))
+        .zip(fresh.as_chunks::<4>().0)
         .filter(|(a, b)| a != b)
         .count();
     assert_eq!(
@@ -842,7 +842,7 @@ fn psnr(a: &[u8], b: &[u8]) -> f64 {
     assert_eq!(a.len(), b.len());
     let mut sum = 0.0f64;
     let mut count = 0usize;
-    for (pa, pb) in a.as_chunks::<4>().0.iter().zip(b.chunks_exact(4)) {
+    for (pa, pb) in a.as_chunks::<4>().0.iter().zip(b.as_chunks::<4>().0) {
         for c in 0..3 {
             let d = pa[c] as f64 - pb[c] as f64;
             sum += d * d;

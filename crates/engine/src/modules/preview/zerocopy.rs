@@ -6,8 +6,8 @@
 //! system memory, convert it to NV12 on twelve rayon workers, and upload 3 MB of
 //! that straight back into a VA surface for the fixed-function JPEG encoder to
 //! read. Measured at 1080×1920 on the Raptor Lake iGPU
-//! (`docs/research/preview-performance.md`): readback 5.10 ms + convert 1.81 ms
-//! + upload 2.59 ms = **9.50 ms of a 15.82 ms frame**, against 0.81 ms of
+//! (`docs/research/preview-performance.md`): readback 5.10 ms + convert 1.81 ms +
+//! upload 2.59 ms = **9.50 ms of a 15.82 ms frame**, against 0.81 ms of
 //! decoding and 0.48 ms of compositing. The encoder itself was 1.59 ms — 28% of
 //! its own path — and the rest was carrying pixels to a chip that already had
 //! them.

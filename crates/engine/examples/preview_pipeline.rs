@@ -688,11 +688,13 @@ fn main() {
 
         if let Some(long_edge) = options.long_edge {
             println!();
-            // Field assignment rather than a struct literal: `PreviewOptions`
+            // `..Default::default()` rather than every field: `PreviewOptions`
             // gains fields (a viewport, a full-quality flag) as the preview
-            // grows, and a literal here would stop compiling every time.
-            let mut reduced_options = PreviewOptions::default();
-            reduced_options.long_edge = Some(long_edge);
+            // grows, and a full literal would stop compiling every time.
+            let reduced_options = PreviewOptions {
+                long_edge: Some(long_edge),
+                ..Default::default()
+            };
             let reduced = live_phase(
                 &server,
                 Arc::clone(&project),

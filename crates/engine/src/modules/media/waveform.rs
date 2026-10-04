@@ -757,7 +757,7 @@ mod tests {
         // Four hours would be 14.4 million buckets without the ceiling.
         assert_eq!(cache_buckets(4 * 3_600 * 1_000_000), MAX_CACHE_BUCKETS);
         // And nothing is ever stored that no caller could ask to read.
-        assert!(MAX_CACHE_BUCKETS <= MAX_REQUEST_BUCKETS);
+        const { assert!(MAX_CACHE_BUCKETS <= MAX_REQUEST_BUCKETS) };
         assert_eq!(cache_buckets(0), UNKNOWN_DURATION_BUCKETS);
         // A file shorter than one bucket still gets one.
         assert_eq!(cache_buckets(100), 1);

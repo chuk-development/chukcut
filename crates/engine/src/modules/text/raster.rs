@@ -420,9 +420,8 @@ impl Canvas {
                 }
                 let i = (y as usize * self.width as usize + (mask.x0 + col) as usize) * 4;
                 let inv = 255 - src_a;
-                for c in 0..3 {
-                    self.px[i + c] =
-                        (div255(rgb[c] * src_a) + div255(self.px[i + c] as u32 * inv)) as u8;
+                for (dst, channel) in self.px[i..i + 3].iter_mut().zip(rgb) {
+                    *dst = (div255(channel * src_a) + div255(*dst as u32 * inv)) as u8;
                 }
                 self.px[i + 3] = (src_a + div255(self.px[i + 3] as u32 * inv)) as u8;
             }
@@ -433,8 +432,8 @@ impl Canvas {
     fn over(&mut self, x: usize, y: usize, src: [u32; 4]) {
         let i = (y * self.width as usize + x) * 4;
         let inv = 255 - src[3].min(255);
-        for c in 0..4 {
-            self.px[i + c] = (src[c] + div255(self.px[i + c] as u32 * inv)).min(255) as u8;
+        for (dst, s) in self.px[i..i + 4].iter_mut().zip(src) {
+            *dst = (s + div255(*dst as u32 * inv)).min(255) as u8;
         }
     }
 

@@ -781,7 +781,7 @@ fn golden_image_matches() {
         .as_chunks::<4>()
         .0
         .iter()
-        .zip(expected.chunks_exact(4))
+        .zip(expected.as_chunks::<4>().0)
     {
         // Only alpha is compared. The RGB of a transparent pixel is whatever
         // the edge bleed put there, which is deliberately unspecified.

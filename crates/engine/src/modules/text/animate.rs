@@ -642,7 +642,7 @@ mod tests {
             .as_chunks::<4>()
             .0
             .iter()
-            .zip(text.pixels.chunks_exact(4))
+            .zip(text.pixels.as_chunks::<4>().0)
             .map(|(a, b)| {
                 (0..4)
                     .map(|c| {
