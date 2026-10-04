@@ -99,9 +99,48 @@ pub fn cache_path(source: &str, isolate: &Isolate) -> PathBuf {
         .join(format!("{:016x}-isolated.wav", fnv1a(key.as_bytes())))
 }
 
+/// Cache files a render in this process is making now.
+fn in_flight() -> &'static parking_lot::Mutex<std::collections::HashSet<PathBuf>> {
+    static SET: std::sync::OnceLock<parking_lot::Mutex<std::collections::HashSet<PathBuf>>> =
+        std::sync::OnceLock::new();
+    SET.get_or_init(Default::default)
+}
+
+/// Whether a render in this process is making `path` now: the project's
+/// preparation (`modules::prepare`) and the app's own queue after an edit
+/// must not both render one recording.
+pub fn is_rendering(path: &Path) -> bool {
+    in_flight().lock().contains(path)
+}
+
+/// A cache file being made; released when dropped.
+struct Claim(PathBuf);
+
+impl Drop for Claim {
+    fn drop(&mut self) {
+        in_flight().lock().remove(&self.0);
+    }
+}
+
+/// Claim `path`, waiting while another render holds it: the second render
+/// of one file then finds it made instead of making it again.
+fn claim(path: &Path, cancel: &AtomicBool) -> Result<Claim, String> {
+    loop {
+        if in_flight().lock().insert(path.to_path_buf()) {
+            return Ok(Claim(path.to_path_buf()));
+        }
+        if cancel.load(Ordering::Relaxed) {
+            return Err("cancelled".into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
+
 /// Make the stem and the mix for `source` (whose material lasts
 /// `duration`) unless they are cached. Returns the mix. Blocking: the stem
-/// runs the model over the whole file. `progress` gets `0..=1`.
+/// runs the model over the whole file. `progress` gets `0..=1`. A render of
+/// the same file already running in this process is waited for, not
+/// repeated.
 pub fn render(
     source: &str,
     duration: Micros,
@@ -113,6 +152,10 @@ pub fn render(
     if target.is_file() {
         return Ok(target);
     }
+    let _target = claim(&target, cancel)?;
+    if target.is_file() {
+        return Ok(target);
+    }
     if isolate.model != current_model() {
         tracing::warn!(
             model = %isolate.model,
@@ -121,6 +164,7 @@ pub fn render(
         );
     }
     let stem = stem_path(source, &isolate.model);
+    let _stem = claim(&stem, cancel)?;
     if !stem.is_file() {
         separate::prepare(&|_, _| {}, cancel).map_err(|e| e.to_string())?;
         atomically(&stem, |part| {

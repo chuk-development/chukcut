@@ -7,7 +7,7 @@ use super::track::{self, Face, FaceFrame};
 use crate::modules::analysis::frames::{self, Walk};
 use crate::modules::analysis::jobs::JobContext;
 use crate::modules::ml;
-use crate::modules::project::document::{Micros, Project, TimeRange};
+use crate::modules::project::document::{Micros, Project, Segment, TimeRange};
 
 /// The long side frames are analysed at. The face mesh reads a 256-pixel
 /// crop around each face; at 1280 a face a fifth of a 9:16 frame wide is
@@ -30,12 +30,17 @@ pub struct Job {
 }
 
 impl Job {
-    /// The job for `segment_id`'s source range. Only a video clip has faces
-    /// to follow over time.
+    /// The job for clip `segment_id`, on any timeline or inside a compound
+    /// clip.
     pub fn for_segment(project: &Project, segment_id: &str) -> Result<Job, String> {
-        let (_, segment) = project
-            .segment(segment_id)
+        let (_, _, segment) = crate::modules::sequence::find_segment(project, segment_id)
             .ok_or("the clip is no longer on the timeline")?;
+        Job::of(project, segment)
+    }
+
+    /// The job for `segment`'s source range. Only a video clip has faces to
+    /// follow over time.
+    pub fn of(project: &Project, segment: &Segment) -> Result<Job, String> {
         let video = project
             .materials
             .video(&segment.material_id)

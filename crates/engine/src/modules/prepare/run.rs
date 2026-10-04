@@ -30,6 +30,8 @@ enum Bake {
     Matte(u64),
     Flow(u64),
     Enhance(u64),
+    /// An analysis job (`analysis::jobs`): face landmarks.
+    Analysis(u64),
 }
 
 /// What one clip is missing.
@@ -51,6 +53,10 @@ pub(super) enum Item {
         segment_id: String,
         missing: u32,
     },
+    /// Face landmarks a retouch effect reads.
+    Landmarks { segment_id: String, missing: u32 },
+    /// A clip's isolated voice.
+    Voice { segment_id: String },
 }
 
 fn slot() -> &'static Mutex<Option<Arc<Run>>> {
@@ -70,6 +76,7 @@ pub(super) fn cancel_current(run: &Run) {
         Some(Bake::Matte(job)) => crate::modules::matting::commands::matting_cancel(job),
         Some(Bake::Flow(job)) => crate::modules::speed::flow::jobs::cancel(job),
         Some(Bake::Enhance(job)) => crate::modules::enhance::jobs::cancel(job),
+        Some(Bake::Analysis(job)) => crate::modules::analysis::jobs::cancel(job),
         None => {}
     }
 }
@@ -113,7 +120,7 @@ fn going(state: &AppState, run: &Run, project_id: &str) -> bool {
     !run.cancel.load(Ordering::Relaxed) && open_id(state).as_deref() == Some(project_id)
 }
 
-fn work(state: &AppState, run: &Run, grace: Duration) {
+fn work(state: &Arc<AppState>, run: &Run, grace: Duration) {
     let Some(project_id) = open_id(state) else {
         return;
     };
@@ -152,7 +159,9 @@ pub(super) fn count(items: &[Item], status: &mut PrepareStatus) {
             Item::Sound { .. } => status.sounds += 1,
             Item::Matte { missing, .. }
             | Item::Flow { missing, .. }
-            | Item::Enhance { missing, .. } => status.frames += missing,
+            | Item::Enhance { missing, .. }
+            | Item::Landmarks { missing, .. } => status.frames += missing,
+            Item::Voice { .. } => status.voices += 1,
         }
     }
 }
@@ -164,7 +173,8 @@ fn lanes(project: &Project) -> impl Iterator<Item = &crate::modules::project::Tr
 }
 
 /// What `project`'s clips are missing, sound first (cheapest), then mattes,
-/// flow frames and remade frames. Reads the cache's directories.
+/// flow frames, remade frames, face landmarks and isolated voices. Reads
+/// the cache's directories.
 pub(super) fn scan(project: &Project) -> Vec<Item> {
     use crate::modules::{enhance, matting, sequence, speed};
     let pool = &project.materials;
@@ -243,10 +253,19 @@ pub(super) fn scan(project: &Project) -> Vec<Item> {
             }
         }
     }
+    for (segment_id, _, missing) in crate::modules::landmarks::commands::missing(project) {
+        items.push(Item::Landmarks {
+            segment_id,
+            missing: missing as u32,
+        });
+    }
+    for segment_id in crate::modules::voice::commands::isolation_missing(project) {
+        items.push(Item::Voice { segment_id });
+    }
     items
 }
 
-fn execute(state: &AppState, run: &Run, project: &Project, project_id: &str, item: Item) {
+fn execute(state: &Arc<AppState>, run: &Run, project: &Project, project_id: &str, item: Item) {
     use crate::modules::{enhance, matting, speed};
     let set_stage = |stage: &str| run.status.lock().stage = Some(stage.to_string());
     match item {
@@ -329,6 +348,67 @@ fn execute(state: &AppState, run: &Run, project: &Project, project_id: &str, ite
                 },
                 Bake::Enhance,
             );
+        }
+        Item::Landmarks {
+            segment_id,
+            missing,
+        } => {
+            use crate::modules::analysis::jobs::{self, JobKind};
+            set_stage("Finding faces to retouch");
+            let started = crate::modules::landmarks::commands::landmarks_analyse(
+                state,
+                segment_id.clone(),
+                None,
+            )
+            .map(Some)
+            .or_else(|error| {
+                // Already being analysed (an edit queued it): follow
+                // that job instead.
+                jobs::all()
+                    .into_iter()
+                    .find(|j| {
+                        j.kind == JobKind::Landmarks
+                            && j.segment_id == segment_id
+                            && j.finished.is_none()
+                    })
+                    .map(|j| Some(j.id))
+                    .ok_or(error)
+            });
+            follow(
+                state,
+                run,
+                project_id,
+                missing,
+                "Retouch",
+                started,
+                |id| {
+                    let status = jobs::status(id)?;
+                    let done = (status.fraction.clamp(0.0, 1.0) * missing as f32) as u32;
+                    Some((done, status.finished.map(|r| r.map(|_| ()))))
+                },
+                Bake::Analysis,
+            );
+        }
+        Item::Voice { segment_id } => {
+            set_stage("Isolating voices");
+            let rendered = crate::modules::voice::commands::voice_isolation_render(
+                state,
+                segment_id,
+                &run.cancel,
+                &|_| {},
+            );
+            match rendered {
+                Ok(_) => {
+                    run.status.lock().voices_done += 1;
+                    // The mixers resolve a clip's sound per project
+                    // snapshot; the app takes a fresh one when the run ends.
+                    crate::modules::audiofx::cache::notify_landed();
+                }
+                Err(error) if !run.cancel.load(Ordering::Relaxed) => {
+                    fail(run, "Isolate voice", &error)
+                }
+                Err(_) => {}
+            }
         }
     }
 }

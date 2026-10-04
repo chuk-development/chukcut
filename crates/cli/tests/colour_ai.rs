@@ -1,5 +1,6 @@
 //! Colour AI from the command line: auto adjust, colour match, grade
-//! presets — each one undo step, saved into the project file.
+//! presets — each one undo step, saved into the project file — and the
+//! face and body tools' settings.
 
 mod common;
 
@@ -146,6 +147,31 @@ fn retouch_sets_presets_and_values() {
     assert_eq!(out.code, 2, "{}", out.json);
     ok(&dir, &["retouch", p, "0:0", "--off"]);
     assert_eq!(retouches(&project), 0, "the effect is gone");
+}
+
+/// Follow body part's words are checked before anything is analysed (the
+/// private cache has no body model): an unknown part, a person counted from
+/// zero, an unknown mode.
+#[test]
+fn follow_body_refuses_unknown_parts_and_people() {
+    require_ffmpeg!();
+    let dir = common::scratch("follow-body");
+    let (card, bars) = common::media(&dir);
+    let project = dir.join("body.chukcut");
+    let p = project.to_str().unwrap();
+    ok(&dir, &["new", p]);
+    ok(&dir, &["import", p, card.to_str().unwrap(), "--append"]);
+    ok(&dir, &["import", p, bars.to_str().unwrap(), "--append"]);
+    for args in [
+        &["--part", "tail"][..],
+        &["--part", "left_hand", "--person", "0"],
+        &["--part", "hips", "--mode", "orbit"],
+    ] {
+        let mut all = vec!["follow-body", p, "0:1", "--body-of", "0:0"];
+        all.extend_from_slice(args);
+        let out = run(&dir, &all);
+        assert_eq!(out.code, 2, "{args:?}: {}", out.json);
+    }
 }
 
 /// Retouch effects the clips of a saved project carry.

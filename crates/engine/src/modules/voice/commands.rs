@@ -45,8 +45,23 @@ impl Target {
 
 fn target(state: &AppState, segment_id: &str) -> Result<Target, String> {
     state.with_project(|project| {
-        let audible = audible_segment(project, segment_id).ok_or("the clip has no sound")?;
-        let (_, segment) = project.segment(&audible).ok_or("unknown clip")?;
+        // A clip on another timeline or inside a compound clip is not
+        // linked to anything on the open one: it is its own audible clip
+        // (the one `voice_isolation_missing` names).
+        let parked = || {
+            crate::modules::sequence::find_segment(project, segment_id)
+                .map(|(_, track, segment)| (segment_id.to_string(), track, segment))
+        };
+        let (audible, segment) = match audible_segment(project, segment_id) {
+            Some(audible) => {
+                let (_, segment) = project.segment(&audible).ok_or("unknown clip")?;
+                (audible, segment)
+            }
+            None => {
+                let (id, _, segment) = parked().ok_or("the clip has no sound")?;
+                (id, segment)
+            }
+        };
         let current = cleanup_of(project, segment)
             .map(|(_, c)| c)
             .unwrap_or_default();
@@ -211,31 +226,47 @@ pub fn voice_isolation_render(
 }
 
 /// The clips whose voice isolation is set but not rendered: after a cache
-/// was cleared, or a project came from another machine. The app renders
-/// them in the background; an export renders them itself.
+/// was cleared, or a project came from another machine — on every timeline
+/// and inside compound clips. The app renders them in the background (the
+/// project's preparation does after opening); an export renders them
+/// itself. A clip whose render is running already is not named.
 pub fn voice_isolation_missing(state: &Arc<AppState>) -> Vec<String> {
     state
-        .with_project(|project| {
-            let mut out = Vec::new();
-            for track in &project.tracks {
-                for segment in &track.segments {
-                    let Some((_, cleanup)) = cleanup_of(project, segment) else {
-                        continue;
-                    };
-                    let Some(isolate) = &cleanup.isolate else {
-                        continue;
-                    };
-                    let Some((original, _)) = original_source(project, segment) else {
-                        continue;
-                    };
-                    if !isolate::cache_path(&original, isolate).is_file() {
-                        out.push(segment.id.clone());
-                    }
-                }
-            }
-            out
-        })
+        .project
+        .read()
+        .clone()
+        .map(|project| isolation_missing(&project))
         .unwrap_or_default()
+}
+
+/// [`voice_isolation_missing`] for a project in hand. Looks at the cache:
+/// call it off the UI thread.
+pub fn isolation_missing(project: &crate::modules::project::Project) -> Vec<String> {
+    let mut out = Vec::new();
+    for track in crate::modules::sequence::all_tracks(project) {
+        for segment in &track.segments {
+            let Some((_, cleanup)) = cleanup_of(project, segment) else {
+                continue;
+            };
+            let Some(isolate) = &cleanup.isolate else {
+                continue;
+            };
+            let original = if project.materials.sequence(&segment.material_id).is_some() {
+                crate::modules::sequence::bounce::source_of(project, &segment.material_id)
+                    .map(|(path, _)| path.to_string_lossy().into_owned())
+            } else {
+                original_source(project, segment).map(|(path, _)| path)
+            };
+            let Some(original) = original else {
+                continue;
+            };
+            let path = isolate::cache_path(&original, isolate);
+            if !path.is_file() && !isolate::is_rendering(&path) {
+                out.push(segment.id.clone());
+            }
+        }
+    }
+    out
 }
 
 /// Bring a clip to `target_lufs`, or remove its normalisation with `None`.

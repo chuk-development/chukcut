@@ -215,7 +215,9 @@ fn a_body_is_found_followed_and_followed_by_a_sticker() {
         return;
     }
     let Some((walk, _, sticker)) = fixture() else {
-        eprintln!("skipping: the public-domain portrait could not be fetched, or ffmpeg is missing");
+        eprintln!(
+            "skipping: the public-domain portrait could not be fetched, or ffmpeg is missing"
+        );
         return;
     };
     private_cache("body-cache");
@@ -236,7 +238,13 @@ fn a_body_is_found_followed_and_followed_by_a_sticker() {
     };
     let (first, later) = (at(0), at(1_500_000));
     assert_eq!(first.id, 0);
-    for name in ["nose", "left_shoulder", "right_shoulder", "left_hip", "right_hip"] {
+    for name in [
+        "nose",
+        "left_shoulder",
+        "right_shoulder",
+        "left_hip",
+        "right_hip",
+    ] {
         assert!(point(&first, name)[2] > 0.3, "{name} seen: {first:?}");
     }
     let (nose, hip, ankle) = (
@@ -319,7 +327,9 @@ fn auto_reframe_holds_a_body_when_no_face_shows() {
         return;
     }
     let Some((_, headless, sticker)) = fixture() else {
-        eprintln!("skipping: the public-domain portrait could not be fetched, or ffmpeg is missing");
+        eprintln!(
+            "skipping: the public-domain portrait could not be fetched, or ffmpeg is missing"
+        );
         return;
     };
     private_cache("body-reframe-cache");
