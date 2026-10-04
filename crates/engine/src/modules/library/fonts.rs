@@ -463,15 +463,7 @@ fn draw_name(renderer: &TextRenderer, family: &str, text: &str, path: &Path) -> 
     }
     let image = image::RgbaImage::from_raw(raster.width, raster.height, raster.pixels)
         .ok_or("the preview did not fit its own size")?;
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)
-            .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-    }
-    let part = path.with_extension("part.png");
-    image
-        .save(&part)
-        .map_err(|e| format!("cannot write {}: {e}", part.display()))?;
-    std::fs::rename(&part, path).map_err(|e| format!("cannot write {}: {e}", path.display()))
+    crate::modules::workspace::atomic::save_png_atomically(path, &image)
 }
 
 /// The `src: url(…)` of the first face in a CSS2 answer.

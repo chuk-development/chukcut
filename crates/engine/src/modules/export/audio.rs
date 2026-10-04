@@ -863,6 +863,101 @@ mod tests {
         assert!(level > 0.1, "a curved clip is no longer muted ({level})");
     }
 
+    /// A source whose samples depend on where in the file they are: two
+    /// tones, so a phase shift or a dip between two mixes shows up as a
+    /// difference. A constant source would hide both.
+    struct Tones;
+
+    impl AudioSource for Tones {
+        fn samples(&self, request: &AudioRequest<'_>) -> anyhow::Result<Vec<f32>> {
+            let rate = request.sample_rate as f64;
+            let first =
+                crate::modules::audio::clock::micros_to_frames(request.start, request.sample_rate);
+            let channels = request.channels.max(1) as usize;
+            let mut out = Vec::with_capacity(request.frames() * channels);
+            for i in 0..request.frames() {
+                let t = (first + i as i64) as f64 / rate;
+                let v = 0.3 * (std::f64::consts::TAU * 220.0 * t).sin()
+                    + 0.2 * (std::f64::consts::TAU * 1_330.0 * t).sin();
+                for _ in 0..channels {
+                    out.push(v as f32);
+                }
+            }
+            Ok(out)
+        }
+    }
+
+    /// The same document mixed twice is the same samples. Pitch-preserving
+    /// audio through a speed curve used to differ by up to 0.12 between two
+    /// mixes, with phase shifts and dips: the stretcher randomises its phase
+    /// advance whenever it slows by more than 2x and seeded that randomness
+    /// from `std::random_device`. The curve here goes down to 0.2x to reach
+    /// that path, and up to 3x for the other end.
+    #[test]
+    fn a_speed_curve_mixes_to_the_same_samples_every_time() {
+        use crate::modules::project::{SpeedCurveMaterial, SpeedPoint};
+        let mut project = project();
+        let points = vec![
+            SpeedPoint {
+                source: 0,
+                speed: 1.0,
+            },
+            SpeedPoint {
+                source: 600_000,
+                speed: 0.2,
+            },
+            SpeedPoint {
+                source: 1_200_000,
+                speed: 3.0,
+            },
+            SpeedPoint {
+                source: 3 * MICROS_PER_SECOND,
+                speed: 0.4,
+            },
+        ];
+        let source_range = TimeRange::new(500_000, 3 * MICROS_PER_SECOND);
+        let length = crate::modules::project::speed::curve_target_duration(&points, source_range);
+        project.materials.speed_curves.push(SpeedCurveMaterial {
+            id: "curve".into(),
+            preset: None,
+            points,
+        });
+        let mut seg = segment("a1", 0, length);
+        seg.source_range = source_range;
+        seg.extras.push("curve".into());
+        project.tracks.push(track(TrackKind::Audio, vec![seg]));
+
+        let mix = || mix_timeline(&project, &Tones, RATE, 2, &AtomicBool::new(false)).unwrap();
+        let first = mix();
+        assert!(
+            first.iter().any(|s| s.abs() > 0.05),
+            "the curved clip is heard at all"
+        );
+        // Mixed on other threads as well: nothing may depend on which thread
+        // or in which order the renders run.
+        let others: Vec<Vec<f32>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..3).map(|_| scope.spawn(mix)).collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        for (run, other) in std::iter::once(mix()).chain(others).enumerate() {
+            assert_eq!(first.len(), other.len());
+            let worst = first
+                .iter()
+                .zip(&other)
+                .enumerate()
+                .map(|(i, (a, b))| (i, (a - b).abs()))
+                .fold((0, 0.0f32), |w, d| if d.1 > w.1 { d } else { w });
+            assert!(
+                worst.1 == 0.0,
+                "mix {} differs from the first by {} at sample {} of {}",
+                run + 2,
+                worst.1,
+                worst.0,
+                first.len()
+            );
+        }
+    }
+
     #[test]
     fn volume_keyframes_fade_the_segment() {
         let mut project = project();

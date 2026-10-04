@@ -2863,6 +2863,29 @@ mod tests {
         }
         let (server, _time, _exclusive) = shared_server();
         server.set_source_provider(Arc::new(EmptySourceProvider));
+
+        // One window for the whole run. The pacer closes a window every
+        // second of wall time, and on lavapipe twelve frames can take longer
+        // than that: a tick then logs the first few and the summary below
+        // counts only the rest ("counted 8 frames against 12"). The count
+        // stays exact — every frame in the ring must be in it — only the
+        // cadence that splits it is taken out of the test. Restored on drop,
+        // because the server is shared with every other test here.
+        struct Cadence<'a>(&'a PreviewServer);
+        impl Drop for Cadence<'_> {
+            fn drop(&mut self) {
+                self.0
+                    .shared
+                    .stats
+                    .set_summary_interval(super::stats::SUMMARY_INTERVAL);
+            }
+        }
+        server
+            .shared
+            .stats
+            .set_summary_interval(std::time::Duration::from_secs(3600));
+        let _cadence = Cadence(&server);
+
         let info = server.adopt(
             Arc::new(PreviewSession::new(project(), PreviewOptions::default())),
             0,

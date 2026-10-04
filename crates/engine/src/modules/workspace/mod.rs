@@ -9,6 +9,7 @@
 //! does. That is what makes a "clear cache" button a one-line operation
 //! instead of a risk assessment.
 
+pub mod atomic;
 pub mod commands;
 pub mod hardware;
 pub mod logging;

@@ -98,6 +98,56 @@ Judge performance from a release build only.
    `pub fn` in a `commands.rs` that nothing calls. Pending: the tracking
    commands (attach, bake, smoothing), which the tracking branch exposes.
 
+## Flaky tests, fixed (2026-10-04, agent/stable)
+
+The engine suite now passes three runs in a row on the RTX 3060 and one on
+lavapipe, `-j 3` and default test threads. Every flake was a real cause, not
+a timing to be serialised away:
+
+- **`tests/templates.rs`: "cannot write …/luts/Moody Green.cube".** Not the
+  tests sharing a data directory (that is global per process by design) but
+  the library: `looks::install` wrote every look through one fixed
+  `<name>.cube.part`. Two installs at once — two tests, or in the app a
+  template tile and a new project — truncated each other's partial file and
+  the loser's `rename` found it gone. `workspace::atomic::write_atomically`
+  names the partial file by process and counter; the looks, their stamp,
+  effect tiles, font previews and sticker thumbnails use it. **Trap:** a
+  `.part` name that is the same for every writer is not atomic, only
+  crash-safe.
+- **`preview::server` `playback_leaves_numbers_a_log_line_can_be_built_from`,
+  lavapipe only: "counted 8 frames against 12".** The pacer closes a stats
+  window every second of wall time; twelve frames on a loaded lavapipe take
+  longer, a tick logged the first four and the final summary counted the
+  rest. Reproduced on demand with a 5 ms cadence. The test now holds one
+  window for its run (`PlaybackStats::set_summary_interval`, test-only) and
+  still demands every frame in the ring be counted.
+- **Pitch-preserving audio through a speed curve was not deterministic** (two
+  mixes of one document differed by up to 0.8 per sample). Signalsmith
+  Stretch seeds its random engine from `std::random_device` and randomises
+  each bin's phase advance whenever it slows audio by more than 2x. The crate
+  is vendored at `vendor/signalsmith-stretch` (MIT, patched in through
+  `[patch.crates-io]`) with a fixed seed; `audiofx::render::VERSION` is 2 so
+  old cached renders are not reused.
+  `export::audio::tests::a_speed_curve_mixes_to_the_same_samples_every_time`
+  mixes a 0.2x–3x curve four times on several threads and compares sample by
+  sample. **Trap:** a DSP library that "sounds the same" twice may still not
+  be bit-identical; the preview's cached render and the export must be.
+- **`autosave` `the_writer_collapses_a_burst_and_keeps_the_newest`: "edit 17"
+  instead of "edit 19".** The background writer had one pending slot for all
+  files, so a write to the working copy from an unrelated test replaced the
+  queued burst write, which was never written. Now one pending write per
+  file. The same run showed **the engine's unit tests overwriting the user's
+  real `~/.config/chukcut/autosave.chukcut`** — every timeline command
+  schedules it; autosave now starts disabled under `cfg(test)`. Other
+  worktrees still do this until they merge this branch.
+- **`preview::player` `playback_hands_out_frames_in_order_and_never_from_the_future`,
+  lavapipe: "only 0 frames in 600 ms".** The first frame on a loaded lavapipe
+  took longer than the whole window. The test now runs until five frames or
+  an 8 s deadline; the ordering checks are unchanged.
+- Test scratch directories in the system temp that were not per process
+  (`autosave`, `recovery`) moved under `target/test-scratch/<module>/<pid>`:
+  parallel checkouts run the same tests at the same time.
+
 ## Frame blending, motion blur, animated stickers (2026-10-04, agent/motion2)
 
 Decision 0026. Speed → Standard has **Frame blending** (video clips): a frame

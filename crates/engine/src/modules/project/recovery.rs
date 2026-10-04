@@ -209,9 +209,12 @@ mod tests {
         .expect("a minimal segment")
     }
 
+    /// Per process: another checkout running these tests at the same time
+    /// would otherwise delete this directory under a running test.
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir()
-            .join("chukcut-recovery-tests")
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/test-scratch/recovery")
+            .join(std::process::id().to_string())
             .join(name);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("scratch directory");

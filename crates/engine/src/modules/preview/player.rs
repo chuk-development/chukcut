@@ -1141,7 +1141,15 @@ mod tests {
         let started = Instant::now();
         let mut last = -1;
         let mut shown = 0;
-        while started.elapsed() < Duration::from_millis(600) {
+        // Until five frames, not for a fixed 600 ms: the ordering below is the
+        // property, and five frames is only "playback is alive". On lavapipe
+        // under a full parallel suite the first frame alone (pipelines
+        // compiled cold, the CPU shared with every other test) took longer
+        // than 600 ms and the test saw none. A player that stalls still fails
+        // at the deadline; a slow adapter just takes longer to get there.
+        // Inside the ten-second test clip, so the clock never runs past it.
+        let deadline = Duration::from_secs(8);
+        while shown < 5 && started.elapsed() < deadline {
             let clock = started.elapsed().as_micros() as Micros;
             player.request(request(&project, clock, true));
             if let Some(frame) = player.take(clock) {
@@ -1156,7 +1164,7 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(8));
         }
-        assert!(shown >= 5, "only {shown} frames in 600 ms");
+        assert!(shown >= 5, "only {shown} frames in {deadline:?}");
     }
 
     #[test]

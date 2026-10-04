@@ -17,6 +17,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+use crate::modules::workspace::atomic::write_atomically;
+
 /// Bump when a look's arithmetic changes, so installs pick it up.
 pub const LOOKS_VERSION: u32 = 1;
 /// Grid points per axis.
@@ -481,15 +483,15 @@ pub fn install(dir: &Path) -> Result<usize, String> {
         if path.exists() && !ours(&path) {
             continue;
         }
-        let part = path.with_extension("cube.part");
-        std::fs::write(&part, cube_text(look))
-            .map_err(|e| format!("cannot write {}: {e}", part.display()))?;
-        std::fs::rename(&part, &path)
-            .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+        // Two installs can run at once — a template's preview tile and a new
+        // project both make sure the looks are there — so each writes under a
+        // partial name of its own. A shared `<name>.cube.part` let one
+        // truncate the file the other was renaming, and the loser failed
+        // with "cannot write …/Moody Green.cube".
+        write_atomically(&path, cube_text(look).as_bytes())?;
         written += 1;
     }
-    std::fs::write(&stamp, LOOKS_VERSION.to_string())
-        .map_err(|e| format!("cannot write the looks stamp: {e}"))?;
+    write_atomically(&stamp, LOOKS_VERSION.to_string().as_bytes())?;
     Ok(written)
 }
 
@@ -553,6 +555,30 @@ mod tests {
                 "{}",
                 look.name
             );
+        }
+    }
+
+    /// The race `tests/templates.rs` hit with its tests in parallel: every
+    /// one of them installs the looks into the same data directory.
+    #[test]
+    fn installs_running_at_once_all_succeed() {
+        let dir = super::super::scratch("looks-concurrent");
+        for _ in 0..3 {
+            let _ = std::fs::remove_dir_all(&dir);
+            std::thread::scope(|scope| {
+                let installs: Vec<_> = (0..6).map(|_| scope.spawn(|| install(&dir))).collect();
+                for install in installs {
+                    install.join().unwrap().unwrap();
+                }
+            });
+            assert_eq!(installed(&dir).len(), LOOKS.len());
+            let stray: Vec<_> = std::fs::read_dir(&dir)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|name| name.ends_with(".part"))
+                .collect();
+            assert!(stray.is_empty(), "partial files left behind: {stray:?}");
         }
     }
 

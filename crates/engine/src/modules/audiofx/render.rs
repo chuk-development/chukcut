@@ -28,8 +28,9 @@ pub const RATE: u32 = 48_000;
 /// The mix bus is stereo.
 pub const CHANNELS: usize = 2;
 /// Bumped whenever the DSP changes what a spec sounds like, so stale cache
-/// files are never read.
-pub const VERSION: u32 = 1;
+/// files are never read. 2: the stretcher's random engine has a fixed seed
+/// (`vendor/signalsmith-stretch`), so slow pitch-preserving renders changed.
+pub const VERSION: u32 = 2;
 
 /// Everything a render depends on except the file's contents.
 #[derive(Debug, Clone, PartialEq, Serialize)]
