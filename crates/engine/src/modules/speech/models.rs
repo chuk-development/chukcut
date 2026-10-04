@@ -183,6 +183,14 @@ pub fn download_verified(
             if read == 0 {
                 break;
             }
+            // A server that sends more than the pinned size is not sending
+            // the pinned file; stop before it fills the disk.
+            if expected_size.is_some_and(|size| done + read as u64 > size) {
+                return Err(format!(
+                    "the download is larger than the expected {} bytes",
+                    expected_size.unwrap_or(0)
+                ));
+            }
             hasher.update(&buffer[..read]);
             file.write_all(&buffer[..read])
                 .map_err(|e| format!("cannot write {}: {e}", part.display()))?;
