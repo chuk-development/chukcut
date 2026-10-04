@@ -307,7 +307,14 @@ impl Editor {
         let Some(size) = self.render_size() else {
             return;
         };
-        let time = self.clock.position();
+        // At the end of the timeline, the last frame rather than the empty
+        // instant after it: the export dialog's cover is this frame too, and
+        // was black whenever playback had run to the end.
+        let time = chukcut_engine::modules::preview::clock::shown_time(
+            self.clock.position(),
+            self.project.duration(),
+            self.project.fps,
+        );
         // Normal-speed playback renders ahead on the audio clock; a shuttle
         // or a scrub renders exactly where the playhead is.
         let playing = self.clock.is_playing() && !self.shell.playback_driven();
