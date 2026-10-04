@@ -173,7 +173,15 @@ fn model_acceleration(root: &std::path::Path, status: &MlStatus) -> Vec<ModelAcc
                 provider,
                 precision,
                 has_fast_plan: plan.is_some(),
-                engines: builds.iter().filter(|b| b.model == m.id).cloned().collect(),
+                // Only the engines of the precision the plan runs at: an
+                // engine left from another precision (an fp16 trial of a
+                // model that runs fp32) is not one it uses.
+                engines: builds
+                    .iter()
+                    .filter(|b| b.model == m.id)
+                    .filter(|b| plan.is_none_or(|plan| b.precision == plan.precision))
+                    .cloned()
+                    .collect(),
             }
         })
         .collect()
