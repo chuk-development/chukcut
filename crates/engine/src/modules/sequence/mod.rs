@@ -34,6 +34,7 @@ pub mod edit;
 pub mod retime;
 #[cfg(test)]
 mod tests;
+pub mod thumbs;
 
 use std::collections::BTreeSet;
 
@@ -521,41 +522,4 @@ pub fn nested_in(
         path: Vec::new(),
     };
     Some(view)
-}
-
-/// What a compound clip's picture shows at nested time `time` of sequence
-/// `id`, as a file and a time in it: the topmost visible video or still at
-/// that instant, followed into compound clips inside. What the timeline draws
-/// a compound clip's thumbnails from, so they come out of the same caches as
-/// every other clip's. `None` where nothing is there to show.
-pub fn picture_at(project: &Project, id: &str, time: Micros) -> Option<(Id, Micros)> {
-    fn walk(project: &Project, id: &str, time: Micros, depth: usize) -> Option<(Id, Micros)> {
-        if depth > MAX_DEPTH {
-            return None;
-        }
-        let pool = &project.materials;
-        for track in tracks_of(project, id)?.iter().rev() {
-            if track.hidden {
-                continue;
-            }
-            let Some(segment) = track.segment_at(time) else {
-                continue;
-            };
-            let Some(source) = pool.time_map(segment).source_time_at(time) else {
-                continue;
-            };
-            if pool.video(&segment.material_id).is_some()
-                || pool.image(&segment.material_id).is_some()
-            {
-                return Some((segment.material_id.clone(), source));
-            }
-            if exists(project, &segment.material_id) {
-                if let Some(found) = walk(project, &segment.material_id, source, depth + 1) {
-                    return Some(found);
-                }
-            }
-        }
-        None
-    }
-    walk(project, id, time, 0)
 }
