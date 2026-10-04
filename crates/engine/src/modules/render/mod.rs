@@ -63,10 +63,12 @@ pub mod context;
 #[cfg(target_os = "linux")]
 pub mod dmabuf;
 pub mod error;
+pub mod flow;
 pub mod grade;
 pub mod layout;
 pub mod lut;
 pub mod matte;
+pub mod matte_mix;
 pub mod nested;
 pub mod nv12;
 pub mod readback;

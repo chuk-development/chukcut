@@ -11,6 +11,9 @@
 //!   step.
 //! - [`blend`] — frame blending: a slow clip mixes its two neighbouring
 //!   source frames instead of holding one.
+//! - [`flow`] — "Optical flow (AI)": frames made between the source frames
+//!   by RIFE in the ML worker, baked into the cache, drawn instead of the
+//!   mix once they are there.
 //! - [`commands`] — the shell-facing surface.
 //!
 //! ## Sound
@@ -24,3 +27,4 @@
 pub mod blend;
 pub mod commands;
 pub mod edit;
+pub mod flow;

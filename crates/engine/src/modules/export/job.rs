@@ -688,6 +688,36 @@ pub fn run_export(job: &ExportJob, sink: &dyn ProgressSink) -> Result<ExportOutc
         }
     }
 
+    // "Optical flow (AI)" frames are cache too: bake the ones this export's
+    // frame grid lands on, so the file shows what the user chose rather
+    // than the plain blend the preview draws while a bake runs.
+    if !settings.audio_only {
+        let fps = settings.fps();
+        let times: Vec<Micros> = (0..settings.total_frames)
+            .map(|i| {
+                settings.range_start + fps.frame_time(i) + crate::modules::project::SAMPLE_SLACK
+            })
+            .collect();
+        let ensured = crate::modules::speed::commands::speed_flow_ensure(
+            &job.project,
+            &times,
+            &|what, fraction| {
+                let mut preparing = tracker.snapshot(ExportStage::Preparing, 0, Instant::now());
+                preparing.message = Some(format!("{what} ({:.0} %)", fraction * 100.0));
+                sink.send(preparing);
+            },
+            &job.cancel,
+        );
+        if let Err(message) = ensured {
+            let error = ExportError::Settings(message);
+            tracing::error!(%error, "the export could not make its optical-flow frames");
+            let mut failed = tracker.snapshot(ExportStage::Failed, 0, Instant::now());
+            failed.message = Some(error.to_string());
+            sink.send(failed);
+            return Err(error);
+        }
+    }
+
     // Open the file first: a codec that is not in this build, a directory that
     // does not exist or a path that is not writable all fail here, in
     // milliseconds, instead of after the audio mix.

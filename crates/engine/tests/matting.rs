@@ -566,6 +566,7 @@ fn a_click_selects_the_box_and_the_selection_follows_it() {
             },
         ),
         invert: false,
+        ..chukcut_engine::modules::matting::commands::current_model()
     };
     let key = cache::key_for(&path, &setting).unwrap();
     for (_, dir) in cache::dirs_of(&key) {

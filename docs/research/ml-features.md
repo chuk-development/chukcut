@@ -617,6 +617,19 @@ materials; `CCAudioNoiseFilter`, `CCAudioSamiFilter`.
 **Recommendation:** RIFE through `ort` (TensorRT where present, else CUDA,
 else OpenVINO). Bake to a cache file when speed < 1×. **Effort M, priority 3.**
 
+**Built (2026-10-04, decision 0028).** RIFE v4 through `ort` in the worker,
+the export `huggingface.co/walterlow/RIFE_fp32_timestep` (MIT, commit
+`ee09066`, 22 MB): input `[1, 6, H, W]` (both frames, planar RGB 0..1) and a
+scalar `timestep`, output `[1, 3, H, W]`; any size (the graph pads to 32).
+`yuvraj108c/rife-onnx`'s RIFE 4.9 export (separate `img0`/`img1`/`timestep`
+inputs) gave the same answer on a moving square (within 1 px at t = 0.25
+and 0.5) but states no licence. Measured on the RTX 3060, fp32, CUDA
+provider, release worker: 18 ms at 640×360, 70 ms at 720p, 173 ms at 1080p;
+CPU 0.25 s at 360p, 1.2 s at 720p. That is well below the TensorRT fp16
+estimate above: TensorRT and fp16 are the open speed-ups. Frames are baked
+per (source frame, phase in 64ths) as JPEG into the cache and drawn in place
+of the plain blend.
+
 ### 3.12 Upscaling and "optimise quality"
 
 **CapCut:** "Qualität optimieren" (Pro, 3 uses per day for free users);

@@ -28,7 +28,7 @@ fn frame_blending_motion_blur_and_an_animated_sticker() {
     ok(&dir, &["new", p]);
     ok(&dir, &["import", p, card.to_str().unwrap(), "--append"]);
 
-    // Frame blending: read, switch on, refuse optical flow, switch off.
+    // Frame blending: read, switch on, optical flow, switch off.
     assert_eq!(ok(&dir, &["frame-blend", p, "0:0"])["frame_blend"], "none");
     assert_eq!(
         ok(&dir, &["frame-blend", p, "0:0", "--mode", "blend"])["frame_blend"],
@@ -36,8 +36,20 @@ fn frame_blending_motion_blur_and_an_animated_sticker() {
     );
     let extras = document(&project)["materials"]["extras"].to_string();
     assert!(extras.contains("frame_blend"), "{extras}");
+    // Optical flow, set without baking (no model needed here); a mode
+    // that does not exist is a usage error.
     assert_eq!(
-        run(&dir, &["frame-blend", p, "0:0", "--mode", "optical_flow"]).code,
+        ok(
+            &dir,
+            &["frame-blend", p, "0:0", "--mode", "flow", "--no-bake"]
+        )["frame_blend"],
+        "flow"
+    );
+    assert!(document(&project)["materials"]["extras"]
+        .to_string()
+        .contains("\"flow\""));
+    assert_eq!(
+        run(&dir, &["frame-blend", p, "0:0", "--mode", "sideways"]).code,
         2
     );
     assert_eq!(

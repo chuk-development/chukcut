@@ -118,6 +118,9 @@ enum Command {
     ChromaKey(On<ChromaKeyArgs>),
     /// Remove a video clip's background: people or the main object (ML).
     RemoveBackground(On<RemoveBackgroundArgs>),
+    /// Grade or effects only on the subject or only on the background, by
+    /// the clip's matte.
+    ApplyTo(On<ApplyToArgs>),
     /// Keep (or cut out) the object you point at, on every frame (ML).
     SelectObject(On<SelectObjectArgs>),
     /// Set how a clip blends with the lanes beneath it, and its opacity.
@@ -174,8 +177,12 @@ enum Command {
     Freeze(On<FreezeArgs>),
     /// Give a clip a speed ramp from a preset or points, or remove it.
     SpeedCurve(On<SpeedCurveArgs>),
-    /// Frame blending for slow motion and speed ramps: none or blend.
+    /// Frame blending for slow motion and speed ramps: none, blend or flow
+    /// (optical flow, frames made by RIFE; baked before it returns).
     FrameBlend(On<FrameBlendArgs>),
+    /// Smooth slow motion in one step: optical flow on, slowed to 0.5x
+    /// (or --speed) unless it is slowed already, frames baked.
+    SmoothSlowMo(On<SmoothSlowMoArgs>),
     /// Make an animated sticker loop or play once.
     StickerPlayback(On<StickerPlaybackArgs>),
     /// Picture in picture and split-screen layouts.
@@ -574,6 +581,7 @@ fn dispatch(command: Command, dry: bool, ctx: &Ctx) -> CliResult<(&'static str, 
         Command::Mask(o) => on(o, dry, ctx),
         Command::ChromaKey(o) => on(o, dry, ctx),
         Command::RemoveBackground(o) => on(o, dry, ctx),
+        Command::ApplyTo(o) => on(o, dry, ctx),
         Command::SelectObject(o) => on(o, dry, ctx),
         Command::Blend(o) => on(o, dry, ctx),
         Command::Effect(EffectCommand::Add(o)) => on(o, dry, ctx),
@@ -620,6 +628,7 @@ fn dispatch(command: Command, dry: bool, ctx: &Ctx) -> CliResult<(&'static str, 
         Command::Freeze(o) => on(o, dry, ctx),
         Command::SpeedCurve(o) => on(o, dry, ctx),
         Command::FrameBlend(o) => on(o, dry, ctx),
+        Command::SmoothSlowMo(o) => on(o, dry, ctx),
         Command::StickerPlayback(o) => on(o, dry, ctx),
         Command::Layout(LayoutCommand::Pip(o)) => on(o, dry, ctx),
         Command::Layout(LayoutCommand::Split(o)) => on(o, dry, ctx),

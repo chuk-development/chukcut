@@ -16,8 +16,9 @@
 //!   path alone), the proxies the cache index maps to its media, and the
 //!   baked "Remove background" mattes of its media (`mattes/<digest>-…`,
 //!   keyed by the file's content digest, which a trim reads from each file's
-//!   head and tail). A matte costs a model run per frame to make again, so
-//!   it is the last thing to throw away for the project being edited. Voice
+//!   head and tail), and its optical-flow frames (`flow/<digest>-…`, the
+//!   same key). Both cost a model run per frame to make again, so they are
+//!   the last thing to throw away for the project being edited. Voice
 //!   cleanup renders are keyed by path *and* strength *and* engine, which this
 //!   module cannot reconstruct without the document's clip settings; they are
 //!   ordinary LRU candidates and are re-rendered on demand if trimmed.
@@ -304,6 +305,10 @@ pub fn trim_cache(limit: u64) -> TrimReport {
         protection.dirs.push(paths::waveform_dir(path));
     }
     protection.dirs.extend(matte_dirs_of(&media));
+    protection.dirs.extend(derived_dirs_of(
+        &media,
+        &crate::modules::speed::flow::root(),
+    ));
     protection.files.insert(proxies.root().join("index.json"));
     let wanted: HashSet<String> = media
         .iter()
@@ -331,6 +336,13 @@ pub fn trim_cache(limit: u64) -> TrimReport {
 /// The matte directories of `media` (`matting::cache`, named after each
 /// file's content digest), whatever model or provider made them.
 fn matte_dirs_of(media: &[PathBuf]) -> Vec<PathBuf> {
+    derived_dirs_of(media, &crate::modules::matting::cache::root())
+}
+
+/// The directories under `root` named after one of `media`'s content
+/// digests: mattes, and optical-flow frames (`speed::flow`), which cost a
+/// model run per frame to make again.
+fn derived_dirs_of(media: &[PathBuf], root: &Path) -> Vec<PathBuf> {
     let prefixes: Vec<String> = media
         .iter()
         .filter_map(|p| crate::modules::matting::cache::media_prefix(p).ok())
@@ -338,7 +350,7 @@ fn matte_dirs_of(media: &[PathBuf]) -> Vec<PathBuf> {
     if prefixes.is_empty() {
         return Vec::new();
     }
-    let Ok(entries) = std::fs::read_dir(crate::modules::matting::cache::root()) else {
+    let Ok(entries) = std::fs::read_dir(root) else {
         return Vec::new();
     };
     entries

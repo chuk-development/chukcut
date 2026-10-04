@@ -128,6 +128,12 @@ const M_KEY_SHRINK: u32 = 4u;
 const M_VIEW_MATTE: u32 = 8u;
 const M_BACKGROUND: u32 = 16u;
 const M_BACKGROUND_INVERT: u32 = 32u;
+// The clip's matte steers its grade (`BackgroundRemoval::grade`): graded
+// only on the subject, or only on the rest.
+const M_GRADE_SUBJECT: u32 = 64u;
+const M_GRADE_BACKGROUND: u32 = 128u;
+// The matte itself, for the weights an effects mask mixes by.
+const M_MATTE_OUT: u32 = 256u;
 const KEY_SCALE: f32 = 0.6;
 const STAR_INNER: f32 = 0.381966;
 // The heart: the classic parametric curve at 32 points, width -1..1
@@ -625,6 +631,12 @@ fn fs_premultiplied(in: VertexOutput) -> @location(0) vec4<f32> {
 }
 
 fn shade(in: VertexOutput) -> vec4<f32> {
+    // An effects mask's layer (`render::matte_mix`): the subject's weight
+    // where the clip is, nothing where it is not.
+    if ((quad.matte_flags.x & M_MATTE_OUT) != 0u) {
+        let m = textureSample(background_texture, source_sampler, in.display).r;
+        return vec4<f32>(m, m, m, 1.0);
+    }
     var texel: vec4<f32>;
     if (quad.planar == 1u) {
         // Two samples, both filtered, both from memory the decoder wrote and
@@ -668,6 +680,9 @@ fn shade(in: VertexOutput) -> vec4<f32> {
         }
         texel = vec4<f32>(srgb_to_linear(despill(shot)), texel.a);
     }
+    // The picture before the grade, for a grade that a matte limits to the
+    // subject or to the rest.
+    let ungraded = texel.rgb;
     // Per-clip colour, after decode and before compositing, so a transition
     // layer and an ordinary quad get it the same way. Every stage is behind a
     // flag rather than run with identity values — see `color_active` on the
@@ -796,6 +811,15 @@ fn shade(in: VertexOutput) -> vec4<f32> {
         let h2 = pcg(h1);
         let n = f32(h1 & 65535u) / 65535.0 + f32(h2 & 65535u) / 65535.0 - 1.0;
         rgb = max(rgb * (1.0 + n * quad.detail.z * GRAIN_STRENGTH), vec3<f32>(0.0));
+    }
+    // 17. Where the grade applies: everywhere, or by the clip's matte, mixed
+    // in light so a soft matte edge blends the two pictures smoothly.
+    if ((quad.matte_flags.x & (M_GRADE_SUBJECT | M_GRADE_BACKGROUND)) != 0u) {
+        var weight = textureSample(background_texture, source_sampler, in.display).r;
+        if ((quad.matte_flags.x & M_GRADE_BACKGROUND) != 0u) {
+            weight = 1.0 - weight;
+        }
+        rgb = mix(ungraded, rgb, weight);
     }
     texel = vec4<f32>(rgb, texel.a);
     // The masks and the key's matte, as coverage in the quad's own frame.

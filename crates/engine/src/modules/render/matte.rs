@@ -47,6 +47,15 @@ pub mod flag {
     /// With [`BACKGROUND`]: keep where the matte is clear, remove where it
     /// is opaque (cut the subject out).
     pub const BACKGROUND_INVERT: u32 = 32;
+    /// The grade applies only where the matte at binding 5 keeps the
+    /// subject; elsewhere the clip shows ungraded. Independent of
+    /// [`BACKGROUND`], which is the cut.
+    pub const GRADE_SUBJECT: u32 = 64;
+    /// The grade applies only where the matte does not keep the subject.
+    pub const GRADE_BACKGROUND: u32 = 128;
+    /// Draw the matte itself, `(m, m, m, 1)` over the quad, instead of the
+    /// picture: the weights an effects mask mixes by (`render::matte_mix`).
+    pub const MATTE_OUT: u32 = 256;
 }
 
 /// How far in the CbCr plane a tolerance or softness of 1 reaches. Pure
@@ -362,6 +371,9 @@ mod tests {
             ("M_VIEW_MATTE", flag::VIEW_MATTE),
             ("M_BACKGROUND", flag::BACKGROUND),
             ("M_BACKGROUND_INVERT", flag::BACKGROUND_INVERT),
+            ("M_GRADE_SUBJECT", flag::GRADE_SUBJECT),
+            ("M_GRADE_BACKGROUND", flag::GRADE_BACKGROUND),
+            ("M_MATTE_OUT", flag::MATTE_OUT),
         ] {
             assert!(
                 shader.contains(&format!("const {name}: u32 = {value}u;")),

@@ -130,6 +130,15 @@ impl Editor {
         let effect_clip = self.project.materials.is_effect_clip(segment);
         let extras_count = stack.len() - usize::from(effect_clip);
         let mut sections = Vec::new();
+        // "Apply to": the effects on the whole clip, its matte's subject or
+        // the rest (`matte_target`).
+        if !effect_clip {
+            sections.extend(self.apply_to_rows(
+                segment,
+                chukcut_engine::modules::matting::commands::MattePart::Effects,
+                cx,
+            ));
+        }
         for (index, effect) in stack.iter().enumerate() {
             let own = effect_clip && index == 0;
             let position = self.extras_position(segment, index);

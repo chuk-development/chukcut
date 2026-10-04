@@ -31,7 +31,7 @@ use chukcut_ml_worker::protocol::{
 };
 use chukcut_ml_worker::registry::{self, ModelSpec, Task};
 use chukcut_ml_worker::runtime::{Failure, Runtime};
-use chukcut_ml_worker::{birefnet, rvm, sam, vittrack, yunet};
+use chukcut_ml_worker::{birefnet, rife, rvm, sam, vittrack, yunet};
 use ort::value::Tensor;
 
 type Out = Arc<Mutex<BufWriter<std::io::Stdout>>>;
@@ -428,6 +428,46 @@ impl Worker {
                     provider,
                 })
             }
+            RequestBody::Interpolate {
+                model: name,
+                width,
+                height,
+                phases,
+            } => {
+                let (w, h) = (width as usize, height as usize);
+                if w == 0 || h == 0 || payload.len() != w * h * 8 {
+                    return Err(bad(format!(
+                        "two {width}x{height} RGBA frames are {} bytes, got {}",
+                        w * h * 8,
+                        payload.len()
+                    )));
+                }
+                let spec = model(&name, Task::Interpolate)?;
+                if phases.is_empty() || !phases.iter().all(|&t| rife::valid_phase(t)) {
+                    return Err(bad("every phase must lie strictly between 0 and 1"));
+                }
+                let started = Instant::now();
+                let (first, second) = payload.split_at(w * h * 4);
+                let mut frames = Vec::with_capacity(phases.len() * w * h * 4);
+                let mut provider = String::new();
+                for (i, &phase) in phases.iter().enumerate() {
+                    if self.is_cancelled(id) {
+                        return Err((ErrorKind::Cancelled, "cancelled".into()));
+                    }
+                    let (frame, used) = self.interpolate(spec, first, second, w, h, phase)?;
+                    frames.extend_from_slice(&frame);
+                    provider = used;
+                    progress((i + 1) as f32 / phases.len() as f32, "interpolating");
+                }
+                self.reply_payload = frames;
+                Ok(Outcome::Interpolated {
+                    width,
+                    height,
+                    count: phases.len() as u32,
+                    millis: millis(started),
+                    provider,
+                })
+            }
             RequestBody::Benchmark {
                 model: name,
                 width,
@@ -583,6 +623,43 @@ impl Worker {
             )));
         }
         Ok((birefnet::matte(logits, w, h), provider))
+    }
+
+    /// The frame at `phase` between `first` and `second` (RGBA8, `w × h`
+    /// each), as RGBA8, and the provider it ran on.
+    fn interpolate(
+        &mut self,
+        spec: &'static ModelSpec,
+        first: &[u8],
+        second: &[u8],
+        w: usize,
+        h: usize,
+        phase: f32,
+    ) -> Result<(Vec<u8>, String), Failure> {
+        let loaded = self.runtime()?.session(spec)?;
+        let provider = loaded.provider.to_string();
+        let input = Tensor::from_array((
+            [1i64, 6, h as i64, w as i64],
+            rife::input(first, second, w, h),
+        ))
+        .map_err(inference)?;
+        // A scalar: a 0-dimensional tensor, not a one-element vector.
+        let timestep = Tensor::from_array(((), vec![phase])).map_err(inference)?;
+        let outputs = loaded
+            .session
+            .run(ort::inputs!["input" => input, "timestep" => timestep])
+            .map_err(inference)?;
+        let value = outputs
+            .get("output")
+            .ok_or_else(|| inference("the model has no output output"))?;
+        let (_, data) = value.try_extract_tensor::<f32>().map_err(inference)?;
+        if data.len() != 3 * w * h {
+            return Err(inference(format!(
+                "the frame is {} values for a {w}x{h} picture",
+                data.len()
+            )));
+        }
+        Ok((rife::frame_bytes(data, w, h), provider))
     }
 
     /// The SAM mask of `clicks` (and `bbox`) in this frame: the mask bytes,
@@ -814,6 +891,16 @@ impl Worker {
                     };
                     worker
                         .segment(spec, &rgba, w, h, &[click], None)
+                        .map(|_| ())
+                }
+                Task::Interpolate => {
+                    // The second frame is the first moved a sixteenth of
+                    // the width: real flow for the network to find.
+                    let shift = (w / 16).max(1) * 4;
+                    let mut second = rgba[shift..].to_vec();
+                    second.extend_from_slice(&rgba[..shift]);
+                    worker
+                        .interpolate(spec, &rgba, &second, w, h, 0.5)
                         .map(|_| ())
                 }
                 Task::SegmentDecoder => Err(bad(format!(

@@ -299,6 +299,8 @@ pub struct Compositor {
     accumulate_pipeline: wgpu::RenderPipeline,
     /// Turns that float layer back into a clip layer, built on first use.
     resolver: OnceLock<super::accumulate::Resolver>,
+    /// Effects limited by a matte. See [`super::matte_mix`].
+    matte_mix: OnceLock<super::matte_mix::MatteMix>,
     uniform_layout: wgpu::BindGroupLayout,
     texture_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
@@ -321,6 +323,8 @@ pub struct Compositor {
     matte_placeholder: wgpu::TextureView,
     /// Baked "Remove background" mattes. See [`super::background`].
     backgrounds: super::background::MatteFrames,
+    /// Baked optical-flow frames. See [`super::flow`].
+    flows: super::flow::FlowFrames,
     vertices: wgpu::Buffer,
     indices: wgpu::Buffer,
     /// Per-draw uniforms, addressed with dynamic offsets. Grown, never shrunk —
@@ -750,6 +754,7 @@ impl Compositor {
             layer_pipeline,
             accumulate_pipeline,
             resolver: OnceLock::new(),
+            matte_mix: OnceLock::new(),
             uniform_layout,
             texture_layout,
             sampler,
@@ -760,6 +765,7 @@ impl Compositor {
             curves: super::grade::CurveCache::default(),
             matte_placeholder,
             backgrounds: super::background::MatteFrames::default(),
+            flows: super::flow::FlowFrames::default(),
             vertices,
             indices,
             uniforms: Mutex::new(Scratch::default()),
@@ -1191,7 +1197,7 @@ impl Compositor {
                     blend_layers.push(None);
                     layer_targets.extend(sides);
                 }
-                Draw::Effected { quad, chain } => {
+                Draw::Effected { quad, chain, mask } => {
                     let frame = fx_frame.as_mut().expect("opened for an effected clip");
                     let layer = self.pool.acquire(device, self.target_key(size));
                     self.draw_layer(
@@ -1208,6 +1214,16 @@ impl Compositor {
                         chain,
                         self.target_key(size),
                     );
+                    let out = self.masked(
+                        &mut encoder,
+                        &uniform_group,
+                        &source_groups,
+                        &layer,
+                        out,
+                        mask.as_ref(),
+                        size,
+                        &mut layer_targets,
+                    );
                     overs.push(Some(frame.prepare_over(
                         out.view(),
                         self.config.format,
@@ -1218,7 +1234,9 @@ impl Compositor {
                     layer_targets.push(layer);
                     layer_targets.push(out);
                 }
-                Draw::Blended { quad, chain, .. } => {
+                Draw::Blended {
+                    quad, chain, mask, ..
+                } => {
                     let frame = fx_frame.as_mut().expect("opened for a blended clip");
                     let layer = self.pool.acquire(device, self.target_key(size));
                     self.draw_layer(
@@ -1238,6 +1256,16 @@ impl Compositor {
                             chain,
                             self.target_key(size),
                         );
+                        let out = self.masked(
+                            &mut encoder,
+                            &uniform_group,
+                            &source_groups,
+                            &layer,
+                            out,
+                            mask.as_ref(),
+                            size,
+                            &mut layer_targets,
+                        );
                         layer_targets.push(layer);
                         out
                     };
@@ -1245,7 +1273,12 @@ impl Compositor {
                     layer_groups.push(None);
                     overs.push(None);
                 }
-                Draw::Accumulated { quads, chain, mode } => {
+                Draw::Accumulated {
+                    quads,
+                    chain,
+                    mode,
+                    mask,
+                } => {
                     let frame = fx_frame.as_mut().expect("opened for an accumulated clip");
                     let (sum, layer) = self.accumulate_layer(
                         &mut encoder,
@@ -1264,6 +1297,16 @@ impl Compositor {
                             size,
                             chain,
                             self.target_key(size),
+                        );
+                        let out = self.masked(
+                            &mut encoder,
+                            &uniform_group,
+                            &source_groups,
+                            &layer,
+                            out,
+                            mask.as_ref(),
+                            size,
+                            &mut layer_targets,
                         );
                         layer_targets.push(layer);
                         out
@@ -1549,6 +1592,51 @@ impl Compositor {
         pass.draw_indexed(0..QUAD_INDICES.len() as u32, 0, 0..1);
     }
 
+    /// `after` (a clip's layer with its effects) limited by `mask`: mixed
+    /// with `before` (the layer without them) by the clip's matte. `after`
+    /// itself when there is no mask. The textures the mix reads go into
+    /// `keep`, which outlives the submit.
+    #[allow(clippy::too_many_arguments)]
+    fn masked(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        uniform_group: &wgpu::BindGroup,
+        source_groups: &[Option<wgpu::BindGroup>],
+        before: &PooledTexture,
+        after: PooledTexture,
+        mask: Option<&FxMask>,
+        size: (u32, u32),
+        keep: &mut Vec<PooledTexture>,
+    ) -> PooledTexture {
+        let Some(mask) = mask else {
+            return after;
+        };
+        let device = self.ctx.device();
+        let weights = self.pool.acquire(device, self.target_key(size));
+        self.draw_layer(
+            encoder,
+            uniform_group,
+            source_groups,
+            Some(&mask.quad),
+            weights.view(),
+        );
+        let mixed = self.pool.acquire(device, self.target_key(size));
+        self.matte_mix
+            .get_or_init(|| super::matte_mix::MatteMix::new(&self.ctx, self.config.format))
+            .mix(
+                &self.ctx,
+                encoder,
+                before.view(),
+                after.view(),
+                weights.view(),
+                mask.background,
+                mixed.view(),
+            );
+        keep.push(after);
+        keep.push(weights);
+        mixed
+    }
+
     /// Several weighted draws of one clip summed in a float layer, then
     /// resolved into an ordinary straight-alpha clip layer. Answers both
     /// textures: the sum has to outlive the submit as much as the layer does.
@@ -1741,6 +1829,15 @@ impl Compositor {
                     )
                 })
                 .flatten();
+            // Optical flow draws the frame RIFE made for this instant, once
+            // it is baked; until then the clip takes the frame blend above.
+            let flowed = blend
+                .filter(|_| crate::modules::speed::flow::is_on(&project.materials, segment))
+                .and_then(|b| crate::modules::speed::flow::FlowSample::of(&b))
+                .and_then(|sample| {
+                    let video = project.materials.video(&segment.material_id)?;
+                    self.flows.get(&self.ctx, &video.path, sample)
+                });
             let quad = self.quad(
                 canvas,
                 &project.materials,
@@ -1752,6 +1849,15 @@ impl Compositor {
                 time,
                 &mut draws,
             )?;
+            // The decoded frame placed the clip; the made frame, the same
+            // picture's aspect, is what it shows.
+            let (quad, blend) = match (quad, flowed) {
+                (Some(mut quad), Some(frame)) => {
+                    quad.frame = frame;
+                    (Some(quad), None)
+                }
+                (quad, _) => (quad, blend),
+            };
             if let Some(quad) = quad {
                 let chain = fx::chain_for(
                     &project.materials,
@@ -1777,10 +1883,25 @@ impl Compositor {
                     sources,
                     &mut draws,
                 );
+                let mask = if chain.is_empty() {
+                    None
+                } else {
+                    fx_mask(&project.materials, segment, &quad, &mut draws)
+                };
                 draws.items.push(match (accumulated, mode) {
-                    (Some(quads), mode) => Draw::Accumulated { quads, chain, mode },
-                    (None, Some(mode)) => Draw::Blended { quad, chain, mode },
-                    (None, None) => blurred(project, segment, time, quad, chain),
+                    (Some(quads), mode) => Draw::Accumulated {
+                        quads,
+                        chain,
+                        mode,
+                        mask,
+                    },
+                    (None, Some(mode)) => Draw::Blended {
+                        quad,
+                        chain,
+                        mode,
+                        mask,
+                    },
+                    (None, None) => blurred(project, segment, time, quad, chain, mask),
                 });
             }
         }
@@ -2037,27 +2158,35 @@ impl Compositor {
                 super::matte::MatteBlock::new(m, source_time, quad)
             })
             .unwrap_or_default();
-        // "Remove background": the baked matte of this source frame, when
-        // there is one. A frame not baked yet draws whole.
-        let background = compositing
+        // The clip's matte ("Remove background", or a grade or effects
+        // limited to the subject): the baked matte of this source frame,
+        // when there is one. A frame not baked yet draws whole and graded
+        // whole.
+        let setting = compositing
             .and_then(|m| m.background.as_ref())
-            .and_then(|setting| {
-                let video = materials.video(&segment.material_id)?;
-                let period = if video.fps.is_finite() && video.fps > 1.0 {
-                    (1_000_000.0 / video.fps).round() as Micros
-                } else {
-                    33_333
-                };
-                self.backgrounds
-                    .get(&self.ctx, &video.path, setting, source_time, period)
-            });
-        if background.is_some() {
-            matte.flags[0] |= super::matte::flag::BACKGROUND;
-            if compositing
-                .and_then(|m| m.background.as_ref())
-                .is_some_and(|b| b.invert)
-            {
-                matte.flags[0] |= super::matte::flag::BACKGROUND_INVERT;
+            .filter(|s| s.is_used());
+        let background = setting.and_then(|setting| {
+            let video = materials.video(&segment.material_id)?;
+            let period = if video.fps.is_finite() && video.fps > 1.0 {
+                (1_000_000.0 / video.fps).round() as Micros
+            } else {
+                33_333
+            };
+            self.backgrounds
+                .get(&self.ctx, &video.path, setting, source_time, period)
+        });
+        if let (Some(setting), Some(_)) = (setting, &background) {
+            use crate::modules::project::compositing::MatteTarget;
+            if setting.cut {
+                matte.flags[0] |= super::matte::flag::BACKGROUND;
+                if setting.invert {
+                    matte.flags[0] |= super::matte::flag::BACKGROUND_INVERT;
+                }
+            }
+            match setting.grade {
+                MatteTarget::Subject => matte.flags[0] |= super::matte::flag::GRADE_SUBJECT,
+                MatteTarget::Background => matte.flags[0] |= super::matte::flag::GRADE_BACKGROUND,
+                _ => {}
             }
         }
 
@@ -2296,23 +2425,26 @@ fn blurred(
     time: Micros,
     quad: QuadDraw,
     chain: Vec<FxInstance>,
+    mask: Option<FxMask>,
 ) -> Draw {
     // Without a blur animation the clip is an ordinary quad, or an effected
     // one when it carries built-in effects (`modules/fx`).
-    let plain = |quad: QuadDraw, chain: Vec<FxInstance>| {
+    let plain = |quad: QuadDraw, chain: Vec<FxInstance>, mask: Option<FxMask>| {
         if chain.is_empty() {
             Draw::Quad(quad)
         } else {
-            Draw::Effected { quad, chain }
+            Draw::Effected { quad, chain, mask }
         }
     };
     let keyed = layout::animated_transform(segment, time);
     let Some(m) = motion::clip_motion(&project.materials, segment, time, keyed) else {
-        return plain(quad, chain);
+        return plain(quad, chain, mask);
     };
     if m.blur <= 0.0 || m.blur_radius <= 0.0 {
-        return plain(quad, chain);
+        return plain(quad, chain, mask);
     }
+    // The blur animation draws the clip as a transition side, whose effects
+    // apply to the whole layer; a matte-limited effect is whole there.
     Draw::Transition {
         params: TransitionParams {
             kind: TransitionKind::Blur,
@@ -2329,6 +2461,34 @@ fn blurred(
         from_fx: Vec::new(),
         to_fx: chain,
     }
+}
+
+/// The matte draw that limits `segment`'s effects to its subject or the
+/// rest, when its matte says so and the frame drawn has one baked. Without a
+/// baked matte the effects apply to the whole clip, as a frame with no
+/// matte yet is drawn whole.
+fn fx_mask(
+    materials: &MaterialPool,
+    segment: &Segment,
+    quad: &QuadDraw,
+    draws: &mut DrawList,
+) -> Option<FxMask> {
+    use crate::modules::project::compositing::MatteTarget;
+    let setting = materials.compositing_of(segment)?.background.as_ref()?;
+    let background = match setting.effects {
+        MatteTarget::Subject => false,
+        MatteTarget::Background => true,
+        _ => return None,
+    };
+    quad.background.as_ref()?;
+    let mut mask = quad.clone();
+    mask.matte.flags = [super::matte::flag::MATTE_OUT, 0, 0, 0];
+    mask.slot = draws.slots as u32;
+    draws.slots += 1;
+    Some(FxMask {
+        quad: mask,
+        background,
+    })
 }
 
 /// One textured quad: a segment's frame, where it goes, and which uniform
@@ -2384,6 +2544,8 @@ enum Draw {
     Effected {
         quad: QuadDraw,
         chain: Vec<FxInstance>,
+        /// The effects apply only to the matte's subject or the rest.
+        mask: Option<FxMask>,
     },
     /// An effect clip: its effects run over everything composited so far.
     Adjust {
@@ -2396,6 +2558,7 @@ enum Draw {
         quad: QuadDraw,
         chain: Vec<FxInstance>,
         mode: u32,
+        mask: Option<FxMask>,
     },
     /// One clip drawn several times and averaged: two source frames mixed
     /// (frame blending) and/or the clip placed along its movement (motion
@@ -2406,7 +2569,18 @@ enum Draw {
         quads: Vec<QuadDraw>,
         chain: Vec<FxInstance>,
         mode: Option<u32>,
+        mask: Option<FxMask>,
     },
+}
+
+/// A clip's effects limited by its matte (`BackgroundRemoval::effects`): the
+/// matte drawn as weights over the clip's quad (`M_MATTE_OUT`), and which
+/// side of it the effects apply to. See [`super::matte_mix`].
+#[derive(Clone)]
+struct FxMask {
+    quad: QuadDraw,
+    /// The effects apply to the rest, not the subject.
+    background: bool,
 }
 
 /// Everything a frame draws, plus how many uniform blocks it needs.
@@ -2423,13 +2597,18 @@ impl DrawList {
     fn quads(&self) -> impl Iterator<Item = &QuadDraw> {
         self.items.iter().flat_map(|item| -> Vec<&QuadDraw> {
             match item {
-                Draw::Quad(quad) | Draw::Effected { quad, .. } | Draw::Blended { quad, .. } => {
-                    vec![quad]
+                Draw::Quad(quad) => vec![quad],
+                Draw::Effected { quad, mask, .. } | Draw::Blended { quad, mask, .. } => {
+                    std::iter::once(quad)
+                        .chain(mask.as_ref().map(|m| &m.quad))
+                        .collect()
                 }
                 Draw::Transition { from, to, .. } => {
                     from.as_ref().into_iter().chain(to.as_ref()).collect()
                 }
-                Draw::Accumulated { quads, .. } => quads.iter().collect(),
+                Draw::Accumulated { quads, mask, .. } => {
+                    quads.iter().chain(mask.as_ref().map(|m| &m.quad)).collect()
+                }
                 Draw::Adjust { .. } => Vec::new(),
             }
         })

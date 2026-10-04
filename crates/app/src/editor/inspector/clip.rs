@@ -162,6 +162,7 @@ impl Editor {
                         "HSL" => self.adjust_hsl(&segment, window, cx),
                         "Curves" => self.adjust_curves(&segment, cx),
                         "Colour wheels" => self.adjust_wheels(&segment, window, cx),
+                        "Mask" => self.adjust_mask(&segment, cx),
                         _ => not_yet(current),
                     };
                     (
@@ -578,7 +579,7 @@ impl Editor {
             );
 
         let pitch = self.pitch_switch(cx);
-        let blend = self.frame_blend_switch(segment, cx);
+        let blend = self.frame_blend_rows(segment, cx);
 
         let curved = self.project.materials.speed_curve_of(segment).is_some();
         div()
@@ -600,61 +601,6 @@ impl Editor {
             .child(pitch)
             .children(blend)
             .into_any_element()
-    }
-
-    /// "Frame blending" for a video clip: a slowed clip mixes the two source
-    /// frames around each instant instead of holding one
-    /// (`speed::blend`). `None` for a clip without frames.
-    fn frame_blend_switch(
-        &mut self,
-        segment: &Segment,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        use chukcut_engine::modules::speed::blend::{frame_blend_of, FrameBlend};
-        if self.project.materials.kind_of(&segment.material_id)
-            != Some(chukcut_engine::modules::project::MaterialKind::Video)
-        {
-            return None;
-        }
-        let on = frame_blend_of(&self.project.materials, segment) == FrameBlend::Blend;
-        let id = segment.id.clone();
-        let entity = cx.entity().downgrade();
-        let switch =
-            Switch::new("speed-frame-blend")
-                .checked(on)
-                .on_click(move |checked, _, cx| {
-                    let mode = if *checked {
-                        FrameBlend::Blend
-                    } else {
-                        FrameBlend::None
-                    };
-                    let id = id.clone();
-                    let _ = entity.update(cx, |this, cx| {
-                        let result =
-                            chukcut_engine::modules::speed::commands::speed_set_frame_blend(
-                                &this.state,
-                                id,
-                                mode,
-                            )
-                            .map(|_| ());
-                        this.refresh(cx);
-                        this.report(result, cx);
-                    });
-                });
-        Some(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(4.0))
-                .child(label_row("Frame blending", switch))
-                .child(
-                    div()
-                        .text_size(px(TEXT_CAPTION))
-                        .text_color(rgb(TEXT_MUTED))
-                        .child("Smooths slow motion: each frame mixes the two source frames around it."),
-                )
-                .into_any_element(),
-        )
     }
 
     fn speed_footer(&self, segment: &Segment, cx: &mut Context<Self>) -> AnyElement {

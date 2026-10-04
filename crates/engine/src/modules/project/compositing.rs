@@ -167,6 +167,22 @@ pub struct BackgroundRemoval {
     /// flipping it re-bakes nothing.
     #[serde(default, skip_serializing_if = "is_false")]
     pub invert: bool,
+    /// Whether the matte cuts the clip, which is "Remove background". Off
+    /// when the matte is there only to say where the grade or the effects
+    /// apply ([`grade`](Self::grade), [`effects`](Self::effects)): the
+    /// whole picture shows. Old files, which have no such field, cut.
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub cut: bool,
+    /// Where the clip's colour grade (the Adjust tab: grade, curves, wheels,
+    /// HSL, LUT, vignette, grain) applies: the whole clip, only the matte's
+    /// subject, or only the rest. The subject is what the matte keeps,
+    /// whatever [`invert`](Self::invert) says about the cut.
+    #[serde(default, skip_serializing_if = "MatteTarget::is_whole")]
+    pub grade: MatteTarget,
+    /// Where the clip's effects apply, the same way: "blur only the
+    /// background" is effects on [`MatteTarget::Background`].
+    #[serde(default, skip_serializing_if = "MatteTarget::is_whole")]
+    pub effects: MatteTarget,
 }
 
 /// The clicks that select an object, on one frame of the clip's source.
@@ -190,6 +206,12 @@ pub struct PromptPoint {
 }
 
 impl BackgroundRemoval {
+    /// Whether the matte does anything a renderer must draw: it cuts, or it
+    /// steers the grade or the effects.
+    pub fn is_used(&self) -> bool {
+        self.cut || !self.grade.is_whole() || !self.effects.is_whole()
+    }
+
     /// The first value that is not a finite fraction, by name.
     pub fn invalid_field(&self) -> Option<String> {
         let prompt = self.prompt.as_ref()?;
@@ -309,6 +331,37 @@ string_enum! {
 impl MaskOp {
     fn is_add(&self) -> bool {
         *self == MaskOp::Add
+    }
+}
+
+string_enum! {
+    /// Which part of a clip a grade or its effects apply to, by the clip's
+    /// matte ([`BackgroundRemoval`]).
+    #[derive(Default)]
+    MatteTarget {
+        /// The whole clip, as without a matte.
+        #[default]
+        Whole => "whole",
+        /// Only what the matte keeps: the person, the selected object.
+        Subject => "subject",
+        /// Only the rest.
+        Background => "background",
+    }
+}
+
+impl MatteTarget {
+    pub fn is_whole(&self) -> bool {
+        *self == MatteTarget::Whole
+    }
+
+    /// The name a menu shows.
+    pub fn label(&self) -> &str {
+        match self {
+            MatteTarget::Whole => "Whole clip",
+            MatteTarget::Subject => "Subject",
+            MatteTarget::Background => "Background",
+            MatteTarget::Other(name) => name,
+        }
     }
 }
 

@@ -27,7 +27,9 @@ use super::cache;
 pub use super::BackgroundMode;
 use crate::modules::compositing::commands::compositing_set_background;
 use crate::modules::ml::{matte, segment};
-use crate::modules::project::compositing::{BackgroundRemoval, ObjectPrompt, PromptPoint};
+use crate::modules::project::compositing::{
+    BackgroundRemoval, MatteTarget, ObjectPrompt, PromptPoint,
+};
 use crate::modules::project::document::{Micros, Project, Segment};
 use crate::modules::timeline::commands::EditResponse;
 use crate::state::AppState;
@@ -124,6 +126,9 @@ pub fn setting_for(mode: BackgroundMode) -> BackgroundRemoval {
             .into(),
         prompt: None,
         invert: false,
+        cut: true,
+        grade: MatteTarget::Whole,
+        effects: MatteTarget::Whole,
     }
 }
 
@@ -136,22 +141,109 @@ pub fn matting_remove_background(
     segment_id: String,
     enabled: bool,
 ) -> Result<BackgroundResponse, String> {
-    let mode = enabled.then_some(BackgroundMode::People);
-    set_and_bake(state, segment_id, mode.map(setting_for))
+    matting_remove_background_with(state, segment_id, enabled.then_some(BackgroundMode::People))
 }
 
 /// Turn "Remove background" on with `mode`'s model, or off with `None`.
-/// Switching from one model to another keeps the clip's "invert" choice.
+/// Switching from one model to another keeps the clip's "invert" choice and
+/// where its grade and effects apply. Off keeps the matte (uncut) while the
+/// grade or the effects still apply by it ([`matting_set_target`]).
 pub fn matting_remove_background_with(
     state: &Arc<AppState>,
     segment_id: String,
     mode: Option<BackgroundMode>,
 ) -> Result<BackgroundResponse, String> {
-    let invert = current_setting(state, &segment_id)?.is_some_and(|s| s.invert);
-    let setting = mode.map(|mode| BackgroundRemoval {
-        invert,
-        ..setting_for(mode)
-    });
+    let current = current_setting(state, &segment_id)?;
+    let setting = match mode {
+        Some(mode) => Some(BackgroundRemoval {
+            invert: current.as_ref().is_some_and(|s| s.invert),
+            grade: current
+                .as_ref()
+                .map(|s| s.grade.clone())
+                .unwrap_or_default(),
+            effects: current
+                .as_ref()
+                .map(|s| s.effects.clone())
+                .unwrap_or_default(),
+            ..setting_for(mode)
+        }),
+        None => current
+            .map(|s| BackgroundRemoval { cut: false, ..s })
+            .filter(BackgroundRemoval::is_used),
+    };
+    set_and_bake(state, segment_id, setting)
+}
+
+/// Cut the clip by its matte ("Remove background" on) or stop cutting it,
+/// keeping the matte as it is: its model, a selected object's clicks, and
+/// where the grade and the effects apply. Off on a matte that steers
+/// nothing else removes it. One undoable edit.
+pub fn matting_set_cut(
+    state: &Arc<AppState>,
+    segment_id: String,
+    cut: bool,
+) -> Result<BackgroundResponse, String> {
+    let current = current_setting(state, &segment_id)?
+        .ok_or("the clip has no matte; turn Remove background on with a model")?;
+    let setting = Some(BackgroundRemoval { cut, ..current }).filter(BackgroundRemoval::is_used);
+    set_and_bake(state, segment_id, setting)
+}
+
+/// What a matte can steer besides the cut.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MattePart {
+    /// The colour grade (the Adjust tab).
+    Grade,
+    /// The clip's effects.
+    Effects,
+}
+
+impl MattePart {
+    pub fn parse(text: &str) -> Result<Self, String> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "grade" | "colour" | "color" | "adjust" => Ok(MattePart::Grade),
+            "effects" | "effect" | "fx" => Ok(MattePart::Effects),
+            other => Err(format!("{other:?} is not grade or effects")),
+        }
+    }
+}
+
+/// Apply the clip's grade or its effects to the whole clip, only the
+/// matte's subject, or only the rest ("grade only the person", "blur only
+/// the background"), without duplicating the clip. A clip without a matte
+/// gets the people matte (Robust Video Matting), uncut, which is baked in
+/// the background; a clip with one (people, objects, a selected object)
+/// uses it as it is. Back to the whole clip on a matte that neither cuts
+/// nor steers anything else removes it. One undoable edit.
+pub fn matting_set_target(
+    state: &Arc<AppState>,
+    segment_id: String,
+    part: MattePart,
+    target: MatteTarget,
+) -> Result<BackgroundResponse, String> {
+    if let MatteTarget::Other(name) = &target {
+        return Err(format!("{name:?} is not whole, subject or background"));
+    }
+    let current = current_setting(state, &segment_id)?;
+    let mut setting = match current.clone() {
+        Some(setting) => setting,
+        None if target.is_whole() => {
+            return Ok(BackgroundResponse {
+                edit: None,
+                job: None,
+            })
+        }
+        None => BackgroundRemoval {
+            cut: false,
+            ..setting_for(BackgroundMode::People)
+        },
+    };
+    match part {
+        MattePart::Grade => setting.grade = target,
+        MattePart::Effects => setting.effects = target,
+    }
+    let setting = Some(setting).filter(BackgroundRemoval::is_used);
     set_and_bake(state, segment_id, setting)
 }
 
@@ -236,7 +328,13 @@ pub fn matting_select_object(
         model: segment::MODEL.into(),
         version: segment::model_version().into(),
         prompt: Some(prompt),
-        invert: invert.unwrap_or(current.is_some_and(|s| s.invert)),
+        invert: invert.unwrap_or(current.as_ref().is_some_and(|s| s.invert)),
+        cut: true,
+        grade: current
+            .as_ref()
+            .map(|s| s.grade.clone())
+            .unwrap_or_default(),
+        effects: current.map(|s| s.effects).unwrap_or_default(),
     };
     set_and_bake(state, segment_id, Some(setting))
 }

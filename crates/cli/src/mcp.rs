@@ -83,6 +83,10 @@ const OPEN_WORLD: &[&str] = &[
     // Downloads the model and ONNX Runtime on first use.
     "remove_background",
     "select_object",
+    "apply_to",
+    // Download RIFE on first use (`--mode flow`).
+    "frame_blend",
+    "smooth_slow_mo",
     "sound",
     "fal",
     "sticker",
