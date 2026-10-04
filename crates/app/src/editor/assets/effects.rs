@@ -18,8 +18,8 @@ use super::*;
 pub(super) const TILE_PX: (u32, u32) = ((TILE_W * 2.0) as u32, (TILE_H * 2.0) as u32);
 
 /// The Effects tab's category column: the catalog's categories, in order.
-pub(super) const CATEGORIES: [&str; 7] = [
-    "Blur", "Light", "Motion", "Retro", "Distort", "Film", "Layout",
+pub(super) const CATEGORIES: [&str; 8] = [
+    "Blur", "Light", "Motion", "Retro", "Distort", "Film", "Layout", "Face",
 ];
 
 /// What an effect tile carries while it is dragged towards the timeline.

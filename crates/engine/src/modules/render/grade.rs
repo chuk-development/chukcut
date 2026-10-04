@@ -525,90 +525,114 @@ pub type Look<'a> = (&'a dyn Fn([f32; 3]) -> [f32; 3], f32);
 /// runs. `color` is the original four scalars when they are active; `look`
 /// is a function standing in for the LUT stage, with its intensity.
 pub fn reference_encoded(
-    mut c: [f32; 3],
+    c: [f32; 3],
     color: Option<[f32; 4]>,
     grade: &Grade,
     look: Option<Look<'_>>,
 ) -> [f32; 3] {
-    let block = GradeBlock::new(grade);
-    let f = block.features;
-    use feature::*;
+    EncodedStages::new(color, grade).apply(c, look)
+}
 
-    if f & TINT != 0 {
-        let t = grade.tint * TINT_STRENGTH;
-        c = [c[0] + 0.5 * t, c[1] - t, c[2] + 0.5 * t];
-    }
-    if let Some([brightness, contrast, saturation, temperature]) = color {
-        c[0] += temperature * 0.2;
-        c[2] -= temperature * 0.2;
-        let grey = luma601(c);
-        c = c.map(|v| ((grey + (v - grey) * saturation) - 0.5) * contrast + 0.5 + brightness);
-    }
-    if f & TONE != 0 {
-        let white = 1.0 - LEVELS_STRENGTH * grade.whites;
-        let black = -LEVELS_STRENGTH * grade.blacks;
-        c = c.map(|v| (v - black) / (white - black));
-        let l = luma601(c);
-        let ws = 1.0 - smoothstep(0.0, 0.6, l);
-        let wh = smoothstep(0.4, 1.0, l);
-        let lift = TONE_STRENGTH * (grade.shadows * ws + grade.highlights * wh);
-        c = c.map(|v| v + lift);
-    }
-    if f & WHEELS != 0 {
-        let [lift, gain, gamma, offset] = wheel_factors(grade);
-        for i in 0..3 {
-            let mut v = c[i];
-            v += lift[i] * (1.0 - v);
-            v *= gain[i];
-            v = v.max(0.0).powf(gamma[i]);
-            v += offset[i];
-            c[i] = v;
+/// [`reference_encoded`] with its per-grade work done once: the packed block
+/// and the baked curve table. What a caller that grades many pixels on the
+/// CPU uses — the colour tools (`modules::grading`) simulate a grade over
+/// tens of thousands of samples per step of a fit, and baking the curves per
+/// pixel would cost a thousand evaluations each.
+pub struct EncodedStages<'g> {
+    grade: &'g Grade,
+    color: Option<[f32; 4]>,
+    block: GradeBlock,
+    curves: Option<Vec<[f32; 4]>>,
+}
+
+impl<'g> EncodedStages<'g> {
+    pub fn new(color: Option<[f32; 4]>, grade: &'g Grade) -> Self {
+        Self {
+            grade,
+            color,
+            block: GradeBlock::new(grade),
+            curves: (!grade.curves.is_identity()).then(|| bake_curves(&grade.curves)),
         }
     }
-    if f & HSL != 0 {
-        let hsv = rgb_to_hsv(c.map(|v| v.clamp(0.0, 1.0)));
-        let (a, b, t) = hsl_bands_for(hsv[0]);
-        let mix = |k: usize| {
-            let pa = [
-                grade.hsl.bands[a].hue,
-                grade.hsl.bands[a].saturation,
-                grade.hsl.bands[a].luminance,
-            ][k];
-            let pb = [
-                grade.hsl.bands[b].hue,
-                grade.hsl.bands[b].saturation,
-                grade.hsl.bands[b].luminance,
-            ][k];
-            pa + (pb - pa) * t
-        };
-        let h = hsv[0] + mix(0) * HSL_HUE_DEGREES / 360.0;
-        let s = (hsv[1] * (1.0 + mix(1))).clamp(0.0, 1.0);
-        let v = hsv[2] * (1.0 + mix(2) * HSL_LUMA_STRENGTH * hsv[1]);
-        c = hsv_to_rgb([h, s, v]);
-    }
-    if f & VIBRANCE != 0 {
-        let mx = c[0].max(c[1]).max(c[2]);
-        let mn = c[0].min(c[1]).min(c[2]);
-        let amount = 1.0 + grade.vibrance * (1.0 - (mx - mn).clamp(0.0, 1.0));
-        let grey = luma601(c);
-        c = c.map(|v| grey + (v - grey) * amount);
-    }
-    if !grade.curves.is_identity() {
-        let table = bake_curves(&grade.curves);
-        for (i, v) in c.iter_mut().enumerate() {
-            *v = table_at(&table, table_at(&table, *v, 3), i);
+
+    /// The stages applied to one encoded pixel; see [`reference_encoded`].
+    pub fn apply(&self, mut c: [f32; 3], look: Option<Look<'_>>) -> [f32; 3] {
+        let grade = self.grade;
+        let f = self.block.features;
+        use feature::*;
+
+        if f & TINT != 0 {
+            let t = grade.tint * TINT_STRENGTH;
+            c = [c[0] + 0.5 * t, c[1] - t, c[2] + 0.5 * t];
         }
-    }
-    if let Some((lut, intensity)) = look {
-        let looked = lut(c);
-        for i in 0..3 {
-            c[i] += (looked[i] - c[i]) * intensity;
+        if let Some([brightness, contrast, saturation, temperature]) = self.color {
+            c[0] += temperature * 0.2;
+            c[2] -= temperature * 0.2;
+            let grey = luma601(c);
+            c = c.map(|v| ((grey + (v - grey) * saturation) - 0.5) * contrast + 0.5 + brightness);
         }
+        if f & TONE != 0 {
+            let white = 1.0 - LEVELS_STRENGTH * grade.whites;
+            let black = -LEVELS_STRENGTH * grade.blacks;
+            c = c.map(|v| (v - black) / (white - black));
+            let l = luma601(c);
+            let ws = 1.0 - smoothstep(0.0, 0.6, l);
+            let wh = smoothstep(0.4, 1.0, l);
+            let lift = TONE_STRENGTH * (grade.shadows * ws + grade.highlights * wh);
+            c = c.map(|v| v + lift);
+        }
+        if f & WHEELS != 0 {
+            let [lift, gain, gamma, offset] = [
+                self.block.lift,
+                self.block.gain,
+                self.block.gamma,
+                self.block.offset,
+            ];
+            for i in 0..3 {
+                let mut v = c[i];
+                v += lift[i] * (1.0 - v);
+                v *= gain[i];
+                v = v.max(0.0).powf(gamma[i]);
+                v += offset[i];
+                c[i] = v;
+            }
+        }
+        if f & HSL != 0 {
+            let hsv = rgb_to_hsv(c.map(|v| v.clamp(0.0, 1.0)));
+            let (a, b, t) = hsl_bands_for(hsv[0]);
+            let mix = |k: usize| {
+                let pa = self.block.hsl[a][k];
+                let pb = self.block.hsl[b][k];
+                pa + (pb - pa) * t
+            };
+            let h = hsv[0] + mix(0) * HSL_HUE_DEGREES / 360.0;
+            let s = (hsv[1] * (1.0 + mix(1))).clamp(0.0, 1.0);
+            let v = hsv[2] * (1.0 + mix(2) * HSL_LUMA_STRENGTH * hsv[1]);
+            c = hsv_to_rgb([h, s, v]);
+        }
+        if f & VIBRANCE != 0 {
+            let mx = c[0].max(c[1]).max(c[2]);
+            let mn = c[0].min(c[1]).min(c[2]);
+            let amount = 1.0 + grade.vibrance * (1.0 - (mx - mn).clamp(0.0, 1.0));
+            let grey = luma601(c);
+            c = c.map(|v| grey + (v - grey) * amount);
+        }
+        if let Some(table) = &self.curves {
+            for (i, v) in c.iter_mut().enumerate() {
+                *v = table_at(table, table_at(table, *v, 3), i);
+            }
+        }
+        if let Some((lut, intensity)) = look {
+            let looked = lut(c);
+            for i in 0..3 {
+                c[i] += (looked[i] - c[i]) * intensity;
+            }
+        }
+        if f & FADE != 0 {
+            c = c.map(|v| v * (1.0 - FADE_COMPRESS * grade.fade) + FADE_LIFT * grade.fade);
+        }
+        c.map(|v| v.clamp(0.0, 1.0))
     }
-    if f & FADE != 0 {
-        c = c.map(|v| v * (1.0 - FADE_COMPRESS * grade.fade) + FADE_LIFT * grade.fade);
-    }
-    c.map(|v| v.clamp(0.0, 1.0))
 }
 
 /// The vignette's mask at a position in the quad (`0..1` each way): `0` at

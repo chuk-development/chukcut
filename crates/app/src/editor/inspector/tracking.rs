@@ -105,7 +105,8 @@ impl Editor {
                 })
             });
 
-        vec![
+        let face_rows = self.face_follow_rows(target.clone(), cx);
+        let mut rows = vec![
             hint("Draw a box around an object in the video, and this clip follows it.".to_string()),
             PropertyRow::new("tracking-target-row", "Track in")
                 .no_actions()
@@ -120,7 +121,9 @@ impl Editor {
                 .disabled(target.is_none())
                 .on_click(cx.listener(|this, _, _, cx| this.begin_box_select(false, cx)))
                 .into_any_element()]),
-        ]
+        ];
+        rows.extend(face_rows);
+        rows
     }
 
     /// While the box is being drawn on the player.
@@ -210,13 +213,24 @@ impl Editor {
             .iter()
             .filter(|s| s.is_lost() || s.c < LOW_CONFIDENCE)
             .count();
-        let made_by = TrackerKind::from_id(&track.settings.tracker).label();
+        // A track made from a face's landmarks (`landmarks::commands`) is
+        // not re-tracked with a box and was made by no box tracker.
+        let face =
+            track.settings.tracker == chukcut_engine::modules::landmarks::commands::FACE_TRACKER;
+        let (what, made_by) = if face {
+            ("a face", "Face landmarks")
+        } else {
+            (
+                "an object",
+                TrackerKind::from_id(&track.settings.tracker).label(),
+            )
+        };
         let summary = if doubtful > 0 {
             format!(
-                "Follows an object in {target_name} · {frames} frames, {doubtful} doubtful · {made_by}"
+                "Follows {what} in {target_name} · {frames} frames, {doubtful} doubtful · {made_by}"
             )
         } else {
-            format!("Follows an object in {target_name} · {frames} frames · {made_by}")
+            format!("Follows {what} in {target_name} · {frames} frames · {made_by}")
         };
 
         let slider = self.smoothing_slider(window, cx);
@@ -226,10 +240,25 @@ impl Editor {
             slider.update(cx, |state, cx| state.set_value(smoothing, window, cx));
         }
 
-        vec![
-            hint(summary),
-            self.mode_row(cx),
-            self.tracker_row(cx),
+        let tracker_row = (!face).then(|| self.tracker_row(cx));
+        let mut first = vec![
+            Button::new("tracking-retrack")
+                .small()
+                .label("Re-track from here")
+                .on_click(cx.listener(|this, _, _, cx| this.begin_box_select(true, cx)))
+                .into_any_element(),
+            Button::new("tracking-bake")
+                .small()
+                .label("Bake to keyframes")
+                .on_click(cx.listener(|this, _, _, cx| this.bake_track(cx)))
+                .into_any_element(),
+        ];
+        if face {
+            first.remove(0);
+        }
+        let mut rows = vec![hint(summary), self.mode_row(cx)];
+        rows.extend(tracker_row);
+        rows.extend([
             PropertyRow::new("tracking-smoothing", "Smoothing")
                 .no_actions()
                 .child(div().flex_1().child(Slider::new(&slider)))
@@ -243,18 +272,7 @@ impl Editor {
                         .child(format!("{smoothing:.0}")),
                 )
                 .into_any_element(),
-            actions(vec![
-                Button::new("tracking-retrack")
-                    .small()
-                    .label("Re-track from here")
-                    .on_click(cx.listener(|this, _, _, cx| this.begin_box_select(true, cx)))
-                    .into_any_element(),
-                Button::new("tracking-bake")
-                    .small()
-                    .label("Bake to keyframes")
-                    .on_click(cx.listener(|this, _, _, cx| this.bake_track(cx)))
-                    .into_any_element(),
-            ]),
+            actions(first),
             actions(vec![
                 Button::new("tracking-detach")
                     .small()
@@ -268,7 +286,8 @@ impl Editor {
                     .on_click(cx.listener(|this, _, _, cx| this.remove_track(cx)))
                     .into_any_element(),
             ]),
-        ]
+        ]);
+        rows
     }
 
     /// The follow mode menu. Before tracking it sets how the new track is

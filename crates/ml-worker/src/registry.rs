@@ -41,6 +41,12 @@ pub enum Task {
     DetectFaces,
     /// Single-object tracking: a box in, a box per frame out.
     TrackBox,
+    /// Source separation: a stretch of stereo sound in, its voice out
+    /// (HTDemucs).
+    Separate,
+    /// Dense face landmarks: a face crop in, 478 points out (MediaPipe face
+    /// mesh), on faces YuNet found.
+    FaceLandmarks,
     /// Person matting: an alpha matte per frame, recurrent over a run of
     /// frames.
     Matte,
@@ -92,6 +98,13 @@ pub struct ModelSpec {
     pub companion: Option<&'static str>,
 }
 
+/// The sample rate source separation runs at: HTDemucs was trained on
+/// 44.1 kHz stereo music.
+pub const SEPARATION_RATE: u32 = 44_100;
+/// Frames per channel the separation model takes at once: HTDemucs's
+/// training segment, 7.8 s. The export's input is fixed at this length.
+pub const SEPARATION_SEGMENT: usize = 343_980;
+
 pub const MODELS: &[ModelSpec] = &[
     ModelSpec {
         id: "yunet",
@@ -110,6 +123,57 @@ pub const MODELS: &[ModelSpec] = &[
         providers_tested: &["CPU", "CUDA"],
         cpu_ok: true,
         companion: None,
+    },
+    // HTDemucs fine-tuned, the vocals specialist (Défossez, "Hybrid
+    // Transformers for Music Source Separation", 2022;
+    // github.com/facebookresearch/demucs, MIT, weights released under it),
+    // for "Isolate voice". StemSplitio's ONNX export: the STFT and its
+    // inverse are inside the graph as convolutions, so it is waveform in,
+    // waveform out, `mix` [1, 2, 343980] at 44.1 kHz to `stems`
+    // [1, 4, 2, 343980] (drums, bass, other, vocals; only vocals is trained
+    // in this specialist). Chosen over the Mel-Band RoFormer (better, but
+    // 953 MB and ~10x slower) and over UVR's MDX-Net models (the weights'
+    // licence is a README sentence). Hugging Face commit 2ef0d75; SHA-256 =
+    // LFS object id, checked against the download on 2026-10-04.
+    ModelSpec {
+        id: "htdemucs-vocals",
+        version: "ft-vocals-2ef0d75",
+        name: "HTDemucs (isolate voice)",
+        task: Task::Separate,
+        licence: "MIT",
+        commercial_ok: true,
+        url: "https://huggingface.co/StemSplitio/htdemucs-ft-vocals-onnx/resolve/2ef0d757d3e226d0da85fb8c71514f464fcabdd0/htdemucs_ft_vocals.onnx",
+        sha256: "8c5d5e2da1f27050240bb80236673307ee3b40d4b064066d9350f4d64bfd544d",
+        bytes: 316_446_953,
+        file: "htdemucs_ft_vocals.onnx",
+        providers_tested: &["CPU", "CUDA"],
+        // About half real time on eight CPU threads: slow, bounded.
+        cpu_ok: true,
+        companion: None,
+    },
+    // MediaPipe Face Landmarker v2's face mesh (Google, Apache-2.0 per its
+    // model card, "Model Card MediaPipe Face Mesh V2"): 478 points from a
+    // 256x256 face crop, plus a face-presence logit. The ONNX file is
+    // naklitechie/face-landmarks-onnx (Apache-2.0), a tf2onnx conversion of
+    // face_landmarks_detector.tflite from face_landmarker.task; input
+    // `input_12` [N, 256, 256, 3] NHWC RGB 0..1, outputs `Identity`
+    // [N, 1, 1, 1434] (x, y, z in crop pixels) and `Identity_1` (the
+    // logit). Three other conversions on Hugging Face give the same numbers.
+    // Faces are found by YuNet. Commit 575c338; SHA-256 = LFS object id.
+    ModelSpec {
+        id: "facemesh",
+        version: "v2-478-575c338",
+        name: "MediaPipe face mesh (face landmarks)",
+        task: Task::FaceLandmarks,
+        licence: "Apache-2.0",
+        commercial_ok: true,
+        url: "https://huggingface.co/naklitechie/face-landmarks-onnx/resolve/575c33816c840c5b156398adb485e4f8d138adc2/face_landmarks.onnx",
+        sha256: "f38c3321ceffbc9e95103480ad38cc3f52e7e1bde2bcee7cd9355d0b9138ac0c",
+        bytes: 4_920_995,
+        file: "face_landmarks.onnx",
+        providers_tested: &["CPU", "CUDA"],
+        cpu_ok: true,
+        companion: Some("yunet"),
     },
     ModelSpec {
         id: "vittrack",
@@ -803,8 +867,13 @@ mod tests {
         for m in MODELS {
             if let Some(id) = m.companion {
                 let companion = model(id).unwrap_or_else(|| panic!("{id}"));
-                assert_eq!(m.task, Task::SegmentEncoder, "{}", m.id);
-                assert_eq!(companion.task, Task::SegmentDecoder, "{id}");
+                // SAM's encoder brings its decoder; the face mesh brings the
+                // detector that finds the faces it reads.
+                match m.task {
+                    Task::SegmentEncoder => assert_eq!(companion.task, Task::SegmentDecoder),
+                    Task::FaceLandmarks => assert_eq!(companion.task, Task::DetectFaces),
+                    other => panic!("{} ({other:?}) should not have a companion", m.id),
+                }
             }
         }
     }

@@ -64,6 +64,7 @@ pub mod context;
 pub mod dmabuf;
 pub mod enhance;
 pub mod error;
+pub mod faces;
 pub mod flow;
 pub mod grade;
 pub mod layout;

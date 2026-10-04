@@ -7,6 +7,7 @@
 //! same functions the app calls — against one [`Session`], so one invocation
 //! has one undo history.
 
+pub mod ai;
 pub mod analysis;
 pub mod audio;
 pub mod audiofx;
@@ -14,6 +15,7 @@ pub mod caption_edit;
 pub mod clip;
 pub mod cloud;
 pub mod cloud_tools;
+pub mod colour;
 pub mod delivery;
 pub mod enhance;
 pub mod frame;
@@ -285,6 +287,15 @@ operations!(
     clip::TitleFontArgs,
     clip::MaskMoveArgs,
     clip::LaneAddArgs,
+    colour::AutoAdjustArgs,
+    colour::ColourMatchArgs,
+    colour::GradePresetSaveArgs,
+    colour::GradePresetApplyArgs,
+    colour::GradePresetsArgs,
+    ai::IsolateVoiceArgs,
+    ai::FaceLandmarksArgs,
+    ai::RetouchArgs,
+    ai::FollowFaceArgs,
     library::StickerArgs,
     motion::FrameBlendArgs,
     motion::SmoothSlowMoArgs,

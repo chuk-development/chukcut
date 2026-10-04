@@ -24,7 +24,7 @@ pub fn fx_catalog() -> &'static [EffectDescriptor] {
 
 /// Apply an edit that minted a material: pool first, then history, and the
 /// material back out if the edit is refused.
-fn commit(
+pub(crate) fn commit(
     state: &Arc<AppState>,
     build: impl FnOnce(&Project) -> Result<(Option<EffectMaterial>, EditCommand), String>,
 ) -> Result<EditResponse, String> {

@@ -21,10 +21,12 @@ pub enum Category {
     Distort,
     Film,
     Layout,
+    /// Effects that read the faces in the picture (`modules::landmarks`).
+    Face,
 }
 
 impl Category {
-    pub const ALL: [Category; 7] = [
+    pub const ALL: [Category; 8] = [
         Category::Blur,
         Category::Light,
         Category::Motion,
@@ -32,6 +34,7 @@ impl Category {
         Category::Distort,
         Category::Film,
         Category::Layout,
+        Category::Face,
     ];
 
     pub fn label(self) -> &'static str {
@@ -43,6 +46,7 @@ impl Category {
             Category::Distort => "Distort",
             Category::Film => "Film",
             Category::Layout => "Layout",
+            Category::Face => "Face",
         }
     }
 }
@@ -199,6 +203,7 @@ pub const BLOOM: &str = "bloom";
 pub const GATE_WEAVE: &str = "gate_weave";
 pub const LETTERBOX: &str = "letterbox";
 pub const FRAME: &str = "frame";
+pub const RETOUCH: &str = "retouch";
 
 /// Mirror modes, in `choice` index order.
 pub const MIRROR_MODES: &[&str] = &[
@@ -407,6 +412,21 @@ static EFFECTS: &[EffectDescriptor] = &[
             slider("shadow_distance", "Shadow distance", 20.0),
             number("shadow_angle", "Shadow angle", -180.0, 180.0, 45.0, "°"),
             color("shadow_color", "Shadow colour", BLACK),
+        ],
+    },
+    EffectDescriptor {
+        id: RETOUCH,
+        label: "Retouch",
+        category: Category::Face,
+        description:
+            "Smoother skin, brighter eyes and teeth, a slimmer jaw, on the faces in the clip.",
+        // The defaults are the "Natural" preset (`retouch::PRESETS`).
+        params: &[
+            slider("strength", "Strength", 100.0),
+            slider("smooth", "Smooth skin", 35.0),
+            slider("eyes", "Brighten eyes", 15.0),
+            slider("teeth", "Whiten teeth", 20.0),
+            slider("slim", "Slim face", 0.0),
         ],
     },
 ];

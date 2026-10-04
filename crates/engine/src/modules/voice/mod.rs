@@ -11,12 +11,17 @@
 //!   `docs/decisions/0015-voice-cleanup-engine.md`.
 //! - **Normalize** is a gain, measured once with EBU R128 and stored.
 //!
-//! Both live in one parameter block on the clip ([`cleanup`]), and both
+//! - **Isolate voice** separates the speech from music and noise (or keeps
+//!   only the music) with a model in the ML worker, also rendered to the
+//!   cache ([`isolate`]); the denoise then works on what it kept.
+//!
+//! All live in one parameter block on the clip ([`cleanup`]), and both
 //! mixers resolve it through [`cleanup::effective_source`].
 
 pub mod cleanup;
 pub mod commands;
 pub mod denoise;
+pub mod isolate;
 
 pub use cleanup::{
     audible_segment, cleanup_of, effective_source, Denoise, EffectiveSource, Normalize,

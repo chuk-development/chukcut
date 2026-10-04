@@ -486,6 +486,46 @@ fn look_tile_in(dir: &Path, lut_path: &str, size: (u32, u32)) -> Result<PathBuf,
     })
 }
 
+/// A grade preset's tile: the day picture with the whole grade on it. Keyed
+/// by the grade's values (and the LUT file's stamp, when it has one), so an
+/// edited preset gets a new tile.
+pub fn grade_tile(
+    edit: &crate::modules::inspector::edit::GradeEdit,
+    size: (u32, u32),
+) -> Result<PathBuf, String> {
+    let values = serde_json::to_string(edit).map_err(|e| e.to_string())?;
+    let stamp = edit
+        .lut
+        .as_ref()
+        .and_then(|l| std::fs::metadata(&l.path).ok())
+        .map(|m| format!("{:?}-{}", m.modified().ok(), m.len()))
+        .unwrap_or_default();
+    let key = hash(&[
+        include_str!("../render/grade.rs"),
+        include_str!("../render/shaders/quad.wgsl"),
+        &values,
+        &stamp,
+    ]);
+    let path = tiles_dir().join(format!("{key:016x}-grade-{}x{}.png", size.0, size.1));
+    cached(path, || {
+        let mut p = sample_project(size);
+        let mut track = Track::new(TrackKind::Video, "Main");
+        let mut segment = clip("s", "sample-day", 0, 1_000_000);
+        let mut grade = crate::modules::project::document::ColorAdjustMaterial::identity();
+        grade.brightness = edit.brightness;
+        grade.contrast = edit.contrast;
+        grade.saturation = edit.saturation;
+        grade.temperature = edit.temperature;
+        grade.lut = edit.lut.clone();
+        grade.grade = edit.grade.clone().normalized();
+        segment.extras.push(grade.id.clone());
+        p.materials.color_adjusts.push(grade);
+        track.segments.push(segment);
+        p.tracks.push(track);
+        draw(&p, 0)
+    })
+}
+
 /// Remove every cached tile. They are redrawn on demand.
 pub fn clear() -> std::io::Result<()> {
     let dir = tiles_dir();

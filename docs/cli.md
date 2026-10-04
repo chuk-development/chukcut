@@ -627,6 +627,40 @@ original file goes away. The rest of the grade does not change.
 chukcut-cli look reel.chukcut 0:0 "Teal & Orange" --intensity 0.7
 ```
 
+#### `auto-adjust PROJECT CLIP [--amount 0..1]`
+
+Balances a video or photo clip from its own pixels: exposure towards a
+mid-grey average, white balance against the most neutral pixels, black and
+white points by a levels stretch, a little vibrance when the picture is
+dull. The answer is written into the ordinary grade controls (exposure,
+temperature, tint, whites, blacks, vibrance), which stay editable; the
+clip's other controls (contrast, a LUT, curves) stay and are part of what is
+measured. `--amount` scales the correction (default 1). One undo step. The
+data has the controls and the measurements before and after.
+
+#### `colour-match PROJECT CLIP --to CLIP [--at TIME] [--amount 0..1]`
+
+Grades `CLIP` so its colours match the clip `--to`, as that clip looks with
+its own grade: the L*a*b* means and spreads through exposure, contrast,
+saturation, temperature and tint, the rest of each channel's histogram
+through the red, green and blue curves (not when the clip has a LUT or a
+fade). `--at` matches the reference's frame at that timeline time instead of
+the whole reference. The data reports the L*a*b* distance before and after.
+One undo step.
+
+```bash
+chukcut-cli colour-match reel.chukcut 0:2 --to 0:0
+```
+
+#### `grade-preset-save PROJECT CLIP [--name NAME] [--replace]` · `grade-preset-apply PROJECT CLIP NAME` · `grade-presets PROJECT [--remove NAME]`
+
+Saves a clip's whole grade (sliders, curves, wheels, HSL, LUT, effects
+such as vignette and grain) as a named preset in
+`$XDG_DATA_HOME/chukcut/grade-presets/` — the app's Filters › My presets.
+Without `--name` the next free "Preset N". A preset of that name is
+replaced only with `--replace`. `grade-preset-apply` gives a clip a preset's
+grade (one undo step); `grade-presets` lists them or deletes one.
+
 #### `curve PROJECT CLIP --point X,Y...`
 
 Sets one tone curve of the clip's grade. Each `--point` is an input level and
@@ -1058,6 +1092,47 @@ chukcut-cli effect add reel.chukcut gaussian_blur --clip 0:0 --set radius=30
 chukcut-cli apply-to reel.chukcut 0:0 --effects background
 ```
 
+#### `face-landmarks PROJECT CLIP [--at TIME] [--points]`
+
+Finds the faces in a video clip — MediaPipe's face mesh (478 points per
+face, Apache-2.0, 5 MB) behind the YuNet detector, in the ML worker — and
+prints those at `--at` (default: the clip's start): box, score and the named
+points retouch uses; `--points` adds all 478. Points are fractions of the
+video frame. The landmarks are a cache file per media file
+(`~/.cache/chukcut/landmarks`), not part of the project; the first run on a
+clip analyses every frame of it. The model and ONNX Runtime download on
+first use.
+
+#### `retouch PROJECT CLIP [--preset natural|soft|bright|sculpt] [--strength N] [--smooth N] [--eyes N] [--teeth N] [--slim N] [--off] [--no-analyse]`
+
+Retouches the faces in a video clip: smoother skin (only the face's skin,
+not the eyes, brows, lips or hair), brighter eyes and teeth, a slimmer jaw.
+Values are 0..100; a preset sets the four looks, `--strength` scales them
+all, and any value can be given on its own. On a clip already retouched,
+the values not given are kept. It is the `retouch` effect (Effects › Face in
+the app), so `effect set` reaches it too. One undo step; then the clip's
+faces are found unless `--no-analyse` (the app and an export find them
+when they are missing). A frame without a face is drawn as it is.
+
+```bash
+chukcut-cli retouch reel.chukcut 0:0 --preset soft --slim 20
+```
+
+#### `follow-face PROJECT CLIP --face-of CLIP [--anchor face|eyes|forehead|nose|mouth|chin] [--mode MODE] [--face N] [--at TIME]`
+
+Makes a title, sticker or picture follow a face in a video clip. The face's
+pose — the anchor point, its size and the tilt of the eyes — becomes a
+motion track and the clip follows it like any tracked object, so `--mode`
+(`position`, `position_scale`, `position_scale_rotation`) and `track-set`
+(smoothing, detach, bake to keyframes) work as for `track`. `--face` picks
+a face, largest first. `--at` is the instant the clip is where it should be
+relative to the face (default its start); attaching does not move it there.
+Finds the faces first if the clip has none analysed. One undo step.
+
+```bash
+chukcut-cli follow-face reel.chukcut 2:0 --face-of 0:0 --anchor forehead --mode position_scale
+```
+
 #### `blend PROJECT CLIP [MODE] [--opacity N]`
 
 Sets how a clip blends with the lanes below it: `normal`, `multiply`,
@@ -1365,6 +1440,19 @@ Reduces background noise (RNNoise). `--strength` from 0 to 1 (default 1).
 `--off` turns it off. The first run renders a clean copy of the sound into the
 cache.
 
+#### `isolate-voice PROJECT CLIP [--keep voice|background] [--strength 0..1] [--off] [--no-render]`
+
+Separates a clip's speech from music and noise with HTDemucs (MIT, 316 MB,
+in the ML worker): `--keep voice` (default) keeps the speech,
+`--keep background` keeps everything but the voice (music without the
+singer). `--strength` is how much of the rest goes (default 1). The setting
+is one undo step; the command then renders the isolated sound into the
+cache and waits (about 11 s for a minute of sound on an RTX 3060, 36 s on
+the CPU), unless `--no-render`. Until it is rendered the clip plays as it
+was; an export renders what is missing first. `denoise` works on what
+isolation kept. Running it again with the same setting renders what is
+missing.
+
 #### `loudness PROJECT [--clip CLIP]`
 
 Measures EBU R128 loudness: integrated LUFS, loudness range and true peak. For
@@ -1632,6 +1720,9 @@ The operation names are the MCP tool names: `info`, `validate`, `configure`,
 `animate`, `animate_text`, `zoom`, `keyframe`, `title_add`, `title_set`,
 `transition_add`, `transition_remove`, `track`, `track_set`, `mask`, `chroma_key`,
 `remove_background`, `select_object`, `apply_to`, `blend`,
+`auto_adjust`, `colour_match`, `grade_preset_save`, `grade_preset_apply`,
+`grade_presets`, `isolate_voice`, `face_landmarks`, `retouch`,
+`follow_face`,
 `frame_blend`, `smooth_slow_mo`, `captions_transcribe`,
 `captions_import`, `captions_export`, `captions_style`, `captions_list`,
 `silence_detect`, `silence_remove`, `normalize`, `denoise`, `loudness`,
@@ -1696,15 +1787,17 @@ an unknown tool or a malformed request is a JSON-RPC error.
 Read-only tools have `readOnlyHint`: `info`, `template_list`,
 `template_slots`, `validate`, `captions_list`,
 `silence_detect`, `loudness`, `catalog`, `view_frame`, `marker_list`,
-`analysis`, `stock_kinds`, `stock_search`, `presets`, `estimate`.
+`analysis`, `stock_kinds`, `stock_search`, `presets`, `estimate`,
+`face_landmarks` (which writes only the landmark cache).
 
 Tools that send data to a service outside this machine have
 `openWorldHint`: `captions_transcribe`, `translate_captions`, `tts`,
 `stock_kinds`, `stock_search`, `stock_download`, `sound`, `fal`, `sticker`,
 `music`, `sfx`, `title_font`, `catalog` (the library and `voices` kinds),
 and `ml`, `remove_background`, `select_object`, `apply_to`, `frame_blend`,
-`smooth_slow_mo`, `remove_object` and `enhance_quality`, which download a
-model or ONNX Runtime on first use (they send nothing about the project).
+`smooth_slow_mo`, `remove_object`, `enhance_quality`, `isolate_voice`,
+`face_landmarks`, `retouch` and `follow_face`, which download a model or
+ONNX Runtime on first use (they send nothing about the project).
 
 ### Resources
 

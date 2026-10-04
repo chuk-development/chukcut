@@ -70,7 +70,7 @@ pub fn cache_path(source: &str, strength: f32, engine: &str) -> PathBuf {
 
 /// FNV-1a, 64 bit: stable across builds and toolchains, unlike `std`'s hasher,
 /// so a cache made yesterday is found today.
-fn fnv1a(bytes: &[u8]) -> u64 {
+pub(crate) fn fnv1a(bytes: &[u8]) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325u64;
     for b in bytes {
         hash ^= *b as u64;
@@ -254,7 +254,8 @@ fn render_into(
     writer.finish()
 }
 
-/// Render every denoise cache `project` refers to that is missing.
+/// Render every voice isolation and denoise cache `project` refers to that
+/// is missing.
 ///
 /// The export calls this before it mixes. It is what "export must never
 /// silently differ from the preview" costs when a cache was cleared: the
@@ -272,12 +273,18 @@ pub fn ensure_rendered(project: &Project, cancel: &AtomicBool) -> Result<(), Str
             let Some((_, cleanup)) = cleanup_of(project, segment) else {
                 continue;
             };
-            let Some(denoise) = cleanup.denoise else {
-                continue;
-            };
             let Some((path, duration)) = original_source(project, segment) else {
                 continue;
             };
+            // Isolation first: the denoise reads what it kept.
+            if let Some(isolate) = &cleanup.isolate {
+                super::isolate::render(&path, duration, isolate, cancel, &|_| {})
+                    .map_err(|e| format!("could not isolate the voice of {path}: {e}"))?;
+            }
+            let Some(denoise) = cleanup.denoise.clone() else {
+                continue;
+            };
+            let path = super::cleanup::denoise_input(&path, &cleanup);
             if denoise.engine != ENGINE {
                 tracing::warn!(
                     engine = %denoise.engine,
@@ -295,14 +302,14 @@ pub fn ensure_rendered(project: &Project, cancel: &AtomicBool) -> Result<(), Str
 }
 
 /// The smallest WAV writer that works: 16-bit PCM, sizes patched on finish.
-struct WavWriter {
+pub(crate) struct WavWriter {
     file: BufWriter<std::fs::File>,
     frames: u64,
     channels: u16,
 }
 
 impl WavWriter {
-    fn create(path: &Path, rate: u32, channels: u16) -> Result<Self, String> {
+    pub(crate) fn create(path: &Path, rate: u32, channels: u16) -> Result<Self, String> {
         let file =
             std::fs::File::create(path).map_err(|e| format!("cannot write {path:?}: {e}"))?;
         let mut writer = Self {
@@ -328,7 +335,7 @@ impl WavWriter {
         Ok(writer)
     }
 
-    fn write(&mut self, interleaved: &[f32]) -> Result<(), String> {
+    pub(crate) fn write(&mut self, interleaved: &[f32]) -> Result<(), String> {
         let mut bytes = Vec::with_capacity(interleaved.len() * 2);
         for s in interleaved {
             let v = (s.clamp(-1.0, 1.0) * 32_767.0).round() as i16;
@@ -338,7 +345,7 @@ impl WavWriter {
         self.file.write_all(&bytes).map_err(|e| e.to_string())
     }
 
-    fn finish(mut self) -> Result<(), String> {
+    pub(crate) fn finish(mut self) -> Result<(), String> {
         let data = self.frames * self.channels as u64 * 2;
         if data > u32::MAX as u64 - 36 {
             return Err("the cleaned audio is longer than a WAV file can hold".into());
