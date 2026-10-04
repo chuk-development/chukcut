@@ -50,13 +50,13 @@ keyframes and the denoise is spatial only.
 **Before you change code:** read "Traps that have already cost time" and
 the CLAUDE.md non-negotiables. Judge performance from a release build only.
 
-**Newest sections first:** QA pass 3, UX gaps, Body landmarks, Polish pass 3, CI, Colour AI, QA pass 2, Flaky
+**Newest sections first:** The crash after the export, QA pass 3, UX gaps, Body landmarks, Polish pass 3, CI, Colour AI, QA pass 2, Flaky
 tests, Frame blending, Timelines and compound clips. The ML sections are at
 the end of the file ("The ML worker" and its sub-sections).
 
 ## Update history
 
-Last updated: 2026-10-04 (QA pass 3 over waves 10–11: five fixes, the showcase extended — see "QA pass 3" below). Previously 2026-10-04 (crop, speed effects, denoise, Performance settings, a persisted export queue with a quit guard, and the ML worker and CLI in the tarball — see "UX gaps" below). Previously 2026-10-04 (body landmarks, follow a body part, reframe on a body, zipped models, faces and voices in the preparation — see "Body landmarks" below). Previously 2026-10-04 (the "At a glance" block above, after polish pass 3). Previously 2026-10-04 (QA pass 2 over the wave 7–9 features and a showcase that shows them — see "QA pass 2" below). Previously 2026-10-04 (CI: clippy is fatal, the engine tests run on lavapipe with ffmpeg, the CLI and ML worker tests run too — see "CI" below). Previously 2026-10-04 (preview frames no longer leave the GPU: shared with GPUI through a patched GPUI, readback as the fallback — see "Preview frames shared with GPUI" under Perf). Previously 2026-10-04 (ML worker: VitTrack re-finding, Remove background, CUDA — see "The ML worker" below). Previously 2026-10-02 (**the UI is native now** — decision 0011. The Tauri
+Last updated: 2026-10-04 (the CLI's crash after an export found and fixed, and the shells leave through `lifecycle::exit` — see "The crash after the export" below). Previously 2026-10-04 (QA pass 3 over waves 10–11: five fixes, the showcase extended — see "QA pass 3" below). Previously 2026-10-04 (crop, speed effects, denoise, Performance settings, a persisted export queue with a quit guard, and the ML worker and CLI in the tarball — see "UX gaps" below). Previously 2026-10-04 (body landmarks, follow a body part, reframe on a body, zipped models, faces and voices in the preparation — see "Body landmarks" below). Previously 2026-10-04 (the "At a glance" block above, after polish pass 3). Previously 2026-10-04 (QA pass 2 over the wave 7–9 features and a showcase that shows them — see "QA pass 2" below). Previously 2026-10-04 (CI: clippy is fatal, the engine tests run on lavapipe with ffmpeg, the CLI and ML worker tests run too — see "CI" below). Previously 2026-10-04 (preview frames no longer leave the GPU: shared with GPUI through a patched GPUI, readback as the fallback — see "Preview frames shared with GPUI" under Perf). Previously 2026-10-04 (ML worker: VitTrack re-finding, Remove background, CUDA — see "The ML worker" below). Previously 2026-10-02 (**the UI is native now** — decision 0011. The Tauri
 shell and the React frontend are gone; the engine is `crates/engine`
 (`chukcut-engine`, no UI dependency) and the app is a GPUI window in
 `crates/app`. What the native app does today: import (dialog or command line),
@@ -85,6 +85,55 @@ forgets). Previously 2026-07-27: the preview stopped copying its frames — the
 JPEG encoder now reads a surface the compositor drew into, 2.7–2.9× on a whole
 frame; and earlier the same day, the attempt that went the other way round and
 the `vkDeviceWaitIdle` crash it found.
+
+## The crash after the export (2026-10-04, agent/shutdown)
+
+`chukcut-cli export` sometimes died with SIGSEGV (exit 139) after it had
+printed "exported …": the file was complete, the exit status was not. **The
+cause is found and fixed.** Two things together:
+
+- The export thread sent `Done` and only then dropped the `ExportJob`. The
+  job's `MediaSourceProvider` holds the decoders and a cache of
+  `SourceFrame`s with wgpu textures, so dropping it frees Vulkan memory in
+  the driver.
+- The CLI returned from `main` the moment it heard `Done`. That calls libc's
+  `exit`, which runs every library's destructors (`_dl_fini`) while other
+  threads keep running — among them `libGLX_nvidia`/`libnvidia-glcore`'s and
+  `libnvcuvid`'s.
+
+Evidence: a loop of 2 s exports of the showcase, six at a time pinned to four
+cores (`taskset -c 0-3`) next to a `cargo build -j 3`, gave **5 SIGSEGV and 1
+hang in 90 runs** with the qa3 binary. Every core (apport keeps them in
+`/var/lib/apport/coredump/` once `ulimit -c unlimited` is set) shows the same
+two threads: the export thread in `drop_glue::<ExportJob>` →
+`MediaSourceProvider` → `TextureView::drop` → `libnvidia-glcore`, and the
+main thread inside `libGLX_nvidia`'s destructor called from `ld.so`. The
+kernel line names the export thread too (`chukcut-export-[…]: segfault … in
+libnvidia-glcore.so`), as it did for QA pass 3's crash. The hang was the
+same race with another library: the main thread in `libnvcuvid`'s
+destructor joining a thread that never ended. The crash needs the export
+thread to be descheduled between `Done` and the end of its drop, which is
+why it showed under load and not under gdb.
+
+The fix, in two layers:
+
+- `export_start` holds the terminal message back (`HoldTerminal`) until the
+  job is dropped and `end_job` has run, so a caller that acts on `Done`
+  acts after the GPU resources are gone, and `export_shutdown`'s wait for
+  `active_jobs() == 0` really waits for them. The queue already dropped the
+  job before it reported an item finished.
+- **The CLI and the app leave through `chukcut_engine::lifecycle::exit`**:
+  stop the exports (`export_shutdown`), stop the ML worker (asked, then
+  killed after 2 s), flush stdout and stderr, and `_exit`. No library
+  destructor runs, so no thread of ours — the player, a bake, rayon, a
+  decoder's own threads — can be in a driver while it is unloaded. Nothing
+  the engine keeps needs a destructor at exit: the log file and the export
+  queue file are written unbuffered, and the shared wgpu device lives in a
+  static that Rust never drops anyway.
+
+After: **0 failures in 180 runs** of the same loop with the fixed binary.
+Do not return from `main` (or call `std::process::exit`) in a shell once
+the engine is up; call `lifecycle::exit`.
 
 ## QA pass 3 (2026-10-04, agent/qa3)
 
@@ -3467,6 +3516,12 @@ nothing else in the system would say so.
 
 ## Traps that have already cost time
 
+- **A return from `main` runs the GPU driver's destructors under our
+  threads.** libc's `exit` unloads `libnvidia-glcore`, `libnvcuvid` and the
+  rest while an export, a bake or a decoder thread may still be calling
+  into them: SIGSEGV or a hang after the work was done. Shells leave through
+  `chukcut_engine::lifecycle::exit` (see "The crash after the export"), and
+  a job reports itself finished only after it has dropped what it holds.
 - **A GPU test proves something about one adapter only.** NVIDIA rounds the
   source alpha factor of an `Rgba8UnormSrgb` target to 1/255 in the blender;
   lavapipe does not. A blending test written on lavapipe passed while NVIDIA

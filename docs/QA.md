@@ -518,7 +518,7 @@ Fixed on this branch:
 
 Open:
 
-- **Medium: `chukcut-cli export` crashed once with a segmentation fault
+- ~~**Medium: `chukcut-cli export` crashed once with a segmentation fault
   after the export was written.** In one of four runs of `scripts/demo.sh
   --export` (load 17–22 from `cargo test` runs), the CLI printed "exported
   …/showcase.mp4 (831 frames, 29.7 MB) in 44.7 s" and then died with
@@ -529,27 +529,52 @@ Open:
   hang that was not the device" has the earlier device-teardown crashes.
   Steps: `scripts/demo.sh --export` in a loop under load, or `chukcut-cli
   export _scratch/demo/showcase.chukcut out.mp4 --preset user_showcase
-  --sidecar srt` in a loop.
+  --sidecar srt` in a loop.~~ Fixed on agent/shutdown, cause found: the
+  export thread sent "done" and only then dropped the job, whose decoders
+  free cached GPU textures in the Vulkan driver; the CLI returned from
+  `main` meanwhile, and libc's `exit` ran the NVIDIA libraries' destructors
+  under that thread. Reproduced at 5 crashes (and 1 hang in the NVDEC
+  library's destructor) in 90 exports, six at a time on four cores; the
+  cores all show the export thread in `drop(ExportJob)` → `TextureView`
+  → `libnvidia-glcore` while the main thread is in `_dl_fini`. The job is
+  now dropped before "done" is sent, and the CLI and the app leave through
+  `lifecycle::exit` (stop the exports and the ML worker, flush, `_exit`).
+  After: 0 in 180 under the same load. STATUS.md, "The crash after the
+  export".
 
 Open (low; none blocks a feature):
 
-- **A project path on the command line that cannot be read** opens the
+- ~~**A project path on the command line that cannot be read** opens the
   start screen with no message; the reason is only on stderr ("cannot read
-  /aq.chukcut: No such file or directory"). Steps: `chukcut /nonexistent.chukcut`.
-- **`template slots` numbers the slots per sequence and does not name the
+  /aq.chukcut: No such file or directory"). Steps: `chukcut /nonexistent.chukcut`.~~
+  Fixed on agent/shutdown: the start screen shows the reason (and the
+  editor's status line does, when media files came with it).
+- ~~**`template slots` numbers the slots per sequence and does not name the
   open timeline**: with Quick Cuts as a compound clip and Travel Diary as an
   opened timeline, the list has two "slot 1" lines; the compound clip's say
   `in compound clip "Quick Cuts"`, the timeline's say nothing. `--clip
-  slot:N` picks the open timeline's.
-- **The CLI names clips by their full id** in some answers ("matched to
+  slot:N` picks the open timeline's.~~ Fixed on agent/shutdown: the numbers
+  run across the project (each sequence's slots together), every line says
+  where its slot is when there is more than one place ("on the open
+  timeline "Travel Diary""), and `slot:N` takes those numbers. JSON keeps
+  the fill order as `index` and adds `number` and `open_timeline`.
+- ~~**The CLI names clips by their full id** in some answers ("matched to
   8a2966a5-a61a-…", "follows the forehead of the face in bf34ba1c-…")
-  where `info` uses the short prefix or the file name.
-- **Remove object keeps its estimate line** ("90 frames: about 23 s on a
-  GPU, 4 min on the CPU") under "All 90 frames are made."
-- **The app starts a session bus of its own** when
+  where `info` uses the short prefix or the file name.~~ Fixed on
+  agent/shutdown: `colour-match`, `follow-face` and `follow-body` say
+  "8a2966a5 (portrait.mp4)", as `info` lists it.
+- ~~**Remove object keeps its estimate line** ("90 frames: about 23 s on a
+  GPU, 4 min on the CPU") under "All 90 frames are made."~~ Fixed on
+  agent/shutdown: the estimates of Remove object and Enhance quality go
+  once every frame is made.
+- ~~**The app starts a session bus of its own** when
   `DBUS_SESSION_BUS_ADDRESS` is unset (`dbus-launch --autolaunch`, seen
   after an export finished on Xvfb); the `dbus-daemon` and the AT-SPI bus
-  stay after the app quits. Only matters for test displays.
+  stay after the app quits. Only matters for test displays.~~ Fixed on
+  agent/shutdown: it was the "export finished" desktop notification —
+  `notify-send` is GLib, and GLib autolaunches a bus on X11 when it finds
+  none. The notification is now skipped without a session bus (no
+  `DBUS_SESSION_BUS_ADDRESS` and no `$XDG_RUNTIME_DIR/bus`).
 
 Not tested, and why: playback with sound, voiceover recording, VAAPI and
 QSV (no Intel or AMD GPU here), the portal file chooser, cloud providers;
