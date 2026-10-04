@@ -2,7 +2,8 @@
 
 ## The app does not start
 
-- **"No Vulkan device"** or a black window: chukcut needs a Vulkan driver.
+- **The app stops at start, or the window stays black**: chukcut needs a
+  Vulkan driver.
   Run `vulkaninfo --summary`. It must list your GPU. On a computer without a
   GPU, install Mesa's lavapipe (`mesa-vulkan-drivers`). It works, but it is
   slow.
@@ -58,8 +59,8 @@ it. The software encoders (x264, x265) always work.
 
 ## AI tools
 
-- **"The AI cannot run here"** or nothing happens: the worker program
-  `chukcut-ml-worker` must be next to `chukcut` or on your `PATH`. The
+- **An AI tool says that it cannot run**, or nothing happens: the worker
+  program `chukcut-ml-worker` must be next to `chukcut` or on your `PATH`. The
   install script and the tarball do not install it. See
   [Getting started](getting-started.md#install). `CHUKCUT_ML_WORKER=/path`
   names the worker. `CHUKCUT_ML_WORKER=off` turns the AI tools off.
@@ -67,9 +68,9 @@ it. The software encoders (x264, x265) always work.
   acceleration**. Install the bundle that the row marks as "the one for this
   machine". You do not need a CUDA installation. The bundle brings its own
   libraries. Your system's CUDA does not interfere.
-- **"This machine's driver is too old"**: CUDA 13 needs NVIDIA driver 580 or
-  newer. CUDA 12 needs driver 525 or newer. Update the driver, or install the
-  other bundle.
+- **A bundle row says "this machine's driver is too old for it"**: CUDA 13
+  needs NVIDIA driver 580 or newer. CUDA 12 needs driver 525 or newer.
+  Update the driver, or install the other bundle.
 - **A bundle is partly installed**: the row shows **Finish** and **Remove**.
   Click **Finish**.
 - **Intel GPUs**: the models run on the CPU. An OpenVINO build of ONNX
