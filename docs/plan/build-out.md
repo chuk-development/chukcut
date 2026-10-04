@@ -25,7 +25,8 @@ column current.
   `DISPLAY=:NN xdotool …`. Never touch the owner's display `:1`, never press
   Space (audio goes to the real speakers). Pick a unique NN per agent.
 - GPU tests: run them on the real GPU AND on lavapipe (`VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json`); results differ (NVIDIA rounds alpha in the blender).
-- Build with `memguard-allow 12G cargo build -p chukcut -j 4`; gates:
+- All Claude processes run in `claude.slice` (70% CPU, throttled above 70% RAM; `~/.config/systemd/user/claude.slice`). At most 4 agents build at once, each with `-j 3`.
+- Build with `memguard-allow 12G cargo build -p chukcut -j 3`; gates:
   `cargo fmt --all`, `cargo clippy -p chukcut`, `cargo test -p chukcut`,
   `cargo test -p chukcut-engine -j 4 --lib` (plus integration tests when the
   engine changed).
