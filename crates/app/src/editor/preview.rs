@@ -218,12 +218,22 @@ impl Editor {
                     })),
             )
             .child(
-                IconButton::new("play", if playing { icons::PAUSE } else { icons::PLAY })
-                    .large()
-                    .tint(TEXT)
-                    .tooltip(if playing { "Pause" } else { "Play" })
-                    .shortcut("space")
-                    .on_click(cx.listener(|this, _, w, cx| this.on_play_pause(&PlayPause, w, cx))),
+                // The state is in the id: a tooltip open while playback
+                // starts or stops belongs to the old element and closes,
+                // instead of keeping "Play" over a pause button.
+                IconButton::new(
+                    if playing {
+                        "player-pause"
+                    } else {
+                        "player-play"
+                    },
+                    if playing { icons::PAUSE } else { icons::PLAY },
+                )
+                .large()
+                .tint(TEXT)
+                .tooltip(if playing { "Pause" } else { "Play" })
+                .shortcut("space")
+                .on_click(cx.listener(|this, _, w, cx| this.on_play_pause(&PlayPause, w, cx))),
             )
             .child(
                 IconButton::new("player-step-forward", icons::STEP_FORWARD)
