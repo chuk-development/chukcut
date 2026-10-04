@@ -98,6 +98,6 @@ column current.
 - **ML worker** (backlog 3): partial, uncommitted work in `/mnt/data/git/chukcut-mlworker` (branch agent/mlworker) — review it, commit or redo.
 - **Release build is stale:** rebuild `cargo build --release -p chukcut`; the running binary predates the alpha fixes (d9d86dd, agent/alpha merge).
 - **CI:** green after the font fix (runs 37142894595, 37144217430 passed on 2026-10-03).
-- **Dependabot PRs** (rust-minor group, ffmpeg-next 9.0) are unreviewed; ffmpeg-next 9 needs a build + full test run before merging.
+- **Dependabot PRs:** #26 (rust-minor) and #27 (ffmpeg-next 9) are applied on master (7823f49, f283efe) and can be closed; #5, #7, #8, #9, #16, #24, #25 target the removed web/Tauri code and can be closed; #28 (skrifa 0.47) is unreviewed. Closing PRs needs the owner (the session may not write to GitHub).
 - **Owner decisions pending:** (1) a project identity (URL + project e-mail, not the owner's) for Wikimedia/Musopen User-Agent — until then those sources stay off; (2) delete the fork `chukfinley/filmcraft` (needs `gh auth refresh -h github.com -s delete_repo`).
 - **Follow-up:** check `effects/graph.rs:735` (data-driven blend state) for the NVIDIA alpha rounding.
