@@ -44,7 +44,8 @@ fn clip_outcome(session: &Session, id: &str, message: String) -> Outcome {
 /// Colour-grade a clip: set any of the grading panel's controls, attach or
 /// remove a .cube LUT, or reset a section. All changes are one undo step.
 /// `catalog grade` lists the controls and their resting values; values are
-/// in document units (exposure in stops, saturation 1 = unchanged).
+/// in document units (exposure in stops; saturation and contrast rest at 1,
+/// so contrast=0.1 flattens the picture).
 #[derive(Debug, Clone, Default, Args, Deserialize, JsonSchema)]
 pub struct GradeArgs {
     /// The clip: id, id prefix or `lane:index`.
@@ -1005,6 +1006,11 @@ pub struct TitleAddArgs {
     /// How long it shows. Defaults to 3 s.
     #[arg(long)]
     pub duration: Option<Time>,
+    /// The title lane: index, name or id. Without it the first title lane,
+    /// where a title that overlaps another moves to the next gap; with it two
+    /// titles can show at once (`lane-add --kind text` makes a lane).
+    #[arg(long)]
+    pub track: Option<String>,
     #[command(flatten)]
     #[serde(flatten)]
     pub style: TitleStyle,
@@ -1021,11 +1027,13 @@ impl Operation for TitleAddArgs {
         self.style.apply(&mut probe)?;
         text_check(&probe)?;
 
-        let added = text_commands::text_add(
+        let lane = super::text::title_lane(session, self.track.as_deref())?;
+        let added = text_commands::text_add_on(
             &session.state,
             self.at.map_or(0, |t| t.resolve(fps)),
             Some(self.text.clone()),
             self.duration.map(|d| d.resolve(fps)),
+            lane,
         )?;
         let commands = self.style.commands(session, &added.segment_id)?;
         if !commands.is_empty() {

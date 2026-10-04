@@ -645,8 +645,10 @@ impl Editor {
             }
         };
 
+        // The state is in the id, so an open tooltip does not keep the old
+        // words after a click (see the effect eye in `effects.rs`).
         let eye = IconButton::new(
-            SharedString::from(format!("mask-eye-{index}")),
+            SharedString::from(format!("mask-eye-{index}-{enabled}")),
             if enabled {
                 IconName::Eye
             } else {
@@ -1067,18 +1069,21 @@ impl Editor {
             let colour = [key.color[0], key.color[1], key.color[2], 1.0];
             picker.update(cx, |picker, _| picker.sync(colour));
             let picking = self.inspector.masks.picking;
-            let dropper = IconButton::new("key-eyedropper", ui::Glyph(glyphs::EYEDROPPER))
-                .small()
-                .tint(if picking { ACCENT } else { TEXT_DIM })
-                .tooltip(if picking {
-                    "Click the colour on the player"
-                } else {
-                    "Pick the colour on the player"
-                })
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.inspector.masks.picking = !this.inspector.masks.picking;
-                    cx.notify();
-                }));
+            let dropper = IconButton::new(
+                SharedString::from(format!("key-eyedropper-{picking}")),
+                ui::Glyph(glyphs::EYEDROPPER),
+            )
+            .small()
+            .tint(if picking { ACCENT } else { TEXT_DIM })
+            .tooltip(if picking {
+                "Click the colour on the player"
+            } else {
+                "Pick the colour on the player"
+            })
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.inspector.masks.picking = !this.inspector.masks.picking;
+                cx.notify();
+            }));
             rows.push(label_row(
                 "Colour",
                 div()

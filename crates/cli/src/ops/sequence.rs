@@ -74,14 +74,13 @@ fn timeline(project: &Project, reference: &str) -> CliResult<String> {
 }
 
 fn where_now(session: &Session) -> Value {
-    session.with(|p| {
-        json!({
-            "active": p.sequence.id,
-            "path": sequence::breadcrumbs(p)
-                .into_iter()
-                .map(|(id, name)| json!({"id": id, "name": name}))
-                .collect::<Vec<_>>(),
-        })
+    let path = seq::sequence_breadcrumbs(&session.state).unwrap_or_default();
+    json!({
+        "active": session.with(|p| p.sequence.id.clone()),
+        "path": path
+            .into_iter()
+            .map(|(id, name)| json!({"id": id, "name": name}))
+            .collect::<Vec<_>>(),
     })
 }
 
@@ -92,21 +91,18 @@ pub struct TimelineListArgs {}
 impl Operation for TimelineListArgs {
     const NAME: &'static str = "timeline_list";
     fn run(self, session: &mut Session, _: &Ctx) -> CliResult<Outcome> {
-        let (timelines, compounds) = session.with(|p| {
-            let all = sequence::list(p);
-            let timelines: Vec<Value> = sequence::timelines(p)
-                .iter()
-                .enumerate()
-                .map(|(i, s)| info_json(i, s))
-                .collect();
-            let compounds: Vec<Value> = all
-                .iter()
-                .filter(|s| s.kind == sequence::SequenceKind::Compound)
-                .enumerate()
-                .map(|(i, s)| info_json(i, s))
-                .collect();
-            (timelines, compounds)
-        });
+        let all = seq::sequence_list(&session.state)?;
+        let timelines: Vec<Value> = seq::sequence_timelines(&session.state)?
+            .iter()
+            .enumerate()
+            .map(|(i, s)| info_json(i, s))
+            .collect();
+        let compounds: Vec<Value> = all
+            .iter()
+            .filter(|s| s.kind == sequence::SequenceKind::Compound)
+            .enumerate()
+            .map(|(i, s)| info_json(i, s))
+            .collect();
         let mut data = where_now(session);
         data["timelines"] = json!(timelines);
         data["compounds"] = json!(compounds);

@@ -49,13 +49,11 @@ fn find(project: &Project, reference: &str) -> CliResult<Marker> {
     if let Some(m) = markers.iter().find(|m| m.id == reference) {
         return Ok((*m).clone());
     }
-    if let Ok(index) = reference.parse::<usize>() {
-        return markers.get(index).map(|m| (*m).clone()).ok_or_else(|| {
-            CliError::usage(format!(
-                "the project has {} marker(s), so there is no marker {index}",
-                markers.len()
-            ))
-        });
+    // An index, unless it is past the end: an id prefix can be all digits
+    // ("11611006"), and that one is then meant.
+    let index = reference.parse::<usize>().ok();
+    if let Some(m) = index.and_then(|i| markers.get(i)) {
+        return Ok((*m).clone());
     }
     if reference.len() >= 4 {
         let matches: Vec<&&Marker> = markers
@@ -72,6 +70,12 @@ fn find(project: &Project, reference: &str) -> CliResult<Marker> {
                 )))
             }
         }
+    }
+    if let Some(index) = index {
+        return Err(CliError::usage(format!(
+            "the project has {} marker(s), so there is no marker {index}",
+            markers.len()
+        )));
     }
     Err(CliError::usage(format!(
         "there is no marker {reference}; `chukcut-cli marker list` lists them"

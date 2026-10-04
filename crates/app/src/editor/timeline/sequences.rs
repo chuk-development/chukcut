@@ -37,15 +37,6 @@ pub(crate) const COMPOUND_GLYPH: ui::icons::Glyph = ui::icons::Glyph(
 /// The height of the tab row.
 const BAR_H: f32 = 26.0;
 
-/// CapCut's keys: Alt+G makes a compound clip, Alt+Shift+G takes it apart.
-pub(crate) fn key_bindings() -> Vec<KeyBinding> {
-    const TYPING_OFF: Option<&str> = Some("!Input");
-    vec![
-        KeyBinding::new("alt-g", CreateCompound, TYPING_OFF),
-        KeyBinding::new("alt-shift-g", FlattenCompound, TYPING_OFF),
-    ]
-}
-
 /// What the clip menu's compound entries may do for the clicked selection.
 #[derive(Clone, Copy, Default)]
 pub(crate) struct MenuFlags {

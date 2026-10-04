@@ -215,9 +215,10 @@ same media id.
 chukcut-cli import reel.chukcut take1.mp4 take2.mp4 music.mp3 --append
 ```
 
-#### `catalog KIND`
+#### `catalog KIND [--search WORDS] [--filter VALUE]`
 
-Lists what you can use. Does not need a project.
+Lists what you can use. Does not need a project. `--search` and `--filter`
+narrow the lists that take them (see the table).
 
 | Kind | Lists |
 |---|---|
@@ -238,6 +239,25 @@ Lists what you can use. Does not need a project.
 | `layouts` | split-screen layouts and picture-in-picture corners |
 | `speed_presets` | speed-ramp presets for `speed-curve`, with their shapes |
 | `accounts` | the cloud accounts that the app has, and what each one can do; never a key |
+| `looks` | chukcut's own looks for `look` (writes them into the LUT library the first time) |
+| `emoji` | emoji stickers for `sticker --emoji`; `--search` a name, `--filter` a style (`fluent3d`, `fluent_flat`, `noto`) |
+| `icons` | icons for `sticker --icon`; `--search` is necessary |
+| `music` | the curated tracks (`--filter` a mood: Upbeat, Chill, Funny, Cinematic, Calm), or `--search` all of Incompetech |
+| `sfx` | the sound-effect packs; `--filter PACK` lists the sounds of one pack (downloads it the first time), `--search` narrows them |
+| `font_catalogue` | Fontsource families; `--search` a name, `--filter` a category (`sans_serif`, `serif`, `display`, `handwriting`, `monospace`, `popular`) |
+| `fonts_installed` | the families that the library downloaded |
+| `fonts_system` | every family that the text renderer can draw now |
+| `library_settings` | the library's settings (where font previews come from) |
+| `providers` | the cloud provider kinds and what each one can do |
+| `fal_actions` | the fal.ai actions for `cloud fal` |
+| `voices` | the voices of a speech account (`--filter ACCOUNT`, or the first speech account) |
+| `machine` | this machine's GPU, hardware decoders and encoders |
+| `settings` | the app's settings |
+| `cache` | how much the cache and the proxies use |
+| `recent` | the start screen's recent projects |
+
+The library kinds download a catalogue the first time and keep it for a
+week. Without the network, they use the old copy or fail with exit code 1.
 
 ### Timeline
 
@@ -303,6 +323,34 @@ chukcut-cli trim reel.chukcut 0:0 --head 0.4 --tail 3.2 --ripple
 `--volume` (linear gain), `--speed` (playback rate). Transform and volume are
 one undo step. Speed keeps the part of the file that the clip shows: speed 2
 halves the clip's length and pulls the later clips in.
+
+#### `rename PROJECT CLIP NAME`
+
+Gives the clip a name of its own. The timeline shows it instead of the file
+name. An empty name (`""`) clears it.
+
+#### `link PROJECT CLIP CLIP...` · `unlink PROJECT CLIP`
+
+`link` makes two or more clips move, trim and delete as one (as a picture and
+its sound do after import). `unlink` breaks the link of a clip.
+
+#### `lane-add PROJECT --kind KIND [--name NAME]`
+
+Adds an empty lane of `video`, `audio`, `text`, `sticker` or `effect`, directly
+above the last lane of that kind. The result gives its `id` and `index`. A
+headline and a subtitle at the same time:
+
+```bash
+chukcut-cli title add reel.chukcut "Day 1" --at 0.5 --duration 4
+chukcut-cli lane-add reel.chukcut --kind text
+chukcut-cli title add reel.chukcut "Lisbon" --at 0.5 --duration 4 --track "Text 2" --y -0.6
+```
+
+#### `paste-attributes PROJECT --from CLIP CLIP...`
+
+Copies the position, scale, rotation, opacity, speed, volume, crop and grade
+of `--from` onto the other clips. One undo step. The linked partners of the
+target clips do not change.
 
 #### `freeze PROJECT CLIP --at TIME`
 
@@ -434,6 +482,63 @@ The MCP tools are `timeline_list`, `timeline_new`, `timeline_rename`,
 `timeline_delete`, `timeline_duplicate`, `timeline_switch`, `compound_create`,
 `compound_open`, `compound_close` and `compound_flatten`.
 
+### Templates
+
+A template is a project whose picture clips are **slots** your media fills,
+with its titles, animations, effects, transitions, looks and music already in
+place. chukcut ships eleven of its own (`template list`); `template save`
+adds yours under `<data>/templates/user/`. Decision 0022.
+
+#### `template list`
+
+Lists the templates, the built-ins first: id, name, category, canvas, length
+and each slot's length, shape and what it accepts. Needs no project.
+
+#### `template apply PROJECT TEMPLATE [FILE...] [--name NAME] [--force]`
+
+Writes a new project from a template, the files filling its slots in order.
+A longer clip is trimmed to its slot (from its start), a shorter one is
+slowed down until it spans the slot, and a picture of another shape is
+cropped, centred, to the slot's shape; the slot keeps its place, length,
+animation and look. Fewer files than slots leave the rest showing a numbered
+placeholder. More files than slots, a file that does not read, sound only,
+or a video in a photo-only slot is refused by name. The result lists each
+filled slot (`slowed_to` when it plays slowed) and the empty ones.
+
+#### `template slots PROJECT`
+
+Lists a project's slots: number, clip, start, length, shape, and the file in
+it or `(empty)`.
+
+#### `template replace PROJECT --clip CLIP --media FILE [--from TIME]`
+
+Puts a file into a slot (`--clip slot:3`) or into any video or photo clip,
+with the same trimming, slowing and cropping. `--from` is where a longer clip
+starts. One undo step.
+
+#### `template save PROJECT --name NAME [--slot CLIP...] [--label TEXT...]`
+
+Saves the project as a template of your own. The `--slot` clips become its
+slots, in that order, `--label` naming them; without `--slot`, the slots the
+project already has stay slots. Media the template still uses is copied into
+it. `--description` and `--category` are optional. The project file is not
+changed.
+
+#### `template delete TEMPLATE`
+
+Deletes one of your own templates. A built-in cannot be deleted.
+
+```bash
+chukcut-cli template apply trip.chukcut travel-diary a.mp4 b.mp4 c.jpg d.mp4
+chukcut-cli template slots trip.chukcut
+chukcut-cli template replace trip.chukcut --clip slot:2 --media better.mp4 --from 3
+chukcut-cli template save trip.chukcut --name "My trip look"
+```
+
+The MCP tools are `template_list` and `template_delete` (no `project`),
+`template_apply` (`project` is the file to write), `template_slots`,
+`template_replace` and `template_save`.
+
 ### Look
 
 #### `grade PROJECT CLIP`
@@ -453,12 +558,29 @@ Control names: `brightness`, `contrast`, `saturation`, `temperature`,
 `orange`, `yellow`, `green`, `aqua`, `blue`, `purple`, `magenta`), and
 `wheel_x:WHEEL`, `wheel_y:WHEEL`, `wheel_luma:WHEEL` (wheels: `lift`, `gamma`,
 `gain`, `offset`). `catalog grade` lists them with their resting values.
-Values are in document units: exposure in stops, saturation 1 is no change.
+Values are in document units: exposure in stops; `saturation` and
+`contrast` rest at 1 (1 is no change, `contrast=0.1` makes the picture almost
+flat); the others rest at 0.
 All changes in one command are one undo step.
 
 ```bash
 chukcut-cli grade reel.chukcut 0:0 --set exposure=0.3 --set saturation=1.15 \
   --set hsl_saturation:orange=-0.2 --lut ~/luts/film.cube --lut-intensity 0.6
+```
+
+#### `grade-to-all PROJECT CLIP`
+
+Gives every other picture clip the grade of `CLIP`. One undo step.
+
+#### `look PROJECT CLIP LOOK [--intensity 0..1]`
+
+Puts a look on the clip. `LOOK` is the name of one of chukcut's looks
+(`catalog looks`), a `.cube` file, or `none`. A `.cube` file is checked and
+copied into the LUT library first, so the clip keeps its look when the
+original file goes away. The rest of the grade does not change.
+
+```bash
+chukcut-cli look reel.chukcut 0:0 "Teal & Orange" --intensity 0.7
 ```
 
 #### `curve PROJECT CLIP --point X,Y...`
@@ -525,10 +647,12 @@ Adds an effect (`catalog effects`): `gaussian_blur`, `zoom_blur`, `glow`,
   `--track` place it.
 
 `--set NAME=VALUE` sets parameters. The CLI checks each value against the
-catalog: a number in its range, a colour, or a choice by name or index.
+catalog: a number in its range, a colour, or a choice by name or index. Read
+the range in `catalog effects`: many effects count from 0 to 100 (glow's
+`intensity` 60 is a strong glow), not from 0 to 1.
 
 ```bash
-chukcut-cli effect add reel.chukcut glow --clip 0:1 --set intensity=0.8
+chukcut-cli effect add reel.chukcut glow --clip 0:1 --set intensity=60
 chukcut-cli effect add reel.chukcut shake --at 5 --duration 0.4
 ```
 
@@ -545,6 +669,20 @@ same.
 #### `effect remove PROJECT CLIP EFFECT`
 
 Removes the effect from the clip. To remove an effect clip, delete the clip.
+
+#### `effect move PROJECT CLIP EFFECT --to INDEX`
+
+Moves the effect to another place in the clip's stack. Index 0 is applied
+first.
+
+#### `effect reset PROJECT CLIP EFFECT`
+
+Puts every parameter of the effect back to its default value.
+
+#### `effect keyframe PROJECT CLIP EFFECT --param NAME --at TIME`
+
+Adds a keyframe for the parameter at that time, or removes the keyframe that
+is there. To set a keyed value, use `effect set --at`.
 
 #### `animate PROJECT CLIP --preset NAME`
 
@@ -594,6 +732,9 @@ chukcut-cli keyframe reel.chukcut 2:0 --property opacity --at 0.5 --value 1 --ea
 
 Puts a title on the title lane. `--at` (default 0) and `--duration` (default
 3 s). When the time is not free, the title moves to the next gap.
+`--track LANE` puts it on another text lane, where it can show at the same
+time as a title on the first one. `lane-add PROJECT --kind text` makes that
+lane.
 
 Style options (also for `title set`): `--font`, `--size` (canvas pixels),
 `--color`, `--bold true|false`, `--italic true|false`,
@@ -611,6 +752,16 @@ chukcut-cli title add reel.chukcut "Day 1" --at 0.5 --size 140 --color "#ffcc00"
 `--text` changes the words. The style options change the look. All changes are
 one undo step.
 
+#### `title text PROJECT CLIP TEXT`
+
+Changes only the words of a title. The style stays.
+
+#### `title font PROJECT CLIP FAMILY`
+
+Sets the title's font family. When the text renderer does not have the
+family, the CLI finds it in the Fontsource catalogue and installs it first
+(this needs the network once). The result says `installed: true` then.
+
 #### `title style PROJECT STYLE`
 
 Adds a title in a style, or gives a title a new style. `catalog title_styles`
@@ -619,8 +770,8 @@ lists the styles.
 - With `--clip CLIP`, the title gets the style. It keeps its words, its size
   and its position.
 - Without `--clip`, the CLI adds a new title. `--at` (default 0) and
-  `--track` place it, and `--text` gives its words (default: the style's
-  sample). The title goes where the style puts it, for example low and left
+  `--track` place it, `--duration` gives its length (default 3 s), and
+  `--text` gives its words (default: the style's sample). The title goes where the style puts it, for example low and left
   for a lower third.
 
 One undo step.
@@ -656,6 +807,14 @@ Puts a transition on the cut at the start of the clip (the incoming clip).
 `blur`, or a library preset from `catalog transitions` (`gl:crosswarp`, or
 only `crosswarp` when the name is unique). `--duration` is shortened to what
 the two clips allow. A new transition replaces the old one.
+
+#### `transition set PROJECT CLIP`
+
+Changes the transition at the start of the clip. `--duration` (shortened to
+what the two clips allow; the result says `shortened`), `--easing hold|linear|ease_in|ease_out|ease_in_out`,
+`--direction left|right|up|down` (wipe, slide), `--color` (dip),
+`--softness` (wipe), `--zoom` (zoom), and `--param NAME=V[,V...]` for the
+parameters of a library transition.
 
 #### `transition remove PROJECT CLIP`
 
@@ -700,6 +859,11 @@ chukcut-cli mask reel.chukcut 1:0 --add rectangle --op subtract --set width=0.1
 chukcut-cli mask reel.chukcut 1:0 --mask 0 --set x=-0.3 --at 0 --set x=0.3 --at 2
 ```
 
+#### `mask-move PROJECT CLIP MASK --to INDEX`
+
+Moves a mask to another place in the clip's mask order. Masks combine in
+order by their `op`, so the order changes the result.
+
 #### `chroma-key PROJECT CLIP`
 
 Keys a colour out of a clip (green screen). `--color #rrggbb` gives the
@@ -719,6 +883,35 @@ Sets how a clip blends with the lanes below it: `normal`, `multiply`,
 `screen`, `overlay`, `soft_light`, `hard_light`, `darken`, `lighten`,
 `color_dodge`, `color_burn`, `difference`, `exclusion`, `add` or `subtract`.
 `--opacity` is 0..1.
+
+### Library
+
+The asset library of the app: emoji and icons from open sets, Incompetech
+music (CC BY 4.0) and CC0 sound packs. Each file is downloaded once into the
+library cache with its licence record; `cloud credits` then lists what needs a
+credit.
+
+#### `sticker PROJECT --emoji NAME | --icon ID | --file IMAGE`
+
+Puts a sticker on an overlay lane, in the middle of the frame, for three
+seconds, from `--at TIME` (default 0). An emoji is found by name or by the
+emoji itself; `--style fluent3d|fluent_flat|noto` chooses the drawing. An
+icon is `prefix:name` from `catalog icons`, or a word (the first hit). One
+undo step.
+
+```bash
+chukcut-cli sticker reel.chukcut --emoji "red heart" --at 2.5
+```
+
+#### `music PROJECT TITLE [--at TIME]`
+
+Imports a music track by its title (or words from it) and, with `--at`, puts
+it on the timeline. Curated tracks first, then the whole catalogue.
+
+#### `sfx PROJECT --pack PACK SOUND [--at TIME]`
+
+Imports a sound from a pack (`catalog sfx`, then `catalog sfx --filter PACK`)
+and, with `--at`, puts it on the timeline.
 
 ### Analysis
 
@@ -844,6 +1037,28 @@ commercial use). The result lists each hit's id, title, creator, size,
 licence and credit line. The CLI keeps search results for one day. It does not
 change the project.
 
+#### `cloud sound PROJECT PROMPT`
+
+Makes a sound effect from a description, or music with `--music`, with an
+account that can (ElevenLabs), and imports it. `--seconds`, `--looping`
+(sound effects), `--instrumental` (music), `--at TIME` to put it on the
+timeline.
+
+#### `cloud fal PROJECT CLIP --action ID [--confirm]`
+
+Runs a fal.ai action (`catalog fal_actions`) on the file of a video clip.
+Without `--confirm`, the CLI only asks fal for the price and shows it. With
+`--confirm`, it uploads the file, runs the action (this costs money on the
+account), imports the result and puts it at the clip's start on a lane of its
+own. The clip does not change.
+
+#### `cloud credits PROJECT [--write VIDEO]`
+
+Shows what the licences of the media on the timeline ask for: the items that
+need a credit, the items that are not for commercial use, and the credits
+text. `--write VIDEO` writes `VIDEO.credits.txt` next to an exported video,
+as the app does after an export. Changes nothing in the project.
+
 #### `cloud stock-download PROJECT QUERY --id ID`
 
 Downloads one result of a search and imports it into the project. Give the
@@ -896,6 +1111,28 @@ colour), `--bold`, `--italic`, `--align`, `--stroke-width`, `--stroke-color`,
 `--background COLOUR|none`, `--position top|middle|bottom|Y`.
 
 #### `captions list PROJECT`
+
+#### `captions add PROJECT TEXT --start TIME --end TIME`
+
+Puts one caption on the caption lane, next to the captions that are there, in
+their style.
+
+#### `captions text PROJECT CLIP TEXT`
+
+Changes the words of one caption.
+
+#### `captions split PROJECT CLIP --at TIME` · `captions merge PROJECT FIRST SECOND`
+
+Cuts a caption in two at a time, or joins two neighbouring captions into one.
+
+#### `captions clear PROJECT`
+
+Deletes every caption.
+
+#### `captions regroup PROJECT [--words N]`
+
+Groups the captions again from their words: word captions with at most `N`
+words on screen, or sentence captions without `--words`.
 
 ### Sound
 
@@ -1210,7 +1447,8 @@ the same command: the program `chukcut-cli` with the argument `mcp`.
 Each operation above is a tool with the same name and a JSON Schema made from
 the same argument struct that the CLI parses. A tool schema cannot be
 different from what the tool accepts. Each tool (except `catalog`) also takes
-`project`, the absolute path of the `.chukcut` file.
+`project`, the absolute path of the `.chukcut` file; `template_list` and
+`template_delete` do not.
 
 The server adds four tools:
 
@@ -1226,13 +1464,15 @@ on 2025-06-18 or later, the same object is also in `structuredContent`. A
 refused edit is a tool result with `isError: true` and the engine's message;
 an unknown tool or a malformed request is a JSON-RPC error.
 
-Read-only tools have `readOnlyHint`: `info`, `validate`, `captions_list`,
+Read-only tools have `readOnlyHint`: `info`, `template_list`,
+`template_slots`, `validate`, `captions_list`,
 `silence_detect`, `loudness`, `catalog`, `view_frame`, `marker_list`,
 `analysis`, `stock_kinds`, `stock_search`, `presets`, `estimate`.
 
 Tools that send data to a service outside this machine have
 `openWorldHint`: `captions_transcribe`, `translate_captions`, `tts`,
-`stock_kinds`, `stock_search`, `stock_download`.
+`stock_kinds`, `stock_search`, `stock_download`, `sound`, `fal`, `sticker`,
+`music`, `sfx`, `title_font`, `catalog` (the library and `voices` kinds).
 
 ### Resources
 
@@ -1332,8 +1572,17 @@ ffprobe -v error -count_frames -show_entries stream=nb_read_frames out.mp4
 - `crates/cli/src/ops/` holds one argument struct per operation. The struct
   is the CLI options (clap), the batch and tool arguments (serde) and the MCP
   schema (schemars). To add an operation, write the struct and its `run`, then
-  add it to the `operations!` list in `ops/mod.rs` and to the `Command` enum in
-  `main.rs`.
+  add it to the `operations!` list in `ops/mod.rs` and give it a subcommand:
+  a variant in `main.rs`, or in a subcommand enum of its `ops/` file that
+  `main.rs` flattens in (`ops/clip.rs`, `ops/library.rs` and others do this,
+  so that a new group touches `main.rs` in two lines).
+- **Every command-layer function is reachable.** `tests/reachability.rs`
+  reads each `modules/*/commands.rs` and fails when a `pub fn` is not called
+  from `crates/cli/src`, unless its `ALLOWLIST` gives the reason (live
+  preview, jobs inside one process, preview tiles, account keys, ...). The
+  same test checks that every operation is in `operations!` (so batch and
+  MCP have it) and has a subcommand. A new engine command therefore needs an
+  operation, or an allowlist line that says why not.
 - An operation builds its edit with the engine's command functions
   (`modules/*/commands.rs`) and the gesture builders in
   `modules/timeline/gesture.rs`. It does not change a `Project` directly.

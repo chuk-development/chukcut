@@ -146,8 +146,14 @@ All four below were fixed by the polish pass; kept for the record.
 - ~~Settings → Hardware says "Zero-copy decode: Yes" on a machine where no
   VAAPI decoder works.~~
 - ~~The title bar keeps the last error until the next status message.~~
-- A tooltip that is open while its button changes keeps the old text
-  (the effect's eye shows "Turn off" after it was turned off).
+- ~~A tooltip that is open while its button changes keeps the old text
+  (the effect's eye shows "Turn off" after it was turned off).~~ Fixed on
+  agent/upkeep: the buttons whose tooltip follows a state (effect and mask
+  eyes, the key eyedropper, the file browser's hidden-files switch, an export
+  queue row's stop/skip) carry the state in their element id, so a click makes
+  a new element whose tooltip starts closed. The player's play/pause button
+  (`preview.rs`) still has the old behaviour. Built, and the app's tests
+  pass; not yet looked at on screen.
 - ~~Menu has no New project shortcut hint although Ctrl+N works.~~
 - Projects whose clips were placed before the frame snapping keep their
   off-grid edges, and a drop that snaps to such an edge stays off the grid.
