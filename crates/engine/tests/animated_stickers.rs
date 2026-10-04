@@ -76,8 +76,10 @@ fn sticker_project(file: &Path, playback: Playback) -> (Project, String) {
     (project, id)
 }
 
-fn lottie_file() -> PathBuf {
-    let path = dir().join("slide.json");
+/// Each test writes its own copy: the tests run in parallel, and a shared
+/// file was truncated by one test's write while the other was reading it.
+fn lottie_file(name: &str) -> PathBuf {
+    let path = dir().join(format!("{name}.json"));
     std::fs::write(&path, SLIDE).unwrap();
     path
 }
@@ -96,7 +98,7 @@ fn red(data: &[u8], x: u32) -> u8 {
 #[test]
 fn a_lottie_sticker_loops_or_holds_its_last_frame() {
     let ctx = require_gpu!();
-    let file = lottie_file();
+    let file = lottie_file("slide-playback");
     let compositor = Compositor::new(ctx);
     let (looping, _) = sticker_project(&file, Playback::Loop);
     let (once, _) = sticker_project(&file, Playback::Once);
@@ -171,7 +173,7 @@ fn a_gif_sticker_shows_each_frame_for_its_own_delay() {
 #[test]
 fn an_export_draws_every_frame_of_the_animation_where_it_belongs() {
     let ctx = require_gpu!();
-    let file = lottie_file();
+    let file = lottie_file("slide-export");
     let (project, _) = sticker_project(&file, Playback::Loop);
     let path = dir().join("stickers.mp4");
     let _ = std::fs::remove_file(&path);

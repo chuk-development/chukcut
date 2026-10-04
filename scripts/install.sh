@@ -43,7 +43,7 @@ while [ $# -gt 0 ]; do
         --uninstall) mode=uninstall ;;
         --check) mode=check ;;
         --no-build) build=0 ;;
-        --cuda) features=(--features chukcut/cuda,chukcut-cli/cuda) ;;
+        --cuda) features=(--features "chukcut/cuda,chukcut-cli/cuda") ;;
         --bindir) bindir="$2"; shift ;;
         -h|--help) sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "install.sh: unknown option '$1' (try --help)" >&2; exit 2 ;;
