@@ -25,7 +25,12 @@ crates/app/           chukcut — the native app (GPUI window)
   src/edits.rs        UI gestures → EditCommand
 crates/cli/           chukcut-cli — the commands from a shell, a batch file,
                       and an MCP server (docs/cli.md)
+crates/ml-worker/     chukcut-ml-worker — the AI models on ONNX Runtime, in
+                      their own process (decision 0025)
 docs/                 STATUS, ROADMAP, architecture/, decisions/, research/
+docs/manual/          the user manual, one page per area of the app; update
+                      it with every user-visible change. shortcuts.md is
+                      generated (tests/keymap_doc.rs, CHUKCUT_BLESS=1)
 assets/icons/         app icons
 ```
 

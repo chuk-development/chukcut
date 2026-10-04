@@ -1,0 +1,163 @@
+# Effects and transitions
+
+## Effects
+
+Open the asset panel's **Effects** tab. The effects run on the GPU, in the
+preview and in the export.
+
+| Category | Effects |
+|---|---|
+| **Blur** | Blur, Zoom blur |
+| **Light** | Glow, Light sweep |
+| **Motion** | Shake, Motion blur |
+| **Retro** | RGB split, Glitch, VHS, Pixelate |
+| **Distort** | Mirror, Kaleidoscope |
+| **Film** | Grain, Halation, Bloom, Gate weave, Letterbox |
+| **Layout** | Picture in picture, Side by side, Top and bottom, Three rows, Three columns, Grid, Frame |
+| **Face** | Retouch |
+
+There are two ways to use an effect:
+
+- **On a clip**: select a clip, then click the effect. The effect changes
+  only that clip.
+- **As an effect clip**: drag the effect onto the timeline (or click it with
+  no clip selected; it lands at the playhead). An effect clip sits on an
+  effect lane and changes everything below it, for as long as it lasts. Trim
+  and move it like any clip.
+
+### Change an effect
+
+Select the clip and open the inspector's **Effects** tab. Each effect in the
+list has:
+
+- an eye (**Turn off** / **Turn on**), up and down arrows for the order, a
+  reset arrow, and a bin (**Remove effect**);
+- its parameters, each with a slider, a reset and a keyframe button.
+
+**Apply to** at the top (video clips only): **Whole clip**, **Subject** or
+**Background**. With **Subject** or **Background**, the effects change only
+that part of the picture, for example a blur on the background only. The
+subject comes from the clip's matte. See
+[AI tools](ai-tools.md#grade-or-effects-on-the-subject-or-the-background).
+
+### Motion blur
+
+**Effects › Motion › Motion blur** smears a clip along its own motion: its
+keyframes, animations and tracking. Set the **Shutter angle** (0 to 360°)
+and the number of **Samples**. A clip that does not move stays sharp. The blur does
+not see motion inside the video picture itself.
+
+### Layouts
+
+**Effects › Layout**:
+
+- Select one clip and click **Picture in picture**: the clip becomes a
+  small window with round corners, a border and a shadow.
+- Select several clips and click **Side by side**, **Top and bottom**,
+  **Three rows**, **Three columns** or **Grid** for a split screen.
+
+## Animations
+
+Select a clip and open **Animation**.
+
+- **In**: plays from the clip's first frame. **Out**: plays into its last
+  frame. Both follow the clip when you trim it. Presets: **Fade**, **Slide
+  left/right/up/down**, **Zoom in**, **Zoom out**, **Pop**, **Bounce**,
+  **Spin**, **Blur**, **Wipe right/left/up/down**, **Swing**, **Shake**,
+  **Rise**, **Flip**, **Whip**.
+- **Combo**: loops for the whole clip. Presets: **Pulse**, **Heartbeat**,
+  **Wobble**, **Rock**, **Float**, **Jitter**, **Rotate**, **Flicker**.
+- Each has **Duration** (on Combo: **Speed (one loop)**), **Strength** and
+  **Easing**.
+- **Zoom** (not on titles):
+  - **Punch-in zoom** zooms in over the clip: **Zoom**, **Push-in time**,
+    **Easing**, and **Pivot**. Drag the crosshair on the player to put the
+    pivot on a face.
+  - **Auto zoom**: when the clip is one of several jump cuts from one take,
+    **Auto zoom jump cuts** punches in every second one. It is one undo
+    step.
+
+Titles have **Text** in place of **Zoom**. See
+[Text and captions](text-and-captions.md#animate-a-title).
+
+## Transitions
+
+Open the asset panel's **Transitions** tab.
+
+- **Basic**: **Cross dissolve**, **Dip to colour**, **Wipe**, **Slide**,
+  **Zoom**, **Blur**.
+- **Seamless**: **Zoom in through**, **Zoom out through**, **Spin**, **Whip
+  pan**, **Push**.
+- **Library**: about 120 transitions from the gl-transitions collection.
+  Each tooltip names its author and licence.
+
+Select a clip, then click a transition. It goes on the cut between that
+clip and the next one. On the timeline, the transition is a badge on the
+cut. Drag its edge to change its length.
+
+## Masks
+
+**Video › Mask** (video, photo and compound clips).
+
+1. Click a shape under **Add mask**: **Linear**, **Mirror**, **Circle**,
+   **Rectangle**, **Star** or **Heart**.
+2. Drag its handles on the player.
+3. Set **Position X**, **Position Y**, **Width**, **Height**, **Rotate**,
+   **Feather** and, for a rectangle, **Round corners**. Each value can have
+   keyframes.
+
+A clip can have several masks. Each mask has **Add**, **Subtract** or
+**Intersect**, and **Invert**. The eye turns a mask off. The arrows change
+the order. The bin removes it.
+
+## Chroma key
+
+**Video › Remove background › Chroma key** (a green screen).
+
+1. Tick **Chroma key**.
+2. Click the eyedropper, then click the background colour on the player.
+3. Set **Intensity**, **Softness**, **Spill removal** and **Edge shrink**.
+4. **Show matte** shows what stays (white) and what goes (black).
+
+## Blend modes
+
+**Video › Basic › Blend**: **Mode** and **Opacity**. The modes: **Normal**,
+**Multiply**, **Screen**, **Overlay**, **Soft light**, **Hard light**,
+**Darken**, **Lighten**, **Colour dodge**, **Colour burn**, **Difference**,
+**Exclusion**, **Add**, **Subtract**.
+
+## Stickers
+
+Open the asset panel's **Stickers** tab.
+
+- **Smileys**, **People**, **Animals**, **Food**, **Travel**,
+  **Activities**, **Objects**, **Symbols**, **Flags**: emoji in three looks,
+  **3D**, **Flat** and **Noto**.
+- **Icons**: search for a word, for example "heart" or "arrow".
+- **Animated**: Noto animated emoji by Google (CC BY 4.0).
+
+Click a sticker to add it at the playhead. The images download on first use,
+so the tiles can stay empty for a few seconds.
+
+A Lottie `.json`, an animated GIF or an animated WebP that you import is an
+animated sticker too. By default it loops. **Video › Basic › Sticker › Play
+once** plays it one time and then holds the last frame.
+
+A sticker is an image clip: it has **Video**, **Animation**, **Adjust**,
+**Tracking** and **Effects**. It can follow an object. See
+[Tracking](tracking.md).
+
+Limits: chukcut draws no text layers and no image layers inside a Lottie
+file. A GIF must have a transparent colour in its palette, or it shows as a
+box.
+
+## Video › Basic
+
+The other sections of **Video › Basic**:
+
+- **Transform**: **Scale** (with **Uniform scale**), **Position** (**X**,
+  **Y**), **Rotate**, and buttons to align the clip to an edge or the
+  centre.
+- **Keyframe easing**: see [Timeline editing](timeline.md#keyframes).
+- **Stabilise**, **Scene detection**, **Auto reframe**: see
+  [Timeline editing](timeline.md#analysis-tools-no-ai-model).
