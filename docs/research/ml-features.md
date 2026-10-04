@@ -463,6 +463,44 @@ frames land as the bake reaches them, so the preview shows them at once), and
 the quad shader multiplies them into the clip's alpha. 15.6 ms per 540×960
 frame on an RTX 3060 (CUDA 13), 99 ms on the CPU. Decision 0025.
 
+**Built (2026-10-04, agent/ml2): objects and "Select object".**
+
+- **BiRefNet lite** for "Objects": onnx-community's transformers.js export
+  (`huggingface.co/onnx-community/BiRefNet_lite-ONNX`, commit `de15b22`,
+  `onnx/model.onnx`, 224 005 088 bytes, SHA-256 `56000243…0f03333`, in the
+  registry; MIT). Fixed `[1, 3, 1024, 1024]` input, ImageNet-normalised;
+  the output is **logits** (no sigmoid in the graph). Measured on an RTX
+  3060 (driver 610, CUDA 13 bundle): **426 ms per 960×540 frame**, of which
+  ~32 ms is our resize in and out — so ~2.3 fps, slower than the estimate
+  above. The fp16 file (115 MB) runs at 385 ms; not used (no CPU kernels for
+  some nodes, fp16 overflow risk). **On the CPU it is unusable for video:**
+  12–25 s per frame on four threads and 11 GB peak memory (6 GB with ORT's
+  memory arena off). So it is GPU-only (`cpu_ok: false`): the bake refuses
+  on the CPU in words.
+- **MobileSAM** for "Select object" (Apache-2.0; ONNX by Acly,
+  `huggingface.co/Acly/MobileSAM` commit `0d3b403`, MIT): the encoder takes
+  HWC RGB 0..255 with the long side at 1024 and normalises and pads in the
+  graph; the decoder is Segment Anything's single-mask export. 960×540,
+  encoder + decoder: **71.6 ms on CUDA**, **727 ms on the CPU** (4 threads,
+  load ~13); the decoder alone ~45–60 ms on the CPU, so more clicks on one
+  frame are cheap (the worker keeps the last embedding). On a synthetic disc
+  one click gave IoU 0.993, a box prompt 0.993.
+- **Propagation.** SAM 2.1's video predictor needs its memory encoder and
+  memory attention in ONNX; the published community exports cover only the
+  image encoder and the prompt decoder (`onnx-community/sam2.1-hiera-tiny-ONNX`
+  has `vision_encoder` and `prompt_encoder_mask_decoder`, nothing else), so
+  the memory path was not feasible in this step. Instead: segment the
+  clicked frame, track the mask's box with VitTrack forwards and backwards
+  (with its whole-frame re-detection), and prompt SAM on every frame with
+  the tracked box grown by 10 % plus the clicked points carried along with
+  the box (`matting/object.rs`); the box's size stays within 0.7–1.4× of
+  the clicked object's (VitTrack's box grows over busy backgrounds), the mask
+  is cleared outside the prompt box, and carried clicks stay 15 % inside it.
+  With a correct box SAM is near perfect here (IoU 0.999 on the moving
+  square, box or box + point, single-mask decoder); the error is all in the
+  box. Good for rigid and slowly deforming objects; a thin object crossing a similar background can lose parts, and
+  occlusion drops the mask until VitTrack finds the object again.
+
 ### 3.5 Scene / shot detection
 
 **CapCut:** toolbar "Szenen aufteilen" (free); macOS bundle resource
@@ -778,6 +816,20 @@ redistributables — large, ~1–2 GB [est]; check NVIDIA's redistribution terms
 or use the system CUDA if present), "Intel" (OpenVINO). This is the single
 biggest packaging risk in this document. Measure the real sizes before
 promising a download size in the UI.
+
+**Measured (2026-10-04, agent/ml2).** The NVIDIA runtime pack is now a
+*bundle* of NVIDIA's PyPI wheels next to ONNX Runtime's CUDA build:
+CUDA 13 — ORT 241 MB, cudart 2.5, cuBLAS 439, cuRAND 61, NVRTC 53, cuDNN 9
+537 MB: **1.33 GB download**, installed in 3 min 45 s here. CUDA 12 — ORT
+424, cudart 3.5, cuBLAS 581, cuRAND 68, NVRTC 90, cuDNN 766: **1.93 GB**.
+ORT 1.28's CUDA provider links only cudart, cuBLAS(Lt) and cuRAND
+(`readelf -d libonnxruntime_providers_cuda.so`); cuDNN is opened at run
+time, and the provider registers without it, then fails on the first
+convolution — so the worker checks for `libcudnn.so.9` itself. cuFFT is not
+needed. The CUDA 13 wheels put every library in `nvidia/cu13/lib/`, the
+CUDA 12 ones in `nvidia/<library>/lib/`. Ubuntu's CUDA 12.0 cudart is too
+old for ORT 1.28 (`cudaLibraryGetKernel` is 12.1+); preloading the wheel's
+cudart by path keeps it out. Driver 580+ runs CUDA 13, 525+ CUDA 12.
 
 ### 5.4 Model registry and downloader
 

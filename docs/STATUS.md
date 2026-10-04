@@ -3309,24 +3309,89 @@ loaded at run time; `modules/ml` supervises it; `chukcut-cli ml status
   re-baked six deleted frames. Tests: `tests/matting.rs` (setting + undo,
   hole detection, the compositor cutting at a hand-made matte in preview and
   NV12 export on NVIDIA and lavapipe, a real RVM bake where installed).
-- **Rough:** RVM is people only (no BiRefNet for objects yet); no
-  click-to-select "custom" removal (needs SAM, T3); the matte is not
-  keyed by provider, so a clip half baked on the CPU and half on CUDA
-  differs by ~1/255 between the halves; changing a clip's speed or trimming
-  it longer leaves new frames unbaked until "Finish missing frames" or the
-  export; mattes are never cleaned up with the cache limit yet.
 - **GPU providers:** CUDA, then OpenVINO, then the CPU, probed per worker.
-  Runtime packs: `runtime:cpu` (fetched on first use), `cuda12`, `cuda13`,
-  and `cudnn9-cu12` (NVIDIA's PyPI wheel). `ml status` names the GPU vendors
-  and what to install. **Trap:** Ubuntu's CUDA 12.0 `libcudart.so.12` is too
-  old for ORT 1.28's CUDA 12 provider (`undefined symbol:
-  cudaLibraryGetKernel`). On the RTX 3060 here CUDA worked with the `cuda13`
-  pack and `CHUKCUT_CUDA_LIB_DIRS` pointing at a venv's
-  `nvidia/cu13/lib:nvidia/cudnn/lib`. RVM 15.6 ms per 540×960 frame on CUDA
-  against 99 ms on the CPU. OpenVINO needs an OpenVINO-enabled
-  `libonnxruntime.so` in `CHUKCUT_ORT_DYLIB` (Microsoft's Linux builds have
-  none); not tested on Intel hardware. All ML runs on job threads; the app
-  only polls status from its tick.
+  OpenVINO needs an OpenVINO-enabled `libonnxruntime.so` in
+  `CHUKCUT_ORT_DYLIB` (Microsoft's Linux builds have none); not tested on
+  Intel hardware. All ML runs on job threads; the app only polls status
+  from its tick.
+
+### ML, second pass (2026-10-04, agent/ml2)
+
+Decision 0025, "Amended". What changed, with what it measured on the RTX
+3060 here (driver 610.57, load 12–16 from other agents' builds):
+
+- **CUDA out of the box.** `chukcut-cli ml install gpu` (or Settings › AI
+  acceleration › Install) fetches the NVIDIA bundle for the driver:
+  `nvidia-cu13` (driver ≥ 580; ORT CUDA 13 build + cudart, cuBLAS, cuRAND,
+  NVRTC, cuDNN 9 from NVIDIA's PyPI wheels, 1.33 GB, 3 min 45 s here) or
+  `nvidia-cu12` (≥ 525, 1.93 GB). No environment variable: `ml status
+  --probe` said "CUDA 13 on the GPU with chukcut's CUDA libraries" and
+  listed `libcudart.so.13`, `libcublas.so.13` and `libcudnn.so.9` from the
+  packs. Measured through the worker: RVM 15.4 ms per 540×960 frame,
+  MobileSAM 71.6 ms per 960×540 (encoder + decoder), BiRefNet lite 426 ms
+  per 960×540, VitTrack 3.5 ms per 640×360.
+  **Traps:** the CUDA provider registers without cuDNN and only fails on
+  the first convolution ("cuDNN is unavailable … libcudnn.so"), which a
+  half-installed bundle hit; the probe now requires `libcudnn.so.9` to open
+  before it counts CUDA. ORT's error strings start with a source path; `ml
+  status` shows the part after "with error:".
+- **Objects** (Video › Remove background › Auto remove › Keep: Objects,
+  `remove-background --model objects`): BiRefNet lite, GPU only. On the
+  CPU it took 12–25 s and up to 11 GB per frame in a test, so it refuses
+  there with a sentence that says what to install. Per frame, no state:
+  edges can shimmer where RVM's would not.
+- **Select object** (Keep: Select, click on the player, Alt-click or
+  right-click to leave a part out; `select-object --at T --point x,y`):
+  MobileSAM segments the clicked frame; VitTrack carries the selection
+  forwards and backwards; MobileSAM draws the mask on every frame inside
+  the tracked box. The clicks are part of the document (source fractions
+  and the source time of the frame) and of the cache key. CPU: ~0.7 s per
+  frame (encoder), so a 10 s clip bakes in minutes; CUDA ~70 ms per frame.
+  **Measured** on a 640×360 red square moving over `testsrc2` bars, one
+  click at 1.5 s, 90 frames baked in 7.6–9.3 s on CUDA (app and CLI):
+  IoU with the true square 0.99 at 0.2 s and 2.0 s, 0.76 at 1.0 s and 0.77
+  at 2.8 s — the losses are a faint fringe of the neighbouring bar inside
+  the prompt box, not a lost object. **Three traps found on the way:**
+  VitTrack's box slowly grows over a busy background and the mask grew with
+  it (now the prompt box's size stays within 0.7–1.4× of the clicked
+  object's, and the mask is cleared outside the prompt box); taking the next
+  prompt box from the last mask feeds back (SAM filled the grown box, the
+  box grew by the margin, and within a second the selection was a whole
+  stripe); a click on the object's very edge, carried along, lands beside it
+  (carried clicks stay 15 % inside the box). And a fixture trap: ffmpeg's
+  `drawbox` `t` is the line thickness, not the time — move a box with
+  `overlay=x='…+t*…'`.
+  Checked in the app on Xvfb + lavapipe: Keep › Select › Select on player,
+  one click on the square, the dot is drawn, the bake runs, the preview cuts
+  the square out of the bars; Settings › AI acceleration lists "CUDA 13 on
+  the GPU with chukcut's CUDA libraries", the driver, both bundles (a partly
+  installed one with Finish and Remove), packs, models with sizes and the
+  baked mattes.
+- **Cut out instead** (`--invert`): the matte's subject is removed and the
+  rest kept, a shader flag (`M_BACKGROUND_INVERT`), so it re-bakes nothing.
+  This is also the way to grade or blur only an object or only its
+  surroundings: put a copy of the clip on the lane above, select the
+  object on the copy (inverted or not) and grade the copy. A grade mask
+  driven by the matte directly is not built.
+- **The matte cache** is keyed by provider and selection
+  (`<digest>-<model>-<version>[-p<hash>]-<provider>-960/`); a bake fills
+  its provider's directory and the compositor draws a clip from the
+  directory with the most frames, never a mix. Mattes count towards the
+  cache limit, are deleted by "Clear cache" (and by Clear in AI
+  acceleration), and a trim keeps the open project's. The ML downloads
+  (`~/.cache/chukcut/ml`: models, bundles) are outside the limit and
+  outside "Clear cache" now — a trim used to be allowed to delete a 1 GB
+  CUDA library as the least recently used file.
+- **Missing frames bake on their own.** After every edit the app asks the
+  engine (`matting_queue_missing`) for clips whose matte lacks frames — a
+  trim that made a clip longer, a speed change, an undo, a cleaned cache —
+  and bakes them in the background; the preview redraws as they land.
+- **Rough:** the bundles are big (1.3–1.9 GB per CUDA major) and two can
+  sit side by side; BiRefNet at ~2.3 fps on a 3060 is slow for long clips;
+  "Select object" loses the object for as long as VitTrack does (full
+  occlusion, leaving the frame) and is drawn empty there; the click mode
+  works on the frame under the playhead only; no grade or effect mask from
+  a matte directly.
 
 ## The research
 
