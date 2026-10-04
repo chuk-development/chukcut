@@ -1,9 +1,7 @@
 //! The asset panel on the left, laid out like CapCut's: a row of icon tabs,
 //! a category column, a search field and a tile grid.
 //!
-//! Only tabs that lead somewhere real are shown — Media, Audio, Text,
-//! Effects, Transitions and Filters. Stickers, templates and the AI tabs
-//! have nothing behind them yet.
+//! Only tabs that lead somewhere real are shown.
 
 mod effects;
 mod library;
@@ -12,6 +10,7 @@ mod library_panel;
 mod looks;
 mod media;
 mod stickers;
+mod templates;
 mod titles;
 pub(crate) use media::{drop_command, MediaDrag};
 
@@ -38,10 +37,12 @@ pub(crate) enum AssetTab {
     Stickers,
     /// Pexels, Pixabay and Freesound with the user's keys (`editor/cloud`).
     Stock,
+    /// Project templates (`templates.rs`, `editor/templates.rs`).
+    Templates,
 }
 
 impl AssetTab {
-    const ALL: [AssetTab; 9] = [
+    const ALL: [AssetTab; 10] = [
         AssetTab::Media,
         AssetTab::Audio,
         AssetTab::Text,
@@ -51,6 +52,7 @@ impl AssetTab {
         AssetTab::Transitions,
         AssetTab::Filters,
         AssetTab::Stock,
+        AssetTab::Templates,
     ];
 
     fn label(self) -> &'static str {
@@ -64,6 +66,7 @@ impl AssetTab {
             AssetTab::Effects => "Effects",
             AssetTab::Stickers => "Stickers",
             AssetTab::Stock => "Stock",
+            AssetTab::Templates => "Templates",
         }
     }
 
@@ -78,6 +81,7 @@ impl AssetTab {
             AssetTab::Effects => icons::EFFECTS,
             AssetTab::Stickers => stickers::STICKER_GLYPH,
             AssetTab::Stock => super::cloud::STOCK_GLYPH,
+            AssetTab::Templates => super::templates::TEMPLATE_GLYPH,
         }
     }
 
@@ -102,6 +106,7 @@ impl AssetTab {
             AssetTab::Stickers => &stickers::CATEGORIES,
             AssetTab::Effects => &effects::CATEGORIES,
             AssetTab::Stock => super::cloud::STOCK_CATEGORIES,
+            AssetTab::Templates => &templates::CATEGORIES,
         }
     }
 
@@ -112,6 +117,7 @@ impl AssetTab {
             // music and sounds use the shared one.
             AssetTab::Media => category < 2,
             AssetTab::Audio => category < 4,
+            AssetTab::Templates => category + 1 < templates::CATEGORIES.len(),
             _ => true,
         }
     }
@@ -139,7 +145,10 @@ pub(crate) struct AssetPanel {
     pub(crate) cloud: super::cloud::CloudPanel,
     /// The built-in library: fonts, stickers, music, sounds, looks.
     pub(crate) library: library_panel::LibraryPanel,
+    /// Project templates and their preview tiles.
+    templates: Entity<super::templates::Gallery>,
     _search_changed: Subscription,
+    _template_chosen: Subscription,
 }
 
 impl AssetPanel {
@@ -151,6 +160,7 @@ impl AssetPanel {
             }
         });
         let library = library_panel::LibraryPanel::new(&search, window, cx);
+        let (templates, template_chosen) = templates::gallery(window, cx);
         Self {
             tab: AssetTab::Media,
             category: HashMap::new(),
@@ -159,7 +169,9 @@ impl AssetPanel {
             picked: None,
             cloud: super::cloud::CloudPanel::new(window, cx),
             library,
+            templates,
             _search_changed: subscription,
+            _template_chosen: template_chosen,
         }
     }
 
@@ -262,6 +274,7 @@ impl Editor {
             AssetTab::Stickers => self.render_stickers_tab(category, cx),
             AssetTab::Effects => self.render_effects_tab(category, cx).into_any_element(),
             AssetTab::Stock => self.render_stock_tab(category, cx).into_any_element(),
+            AssetTab::Templates => self.render_templates_tab(category, cx),
         };
 
         Panel::new("asset-panel")

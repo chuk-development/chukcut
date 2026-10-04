@@ -80,12 +80,10 @@ pub fn track(project: &Project, reference: &str) -> CliResult<String> {
     if project.track(reference).is_some() {
         return Ok(reference.to_string());
     }
-    if let Ok(index) = reference.parse::<usize>() {
-        return project
-            .tracks
-            .get(index)
-            .map(|t| t.id.clone())
-            .ok_or_else(|| CliError::usage(format!("there is no lane {index}")));
+    // An index, unless it is past the end: an id prefix can be all digits.
+    let index = reference.parse::<usize>().ok();
+    if let Some(t) = index.and_then(|i| project.tracks.get(i)) {
+        return Ok(t.id.clone());
     }
     let named: Vec<&str> = project
         .tracks
@@ -108,6 +106,10 @@ pub fn track(project: &Project, reference: &str) -> CliResult<String> {
         project.tracks.iter().map(|t| t.id.as_str()),
     )?
     .ok_or_else(|| CliError::usage(format!("there is no lane {reference}")))
+    .map_err(|e| match index {
+        Some(i) => CliError::usage(format!("there is no lane {i}")),
+        None => e,
+    })
 }
 
 /// The id of the imported material `reference` names: an id, a prefix, a
@@ -170,13 +172,19 @@ pub fn effect(project: &Project, segment_id: &str, reference: &str) -> CliResult
     if let Some(found) = stack.iter().find(|e| e.id == reference) {
         return Ok(found.id.clone());
     }
-    if let Ok(index) = reference.parse::<usize>() {
-        return stack.get(index).map(|e| e.id.clone()).ok_or_else(|| {
-            CliError::usage(format!(
-                "the clip has {} effect(s), so there is no effect {index}",
-                stack.len()
-            ))
-        });
+    // An index, unless it is past the end: an id prefix can be all digits.
+    let index = reference.parse::<usize>().ok();
+    if let Some(e) = index.and_then(|i| stack.get(i)) {
+        return Ok(e.id.clone());
+    }
+    if let Some(index) = index {
+        if let Some(id) = by_prefix("effect", reference, stack.iter().map(|e| e.id.as_str()))? {
+            return Ok(id);
+        }
+        return Err(CliError::usage(format!(
+            "the clip has {} effect(s), so there is no effect {index}",
+            stack.len()
+        )));
     }
     let of_kind: Vec<&str> = stack
         .iter()
@@ -217,6 +225,19 @@ mod tests {
             extras: Vec::new(),
             keyframes: Vec::new(),
         }
+    }
+
+    /// An id can start with eight digits; its prefix is then an id prefix,
+    /// not an index past the end (this made a marker test fail at random).
+    #[test]
+    fn an_all_digit_prefix_past_the_end_is_an_id_prefix() {
+        let mut p = Project::new("t", CanvasConfig::default(), 30.0);
+        let mut lane = Track::new(TrackKind::Video, "Video 1");
+        lane.id = "11611006-aaaa-bbbb".into();
+        p.tracks.push(lane);
+        assert_eq!(track(&p, "11611006").unwrap(), "11611006-aaaa-bbbb");
+        assert_eq!(track(&p, "0").unwrap(), "11611006-aaaa-bbbb");
+        assert!(track(&p, "7").is_err());
     }
 
     #[test]

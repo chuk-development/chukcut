@@ -95,7 +95,29 @@ pub use texture_pool::{PoolStats, PooledTexture, TextureKey, TexturePool};
 /// tearing down that many concurrently segfaults inside the Mesa driver often
 /// enough to make the suite unreliable — a failure that says nothing about the
 /// code under test.
+///
+/// Which adapter that is decides what a GPU test proves: NVIDIA rounds the
+/// source alpha of an 8-bit target in the blender and lavapipe does not, so
+/// a blending test can pass on one and fail on the other. Run them on both
+/// with `scripts/gpu-tests.sh`. With `CHUKCUT_TEST_ADAPTER` set (a part of
+/// the adapter's name, such as `llvmpipe` or `nvidia`), a test on any other
+/// adapter fails instead of passing on the wrong one.
 #[cfg(test)]
 pub(crate) fn test_context() -> Option<std::sync::Arc<RenderContext>> {
-    crate::modules::gpu::render_context()
+    let ctx = crate::modules::gpu::render_context();
+    let name = ctx
+        .as_ref()
+        .map(|c| c.adapter_info().name.clone())
+        .unwrap_or_else(|| "no adapter".into());
+    static SAID: std::sync::Once = std::sync::Once::new();
+    SAID.call_once(|| eprintln!("GPU tests run on {name}"));
+    if let Ok(wanted) = std::env::var("CHUKCUT_TEST_ADAPTER") {
+        let wanted = wanted.trim().to_lowercase();
+        assert!(
+            wanted.is_empty() || name.to_lowercase().contains(&wanted),
+            "CHUKCUT_TEST_ADAPTER={wanted} but the GPU tests got {name}; \
+             VK_ICD_FILENAMES chooses the Vulkan driver"
+        );
+    }
+    ctx
 }

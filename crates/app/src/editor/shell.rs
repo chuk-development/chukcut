@@ -248,6 +248,9 @@ impl Shell {
                 }
             }
             HomeEvent::Open(path) => self.open_path(path.clone(), window, cx),
+            HomeEvent::FromTemplate(request) => {
+                self.open_from_template(request.clone(), window, cx)
+            }
             HomeEvent::Browse => self.browse(window, cx),
             HomeEvent::Restore => self.restore(window, cx),
             HomeEvent::DiscardRecovery => {
@@ -276,6 +279,9 @@ impl Shell {
             }
             EditorEvent::Open(path) => self.open_path(path.clone(), window, cx),
             EditorEvent::Quit => self.finish_and_quit(cx),
+            EditorEvent::FromTemplate(request) => {
+                self.open_from_template(request.clone(), window, cx)
+            }
         }
     }
 
@@ -308,6 +314,64 @@ impl Shell {
                 }
             }
         }
+    }
+
+    /// A new project from a template, the files in its slots. Probing the
+    /// files is IO, so the project is built off the UI thread; whatever was
+    /// on screen stays until it is ready, and stays if it fails.
+    fn open_from_template(
+        &mut self,
+        request: super::templates::FillRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use chukcut_engine::modules::template::commands as template_commands;
+        self.home_notice("Making the project from the template\u{2026}".into(), cx);
+        let media: Vec<String> = request
+            .media
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        cx.spawn_in(window, async move |this, cx| {
+            let built = cx
+                .background_executor()
+                .spawn(async move {
+                    template_commands::template_build_project(
+                        &request.template_id,
+                        &media,
+                        request.name,
+                    )
+                })
+                .await;
+            let _ = this.update_in(cx, |shell, window, cx| match built {
+                Ok(applied) => {
+                    if shell.editor().is_some() {
+                        project_commands::project_close(&shell.state, false);
+                    }
+                    template_commands::template_open_project(&shell.state, &applied.project);
+                    shell.show_editor(Vec::new(), false, window, cx);
+                    if let Some(editor) = shell.editor() {
+                        editor.update(cx, |editor, cx| {
+                            // Never saved: the guard asks before it is lost.
+                            editor.mark_unsaved();
+                            if !applied.empty.is_empty() {
+                                editor.status = Some(
+                                    format!(
+                                        "{} slot{} still empty: Templates \u{2192} This project fills them",
+                                        applied.empty.len(),
+                                        if applied.empty.len() == 1 { " is" } else { "s are" }
+                                    )
+                                    .into(),
+                                );
+                            }
+                            cx.notify();
+                        });
+                    }
+                }
+                Err(error) => shell.home_notice(error, cx),
+            });
+        })
+        .detach();
     }
 
     fn browse(&mut self, window: &mut Window, cx: &mut Context<Self>) {

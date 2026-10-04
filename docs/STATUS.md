@@ -91,8 +91,12 @@ Judge performance from a release build only.
    2026-10-03 — `chukcut-cli` and `chukcut-cli mcp`, `docs/cli.md`. Export,
    `render-frame` and `view_frame` need a Vulkan device like the app; a
    one-shot CLI process pays the compositor's start-up (0.75 s in a debug build) on
-   every render. Markers, crop, curves, layouts, freeze frame, translation and
-   TTS are not exposed yet.
+   every render. Since 2026-10-04 every command-layer function is reachable
+   from the CLI and MCP, or is on the allowlist in
+   `crates/cli/tests/reachability.rs` with its reason (live preview, jobs
+   inside one process, preview tiles, account keys). That test fails on a new
+   `pub fn` in a `commands.rs` that nothing calls. Pending: the tracking
+   commands (attach, bake, smoothing), which the tracking branch exposes.
 
 ## Timelines and compound clips (2026-10-04, agent/compound)
 
@@ -2276,6 +2280,57 @@ a transition window and with motion blur; masks and key are not carried by
 but not a motion reveal (wipe-in animations); mask and key cost not
 measured.
 
+## Project templates and the shortcut editor (2026-10-04)
+
+**Templates** (`modules/template`, decision 0022). A template is a project
+whose picture clips carry a `template_slot` marker in `materials.extras`; on
+disk a directory `<data>/templates/user/<id>/` with `template.json` (manifest
+around an ordinary project) and `media/`. Eleven built-ins are built in code
+from our own styles, animations, effects, transitions, looks, drawn
+placeholders (`<data>/templates/placeholders/`) and synthesised music beds
+(`<data>/templates/music/`, `template/music.rs`). Commands:
+`template_list`, `template_build_project` / `template_new_project`,
+`template_open_project`, `template_slots`, `template_replace_media` (one
+undo step), `template_save`, `template_delete`, `template_thumbnail`. CLI and
+MCP: `template list|apply|slots|replace|save|delete` (`docs/cli.md`). App:
+a Templates section on the start screen, a Templates tab in the asset panel
+(by category, "My templates", and "This project" with slots and "Save as
+template"), the fill dialog and the slots dialog (`editor/templates.rs`,
+`editor/assets/templates.rs`). Tests: `template::*` unit tests (fill time
+math, crop, slot order, save), `tests/templates.rs` (real files, slowed
+fill, missing media, replace + undo, save then apply, a tile for every
+built-in), `crates/cli/tests/templates.rs`.
+
+- **Fill rule:** longer clips are trimmed from their start (or `--from`),
+  shorter ones slowed to span the slot (refused below 0.01×), other shapes
+  centre-cropped to the slot's aspect. A slot's own sound plays at the slot
+  volume; the built-ins set 0 under music.
+- **Trap:** two threads drawing the same missing placeholder raced on one
+  `.part` file and one rename failed ("cannot write …"). `assets::
+  write_atomically` names the partial file per write.
+- **Trap: a portal file dialog from a test instance opens on the owner's
+  desktop.** On Xvfb, run the app with `CHUKCUT_FILE_DIALOG=builtin` and
+  `DBUS_SESSION_BUS_ADDRESS` unset; otherwise "Choose…" asks the real
+  session's xdg-desktop-portal.
+- Rough: the media library lists the placeholder PNGs and the music bed like
+  any import; a template project references a user template's `media/` by
+  absolute path (deleting the template takes those files offline); splitting
+  a slot gives both halves the same marker.
+
+**Shortcuts** (`modules/keymap`). Every bindable action is in one registry
+(`keymap/registry.rs`) with its keys in three presets (chukcut, CapCut-like,
+Premiere-like); the user's changes are per-action overrides in
+`<config>/shortcuts.json`. The app binds only from it (`editor/keymap.rs`
+rebuilds the keymap and keeps GPUI Component's own bindings), the shortcuts
+sheet reads it, and Settings → Keyboard shortcuts → "Edit shortcuts…" opens a
+searchable editor: change, add, remove, reset per action or all, preset
+switch, conflict list. A new key is captured through
+`App::intercept_keystrokes`, so Ctrl+S is recorded rather than saving; a key
+another action has is offered with "Take it". **A new action needs a
+registry entry and a line in `editor/keymap.rs`'s `bindings!` list**; a
+test fails when the two disagree. Plain keys and `typing_off` actions are
+bound with `!Input` so typing in a field never runs them.
+
 ## Not built yet
 
 Both keyframe editing and audio waveforms landed overnight and this line was
@@ -2722,6 +2777,23 @@ first rendered frame actually had. Those two being different is a bug, and
 nothing else in the system would say so.
 
 ## Traps that have already cost time
+
+- **A GPU test proves something about one adapter only.** NVIDIA rounds the
+  source alpha factor of an `Rgba8UnormSrgb` target to 1/255 in the blender;
+  lavapipe does not. A blending test written on lavapipe passed while NVIDIA
+  drew faint alpha in steps (d9d86dd, the agent/alpha merge, and on
+  2026-10-04 the effect runtime: an effect package's pass that blends
+  `SRC_ALPHA, ONE_MINUS_SRC_ALPHA` drew alphas 0.4/255 to 1.1/255 as 0, 13,
+  13, 13 instead of 5, 10, 14, 17). `scripts/gpu-tests.sh [filter]` runs the
+  engine's library tests on the real GPU, then on lavapipe; the second run sets
+  `CHUKCUT_TEST_ADAPTER=llvmpipe`, and `render::test_context` fails a test that
+  got another adapter instead of letting it pass on the wrong one. It also
+  prints the adapter's name once (`--nocapture` shows it). **Do not set
+  `VK_ICD_FILENAMES=` to an empty value**: on this machine a test then found no
+  adapter and skipped, which reads as a pass. The fix for the effect runtime
+  is the same as for the quad: `glsl::premultiply_output` wraps a pass's
+  fragment shader so it writes premultiplied colour, and the pipeline blends
+  with `ONE` (`effects/graph.rs`, `a_straight_alpha_pass_draws_faint_alpha_without_steps`).
 
 - **GPUI Component theme colours set through `Theme::global_mut` never reach
   the widgets.** A Button reads the resolved `theme.tokens`, and the tokens

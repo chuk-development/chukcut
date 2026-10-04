@@ -524,6 +524,7 @@ impl Render for SettingsDialog {
             .child(self.render_general(cx))
             .child(self.render_playback(cx))
             .child(self.render_storage(cx))
+            .child(super::keymap::settings_section())
             .child(self.accounts.clone())
             .child(self.render_hardware())
             .child(self.render_logs())

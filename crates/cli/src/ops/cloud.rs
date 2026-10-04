@@ -27,20 +27,27 @@ use crate::values::{seconds, Time};
 
 /// Nothing in a one-shot invocation cancels; the engine's download takes a
 /// flag all the same.
-static NEVER: AtomicBool = AtomicBool::new(false);
+pub(crate) static NEVER: AtomicBool = AtomicBool::new(false);
 
 fn capability_name(capability: Capability) -> &'static str {
     match capability {
         Capability::Translate => "translate",
         Capability::Tts => "speak (text to speech)",
         Capability::StockSearch => "search stock media",
+        Capability::SoundEffects => "make sound effects",
+        Capability::Music => "make music",
+        Capability::Process => "process clips (fal.ai)",
         _ => "do that",
     }
 }
 
 /// The account to use: the one named, or the first that can do
 /// `capability`.
-fn account(store: &CloudStore, named: Option<&str>, capability: Capability) -> CliResult<String> {
+pub(crate) fn account(
+    store: &CloudStore,
+    named: Option<&str>,
+    capability: Capability,
+) -> CliResult<String> {
     if let Some(id) = named {
         // The engine checks it, with its own message, when it is used.
         return Ok(id.trim().to_string());
@@ -59,7 +66,7 @@ fn account(store: &CloudStore, named: Option<&str>, capability: Capability) -> C
 
 /// Import `path` into the project and, with `at`, put it on the timeline
 /// there. Returns the material and the clip, when one was placed.
-fn import_and_place(
+pub(crate) fn import_and_place(
     session: &Session,
     path: &Path,
     at: Option<Time>,

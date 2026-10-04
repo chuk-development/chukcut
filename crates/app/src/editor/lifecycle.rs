@@ -32,6 +32,8 @@ pub(crate) enum EditorEvent {
     Open(PathBuf),
     /// Close the document and quit.
     Quit,
+    /// Close the document and make a new one from a template.
+    FromTemplate(super::templates::FillRequest),
 }
 
 impl EventEmitter<EditorEvent> for Editor {}

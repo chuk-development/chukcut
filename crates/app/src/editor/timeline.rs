@@ -22,6 +22,9 @@ mod media_cache;
 mod ripple;
 mod selection;
 mod sequences;
+pub(crate) use sequences::{
+    CloseCompound, CreateCompound, FlattenCompound, NewTimeline, OpenCompound,
+};
 
 use chukcut_engine::modules::inspector::commands as inspector_commands;
 use chukcut_engine::modules::project::{Marker, MarkerColor, Segment, TimeRange};
@@ -34,7 +37,7 @@ use chukcut_engine::modules::transitions::resolve as transition_resolve;
 use gpui::assets::IconName;
 use gpui::component::menu::{ContextMenuExt, DropdownMenu};
 use gpui::component::slider::{Slider, SliderEvent, SliderState};
-use gpui::{fill, point, size, Corners, CursorStyle, Entity, KeyBinding, Subscription};
+use gpui::{fill, point, size, Corners, CursorStyle, Entity, Subscription};
 
 use super::*;
 use crate::ui::{self, IconButton, IconSrc};
@@ -65,33 +68,6 @@ actions!(
         FreezeFrame
     ]
 );
-
-/// The timeline's own shortcuts, CapCut's keys. Kept out of text fields,
-/// where the letters and Ctrl+C/X/V/A belong to the field.
-pub(crate) fn key_bindings() -> Vec<KeyBinding> {
-    const TYPING_OFF: Option<&str> = Some("!Input");
-    vec![
-        KeyBinding::new("q", DeleteLeft, TYPING_OFF),
-        KeyBinding::new("w", DeleteRight, TYPING_OFF),
-        KeyBinding::new("m", ToggleMarker, TYPING_OFF),
-        KeyBinding::new("p", ToggleMagnet, TYPING_OFF),
-        KeyBinding::new("n", ToggleSnapping, TYPING_OFF),
-        KeyBinding::new("shift-z", ZoomToFit, TYPING_OFF),
-        KeyBinding::new("a", SelectTool, TYPING_OFF),
-        KeyBinding::new("b", BladeTool, TYPING_OFF),
-        KeyBinding::new("ctrl-+", ZoomIn, None),
-        KeyBinding::new("ctrl-shift-=", ZoomIn, None),
-        KeyBinding::new("ctrl-c", CopyClips, TYPING_OFF),
-        KeyBinding::new("ctrl-x", CutClips, TYPING_OFF),
-        KeyBinding::new("ctrl-v", PasteClips, TYPING_OFF),
-        KeyBinding::new("ctrl-d", DuplicateClips, TYPING_OFF),
-        KeyBinding::new("ctrl-a", SelectAllClips, TYPING_OFF),
-        KeyBinding::new("escape", ClearSelection, TYPING_OFF),
-    ]
-    .into_iter()
-    .chain(sequences::key_bindings())
-    .collect()
-}
 
 // --- geometry -------------------------------------------------------------------
 

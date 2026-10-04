@@ -198,8 +198,11 @@ impl Editor {
         });
 
         let (s, e) = (segment_id.clone(), effect_id.clone());
+        // The state is in the id: a tooltip that is open when the button
+        // flips would otherwise keep saying "Turn off" after it was turned
+        // off. A new id is a new element, whose tooltip starts closed.
         let eye = IconButton::new(
-            SharedString::from(format!("fx-eye-{index}")),
+            SharedString::from(format!("fx-eye-{index}-{enabled}")),
             if enabled {
                 IconName::Eye
             } else {

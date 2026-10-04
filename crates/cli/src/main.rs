@@ -37,6 +37,7 @@ use ops::mask::*;
 use ops::project::*;
 use ops::render::*;
 use ops::sequence::*;
+use ops::template::*;
 use ops::text::*;
 use ops::timeline::*;
 use ops::{Ctx, Operation, Outcome};
@@ -203,6 +204,13 @@ enum Command {
     ExportQueue(On<ExportQueueArgs>),
     /// Render one frame as a PNG.
     RenderFrame(On<RenderFrameArgs>),
+    /// Project templates: list, make a project from one, save one, fill slots.
+    #[command(subcommand)]
+    Template(TemplateCommand),
+    #[command(flatten)]
+    Clip(ops::clip::ClipCommand),
+    #[command(flatten)]
+    Library(ops::library::LibraryCommand),
     /// Run a JSON list of operations against one project, with one undo history.
     Batch(BatchArgs),
     /// List effects, audio effects, transitions, animations, grade controls, presets, encoders, models, LUTs or fonts.
@@ -247,6 +255,8 @@ enum EffectCommand {
     Set(On<EffectSetArgs>),
     /// Take an effect off a clip.
     Remove(On<EffectRemoveArgs>),
+    #[command(flatten)]
+    More(ops::clip::EffectMoreCommand),
 }
 
 #[derive(Subcommand)]
@@ -275,6 +285,8 @@ enum TitleCommand {
     Position(On<TitlePositionArgs>),
     /// Copy a title with its own words and style.
     Duplicate(On<TitleDuplicateArgs>),
+    #[command(flatten)]
+    More(ops::clip::TitleMoreCommand),
 }
 
 #[derive(Subcommand)]
@@ -289,6 +301,8 @@ enum CaptionsCommand {
     Style(On<CaptionsStyleArgs>),
     /// List the captions.
     List(On<CaptionsListArgs>),
+    #[command(flatten)]
+    Edit(ops::caption_edit::CaptionsEditCommand),
 }
 
 #[derive(Subcommand)]
@@ -305,6 +319,8 @@ enum TransitionCommand {
     Add(On<TransitionAddArgs>),
     /// Remove the transition at the start of a clip.
     Remove(On<TransitionRemoveArgs>),
+    #[command(flatten)]
+    More(ops::clip::TransitionMoreCommand),
 }
 
 #[derive(Subcommand)]
@@ -371,6 +387,8 @@ enum CloudCommand {
     StockSearch(On<StockSearchArgs>),
     /// Download a stock result and import it.
     StockDownload(On<StockDownloadArgs>),
+    #[command(flatten)]
+    More(ops::cloud_tools::CloudMoreCommand),
 }
 
 // Parsed once per process; the size difference costs nothing.
@@ -381,6 +399,22 @@ enum PresetCommand {
     Save(On<PresetSaveArgs>),
     /// Delete one of your own presets.
     Remove(On<PresetRemoveArgs>),
+}
+
+#[derive(Subcommand)]
+enum TemplateCommand {
+    /// List the templates: the built-ins, then your own.
+    List(TemplateListArgs),
+    /// Make a new project file from a template, your files filling its slots.
+    Apply(On<TemplateApplyArgs>),
+    /// Save a project as a template of your own.
+    Save(On<TemplateSaveArgs>),
+    /// Put a file into a slot or any video or photo clip.
+    Replace(On<TemplateReplaceArgs>),
+    /// List a project's slots.
+    Slots(On<TemplateSlotsArgs>),
+    /// Delete one of your own templates.
+    Delete(TemplateDeleteArgs),
 }
 
 #[derive(Args)]
@@ -604,6 +638,27 @@ fn dispatch(command: Command, dry: bool, ctx: &Ctx) -> CliResult<(&'static str, 
         Command::Estimate(o) => on(o, dry, ctx),
         Command::ExportQueue(o) => on(o, dry, ctx),
         Command::RenderFrame(o) => on(o, dry, ctx),
+        Command::Template(TemplateCommand::List(args)) => Ok(("template_list", args.run()?, false)),
+        Command::Template(TemplateCommand::Apply(o)) => {
+            let (mut session, outcome) = o.args.create(&o.project)?;
+            if !dry {
+                session.save()?;
+            }
+            Ok(("template_apply", outcome, !dry))
+        }
+        Command::Template(TemplateCommand::Save(o)) => on(o, dry, ctx),
+        Command::Template(TemplateCommand::Replace(o)) => on(o, dry, ctx),
+        Command::Template(TemplateCommand::Slots(o)) => on(o, dry, ctx),
+        Command::Template(TemplateCommand::Delete(args)) => {
+            Ok(("template_delete", args.run()?, false))
+        }
+        Command::Clip(c) => c.dispatch(dry, ctx),
+        Command::Library(c) => c.dispatch(dry, ctx),
+        Command::Effect(EffectCommand::More(c)) => c.dispatch(dry, ctx),
+        Command::Title(TitleCommand::More(c)) => c.dispatch(dry, ctx),
+        Command::Captions(CaptionsCommand::Edit(c)) => c.dispatch(dry, ctx),
+        Command::Transition(TransitionCommand::More(c)) => c.dispatch(dry, ctx),
+        Command::Cloud(CloudCommand::More(c)) => c.dispatch(dry, ctx),
         Command::Catalog(args) => Ok(("catalog", args.run()?, false)),
         Command::Batch(args) => {
             let raw = read_input(&args.file)?;
