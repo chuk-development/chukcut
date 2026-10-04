@@ -74,6 +74,7 @@ mod settings;
 mod shell;
 mod shortcuts;
 mod silence;
+mod templates;
 mod timeline;
 pub(crate) use keymap::install as install_keymap;
 pub(crate) use shell::{quit, startup, Shell};
