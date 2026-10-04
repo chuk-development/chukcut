@@ -84,11 +84,16 @@ slowed already) and turns on **Optical flow (AI)**. It is one undo step.
 
 Measured on an RTX 3060 with the CUDA bundle:
 
-| Frame size | GPU, per new frame | CPU (4 threads), per new frame |
-|---|---|---|
-| 640×360 | 18 ms | 0.25 s |
-| 1280×720 | 70 ms | 1.2 s |
-| 1920×1080 | 173 ms | much slower |
+| Frame size | GPU, per new frame | GPU, Fast mode | CPU (4 threads), per new frame |
+|---|---|---|---|
+| 640×360 | 18 ms | | 0.25 s |
+| 1280×720 | 64 ms | 38 ms | 1.2 s |
+| 1920×1080 | 145 ms | 96 ms | much slower |
+
+Fast mode needs the TensorRT add-on (see
+[Settings](settings.md#ai-acceleration)). Its first job at a new frame size
+prepares the model once, 1 to 3 minutes for RIFE. Hero moment on a 6 s
+1080×1920 clip (264 new frames) took 113 s, with that preparation.
 
 A 3 s 720p clip at 0.25x needs 267 new frames: 25 s on the GPU. On the CPU,
 the same clip takes minutes. The strip then says "Optical flow runs on the
