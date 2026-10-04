@@ -15,6 +15,7 @@ pub mod clip;
 pub mod cloud;
 pub mod cloud_tools;
 pub mod delivery;
+pub mod enhance;
 pub mod frame;
 pub mod layout;
 pub mod library;
@@ -208,6 +209,8 @@ operations!(
     mask::RemoveBackgroundArgs,
     mask::ApplyToArgs,
     mask::SelectObjectArgs,
+    enhance::RemoveObjectArgs,
+    enhance::EnhanceQualityArgs,
     audio::CaptionsTranscribeArgs,
     audio::CaptionsImportArgs,
     audio::CaptionsExportArgs,

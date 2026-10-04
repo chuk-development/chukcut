@@ -29,6 +29,7 @@ use ops::audio::*;
 use ops::audiofx::*;
 use ops::cloud::*;
 use ops::delivery::*;
+use ops::enhance::*;
 use ops::frame::*;
 use ops::layout::*;
 use ops::look::*;
@@ -123,6 +124,10 @@ enum Command {
     ApplyTo(On<ApplyToArgs>),
     /// Keep (or cut out) the object you point at, on every frame (ML).
     SelectObject(On<SelectObjectArgs>),
+    /// Remove an object from every frame: clicked, boxed or painted (ML).
+    RemoveObject(On<RemoveObjectArgs>),
+    /// Make a clip's picture 2x or 4x larger and cleaner (ML).
+    EnhanceQuality(On<EnhanceQualityArgs>),
     /// Set how a clip blends with the lanes beneath it, and its opacity.
     Blend(On<BlendArgs>),
     /// Give a clip an In, Out or Combo animation preset.
@@ -583,6 +588,8 @@ fn dispatch(command: Command, dry: bool, ctx: &Ctx) -> CliResult<(&'static str, 
         Command::RemoveBackground(o) => on(o, dry, ctx),
         Command::ApplyTo(o) => on(o, dry, ctx),
         Command::SelectObject(o) => on(o, dry, ctx),
+        Command::RemoveObject(o) => on(o, dry, ctx),
+        Command::EnhanceQuality(o) => on(o, dry, ctx),
         Command::Blend(o) => on(o, dry, ctx),
         Command::Effect(EffectCommand::Add(o)) => on(o, dry, ctx),
         Command::Effect(EffectCommand::Set(o)) => on(o, dry, ctx),

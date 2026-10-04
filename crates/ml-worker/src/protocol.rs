@@ -36,7 +36,9 @@ use serde::{Deserialize, Serialize};
 /// `needs_gpu` error and the loaded CUDA libraries in a probe.
 /// 4: frame interpolation (`interpolate`), the first request with two frames
 /// in its payload and several out.
-pub const PROTOCOL_VERSION: u32 = 4;
+/// 5: inpainting (`inpaint`, a picture and its mask in one payload) and
+/// super-resolution (`upscale`).
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// A header longer than this is a broken stream, not a message.
 const MAX_HEADER: usize = 1 << 20;
@@ -142,6 +144,29 @@ pub enum RequestBody {
         height: u32,
         phases: Vec<f32>,
     },
+    /// Paint over the masked part of a picture with inpainting model
+    /// `model`. The payload is the picture, RGBA8 `width × height`, then
+    /// its mask, `width × height` bytes, nonzero where the picture is to be
+    /// filled. Answered with [`Outcome::Inpainted`] and the filled picture
+    /// as the payload, RGBA8 of the same size: the network's whole answer,
+    /// unmasked pixels included, so the caller decides how to blend it in.
+    /// The picture is usually a crop around the mask, not a whole frame.
+    Inpaint {
+        model: String,
+        width: u32,
+        height: u32,
+    },
+    /// The picture (the payload, RGBA8 `width × height`) made larger by
+    /// super-resolution model `model`, then resized to `out_width ×
+    /// out_height` (area averaging below the model's own scale). Answered
+    /// with [`Outcome::Upscaled`] and the picture, RGBA8, as the payload.
+    Upscale {
+        model: String,
+        width: u32,
+        height: u32,
+        out_width: u32,
+        out_height: u32,
+    },
     /// Run `model` `iterations` times on a synthetic input of `width` ×
     /// `height` and report the time per run. Reports progress and can be
     /// cancelled; it is how a speed claim in the docs is measured.
@@ -231,6 +256,20 @@ pub enum Outcome {
         width: u32,
         height: u32,
         count: u32,
+        millis: f32,
+        provider: String,
+    },
+    /// The payload is the filled picture, RGBA8 `width × height`.
+    Inpainted {
+        width: u32,
+        height: u32,
+        millis: f32,
+        provider: String,
+    },
+    /// The payload is the larger picture, RGBA8 `width × height`.
+    Upscaled {
+        width: u32,
+        height: u32,
         millis: f32,
         provider: String,
     },

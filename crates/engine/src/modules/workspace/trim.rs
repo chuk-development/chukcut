@@ -16,9 +16,11 @@
 //!   path alone), the proxies the cache index maps to its media, and the
 //!   baked "Remove background" mattes of its media (`mattes/<digest>-…`,
 //!   keyed by the file's content digest, which a trim reads from each file's
-//!   head and tail), and its optical-flow frames (`flow/<digest>-…`, the
-//!   same key). Both cost a model run per frame to make again, so they are
-//!   the last thing to throw away for the project being edited. Voice
+//!   head and tail), its optical-flow frames (`flow/<digest>-…`, the
+//!   same key) and its remade frames ("Remove object", "Enhance quality",
+//!   `enhance/<digest>-…`). All cost a model run per frame to make again,
+//!   so they are the last thing to throw away for the project being
+//!   edited. Voice
 //!   cleanup renders are keyed by path *and* strength *and* engine, which this
 //!   module cannot reconstruct without the document's clip settings; they are
 //!   ordinary LRU candidates and are re-rendered on demand if trimmed.
@@ -308,6 +310,10 @@ pub fn trim_cache(limit: u64) -> TrimReport {
     protection.dirs.extend(derived_dirs_of(
         &media,
         &crate::modules::speed::flow::root(),
+    ));
+    protection.dirs.extend(derived_dirs_of(
+        &media,
+        &crate::modules::enhance::cache::root(),
     ));
     protection.files.insert(proxies.root().join("index.json"));
     let wanted: HashSet<String> = media

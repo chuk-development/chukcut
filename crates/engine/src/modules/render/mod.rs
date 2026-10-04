@@ -62,6 +62,7 @@ pub mod context;
 /// DMA-BUF export. Linux only: everything in it is a DRM concept.
 #[cfg(target_os = "linux")]
 pub mod dmabuf;
+pub mod enhance;
 pub mod error;
 pub mod flow;
 pub mod grade;

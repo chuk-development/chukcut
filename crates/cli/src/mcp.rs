@@ -87,6 +87,9 @@ const OPEN_WORLD: &[&str] = &[
     // Download RIFE on first use (`--mode flow`).
     "frame_blend",
     "smooth_slow_mo",
+    // Download LaMa or Real-ESRGAN on first use.
+    "remove_object",
+    "enhance_quality",
     "sound",
     "fal",
     "sticker",

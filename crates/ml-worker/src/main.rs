@@ -31,7 +31,7 @@ use chukcut_ml_worker::protocol::{
 };
 use chukcut_ml_worker::registry::{self, ModelSpec, Task};
 use chukcut_ml_worker::runtime::{Failure, Runtime};
-use chukcut_ml_worker::{birefnet, rife, rvm, sam, vittrack, yunet};
+use chukcut_ml_worker::{birefnet, esrgan, lama, rife, rvm, sam, vittrack, yunet};
 use ort::value::Tensor;
 
 type Out = Arc<Mutex<BufWriter<std::io::Stdout>>>;
@@ -468,6 +468,60 @@ impl Worker {
                     provider,
                 })
             }
+            RequestBody::Inpaint {
+                model: name,
+                width,
+                height,
+            } => {
+                let (w, h) = (width as usize, height as usize);
+                if w == 0 || h == 0 || payload.len() != w * h * 5 {
+                    return Err(bad(format!(
+                        "a {width}x{height} picture and its mask are {} bytes, got {}",
+                        w * h * 5,
+                        payload.len()
+                    )));
+                }
+                let spec = model(&name, Task::Inpaint)?;
+                let started = Instant::now();
+                let (picture, mask) = payload.split_at(w * h * 4);
+                let (filled, provider) = self.inpaint(spec, picture, mask, w, h)?;
+                self.reply_payload = filled;
+                Ok(Outcome::Inpainted {
+                    width,
+                    height,
+                    millis: millis(started),
+                    provider,
+                })
+            }
+            RequestBody::Upscale {
+                model: name,
+                width,
+                height,
+                out_width,
+                out_height,
+            } => {
+                let (w, h) = frame(payload, width, height)?;
+                let spec = model(&name, Task::Upscale)?;
+                let (ow, oh) = (out_width as usize, out_height as usize);
+                // Larger than the model makes is a stretch, not detail; 8K
+                // is the reply's own limit.
+                if ow == 0 || oh == 0 || ow > w * esrgan::SCALE || oh > h * esrgan::SCALE {
+                    return Err(bad(format!(
+                        "{out_width}x{out_height} is not between 1 and {}x the {width}x{height} picture",
+                        esrgan::SCALE
+                    )));
+                }
+                let started = Instant::now();
+                let (big, provider) = self.upscale(id, spec, payload, w, h, progress)?;
+                self.reply_payload =
+                    esrgan::resize_rgba(&big, w * esrgan::SCALE, h * esrgan::SCALE, ow, oh);
+                Ok(Outcome::Upscaled {
+                    width: out_width,
+                    height: out_height,
+                    millis: millis(started),
+                    provider,
+                })
+            }
             RequestBody::Benchmark {
                 model: name,
                 width,
@@ -660,6 +714,97 @@ impl Worker {
             )));
         }
         Ok((rife::frame_bytes(data, w, h), provider))
+    }
+
+    /// LaMa over a picture and its mask (`w × h` each): the network's
+    /// answer stretched back to `w × h`, and the provider it ran on.
+    fn inpaint(
+        &mut self,
+        spec: &'static ModelSpec,
+        rgba: &[u8],
+        mask: &[u8],
+        w: usize,
+        h: usize,
+    ) -> Result<(Vec<u8>, String), Failure> {
+        let loaded = self.runtime()?.session(spec)?;
+        let provider = loaded.provider.to_string();
+        let size = lama::SIZE as i64;
+        let image = Tensor::from_array(([1i64, 3, size, size], lama::image_input(rgba, w, h)))
+            .map_err(inference)?;
+        let mask = Tensor::from_array(([1i64, 1, size, size], lama::mask_input(mask, w, h)))
+            .map_err(inference)?;
+        let outputs = loaded
+            .session
+            .run(ort::inputs!["image" => image, "mask" => mask])
+            .map_err(inference)?;
+        let value = outputs
+            .get("output")
+            .ok_or_else(|| inference("the model has no output output"))?;
+        let (_, data) = value.try_extract_tensor::<f32>().map_err(inference)?;
+        if data.len() != 3 * lama::SIZE * lama::SIZE {
+            return Err(inference(format!(
+                "the picture is {} values, not 3 × {}²",
+                data.len(),
+                lama::SIZE
+            )));
+        }
+        Ok((lama::output_rgba(data, w, h), provider))
+    }
+
+    /// Real-ESRGAN over a picture, tile by tile: the RGBA8 picture at the
+    /// model's scale, and the provider it ran on. Checks for a cancel
+    /// between tiles.
+    fn upscale(
+        &mut self,
+        id: u64,
+        spec: &'static ModelSpec,
+        rgba: &[u8],
+        w: usize,
+        h: usize,
+        progress: &dyn Fn(f32, &str),
+    ) -> Result<(Vec<u8>, String), Failure> {
+        let scale = esrgan::SCALE;
+        let mut big = vec![0u8; w * scale * h * scale * 4];
+        let (xs, ys) = (esrgan::spans(w), esrgan::spans(h));
+        let total = xs.len() * ys.len();
+        let mut provider = String::new();
+        for (n, (&y, &x)) in ys
+            .iter()
+            .flat_map(|y| xs.iter().map(move |x| (y, x)))
+            .enumerate()
+        {
+            if self.is_cancelled(id) {
+                return Err((ErrorKind::Cancelled, "cancelled".into()));
+            }
+            let loaded = self.runtime()?.session(spec)?;
+            provider = loaded.provider.to_string();
+            let input = Tensor::from_array((
+                [1i64, 3, y.read_len as i64, x.read_len as i64],
+                esrgan::tile_input(rgba, w, h, x, y),
+            ))
+            .map_err(inference)?;
+            let outputs = loaded
+                .session
+                .run(ort::inputs!["input" => input])
+                .map_err(inference)?;
+            let value = outputs
+                .get("output")
+                .ok_or_else(|| inference("the model has no output output"))?;
+            let (_, data) = value.try_extract_tensor::<f32>().map_err(inference)?;
+            if data.len() != 3 * x.read_len * scale * y.read_len * scale {
+                return Err(inference(format!(
+                    "a {}x{} tile came back as {} values",
+                    x.read_len,
+                    y.read_len,
+                    data.len()
+                )));
+            }
+            esrgan::place_tile(&mut big, w, data, x, y);
+            if total > 1 {
+                progress((n + 1) as f32 / total as f32, "upscaling");
+            }
+        }
+        Ok((big, provider))
     }
 
     /// The SAM mask of `clicks` (and `bbox`) in this frame: the mask bytes,
@@ -903,6 +1048,21 @@ impl Worker {
                         .interpolate(spec, &rgba, &second, w, h, 0.5)
                         .map(|_| ())
                 }
+                Task::Inpaint => {
+                    // A hole in the middle third, as a removed object is.
+                    let mask: Vec<u8> = (0..w * h)
+                        .map(|i| {
+                            let (x, y) = (i % w, i / w);
+                            u8::from(
+                                (w / 3..2 * w / 3).contains(&x) && (h / 3..2 * h / 3).contains(&y),
+                            ) * 255
+                        })
+                        .collect();
+                    worker.inpaint(spec, &rgba, &mask, w, h).map(|_| ())
+                }
+                Task::Upscale => worker
+                    .upscale(id, spec, &rgba, w, h, &|_, _| {})
+                    .map(|_| ()),
                 Task::SegmentDecoder => Err(bad(format!(
                     "{} runs with its encoder; benchmark that",
                     spec.id
