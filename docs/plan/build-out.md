@@ -89,6 +89,8 @@ column current.
 | 11 | body | zip/tar downloads, RTMPose body landmarks + follow body part, body box for reframe, face/voice queues over every timeline in the prepare chip | merged — zip/tar.gz model downloads, YOLOX-tiny + RTMPose-m (Apache-2.0) body tracks, follow body part (13 parts), people box in auto reframe, face/voice queues over all timelines in the prepare chip; open: fingers, id swaps when people cross, detector NMS on CPU |
 | 11 | docs | README feature overview, user manual in docs/manual/ (keyboard table checked against the keymap registry), STATUS top summary | merged — README rewritten, docs/manual/ (17 pages), keymap_doc test, STATUS "At a glance" |
 | 11 | ux | install worker + CLI with the app, inspector crop, speed-effect presets, Basic-tab stubs, hardware-decode + ML runtime in settings, persisted export queue + quit guard | merged — worker + CLI installed with the app, GPU "Reduce noise" effect, speed-effect presets, inspector Crop (ratios, handles, rotate/flip), decode + AI runtime pickers, persisted export queue + quit guard, exit hang fixed; open: crop not keyframable, denoise spatial only |
+| 11 | qa3 | end-to-end QA of waves 10–11, installed layout, showcase extension | running (agent/qa3) |
+| 11 | release | manual-only `release.yml`: .deb, AppImage x86_64 + aarch64, macOS universal .dmg, Windows .exe zip + installer; Linux jobs must work, macOS/Windows best effort (`continue-on-error`) | running (agent/release) |
 
 ## Backlog for the next waves (lead picks from the top)
 
