@@ -38,7 +38,7 @@ pub fn strip_sequence(key: &str) -> &str {
 
 /// The compositor every strip renders with: one per process, on the shared
 /// device, built on first use.
-fn compositor() -> Result<Arc<Compositor>, String> {
+pub(crate) fn compositor() -> Result<Arc<Compositor>, String> {
     static COMPOSITOR: OnceLock<Option<Arc<Compositor>>> = OnceLock::new();
     COMPOSITOR
         .get_or_init(|| {

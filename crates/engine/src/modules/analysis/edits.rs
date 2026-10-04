@@ -292,6 +292,9 @@ fn cropped_size(project: &Project, segment: &Segment) -> Option<(u32, u32)> {
         } else {
             (video.width, video.height)
         }
+    } else if pool.sequence(&segment.material_id).is_some() {
+        sequence_content(project, &segment.material_id, 0)
+            .unwrap_or((project.canvas.width, project.canvas.height))
     } else {
         let image = pool.image(&segment.material_id)?;
         (image.width, image.height)
@@ -301,6 +304,38 @@ fn cropped_size(project: &Project, segment: &Segment) -> Option<(u32, u32)> {
         ((w.max(1) as f32 * cw).max(1.0)) as u32,
         ((h.max(1) as f32 * ch).max(1.0)) as u32,
     ))
+}
+
+/// The shape a compound clip's contents have: the largest picture inside
+/// that fills its frame the plain way, through compound clips inside. A
+/// compound clip is drawn as its sequence rendered on the whole canvas, so
+/// the canvas says nothing about its contents; a 16:9 shot inside it stays a
+/// 16:9 picture, letterboxed, on a 9:16 canvas. `None` when nothing inside
+/// fills its frame (only picture-in-picture, titles).
+pub fn content_size(project: &Project, segment: &Segment) -> Option<(u32, u32)> {
+    project.materials.sequence(&segment.material_id)?;
+    sequence_content(project, &segment.material_id, 0)
+}
+
+fn sequence_content(project: &Project, id: &str, depth: usize) -> Option<(u32, u32)> {
+    if depth >= crate::modules::sequence::MAX_DEPTH {
+        return None;
+    }
+    let tracks = crate::modules::sequence::tracks_of(project, id)?;
+    let area = |(w, h): (u32, u32)| w as u64 * h as u64;
+    tracks
+        .iter()
+        .filter(|t| t.kind == TrackKind::Video && !t.hidden)
+        .flat_map(|t| t.segments.iter())
+        .filter(|s| is_full_frame(s) && !project.materials.is_effect_clip(s))
+        .filter_map(|s| {
+            if project.materials.sequence(&s.material_id).is_some() {
+                sequence_content(project, &s.material_id, depth + 1)
+            } else {
+                cropped_size(project, s)
+            }
+        })
+        .max_by_key(|&size| area(size))
 }
 
 /// Width over height of the picture `segment` shows, after its crop.

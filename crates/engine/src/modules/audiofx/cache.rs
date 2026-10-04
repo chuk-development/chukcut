@@ -144,6 +144,12 @@ pub fn generation() -> u64 {
     GENERATION.load(Ordering::Acquire)
 }
 
+/// Say that some other cached render the plan reads has landed (a compound
+/// clip's mixed-down sound, `sequence::bounce`), so the preview re-plans.
+pub(crate) fn notify_landed() {
+    GENERATION.fetch_add(1, Ordering::AcqRel);
+}
+
 struct Queue {
     /// Newest request per owner (a segment id): an older one for the same
     /// clip is superseded, so dragging a slider renders the value it was

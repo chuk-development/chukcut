@@ -26,22 +26,52 @@ struct Target {
     duration: Micros,
     range: TimeRange,
     current: VoiceCleanup,
+    /// A compound clip: the document and its sequence, whose mix-down is
+    /// `original` (`sequence::bounce`) and has to be rendered before use.
+    compound: Option<(Box<crate::modules::project::Project>, String)>,
+}
+
+impl Target {
+    /// Make sure `original` exists: a compound clip's mix-down is rendered
+    /// now if the cache does not have it.
+    fn ready(&self, cancel: &AtomicBool) -> Result<(), String> {
+        if let Some((project, id)) = &self.compound {
+            crate::modules::sequence::bounce::render(project, id, cancel)?;
+        }
+        Ok(())
+    }
 }
 
 fn target(state: &AppState, segment_id: &str) -> Result<Target, String> {
     state.with_project(|project| {
         let audible = audible_segment(project, segment_id).ok_or("the clip has no sound")?;
         let (_, segment) = project.segment(&audible).ok_or("unknown clip")?;
+        let current = cleanup_of(project, segment)
+            .map(|(_, c)| c)
+            .unwrap_or_default();
+        // A compound clip is cleaned as one sound: the mix of its contents.
+        if project.materials.sequence(&segment.material_id).is_some() {
+            let (path, duration) =
+                crate::modules::sequence::bounce::source_of(project, &segment.material_id)
+                    .ok_or("that compound clip's contents are gone")?;
+            return Ok(Target {
+                current,
+                segment_id: audible.clone(),
+                original: path.to_string_lossy().into_owned(),
+                duration,
+                range: segment.source_range,
+                compound: Some((Box::new(project.clone()), segment.material_id.clone())),
+            });
+        }
         let (original, duration) =
             original_source(project, segment).ok_or("the clip has no sound")?;
         Ok(Target {
-            current: cleanup_of(project, segment)
-                .map(|(_, c)| c)
-                .unwrap_or_default(),
+            current,
             segment_id: audible,
             original,
             duration,
             range: segment.source_range,
+            compound: None,
         })
     })?
 }
@@ -69,6 +99,7 @@ pub fn voice_set_denoise(
     progress: &dyn Fn(f32),
 ) -> Result<EditResponse, String> {
     let t = target(state, &segment_id)?;
+    t.ready(cancel)?;
     let mut cleanup = t.current.clone();
     cleanup.denoise = strength.map(|s| Denoise {
         strength: denoise::quantize(s),
@@ -107,6 +138,7 @@ pub fn voice_normalize(
             if !target.is_finite() || !(-40.0..=-5.0).contains(&target) {
                 return Err("a loudness target is between −40 and −5 LUFS".into());
             }
+            t.ready(cancel)?;
             let source = cleanup
                 .denoise
                 .as_ref()

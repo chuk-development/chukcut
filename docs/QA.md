@@ -251,3 +251,21 @@ Template follow-ups (decision 0022) and the lows above.
   stored as typed (`_scratch/media/a.mp4`), so the project broke when opened
   from another directory, and the same file chosen again in a dialog became
   a second material. Found while checking Replace media.
+
+## Compound clips 3, 2026-10-04 (`agent/compound3`)
+
+- **Export dialog cover black** (from the shared-preview pass): reproduced on
+  Xvfb with lavapipe on the showcase project by putting the playhead at the
+  end of the timeline — the player and the cover were both black, shared
+  and readback paths. Opening the dialog at any other instant, or before the
+  first frame arrived, showed the frame. Fixed: at or past the end the
+  preview shows the last frame (`preview::clock::shown_time`); seen on
+  screen after the fix (the ball frame at 19:20).
+- **Compound clip inspector:** made a compound clip with Alt+G on the
+  showcase and selected it: tabs Video (Basic, Mask), Audio, Speed,
+  Animation, Adjust, Effects, and the Scene detection section. Running an
+  analysis from the UI was not tried on screen (covered by
+  `tests/analysis.rs` through the command layer).
+- **Not checked on screen:** a compound clip's audio effects in the preview
+  (would play on the owner's speakers); covered by `tests/compound.rs`
+  through the plan and the block mixer.

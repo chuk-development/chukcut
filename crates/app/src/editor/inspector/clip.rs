@@ -85,6 +85,8 @@ impl Editor {
             ClipKind::Image => vec![VIDEO, ANIMATION, ADJUST, TRACKING],
             ClipKind::Audio => vec![BASIC, VOICE, SPEED],
             ClipKind::Text => vec![text_style::TEXT_TAB, VIDEO, ANIMATION, TRACKING],
+            // Its sound is its contents' mix, which it can process itself.
+            ClipKind::Compound => vec![VIDEO, AUDIO, SPEED, ANIMATION, ADJUST],
         };
         // Effects: on every picture, and all an effect clip has.
         if self.project.materials.is_effect_clip(&segment) {
@@ -109,7 +111,13 @@ impl Editor {
                     (None, self.video_basic(&segment, kind, window, cx), None)
                 }
                 VIDEO => {
-                    let names = ["Basic", "Remove background", "Mask", "Retouch"];
+                    // A compound clip has no footage of its own to cut out
+                    // or retouch; a mask draws on its picture like any other.
+                    let names: &[&'static str] = if kind == ClipKind::Compound {
+                        &["Basic", "Mask"]
+                    } else {
+                        &["Basic", "Remove background", "Mask", "Retouch"]
+                    };
                     let current = sub(self, VIDEO, names[0]);
                     let body = match current {
                         "Basic" => self.video_basic(&segment, kind, window, cx),
@@ -118,7 +126,7 @@ impl Editor {
                         _ => not_yet(current),
                     };
                     (
-                        Some(sub_tabs(VIDEO, &names, current, cx).into_any_element()),
+                        Some(sub_tabs(VIDEO, names, current, cx).into_any_element()),
                         body,
                         None,
                     )
@@ -257,11 +265,16 @@ impl Editor {
         sections.push(blend);
         sections.extend(self.sticker_playback_section(segment, cx));
         // Footage tools; a title has no footage to stabilise or denoise.
-        let footage_tools: &[&str] = if kind == ClipKind::Text {
-            &[]
-        } else {
-            sections.extend(self.analysis_video_sections(segment, cx));
-            &["Enhance quality", "Reduce image noise", "Optical flow"]
+        let footage_tools: &[&str] = match kind {
+            ClipKind::Text => &[],
+            ClipKind::Compound => {
+                sections.extend(self.analysis_video_sections(segment, cx));
+                &[]
+            }
+            _ => {
+                sections.extend(self.analysis_video_sections(segment, cx));
+                &["Enhance quality", "Reduce image noise", "Optical flow"]
+            }
         };
         for &title in footage_tools {
             sections.push(Section::missing(title, "Not in the engine yet").render(

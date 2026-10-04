@@ -27,6 +27,7 @@
 //! its inverse leave the list exactly as it was.
 
 pub mod audio;
+pub mod bounce;
 pub mod build;
 pub mod commands;
 pub mod digest;

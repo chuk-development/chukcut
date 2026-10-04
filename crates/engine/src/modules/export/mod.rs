@@ -63,7 +63,9 @@ pub mod queue;
 pub mod snapshot;
 pub mod store;
 
-pub use audio::{mix_timeline, AudioMixer, AudioRequest, AudioSource, SilentAudioSource};
+pub use audio::{
+    mix_timeline, mix_timeline_unclamped, AudioMixer, AudioRequest, AudioSource, SilentAudioSource,
+};
 pub use encoder::{AudioStreamSpec, MediaWriter, VideoStreamSpec, WriterStats};
 pub use estimate::{EstimateMethod, SizeEstimate};
 pub use hwaccel::{HwAccel, HwEncoder, RateControl};

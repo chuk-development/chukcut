@@ -328,6 +328,20 @@ pub fn frame_start(time: Micros, fps: f64) -> Micros {
     frame_time(frame_at(time.max(0), fps), fps)
 }
 
+/// The instant whose picture the preview shows for playhead `position` on a
+/// timeline `duration` long: the playhead itself, except at or past the end,
+/// where nothing is on any lane any more. There it is the start of the last
+/// frame, so a playhead parked at the end — where playback stops — shows
+/// the last picture instead of black, and so does everything that shows "the
+/// frame at the playhead" (the export dialog's cover).
+pub fn shown_time(position: Micros, duration: Micros, fps: f64) -> Micros {
+    if duration > 0 && position >= duration {
+        frame_start(duration - 1, fps)
+    } else {
+        position
+    }
+}
+
 /// The frame boundary nearest to `time`. Where a click or a drag on the
 /// ruler puts the playhead: on the grid, so that a split there cuts exactly
 /// between two frames and the timecode reads a whole frame.
@@ -519,6 +533,16 @@ mod tests {
         source.advance(10_000_000);
         assert_eq!(clock.position(), 2_000_000);
         assert!(clock.is_at_end());
+    }
+
+    #[test]
+    fn the_end_shows_the_last_frame() {
+        // 30 fps, 2 s: the last frame starts at 1.9667 s.
+        let last = frame_time(59, 30.0);
+        assert_eq!(shown_time(2_000_000, 2_000_000, 30.0), last);
+        assert_eq!(shown_time(5_000_000, 2_000_000, 30.0), last);
+        assert_eq!(shown_time(1_000_000, 2_000_000, 30.0), 1_000_000);
+        assert_eq!(shown_time(0, 0, 30.0), 0);
     }
 
     #[test]

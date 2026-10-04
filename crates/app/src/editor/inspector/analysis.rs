@@ -70,10 +70,17 @@ impl Editor {
         segment: &Segment,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        let is_video = self.project.materials.video(&segment.material_id).is_some();
+        let pool = &self.project.materials;
+        let is_video = pool.video(&segment.material_id).is_some();
+        let is_compound = pool.sequence(&segment.material_id).is_some();
         let mut sections = Vec::new();
         if is_video {
             sections.push(self.stabilise_section(segment, cx));
+            sections.push(self.scenes_section(segment, cx));
+        } else if is_compound {
+            // Scene changes are found in the compound clip's rendered
+            // contents; stabilising one would need its camera, which it does
+            // not have.
             sections.push(self.scenes_section(segment, cx));
         } else {
             sections.push(

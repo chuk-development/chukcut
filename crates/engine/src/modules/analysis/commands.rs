@@ -25,6 +25,7 @@ use crate::modules::ml::faces::FaceDetector;
 use crate::modules::ml::MlError;
 use crate::modules::project::configure::{ConfigureCommand, ProjectConfig};
 use crate::modules::project::document::{Id, Micros, Project, TimeRange, TrackKind};
+use crate::modules::sequence;
 use crate::modules::timeline::commands::EditResponse;
 use crate::modules::timeline::ops::EditCommand;
 use crate::modules::voice::cleanup::{audible_segment, original_source};
@@ -77,6 +78,73 @@ fn video_of(project: &Project, segment_id: &str) -> Result<(String, f64, TimeRan
         .intersect(&TimeRange::new(0, video.duration.max(1)));
     let source = source.ok_or("the clip shows none of its file")?;
     Ok((video.path.clone(), video.fps, source, video.id.clone()))
+}
+
+/// What a picture analysis reads for one clip: a video's file, or a
+/// compound clip's sequence rendered. Either way `range` and every time the
+/// analysis finds are the clip's source time, so its time map — speed and
+/// speed curve included — puts the results on the timeline.
+struct Picture {
+    path: String,
+    fps: f64,
+    range: TimeRange,
+    media_id: Id,
+    sequence: Option<Arc<Project>>,
+}
+
+impl Picture {
+    fn walk(&self, height: u32, max_rate: Option<f64>) -> Walk {
+        Walk {
+            path: self.path.clone(),
+            fps: self.fps,
+            range: self.range,
+            height,
+            max_rate,
+            sequence: self.sequence.clone(),
+        }
+    }
+}
+
+/// [`Picture`] of a video clip or a compound clip. A compound clip is drawn
+/// on `canvas` — the project's when `None`.
+fn picture_of(
+    project: &Project,
+    segment_id: &str,
+    canvas: Option<(u32, u32)>,
+) -> Result<Picture, String> {
+    let (_, segment) = project
+        .segment(segment_id)
+        .ok_or("the clip is no longer on the timeline")?;
+    let id = &segment.material_id;
+    if project.materials.sequence(id).is_none() {
+        let (path, fps, range, media_id) = video_of(project, segment_id)
+            .map_err(|_| "only a video or a compound clip can be analysed for that".to_string())?;
+        return Ok(Picture {
+            path,
+            fps,
+            range,
+            media_id,
+            sequence: None,
+        });
+    }
+    let mut view = sequence::nested(project, id).ok_or("that compound clip's contents are gone")?;
+    if let Some((w, h)) = canvas {
+        view.canvas.width = w.max(2);
+        view.canvas.height = h.max(2);
+    }
+    let range = segment
+        .source_range
+        .intersect(&TimeRange::new(0, view.duration().max(1)))
+        .ok_or("the compound clip shows none of its contents")?;
+    let size = (view.canvas.width, view.canvas.height);
+    let digest = sequence::digest::digest(&project.materials, size, id).unwrap_or(0);
+    Ok(Picture {
+        path: format!("{}{id}#{digest:016x}", super::cache::SEQUENCE_PREFIX),
+        fps: project.fps,
+        range,
+        media_id: id.clone(),
+        sequence: Some(Arc::new(view)),
+    })
 }
 
 /// Put `entries` into the pool, then apply what `build` makes of the
@@ -144,18 +212,12 @@ pub fn analysis_detect_scenes(
     request: DetectScenes,
     channel: Option<Channel<JobEvent>>,
 ) -> Result<u64, String> {
-    let (path, fps, range, media_id) =
-        state.with_project(|p| video_of(p, &request.segment_id))??;
+    let picture = state.with_project(|p| picture_of(p, &request.segment_id, None))??;
     let state = Arc::clone(state);
     let segment_id = request.segment_id.clone();
     jobs::spawn(JobKind::Scenes, segment_id.clone(), channel, move |ctx| {
-        let walk = Walk {
-            path,
-            fps,
-            range,
-            height: scenes::ANALYSIS_HEIGHT,
-            max_rate: None,
-        };
+        let walk = picture.walk(scenes::ANALYSIS_HEIGHT, None);
+        let (range, media_id) = (picture.range, picture.media_id.clone());
         let scores = scenes::score(&walk, Some(ctx))?;
         let cuts: Vec<Micros> = scenes::cut_times(&scores, request.sensitivity)
             .into_iter()
@@ -256,6 +318,7 @@ pub fn analysis_stabilise(
                 range,
                 height: stabilise::ANALYSIS_HEIGHT,
                 max_rate: None,
+                sequence: None,
             };
             let camera = stabilise::measure(&walk, &media_id, Some(ctx))?;
             let settings = Stabilise {
@@ -350,22 +413,65 @@ pub fn analysis_detect_beats(
     segment_id: Id,
     channel: Option<Channel<JobEvent>>,
 ) -> Result<u64, String> {
-    let (sound_id, path, range, media_id) = state.with_project(|p| {
+    let (sound_id, input, range, media_id) = state.with_project(|p| {
         let sound = audible_segment(p, &segment_id).ok_or("the clip has no sound")?;
         let (_, heard) = p
             .segment(&sound)
             .ok_or("the clip is no longer on the timeline")?;
+        // A compound clip's sound is its contents' mix, in its sequence's
+        // time — the compound clip's source time.
+        if let Some(duration) = sequence::duration_of(p, &heard.material_id)
+            .filter(|_| p.materials.sequence(&heard.material_id).is_some())
+        {
+            let range = heard
+                .source_range
+                .intersect(&TimeRange::new(0, duration.max(1)))
+                .ok_or("the compound clip plays none of its contents")?;
+            let input = Sound::Mix(Box::new(p.clone()));
+            return Ok::<_, String>((sound.clone(), input, range, heard.material_id.clone()));
+        }
         let (path, duration) = original_source(p, heard).ok_or("the clip has no sound")?;
         let range = heard
             .source_range
             .intersect(&TimeRange::new(0, duration.max(1)))
             .ok_or("the clip plays none of its sound")?;
-        Ok::<_, String>((sound.clone(), path, range, heard.material_id.clone()))
+        Ok((
+            sound.clone(),
+            Sound::File(path),
+            range,
+            heard.material_id.clone(),
+        ))
     })??;
     let state = Arc::clone(state);
     jobs::spawn(JobKind::Beats, sound_id.clone(), channel, move |ctx| {
-        let mono =
-            super::beats::decode(&path, range, ctx.cancel_flag(), |f| ctx.progress(f * 0.8))?;
+        let mono = match &input {
+            Sound::File(path) => {
+                super::beats::decode(path, range, ctx.cancel_flag(), |f| ctx.progress(f * 0.8))?
+            }
+            Sound::Mix(project) => {
+                let stereo = sequence::audio::mix_of(
+                    project,
+                    &media_id,
+                    range,
+                    super::beats::RATE,
+                    ctx.cancel_flag(),
+                )
+                .map_err(|e| {
+                    if ctx.cancelled() {
+                        jobs::CANCELLED.into()
+                    } else {
+                        e
+                    }
+                })?;
+                ctx.progress(0.8);
+                stereo
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|frame| (frame[0] + frame[1]) / 2.0)
+                    .collect()
+            }
+        };
         if ctx.cancelled() {
             return Err(jobs::CANCELLED.into());
         }
@@ -391,6 +497,13 @@ pub fn analysis_detect_beats(
         })?;
         Ok(format!("{bpm:.0} BPM · {}", plural(count, "beat", "beats")))
     })
+}
+
+/// Where beat detection hears a clip.
+enum Sound {
+    File(String),
+    /// A compound clip: the document, whose sequence `media_id` is mixed.
+    Mix(Box<Project>),
 }
 
 /// Forget a clip's beats.
@@ -465,7 +578,9 @@ pub fn reframe_candidates(project: &Project) -> Vec<Id> {
         .flat_map(|t| t.segments.iter())
         .filter(|s| {
             let pool = &project.materials;
-            (pool.video(&s.material_id).is_some() || pool.image(&s.material_id).is_some())
+            (pool.video(&s.material_id).is_some()
+                || pool.image(&s.material_id).is_some()
+                || pool.sequence(&s.material_id).is_some())
                 && !pool.is_effect_clip(s)
                 && edits::is_full_frame(s)
         })
@@ -515,13 +630,12 @@ pub fn analysis_reframe(
                 Axis::Horizontal => crop[2] - crop[0],
                 Axis::Vertical => crop[3] - crop[1],
             };
-            let walk = video_of(p, id).ok().map(|(path, fps, range, _)| Walk {
-                path,
-                fps,
-                range,
-                height: reframe::ANALYSIS_HEIGHT,
-                max_rate: Some(reframe::RATE),
-            });
+            // A compound clip is read on a canvas of its contents' shape,
+            // so the frames are the picture the window moves across.
+            let content = edits::content_size(p, segment);
+            let walk = picture_of(p, id, content)
+                .ok()
+                .map(|picture| picture.walk(reframe::ANALYSIS_HEIGHT, Some(reframe::RATE)));
             clips.push(ReframeClip {
                 segment_id: id.clone(),
                 axis,

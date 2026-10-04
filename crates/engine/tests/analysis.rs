@@ -273,6 +273,7 @@ fn camera_shake_is_measured_and_cancelled() {
         range: TimeRange::new(0, 3_000_000),
         height: stabilise::ANALYSIS_HEIGHT,
         max_rate: None,
+        sequence: None,
     };
     let camera = stabilise::measure(&walk, "v", None).unwrap();
     assert!(
@@ -538,4 +539,174 @@ fn the_compositor_draws_a_stabilised_clip_through_its_window() {
         (edge as f32 / 320.0 - 0.405).abs() < 0.02,
         "export edge at {edge}"
     );
+}
+
+// --- compound clips --------------------------------------------------------------
+
+/// Put `ids` into one compound clip played at `speed`, and answer its id.
+fn into_compound(state: &AppState, ids: &[&str], speed: f32) -> String {
+    use chukcut_engine::modules::sequence::build;
+    state
+        .with_project_mut(|p| {
+            let ids: Vec<String> = ids.iter().map(|s| s.to_string()).collect();
+            let compound = build::create_compound(p, &ids, None).unwrap();
+            compound.command.apply(p).unwrap();
+            let clip = p.segment_mut(&compound.segment_id).unwrap();
+            clip.speed = speed;
+            let shown = clip.source_range.duration;
+            clip.target_range.duration = (shown as f64 / speed as f64).round() as Micros;
+            compound.segment_id
+        })
+        .unwrap()
+}
+
+fn gpu_or_skip() -> bool {
+    if chukcut_engine::modules::gpu::render_context().is_none() {
+        eprintln!("skipping: no GPU to render the compound clip with");
+        return false;
+    }
+    true
+}
+
+#[test]
+fn scenes_inside_a_compound_clip_land_where_it_plays_them() {
+    let Some(path) = three_shots() else {
+        eprintln!("skipping: ffmpeg could not generate the fixture");
+        return;
+    };
+    if !gpu_or_skip() {
+        return;
+    }
+    let state = video_state(&path, (320, 180), 3_000_000);
+    // Twice as fast: the shots change at 0.5 s and 1 s of the timeline.
+    let compound = into_compound(&state, &["clip"], 2.0);
+    let job = analysis::analysis_detect_scenes(
+        &state,
+        DetectScenes {
+            segment_id: compound.clone(),
+            sensitivity: 0.5,
+            split: false,
+        },
+        None,
+    )
+    .unwrap();
+    let message = analysis::analysis_wait(job).unwrap();
+    assert_eq!(message, "Found 2 scene changes");
+    let scenes = state
+        .with_project(|p| analysis::analysis_of(p, &compound).scenes)
+        .unwrap();
+    assert_eq!(scenes.len(), 2, "{scenes:?}");
+    assert!((scenes[0] - 500_000).abs() <= 34_000, "{scenes:?}");
+    assert!((scenes[1] - 1_000_000).abs() <= 34_000, "{scenes:?}");
+    // Split at them: three pieces, each still a compound clip.
+    analysis::analysis_split_at_scenes(&state, compound.clone()).unwrap();
+    state
+        .with_project(|p| {
+            let lane = p.segment(&compound).unwrap().0;
+            let starts: Vec<Micros> = lane.segments.iter().map(|s| s.target_range.start).collect();
+            assert_eq!(starts.len(), 3, "{starts:?}");
+            assert!(lane
+                .segments
+                .iter()
+                .all(|s| p.materials.sequence(&s.material_id).is_some()));
+        })
+        .unwrap();
+    timeline_undo(&state).unwrap();
+    timeline_undo(&state).unwrap();
+    assert!(state
+        .with_project(|p| analysis::analysis_of(p, &compound).scenes.is_empty())
+        .unwrap());
+}
+
+#[test]
+fn beats_of_a_compound_clips_mix_follow_its_speed() {
+    let Some(music) = clicks() else {
+        eprintln!("skipping: ffmpeg could not generate the fixture");
+        return;
+    };
+    let mut project = Project::new("beats", CanvasConfig::default(), 30.0);
+    project.materials.audios.push(AudioMaterial {
+        id: "music".into(),
+        path: music.to_string_lossy().into(),
+        duration: 10_000_000,
+        sample_rate: 44_100,
+        channels: 1,
+    });
+    let mut track = Track::new(TrackKind::Audio, "Music");
+    track.segments.push(segment("song", "music", 10_000_000));
+    project.tracks.push(track);
+    let state = AppState::new();
+    *state.project.write() = Some(project);
+    // At twice the speed the clicks come every quarter second from 0.125 s.
+    let compound = into_compound(&state, &["song"], 2.0);
+    let job = analysis::analysis_detect_beats(&state, compound.clone(), None).unwrap();
+    let message = analysis::analysis_wait(job).unwrap();
+    // The tempo is the contents' own: the beats are stored in their time.
+    assert!(message.starts_with("120 BPM"), "{message}");
+    let beats = state
+        .with_project(|p| analysis::analysis_of(p, &compound).beats)
+        .unwrap();
+    assert!(beats.len() >= 15, "{beats:?}");
+    assert!(beats.iter().all(|b| *b < 5_000_000), "{beats:?}");
+    let on_grid = beats
+        .iter()
+        .filter(|b| {
+            let k = ((**b as f64 / 1e6 - 0.125) / 0.25).round();
+            (**b as f64 / 1e6 - (0.125 + 0.25 * k)).abs() < 0.02
+        })
+        .count();
+    assert!(on_grid as f64 >= beats.len() as f64 * 0.9, "{beats:?}");
+}
+
+#[test]
+fn a_moving_subject_inside_a_compound_clip_is_kept_in_a_vertical_frame() {
+    let Some(path) = moving_subject() else {
+        eprintln!("skipping: ffmpeg could not generate the fixture");
+        return;
+    };
+    if !gpu_or_skip() {
+        return;
+    }
+    let state = video_state(&path, (1280, 720), 4_000_000);
+    let compound = into_compound(&state, &["clip"], 2.0);
+    let candidates = state.with_project(analysis::reframe_candidates).unwrap();
+    assert_eq!(candidates, vec![compound.clone()]);
+    let job = analysis::analysis_reframe(
+        &state,
+        Reframe {
+            segment_ids: candidates,
+            ratio: Some((9, 16)),
+            subject: SubjectCue::Saliency,
+        },
+        None,
+    )
+    .unwrap();
+    let message = analysis::analysis_wait(job).unwrap();
+    assert!(message.starts_with("Reframed to 720×1280"), "{message}");
+    let project = state.project.read().clone().unwrap();
+    let clip = project.segment(&compound).unwrap().1.clone();
+    // The compound clip draws its 16:9 contents letterboxed on the 9:16
+    // canvas; filling the canvas scales it by 16/9 over 9/16.
+    let scale = clip.transform.scale[0];
+    assert!(
+        (scale - 1280.0 / 720.0 * 1280.0 / 720.0).abs() < 0.01,
+        "{scale}"
+    );
+    let qw = 720.0 * scale;
+    let track = clip
+        .keyframes
+        .iter()
+        .find(|k| k.property == AnimatableProperty::PositionX)
+        .expect("the window moves");
+    let window = 720.0 / qw;
+    // At 2x, timeline t shows the subject where the file has it at 2t.
+    for t in [250_000i64, 750_000, 1_250_000, 1_750_000] {
+        let position = track.sample(t).unwrap();
+        let u = 0.5 - position * 360.0 / qw;
+        let subject = (140.0 + 250.0 * 2.0 * t as f32 / 1e6) / 1280.0;
+        assert!(
+            (u - subject).abs() < window * 0.5,
+            "at {t}: window at {u}, subject at {subject}"
+        );
+    }
 }

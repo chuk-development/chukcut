@@ -291,11 +291,27 @@ pub fn audiofx_render(
     segment_id: String,
     cancel: &AtomicBool,
 ) -> Result<Option<String>, String> {
+    // A compound clip is heard through its mix-down (`sequence::bounce`),
+    // which has to exist before anything can be rendered from it.
+    let compound = state.with_project(|project| {
+        let id = audible_segment(project, &segment_id)?;
+        let (_, segment) = project.segment(&id)?;
+        project.materials.sequence(&segment.material_id)?;
+        Some((project.clone(), segment.material_id.clone()))
+    })?;
+    if let Some((project, id)) = &compound {
+        crate::modules::sequence::bounce::render(project, id, cancel)?;
+    }
     let spec = state.with_project(|project| {
         let id = audible_segment(project, &segment_id).ok_or("the clip has no sound")?;
         let (_, segment) = project.segment(&id).ok_or("unknown clip")?;
-        let (path, _) = crate::modules::voice::cleanup::original_source(project, segment)
-            .ok_or("the clip has no sound")?;
+        let path = match crate::modules::voice::cleanup::original_source(project, segment) {
+            Some((path, _)) => path,
+            None => crate::modules::sequence::bounce::source_of(project, &segment.material_id)
+                .filter(|_| project.materials.sequence(&segment.material_id).is_some())
+                .map(|(path, _)| path.to_string_lossy().into_owned())
+                .ok_or("the clip has no sound")?,
+        };
         let effective = effective_source(project, segment, &path);
         Ok::<_, String>(super::render::spec_for(project, segment, &effective.path))
     })??;

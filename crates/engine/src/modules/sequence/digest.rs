@@ -13,9 +13,13 @@
 //! its compound clip uses. Hashing the whole pool per frame would cost more
 //! than the clone it replaces.
 //!
-//! Not covered, on purpose: the contents of files on disk (a LUT edited in
-//! place, a missing file that comes back). Those are the provider's and the
-//! LUT cache's business, and a document edit refreshes the key.
+//! Files on disk are part of the picture too: a LUT edited in place, a
+//! title's font replaced, a missing video that comes back. Every absolute
+//! path any hashed entry names is fed in as its identity — size and
+//! modification time, or "missing" — so such a change makes a new key on the
+//! next frame without a document edit. That is one `stat` per file the
+//! compound clip uses, per frame; the LUT cache pays the same for every
+//! graded clip already (`render::lut::LutCache`).
 
 use std::collections::BTreeSet;
 use std::hash::{Hash, Hasher};
@@ -32,7 +36,22 @@ pub fn digest(pool: &MaterialPool, canvas: (u32, u32), id: &str) -> Option<u64> 
     let mut ids: BTreeSet<&str> = BTreeSet::new();
     let mut seen: Vec<&str> = Vec::new();
     lanes(pool, id, &mut hasher, &mut ids, &mut seen)?;
-    referenced(pool, ids, &mut hasher);
+    referenced(pool, ids, &mut hasher, false);
+    Some(hasher.finish())
+}
+
+/// The fingerprint of everything sequence `id`'s *sound* depends on: what
+/// [`digest`] covers, plus the audio materials its clips play, their files,
+/// and which link groups exist (a linked picture defers its sound to its
+/// partner). What a compound clip's mixed-down sound is cached under
+/// (`super::bounce`).
+pub fn sound_digest(pool: &MaterialPool, id: &str) -> Option<u64> {
+    let mut hasher = std::hash::DefaultHasher::new();
+    "sound".hash(&mut hasher);
+    let mut ids: BTreeSet<&str> = BTreeSet::new();
+    let mut seen: Vec<&str> = Vec::new();
+    lanes(pool, id, &mut hasher, &mut ids, &mut seen)?;
+    referenced(pool, ids, &mut hasher, true);
     Some(hasher.finish())
 }
 
@@ -71,13 +90,18 @@ fn lanes<'a>(
 /// Hash every pool entry named by `ids`, following the ids those entries
 /// name in turn (a follow names its motion track; a stabilisation names its
 /// camera path).
-fn referenced(pool: &MaterialPool, ids: BTreeSet<&str>, hasher: &mut std::hash::DefaultHasher) {
+fn referenced(
+    pool: &MaterialPool,
+    ids: BTreeSet<&str>,
+    hasher: &mut std::hash::DefaultHasher,
+    sound: bool,
+) {
     // Destructured without `..` on purpose: a new pool category fails to
     // compile here until someone decides whether a compound clip's picture
     // depends on it. Forgetting it would serve stale cached frames.
     let MaterialPool {
         videos,
-        audios: _, // sound only
+        audios, // sound only
         images,
         texts,
         transitions,
@@ -89,37 +113,48 @@ fn referenced(pool: &MaterialPool, ids: BTreeSet<&str>, hasher: &mut std::hash::
         speed_curves,
         compositing,
         sequences: _, // hashed as lanes above
-        links: _,     // which clips move together; nothing drawn
+        links,        // which clip of a linked pair is heard; nothing drawn
         origins: _,   // credits
         extras,
     } = pool;
 
     let mut queue: Vec<String> = ids.into_iter().map(str::to_string).collect();
     let mut done: BTreeSet<String> = BTreeSet::new();
+    let mut paths: BTreeSet<String> = BTreeSet::new();
     while let Some(id) = queue.pop() {
         if !done.insert(id.clone()) {
             continue;
         }
         let id = id.as_str();
         id.hash(hasher);
+        if sound {
+            hasher.write_u8(links.contains(id) as u8);
+            if let Some(m) = audios.iter().find(|m| m.id == id) {
+                feed(hasher, m);
+                paths.insert(m.path.clone());
+                continue;
+            }
+        }
         if let Some(m) = videos.iter().find(|m| m.id == id) {
             feed(hasher, m);
+            paths.insert(m.path.clone());
         } else if let Some(m) = images.iter().find(|m| m.id == id) {
             feed(hasher, m);
+            paths.insert(m.path.clone());
         } else if let Some(m) = texts.iter().find(|m| m.id == id) {
-            feed(hasher, m);
+            feed_with_files(hasher, m, &mut paths);
         } else if let Some(m) = transitions.iter().find(|m| m.id == id) {
-            feed(hasher, m);
+            feed_with_files(hasher, m, &mut paths);
         } else if let Some(m) = color_adjusts.iter().find(|m| m.id == id) {
-            feed(hasher, m);
+            feed_with_files(hasher, m, &mut paths);
         } else if let Some(m) = effects.iter().find(|m| m.id == id) {
-            feed(hasher, m);
+            feed_with_files(hasher, m, &mut paths);
         } else if let Some(m) = animations.iter().find(|m| m.id == id) {
-            feed(hasher, m);
+            feed_with_files(hasher, m, &mut paths);
         } else if let Some(m) = speed_curves.iter().find(|m| m.id == id) {
             feed(hasher, m);
         } else if let Some(m) = compositing.iter().find(|m| m.id == id) {
-            feed(hasher, m);
+            feed_with_files(hasher, m, &mut paths);
         } else if let Some(m) = follows.iter().find(|m| m.id == id) {
             feed(hasher, m);
             queue.push(m.track_id.clone());
@@ -130,9 +165,56 @@ fn referenced(pool: &MaterialPool, ids: BTreeSet<&str>, hasher: &mut std::hash::
             strings(value, &mut |s| {
                 if extras.contains_key(s) {
                     queue.push(s.to_string());
+                } else if is_path(s) {
+                    paths.insert(s.to_string());
                 }
             });
         }
+    }
+    for path in &paths {
+        file_identity(hasher, path);
+    }
+}
+
+/// Whether a string in a document entry names a file: the document stores
+/// absolute paths (`LutRef::path`, `VideoMaterial::path`, …).
+fn is_path(s: &str) -> bool {
+    s.starts_with('/') && s.len() > 1
+}
+
+/// Feed `value` and collect the file paths inside it.
+fn feed_with_files(
+    hasher: &mut std::hash::DefaultHasher,
+    value: &impl Serialize,
+    paths: &mut BTreeSet<String>,
+) {
+    feed(hasher, value);
+    if let Ok(json) = serde_json::to_value(value) {
+        strings(&json, &mut |s| {
+            if is_path(s) {
+                paths.insert(s.to_string());
+            }
+        });
+    }
+}
+
+/// Feed what a file on disk is now: its size and modification time, or that
+/// it is not there. A file edited in place, replaced, deleted or brought back
+/// changes this.
+pub(crate) fn file_identity(hasher: &mut impl Hasher, path: &str) {
+    path.hash(hasher);
+    match std::fs::metadata(path) {
+        Ok(meta) => {
+            hasher.write_u8(1);
+            hasher.write_u64(meta.len());
+            let modified = meta
+                .modified()
+                .ok()
+                .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_nanos());
+            hasher.write_u128(modified);
+        }
+        Err(_) => hasher.write_u8(0),
     }
 }
 

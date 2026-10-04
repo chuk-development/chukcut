@@ -422,6 +422,124 @@ fn the_nested_frame_cache_reuses_and_refreshes() {
     assert_eq!(graded, draw(&Compositor::new(ctx), &nested));
 }
 
+/// A scratch directory for files a test edits on disk.
+fn scratch(name: &str) -> std::path::PathBuf {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join("compound-files")
+        .join(name);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// Write `text` to `path` and move its modification time on, so a cache keyed
+/// by the time sees a new file even inside one clock tick.
+fn rewrite(path: &std::path::Path, text: &str, tick: u64) {
+    std::fs::write(path, text).unwrap();
+    let file = std::fs::File::options().write(true).open(path).unwrap();
+    let when = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000 + tick);
+    file.set_modified(when).unwrap();
+}
+
+#[test]
+fn a_lut_file_edited_in_place_refreshes_the_nested_frame() {
+    let _ = require_media!();
+    let ctx = require_gpu!();
+    let Some(mut original) = laid_out() else {
+        return;
+    };
+    let dir = scratch("lut");
+    let lut = dir.join("look.cube");
+    rewrite(&lut, "LUT_1D_SIZE 2\n0 0 0\n1 1 1\n", 1);
+    let mut look = chukcut_engine::modules::project::document::ColorAdjustMaterial::identity();
+    look.id = "look".into();
+    look.lut = Some(chukcut_engine::modules::project::document::LutRef {
+        path: lut.to_string_lossy().into_owned(),
+        intensity: 1.0,
+    });
+    original.materials.color_adjusts.push(look);
+    original.tracks[0].segments[0].extras.push("look".into());
+    let (nested, _) = nested(&original);
+    let at = S + 10;
+    let c = Compositor::new(Arc::clone(&ctx));
+    let sources = MediaSourceProvider::from_project(&nested);
+    let draw = |c: &Compositor| c.render(&nested, at, (W, H), &sources).unwrap().data;
+
+    let identity = draw(&c);
+    assert_eq!(identity, draw(&c), "the cached frame is the frame");
+    // The same document, the LUT file darkened on disk.
+    rewrite(&lut, "LUT_1D_SIZE 2\n0 0 0\n0.25 0.25 0.25\n", 2);
+    let darkened = draw(&c);
+    assert_ne!(
+        darkened, identity,
+        "the edited LUT shows inside the compound clip"
+    );
+    assert_eq!(
+        darkened,
+        draw(&Compositor::new(Arc::clone(&ctx))),
+        "and matches a compositor that never saw the old file"
+    );
+    // A LUT gone renders unadjusted, and its return shows again.
+    std::fs::remove_file(&lut).unwrap();
+    let without = draw(&c);
+    assert_eq!(
+        max_difference(&without, &identity).0,
+        0,
+        "no LUT is the identity"
+    );
+    rewrite(&lut, "LUT_1D_SIZE 2\n0 0 0\n0.25 0.25 0.25\n", 3);
+    assert_eq!(draw(&c), darkened, "the LUT that came back is drawn");
+}
+
+#[test]
+fn a_missing_file_that_comes_back_refreshes_the_nested_frame() {
+    let media = require_media!();
+    let ctx = require_gpu!();
+    let Some(mut original) = laid_out() else {
+        return;
+    };
+    // The overlay plays a copy of its file that the test can take away.
+    let dir = scratch("missing");
+    let copy = dir.join("white.mp4");
+    std::fs::copy(&media.solid_white_wide, &copy).unwrap();
+    let white = original
+        .materials
+        .videos
+        .iter_mut()
+        .find(|m| m.id == "white")
+        .unwrap();
+    white.path = copy.to_string_lossy().into_owned();
+    let (nested, _) = nested(&original);
+    let at = S + 10;
+    let c = Compositor::new(Arc::clone(&ctx));
+    let sources = MediaSourceProvider::from_project(&nested);
+    let draw = |c: &Compositor| c.render(&nested, at, (W, H), &sources).unwrap().data;
+
+    let present = draw(&c);
+    let before = c.nested_stats();
+    assert_eq!(draw(&c), present);
+    assert_eq!(c.nested_stats().frame_hits, before.frame_hits + 1);
+    // The provider keeps decoded frames of its own, so what is checked here is
+    // that the nested frame is not served from the cache once the file has
+    // gone, and is again once it is back.
+    let hidden = dir.join("white.mp4.away");
+    std::fs::rename(&copy, &hidden).unwrap();
+    let before = c.nested_stats();
+    let _ = draw(&c);
+    let after = c.nested_stats();
+    assert!(
+        after.frame_hits == before.frame_hits && after.frame_misses > before.frame_misses,
+        "a file gone from disk renders the inside again: {before:?} → {after:?}"
+    );
+    std::fs::rename(&hidden, &copy).unwrap();
+    let back = draw(&c);
+    assert_eq!(
+        max_difference(&back, &present).0,
+        0,
+        "the file that came back is drawn again, not the placeholder"
+    );
+}
+
 /// The outer compound clip of `nested` at twice the speed: it shows the same
 /// 1.5 s of its contents in 0.75 s.
 fn at_double_speed(nested: &Project, outer: &str) -> Project {
@@ -704,4 +822,221 @@ fn loudness_and_silence_hear_a_compound_clips_contents() {
     let inside =
         chukcut_engine::modules::loudness::commands::loudness_measure_mix(&state, &cancel).unwrap();
     assert_eq!(whole.integrated, inside.integrated);
+}
+
+// --- a compound clip's own sound processing ----------------------------------------
+
+/// The preview's mix of `p`, through the plan and the block mixer, with every
+/// cache it reads already rendered.
+fn preview_mix(p: &Project) -> Vec<f32> {
+    use chukcut_engine::modules::audio::{plan, FileClipFactory, TimelineMixer};
+    let mut mixer = TimelineMixer::new(48_000, Arc::new(FileClipFactory));
+    mixer.set_plan(plan(p));
+    let frames = (p.duration() * 48 / 1000) as usize;
+    let mut out = vec![0f32; frames * 2];
+    mixer.fill(0, &mut out);
+    out
+}
+
+fn export_mix(p: &Project) -> Vec<f32> {
+    let cancel = AtomicBool::new(false);
+    let source = chukcut_engine::modules::audio::FileAudioSource;
+    mix_timeline(p, &source, 48_000, 2, &cancel).unwrap()
+}
+
+fn rms(x: &[f32]) -> f32 {
+    (x.iter().map(|s| s * s).sum::<f32>() / x.len().max(1) as f32).sqrt()
+}
+
+/// `nested` in an `AppState`, so the audio commands can be pointed at it.
+fn state_of(p: &Project) -> Arc<chukcut_engine::state::AppState> {
+    let state = chukcut_engine::state::AppState::new();
+    *state.project.write() = Some(p.clone());
+    state
+}
+
+#[test]
+fn a_compound_clips_own_effects_reach_both_mixers() {
+    use chukcut_engine::modules::audiofx::commands::{
+        audiofx_add, audiofx_render, audiofx_set_param,
+    };
+    let _ = require_media!();
+    let Some(original) = laid_out() else {
+        return;
+    };
+    let (nested, outer) = nested(&original);
+    let dry = export_mix(&nested);
+    let state = state_of(&nested);
+    // An equaliser on the compound clip itself that cuts the sine inside.
+    let (_, eq) = audiofx_add(&state, outer.clone(), "eq3".into()).unwrap();
+    audiofx_set_param(&state, outer.clone(), eq.clone(), "mid_freq".into(), 440.0).unwrap();
+    audiofx_set_param(&state, outer.clone(), eq, "mid".into(), -12.0).unwrap();
+    let wet = state.project.read().clone().unwrap();
+
+    let exported = export_mix(&wet);
+    assert_eq!(exported.len(), dry.len());
+    assert!(
+        rms(&exported) < 0.4 * rms(&dry),
+        "the export hears the compound clip's equaliser: {} against {}",
+        rms(&exported),
+        rms(&dry)
+    );
+    // An equaliser is linear, so it is the same on the sum and on the part:
+    // the sine inside, flattened out with the same equaliser on it.
+    let mut flat = flattened(&wet, &outer);
+    let fx_id = wet
+        .segment(&outer)
+        .unwrap()
+        .1
+        .extras
+        .iter()
+        .find(|e| chukcut_engine::modules::audiofx::model::fx_entry(&wet, e).is_some())
+        .cloned()
+        .unwrap();
+    for s in flat.tracks.iter_mut().flat_map(|t| t.segments.iter_mut()) {
+        if s.material_id == "sine" {
+            s.extras.push(fx_id.clone());
+        }
+    }
+    let (a, b) = (rms(&exported), rms(&export_mix(&flat)));
+    assert!(
+        (a - b).abs() <= 0.05 * a.max(b),
+        "the equalised compound clip and its equalised contents: {a} against {b}"
+    );
+
+    // The preview, once the caches it reads are there, mixes what the
+    // export mixes.
+    let cancel = AtomicBool::new(false);
+    audiofx_render(&state, outer.clone(), &cancel)
+        .unwrap()
+        .expect("the compound clip's sound is rendered through its effects");
+    let preview = preview_mix(&wet);
+    let worst = preview
+        .iter()
+        .zip(&exported)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
+    assert!(
+        worst < 1e-3,
+        "the preview mixes what the export mixes: {worst}"
+    );
+}
+
+#[test]
+fn cleanup_on_a_compound_clip_reaches_the_mix_and_its_loudness() {
+    use chukcut_engine::modules::loudness::commands::{
+        loudness_measure_clip, loudness_measure_mix,
+    };
+    use chukcut_engine::modules::voice::commands::{voice_normalize, voice_set_denoise};
+    let _ = require_media!();
+    let Some(original) = laid_out() else {
+        return;
+    };
+    let (nested, outer) = nested(&original);
+    let state = state_of(&nested);
+    let cancel = AtomicBool::new(false);
+    let before = loudness_measure_mix(&state, &cancel).unwrap();
+    let dry = export_mix(&nested);
+
+    // Normalise the compound clip to a quiet target: one gain on its sum.
+    voice_normalize(&state, outer.clone(), Some(-35.0), &cancel).unwrap();
+    let clip = loudness_measure_clip(&state, outer.clone(), &cancel).unwrap();
+    assert!(clip.gain_db < -3.0, "{clip:?}");
+    let normalised = state.project.read().clone().unwrap();
+    let quiet = export_mix(&normalised);
+    let gain = 10f32.powf(clip.gain_db / 20.0);
+    let ratio = rms(&quiet) / rms(&dry);
+    assert!(
+        (ratio - gain).abs() < 0.05 * gain,
+        "the mix carries the compound clip's gain: {ratio} against {gain}"
+    );
+    let after = loudness_measure_mix(&state, &cancel).unwrap();
+    let (b, a) = (before.integrated.unwrap(), after.integrated.unwrap());
+    assert!(
+        (a - b - clip.gain_db as f64).abs() < 1.0,
+        "the mix loudness hears it: {b} → {a}, gain {}",
+        clip.gain_db
+    );
+    // The preview plays the same gain on the mix-down.
+    let planned = chukcut_engine::modules::audio::plan(&normalised);
+    let heard = planned
+        .iter()
+        .find(|p| p.segment_id == outer)
+        .expect("the compound clip is heard as one clip");
+    assert!(
+        (heard.gain - gain).abs() < 1e-3,
+        "{} against {gain}",
+        heard.gain
+    );
+    let worst = preview_mix(&normalised)
+        .iter()
+        .zip(&quiet)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
+    assert!(
+        worst < 1e-3,
+        "the preview mixes what the export mixes: {worst}"
+    );
+
+    // Noise reduction renders the mix-down cleaned, and the mix plays that.
+    voice_set_denoise(&state, outer.clone(), Some(1.0), &cancel, &|_| {}).unwrap();
+    let denoised = state.project.read().clone().unwrap();
+    let heard = chukcut_engine::modules::audio::plan(&denoised)
+        .into_iter()
+        .find(|p| p.segment_id == outer)
+        .unwrap();
+    assert!(
+        heard.path.contains("/voice/"),
+        "the preview reads the cleaned mix-down: {}",
+        heard.path
+    );
+    assert_ne!(
+        export_mix(&denoised),
+        quiet,
+        "the export hears the cleaning"
+    );
+}
+
+#[test]
+fn the_preview_hears_a_processed_compound_clip_dry_until_its_mix_down_lands() {
+    use chukcut_engine::modules::audio::plan;
+    use chukcut_engine::modules::audiofx::commands::audiofx_add;
+    use chukcut_engine::modules::sequence::bounce;
+    let _ = require_media!();
+    let Some(mut original) = laid_out() else {
+        return;
+    };
+    // Contents no earlier run has mixed down: a volume of this instant's own.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .subsec_nanos();
+    original.tracks[2].segments[0].volume = 0.5 + (nanos % 100_000) as f32 / 1e6;
+    let (nested, outer) = nested(&original);
+    let state = state_of(&nested);
+    audiofx_add(&state, outer.clone(), "reverb".into()).unwrap();
+    let wet = state.project.read().clone().unwrap();
+    let sequence = wet.segment(&outer).unwrap().1.material_id.clone();
+    let (mix_down, _) = bounce::source_of(&wet, &sequence).unwrap();
+    assert!(!mix_down.is_file());
+
+    let first = plan(&wet);
+    assert!(
+        first.iter().all(|p| p.segment_id != outer)
+            && first.iter().any(|p| p.segment_id.starts_with(&outer)),
+        "dry, through the contents: {:?}",
+        first.iter().map(|p| &p.segment_id).collect::<Vec<_>>()
+    );
+    // The plan asked for the mix-down; it lands in the background.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !mix_down.is_file() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(mix_down.is_file(), "the mix-down was rendered");
+    let then = plan(&wet);
+    assert!(
+        then.iter().any(|p| p.segment_id == outer),
+        "heard as one clip through its own effects: {:?}",
+        then.iter().map(|p| &p.segment_id).collect::<Vec<_>>()
+    );
 }
