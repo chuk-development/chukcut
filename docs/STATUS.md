@@ -5,7 +5,7 @@ Sessions are long and are not reopened, so nothing important is allowed to live
 only in a conversation. If you learn something that would change how the next
 person works, it belongs in this repository, not in a chat log.
 
-Last updated: 2026-10-04 (preview frames no longer leave the GPU: shared with GPUI through a patched GPUI, readback as the fallback — see "Preview frames shared with GPUI" under Perf). Previously 2026-10-04 (ML worker: VitTrack re-finding, Remove background, CUDA — see "The ML worker" below). Previously 2026-10-02 (**the UI is native now** — decision 0011. The Tauri
+Last updated: 2026-10-04 (CI: clippy is fatal, the engine tests run on lavapipe with ffmpeg, the CLI and ML worker tests run too — see "CI" below). Previously 2026-10-04 (preview frames no longer leave the GPU: shared with GPUI through a patched GPUI, readback as the fallback — see "Preview frames shared with GPUI" under Perf). Previously 2026-10-04 (ML worker: VitTrack re-finding, Remove background, CUDA — see "The ML worker" below). Previously 2026-10-02 (**the UI is native now** — decision 0011. The Tauri
 shell and the React frontend are gone; the engine is `crates/engine`
 (`chukcut-engine`, no UI dependency) and the app is a GPUI window in
 `crates/app`. What the native app does today: import (dialog or command line),
@@ -23,9 +23,8 @@ FFmpeg and using `libx264`/`libx265` in-process is now allowed and the
 LGPL-clean build is no longer required; and the repository now runs `cargo fmt`,
 clippy and both test suites in CI, which meant formatting the whole tree once —
 rustfmt had never been enforced, 483 sites — and taking clippy's
-machine-applicable fixes. **Clippy is reported but not fatal**: about 28 style
-lints remain, none of them correctness, and `-D warnings` belongs in CI only
-once that list is empty). Previously 2026-07-28: (**the media
+machine-applicable fixes. Clippy was reported but not fatal then; it is fatal
+since 2026-10-04, see "CI"). Previously 2026-07-28: (**the media
 library is now a view of the project's
 pool, and missing media is a state** — removing an import is an undoable edit
 that leaves the clips offline instead of deleting them; decision 0009. The bug
@@ -97,6 +96,53 @@ Judge performance from a release build only.
    inside one process, preview tiles, account keys). That test fails on a new
    `pub fn` in a `commands.rs` that nothing calls. Pending: the tracking
    commands (attach, bake, smoothing), which the tracking branch exposes.
+
+## CI (2026-10-04, agent/ci)
+
+`.github/workflows/ci.yml`, three jobs. What each one runs now:
+
+- **Packaging files**: desktop entry, AppStream, MIME XML, shellcheck over
+  `scripts/`, `packaging/`. Red on master until 42e6bd6 (SC2164 in the demo
+  and GPU scripts). Checked locally with shellcheck 0.11 (a static binary in
+  `_scratch/bin`); the runner's apt shellcheck is older and no stricter.
+- **Lint and test**: `cargo fmt --all --check`; **clippy with `-D warnings`**
+  (the ~120 warnings are fixed, the few allows carry a reason); the engine
+  suite **on lavapipe** (`VK_ICD_FILENAMES=…/lvp_icd.json`,
+  `CHUKCUT_TEST_ADAPTER=llvmpipe`) **with the ffmpeg CLI installed**, so the
+  GPU tests and the generated-media integration tests run instead of
+  skipping; the app tests; `cargo test -p chukcut-cli` (reachability, MCP,
+  every CLI flow against generated media); `cargo test -p chukcut-ml-worker`.
+  `mesa-vulkan-drivers` and `ffmpeg` are installed in that job only; they are
+  test tools, not build dependencies, so `.github/apt-packages.txt` does not
+  list them.
+- **Release build**: `cargo build --release --locked -p chukcut` and the
+  tarball. The vendored crates (`vendor/gpui-pre`, `vendor/gpui-pre-wgpu`,
+  `vendor/signalsmith-stretch`) are fully tracked in git and reach the build
+  through `[patch.crates-io]`; none is a workspace member, so clippy and
+  `--workspace` do not lint them.
+
+Simulated locally before the change: lavapipe as the only Vulkan driver, no
+VAAPI driver (`LIBVA_DRIVERS_PATH=/nonexistent`), CUDA hidden, four cores
+(`taskset -c 0-3`). The engine suite took 276 s there; `full_workflow` alone
+is ~115 s on lavapipe against ~40 s on the RTX 3060. One test failed under
+that setup and is fixed: `an_unknown_hardware_encoder_is_rejected` assumed a
+missing NVENC is never *listed*, but an NVIDIA device whose trial encode fails
+is listed as unusable and the error is its note.
+
+What CI still cannot run:
+
+- **Hardware decode and encode** (VAAPI, NVDEC, NVENC, QSV). The runner has no
+  GPU; those paths skip or fall back to software. `tests/every_card.rs` on a
+  real card is the acceptance test.
+- **The real-GPU half of `scripts/gpu-tests.sh`.** CI checks lavapipe only;
+  NVIDIA's alpha rounding in the blender is only seen on a developer machine.
+- **ML inference.** No ONNX Runtime, no models: the ML worker tests cover the
+  protocol, the registry and pre/post-processing, not a model run.
+- **The app's window.** `cargo test -p chukcut` runs the unit tests; nothing
+  opens a GPUI window in CI.
+- **Clippy on a new Rust release.** The toolchain is `stable`, so a release
+  that adds a lint can turn master red without a change in the repository.
+  Fix the lint; pin the toolchain only if that becomes frequent.
 
 ## Flaky tests, fixed (2026-10-04, agent/stable)
 
