@@ -242,6 +242,7 @@ narrow the lists that take them (see the table).
 | `looks` | chukcut's own looks for `look` (writes them into the LUT library the first time) |
 | `emoji` | emoji stickers for `sticker --emoji`; `--search` a name, `--filter` a style (`fluent3d`, `fluent_flat`, `noto`) |
 | `icons` | icons for `sticker --icon`; `--search` is necessary |
+| `animated_emoji` | Noto Animated Emoji (Lottie, CC BY 4.0) for `sticker --animated`; `--search` a name or tag |
 | `music` | the curated tracks (`--filter` a mood: Upbeat, Chill, Funny, Cinematic, Calm), or `--search` all of Incompetech |
 | `sfx` | the sound-effect packs; `--filter PACK` lists the sounds of one pack (downloads it the first time), `--search` narrows them |
 | `font_catalogue` | Fontsource families; `--search` a name, `--filter` a category (`sans_serif`, `serif`, `display`, `handwriting`, `monospace`, `popular`) |
@@ -382,6 +383,23 @@ pitch-correct time stretch). One undo step. For a constant speed, use
 chukcut-cli speed-curve reel.chukcut 0:2 --preset hero
 chukcut-cli speed-curve reel.chukcut 0:2 --point 0=1 --point 1.2s=0.3 --point 2.5s=1
 ```
+
+#### `frame-blend PROJECT CLIP [--mode none|blend]`
+
+Frame blending for a video clip. With `blend`, a frame that falls between two
+frames of the file shows both, mixed by where it falls, so slow motion and
+speed ramps play smoothly instead of holding each frame. `none` switches it
+off. Without `--mode`, says what the clip has. One undo step. Optical flow is
+not built.
+
+```bash
+chukcut-cli frame-blend reel.chukcut 0:2 --mode blend
+```
+
+Motion blur for fast moves is an effect: `effect add PROJECT motion_blur
+--clip CLIP --set shutter=270 --set samples=12` (shutter angle 0–360°, 180 by
+default; 2–32 samples, 8 by default). It averages the clip's position, scale
+and rotation over the shutter; a clip that does not move is not changed.
 
 ### Markers
 
@@ -891,17 +909,27 @@ music (CC BY 4.0) and CC0 sound packs. Each file is downloaded once into the
 library cache with its licence record; `cloud credits` then lists what needs a
 credit.
 
-#### `sticker PROJECT --emoji NAME | --icon ID | --file IMAGE`
+#### `sticker PROJECT --emoji NAME | --animated NAME | --icon ID | --file FILE`
 
 Puts a sticker on an overlay lane, in the middle of the frame, for three
 seconds, from `--at TIME` (default 0). An emoji is found by name or by the
-emoji itself; `--style fluent3d|fluent_flat|noto` chooses the drawing. An
-icon is `prefix:name` from `catalog icons`, or a word (the first hit). One
-undo step.
+emoji itself; `--style fluent3d|fluent_flat|noto` chooses the drawing.
+`--animated` takes a Noto Animated Emoji by name, tag or the emoji itself
+(`catalog animated_emoji`). An icon is `prefix:name` from `catalog icons`, or
+a word (the first hit). `--file` takes a picture, or an animated sticker of
+your own: a Lottie `.json`, or an animated GIF or WebP. Animated stickers
+loop; `--once` plays one once and holds its last frame. One undo step.
 
 ```bash
 chukcut-cli sticker reel.chukcut --emoji "red heart" --at 2.5
+chukcut-cli sticker reel.chukcut --animated "party popper" --at 1 --once
 ```
+
+#### `sticker-playback PROJECT CLIP [--mode loop|once]`
+
+Makes an animated sticker loop or play once and hold its last frame. Without
+`--mode`, says what the clip has and how long one pass of the animation is.
+One undo step.
 
 #### `music PROJECT TITLE [--at TIME]`
 

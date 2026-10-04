@@ -42,13 +42,20 @@ fn style(name: Option<&str>) -> CliResult<StickerStyle> {
 
 /// Put a sticker on an overlay lane, centred, for three seconds: an emoji
 /// (by name or the emoji itself, in the Fluent 3D, Fluent flat or Noto
-/// drawing), an icon (`prefix:name` or a search word, from the icon sets
-/// the licence policy allows), or an image file of your own. One undo step.
+/// drawing), an animated emoji (Noto Animated Emoji, Lottie, CC BY 4.0), an
+/// icon (`prefix:name` or a search word, from the icon sets the licence
+/// policy allows), or a file of your own — a picture, or an animated sticker
+/// (Lottie `.json`, animated GIF or WebP). Animated stickers loop; --once
+/// plays them one time and holds the last frame. One undo step.
 #[derive(Debug, Clone, Default, Args, Deserialize, JsonSchema)]
 pub struct StickerArgs {
     /// An emoji: its name ("red heart") or the emoji itself.
     #[arg(long)]
     pub emoji: Option<String>,
+    /// An animated emoji: its name ("smile"), a tag, or the emoji itself, as
+    /// `catalog animated_emoji` lists them.
+    #[arg(long)]
+    pub animated: Option<String>,
     /// An icon: `prefix:name` as `catalog icons` lists it, or a search word
     /// (the first hit is used).
     #[arg(long)]
@@ -62,6 +69,11 @@ pub struct StickerArgs {
     /// Where it starts on the timeline. Default 0.
     #[arg(long)]
     pub at: Option<Time>,
+    /// An animated sticker plays once and holds its last frame instead of
+    /// looping.
+    #[arg(long)]
+    #[serde(default)]
+    pub once: bool,
 }
 
 impl Operation for StickerArgs {
@@ -69,6 +81,7 @@ impl Operation for StickerArgs {
     fn run(self, session: &mut Session, ctx: &Ctx) -> CliResult<Outcome> {
         let chosen = [
             self.emoji.is_some(),
+            self.animated.is_some(),
             self.icon.is_some(),
             self.file.is_some(),
         ]
@@ -77,7 +90,7 @@ impl Operation for StickerArgs {
         .count();
         if chosen != 1 {
             return Err(CliError::usage(
-                "sticker needs exactly one of --emoji, --icon or --file",
+                "sticker needs exactly one of --emoji, --animated, --icon or --file",
             ));
         }
         let (path, name) = if let Some(emoji) = &self.emoji {
@@ -99,6 +112,24 @@ impl Operation for StickerArgs {
             (
                 library_commands::library_sticker_fetch(sticker, style)?,
                 sticker.name.clone(),
+            )
+        } else if let Some(wanted) = &self.animated {
+            ctx.progress("Reading the animated emoji list", None);
+            let hits = library_commands::library_animated_search(wanted)?;
+            let lower = wanted.trim().to_lowercase();
+            let emoji = hits
+                .iter()
+                .find(|e| e.name == lower || e.glyph == wanted.trim())
+                .or_else(|| hits.first())
+                .ok_or_else(|| {
+                    CliError::usage(format!(
+                        "no animated emoji matches {wanted:?}; `chukcut-cli catalog animated_emoji --search ...` lists them"
+                    ))
+                })?;
+            ctx.progress(&format!("Fetching {}", emoji.name), None);
+            (
+                library_commands::library_animated_fetch(emoji)?,
+                emoji.name.clone(),
             )
         } else if let Some(icon) = &self.icon {
             let wanted = icon.trim();
@@ -131,6 +162,23 @@ impl Operation for StickerArgs {
             &path,
             at,
         ))?;
+        let added: Option<String> = session.with(|p| {
+            p.tracks
+                .iter()
+                .flat_map(|t| t.segments.iter())
+                .find(|s| !before.contains(&s.id))
+                .map(|s| s.id.clone())
+        });
+        if self.once {
+            let id = added
+                .clone()
+                .ok_or_else(|| CliError::usage("the sticker did not land on the timeline"))?;
+            chukcut_engine::modules::animated::commands::animated_set_playback(
+                &session.state,
+                id,
+                chukcut_engine::modules::animated::playback::Playback::Once,
+            )?;
+        }
         let clip = session.with(|p| {
             p.tracks
                 .iter()
@@ -257,6 +305,13 @@ pub fn catalog(kind: &str, search: Option<&str>, filter: Option<&str>) -> Option
         })(),
         "fonts_installed" => Ok(json!(library_commands::library_fonts_installed())),
         "fonts_system" => Ok(json!(library_commands::library_system_fonts())),
+        "animated_emoji" | "animated" => (|| {
+            let list = match search {
+                Some(q) => library_commands::library_animated_search(q)?,
+                None => library_commands::library_animated_index()?.0.clone(),
+            };
+            Ok(json!(list))
+        })(),
         "emoji" | "stickers" => (|| {
             let style = style(filter)?;
             let index = library_commands::library_sticker_index()?;

@@ -74,6 +74,8 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ("library::library_font_system_preview", "the font picker's preview tile"),
     ("library::library_sticker_thumb", "the Stickers tab's preview tile"),
     ("library::library_icon_thumb", "the Stickers tab's preview tile"),
+    ("library::library_animated_preview", "the Stickers tab's moving preview tile"),
+    ("animated::animated_preview", "a moving preview tile for the Stickers tab and the media panel"),
     ("library::library_set_settings", "only chooses where font preview tiles come from (a privacy choice in the app); catalog library_settings shows it"),
     // The app's session, crash recovery and start screen.
     ("project::project_get", "the app's copy of the open document; a Session holds its own"),

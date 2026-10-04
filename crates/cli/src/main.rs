@@ -34,6 +34,7 @@ use ops::layout::*;
 use ops::look::*;
 use ops::markers::*;
 use ops::mask::*;
+use ops::motion::*;
 use ops::project::*;
 use ops::render::*;
 use ops::sequence::*;
@@ -166,6 +167,10 @@ enum Command {
     Freeze(On<FreezeArgs>),
     /// Give a clip a speed ramp from a preset or points, or remove it.
     SpeedCurve(On<SpeedCurveArgs>),
+    /// Frame blending for slow motion and speed ramps: none or blend.
+    FrameBlend(On<FrameBlendArgs>),
+    /// Make an animated sticker loop or play once.
+    StickerPlayback(On<StickerPlaybackArgs>),
     /// Picture in picture and split-screen layouts.
     #[command(subcommand)]
     Layout(LayoutCommand),
@@ -602,6 +607,8 @@ fn dispatch(command: Command, dry: bool, ctx: &Ctx) -> CliResult<(&'static str, 
         Command::Curve(o) => on(o, dry, ctx),
         Command::Freeze(o) => on(o, dry, ctx),
         Command::SpeedCurve(o) => on(o, dry, ctx),
+        Command::FrameBlend(o) => on(o, dry, ctx),
+        Command::StickerPlayback(o) => on(o, dry, ctx),
         Command::Layout(LayoutCommand::Pip(o)) => on(o, dry, ctx),
         Command::Layout(LayoutCommand::Split(o)) => on(o, dry, ctx),
         Command::Scenes(ScenesCommand::Detect(o)) => on(o, dry, ctx),
