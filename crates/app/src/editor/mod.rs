@@ -329,6 +329,8 @@ impl Editor {
         // Normal-speed playback renders ahead on the audio clock; a shuttle
         // or a scrub renders exactly where the playhead is.
         let playing = self.clock.is_playing() && !self.shell.playback_driven();
+        // Opening or leaving Video › Crop shows the clip whole or cropped.
+        self.sync_crop_view();
         let key = (
             frame_at(time, self.project.fps),
             size,

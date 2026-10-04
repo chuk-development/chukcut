@@ -169,6 +169,14 @@ fn paint_thumbnail(window: &mut Window, b: Bounds<Pixels>, shape: &[(f32, f32)],
     }
 }
 
+/// A Speed effects tile: the effect (`None` is "Off"), its label and the
+/// ramp's shape for the thumbnail.
+type EffectTile = (
+    Option<speed_commands::SpeedEffect>,
+    &'static str,
+    Vec<(f32, f32)>,
+);
+
 /// Which tile is lit.
 #[derive(Clone, Copy, PartialEq)]
 enum Tile {
@@ -182,6 +190,163 @@ fn seconds(micros: Micros) -> String {
 }
 
 impl Editor {
+    /// Speed › Speed effects: a ramp and the smoothing that suits it, one
+    /// click each (`speed_commands::speed_apply_effect`). "Off" takes both
+    /// away. The Curve tab shows and edits the ramp afterwards.
+    pub(super) fn speed_effects_tab(
+        &mut self,
+        segment: &Segment,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if self.project.materials.video(&segment.material_id).is_none() {
+            return div()
+                .p(px(PAD))
+                .text_size(px(TEXT_CAPTION))
+                .text_color(rgb(TEXT_MUTED))
+                .child("Speed effects work on video clips.")
+                .into_any_element();
+        }
+        let worn = speed_commands::speed_effect_of(&self.project, &segment.id);
+        let has_ramp = self.project.materials.speed_curve_of(segment).is_some();
+        let effects = speed_commands::speed_effects();
+        let mut tiles: Vec<EffectTile> = vec![(None, "Off", Vec::new())];
+        tiles.extend(
+            effects
+                .iter()
+                .map(|d| (Some(d.effect), d.label, d.shape.clone())),
+        );
+        let grid = div().flex().flex_row().flex_wrap().gap(px(8.0)).children(
+            tiles
+                .into_iter()
+                .enumerate()
+                .map(|(i, (effect, label, shape))| {
+                    let on = match effect {
+                        None => worn.is_none() && !has_ramp,
+                        Some(e) => worn == Some(e),
+                    };
+                    let colour = if on { ACCENT } else { TEXT_DIM };
+                    let id = segment.id.clone();
+                    div()
+                        .id(("speed-effect-tile", i))
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap(px(4.0))
+                        .w(px(TILE_W + 32.0))
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if !on {
+                                this.apply_speed_effect(&id, effect, cx);
+                            }
+                        }))
+                        .child(
+                            div()
+                                .w(px(TILE_W))
+                                .h(px(TILE_H))
+                                .rounded(px(R_SM))
+                                .bg(rgb(WELL))
+                                .border_1()
+                                .border_color(rgb(if on { ACCENT } else { HAIRLINE }))
+                                .when(on, |d| d.border_2())
+                                .hover(|d| d.bg(rgb(PANEL_RAISED)))
+                                .when(effect.is_none(), |d| {
+                                    d.flex().items_center().justify_center().child(
+                                        div()
+                                            .text_size(px(TEXT_CAPTION))
+                                            .text_color(rgb(colour))
+                                            .child("Off"),
+                                    )
+                                })
+                                .when(effect.is_some(), |d| {
+                                    d.child(
+                                        canvas(
+                                            |_, _, _| {},
+                                            move |b, _, window, _| {
+                                                paint_thumbnail(window, b, &shape, colour)
+                                            },
+                                        )
+                                        .size_full(),
+                                    )
+                                }),
+                        )
+                        .child(
+                            div()
+                                .w_full()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .flex()
+                                .justify_center()
+                                .text_size(px(TEXT_CAPTION))
+                                .text_color(rgb(if on { TEXT } else { TEXT_MUTED }))
+                                .child(label),
+                        )
+                }),
+        );
+        let note = match worn {
+            Some(effect) => format!(
+                "{}: the {} ramp with {}. Edit the ramp in Curve.",
+                effect.label(),
+                effect.preset().label(),
+                match effect.smoothing() {
+                    chukcut_engine::modules::speed::blend::FrameBlend::Flow => {
+                        "AI optical flow, baked in the background"
+                    }
+                    _ => "frame blending",
+                }
+            ),
+            None if has_ramp => {
+                "The clip has its own ramp. Pick an effect to replace it.".to_string()
+            }
+            None => "A speed ramp and the smoothing that suits it, in one click. Hero moment and \
+                 Bullet time make AI in-between frames; the others blend frames."
+                .to_string(),
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(16.0))
+            .px(px(PAD))
+            .py(px(PAD))
+            .child(grid)
+            .child(
+                div()
+                    .text_size(px(TEXT_CAPTION))
+                    .text_color(rgb(TEXT_MUTED))
+                    .child(note),
+            )
+            .into_any_element()
+    }
+
+    fn apply_speed_effect(
+        &mut self,
+        segment_id: &str,
+        effect: Option<speed_commands::SpeedEffect>,
+        cx: &mut Context<Self>,
+    ) {
+        match effect {
+            None => {
+                let result =
+                    speed_commands::speed_remove_effect(&self.state, segment_id.to_string())
+                        .map(|_| ());
+                self.refresh(cx);
+                self.report(result, cx);
+            }
+            Some(effect) => {
+                match speed_commands::speed_apply_effect(
+                    &self.state,
+                    segment_id.to_string(),
+                    effect,
+                ) {
+                    Ok(response) => {
+                        self.refresh(cx);
+                        self.started_flow(segment_id, Ok(response.job), cx);
+                    }
+                    Err(error) => self.report(Err(error), cx),
+                }
+            }
+        }
+    }
+
     pub(super) fn speed_curve(&mut self, segment: &Segment, cx: &mut Context<Self>) -> AnyElement {
         let curve = self.project.materials.speed_curve_of(segment).cloned();
         let lit = match &curve {

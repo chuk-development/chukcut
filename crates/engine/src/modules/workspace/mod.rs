@@ -18,4 +18,4 @@ pub mod settings;
 pub mod trim;
 
 pub use hardware::{HardwareCodec, HardwareReport};
-pub use settings::{RecentProject, RecentProjects, Settings};
+pub use settings::{DecodePreference, RecentProject, RecentProjects, Settings};

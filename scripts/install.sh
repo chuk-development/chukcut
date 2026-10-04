@@ -3,13 +3,15 @@
 #
 #   scripts/install.sh               check dependencies, build release, install
 #   scripts/install.sh --check       only check dependencies
-#   scripts/install.sh --no-build    install the existing target/release/chukcut
+#   scripts/install.sh --no-build    install the binaries already in target/release
 #   scripts/install.sh --cuda        build whisper.cpp with CUDA (needs nvcc)
 #   scripts/install.sh --uninstall   remove everything this script installed
 #
 # What goes where (XDG_DATA_HOME defaults to ~/.local/share):
 #
-#   ~/.local/bin/chukcut                                   the binary
+#   ~/.local/bin/chukcut                                   the editor
+#   ~/.local/bin/chukcut-ml-worker                         the AI models' process
+#   ~/.local/bin/chukcut-cli                               the command line and MCP server
 #   $XDG_DATA_HOME/applications/chukcut.desktop            menu entry
 #   $XDG_DATA_HOME/icons/hicolor/<size>/apps/chukcut.png   icons
 #   $XDG_DATA_HOME/mime/packages/chukcut.xml               .chukcut file type
@@ -20,6 +22,10 @@
 #
 # The same script installs a release tarball (packaging/tarball.sh): there it
 # finds bin/chukcut next to itself and skips the build.
+#
+# The editor looks for chukcut-ml-worker next to its own binary, so the two
+# always go into the same directory. Without the worker the AI tools say they
+# are not installed and the rest of the editor works.
 set -euo pipefail
 
 root="$(cd -- "$(dirname -- "$0")/.." >/dev/null && pwd)"
@@ -37,9 +43,9 @@ while [ $# -gt 0 ]; do
         --uninstall) mode=uninstall ;;
         --check) mode=check ;;
         --no-build) build=0 ;;
-        --cuda) features=(--features cuda) ;;
+        --cuda) features=(--features chukcut/cuda,chukcut-cli/cuda) ;;
         --bindir) bindir="$2"; shift ;;
-        -h|--help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "install.sh: unknown option '$1' (try --help)" >&2; exit 2 ;;
     esac
     shift
@@ -53,7 +59,11 @@ else
     warn() { printf '%s\n' "$*" >&2; }
 fi
 
-# A tarball ships the binary in bin/ and has no Cargo.toml.
+# What gets installed. The editor is required; the worker and the CLI are
+# installed when they were built (or shipped), and a missing one is reported.
+binaries=(chukcut chukcut-ml-worker chukcut-cli)
+
+# A tarball ships the binaries in bin/ and has no Cargo.toml.
 prebuilt=0
 if [ ! -f "$root/Cargo.toml" ] && [ -x "$root/bin/chukcut" ]; then
     prebuilt=1
@@ -85,7 +95,10 @@ refresh_caches() {
 
 if [ "$mode" = uninstall ]; then
     say "Removing chukcut"
-    rm -fv "$bindir/chukcut" \
+    for name in "${binaries[@]}"; do
+        rm -fv "$bindir/$name"
+    done
+    rm -fv \
         "$datadir/applications/chukcut.desktop" \
         "$datadir/mime/packages/chukcut.xml" \
         "$datadir/metainfo/$metainfo_id.metainfo.xml"
@@ -173,10 +186,12 @@ check_deps() {
         have_lib "$lib" || need "$lib" "$deb" "$rpm"
     done
     if [ "$prebuilt" = 1 ] && command -v ldd >/dev/null; then
-        local gone
-        gone="$(ldd "$root/bin/chukcut" 2>/dev/null | awk '/not found/ {print $1}')"
+        local gone name
+        gone="$(for name in "${binaries[@]}"; do
+            [ -x "$root/bin/$name" ] && ldd "$root/bin/$name" 2>/dev/null
+        done | awk '/not found/ {print $1}' | sort -u)"
         if [ -n "$gone" ]; then
-            warn "The binary needs libraries this system lacks:"
+            warn "The binaries need libraries this system lacks:"
             # One library per line; the split is the point.
             # shellcheck disable=SC2086
             printf '  %s\n' $gone >&2
@@ -217,9 +232,9 @@ fi
 # ---------------------------------------------------------------------------
 
 if [ "$prebuilt" = 1 ]; then
-    binary="$root/bin/chukcut"
+    from="$root/bin"
 else
-    binary="$root/target/release/chukcut"
+    from="$root/target/release"
 fi
 
 if [ "$build" = 1 ]; then
@@ -231,11 +246,12 @@ if [ "$build" = 1 ]; then
     [ "$jobs" -gt "$(nproc)" ] && jobs=$(nproc)
     jobs="${CARGO_BUILD_JOBS:-$jobs}"
     say "Building release with $jobs jobs (the first build takes a while)"
-    (cd "$root" && cargo build --release --locked -p chukcut -j "$jobs" "${features[@]}")
+    (cd "$root" && cargo build --release --locked -p chukcut -p chukcut-ml-worker -p chukcut-cli \
+        -j "$jobs" "${features[@]}")
 fi
 
-if [ ! -x "$binary" ]; then
-    warn "No binary at $binary. Run without --no-build."
+if [ ! -x "$from/chukcut" ]; then
+    warn "No binary at $from/chukcut. Run without --no-build."
     exit 1
 fi
 
@@ -244,7 +260,18 @@ fi
 # ---------------------------------------------------------------------------
 
 say "Installing to $bindir and $datadir"
-install -Dm755 "$binary" "$bindir/chukcut"
+installed=()
+for name in "${binaries[@]}"; do
+    if [ -x "$from/$name" ]; then
+        install -Dm755 "$from/$name" "$bindir/$name"
+        installed+=("$name")
+    else
+        case "$name" in
+            chukcut-ml-worker) warn "No $name in $from: the AI tools will say they are not installed." ;;
+            chukcut-cli) warn "No $name in $from: the command line and MCP server are not installed." ;;
+        esac
+    fi
+done
 
 # The menu may not have ~/.local/bin on its PATH, so the installed desktop
 # file names the binary by its full path.
@@ -264,7 +291,7 @@ install -Dm644 "$linux/$metainfo_id.metainfo.xml" "$datadir/metainfo/$metainfo_i
 
 refresh_caches
 
-say "Installed $bindir/chukcut"
+say "Installed ${installed[*]} into $bindir"
 case ":$PATH:" in
     *":$bindir:"*) ;;
     *) warn "$bindir is not on your PATH. The menu entry works; for the terminal add it to PATH." ;;

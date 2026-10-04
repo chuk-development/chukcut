@@ -33,7 +33,10 @@ uses it.
   NVIDIA libraries from the driver. chukcut does not bundle them.
 - **AV1**: AV1 decodes on the GPU only where the GPU supports it.
 
-To force a path, start chukcut with `CHUKCUT_DECODE`:
+To choose a path, use **Settings › Performance › Video decoding**. There, a
+file that the chosen decoder cannot read still plays in software. To force a
+path for a test, start chukcut with `CHUKCUT_DECODE`. It overrides the
+setting, and a file the forced decoder cannot read does not play:
 
 ```bash
 CHUKCUT_DECODE=software chukcut   # never use the GPU decoder
@@ -60,10 +63,12 @@ it. The software encoders (x264, x265) always work.
 ## AI tools
 
 - **An AI tool says that it cannot run**, or nothing happens: the worker
-  program `chukcut-ml-worker` must be next to `chukcut` or on your `PATH`. The
-  install script and the tarball do not install it. See
-  [Getting started](getting-started.md#install). `CHUKCUT_ML_WORKER=/path`
-  names the worker. `CHUKCUT_ML_WORKER=off` turns the AI tools off.
+  program `chukcut-ml-worker` must be next to `chukcut` or on your `PATH`.
+  The install script and the tarball put it next to `chukcut` in
+  `~/.local/bin`. A build from source with only `-p chukcut` does not have
+  it. See [Getting started](getting-started.md#install).
+  `CHUKCUT_ML_WORKER=/path` names the worker. `CHUKCUT_ML_WORKER=off` turns
+  the AI tools off.
 - **The AI runs on the CPU on an NVIDIA computer**: open Settings › **AI
   acceleration**. Install the bundle that the row marks as "the one for this
   machine". You do not need a CUDA installation. The bundle brings its own

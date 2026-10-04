@@ -403,3 +403,40 @@ Not tested, and why: the optical-flow strip was not seen running on screen
 the other two); a user template whose own media is copied out, applied
 into a project (covered by the copy-out path `template_build_project`
 shares with it).
+
+## UX gaps, 2026-10-04 (`agent/ux`)
+
+Seen in the debug app on Xvfb (lavapipe, `CHUKCUT_FILE_DIALOG=builtin`, no
+session bus, `HOME` and every `XDG_*` folder under `_scratch/`) with a
+generated 1920×1080 clip:
+
+- **Video › Crop.** 9:16 put a 608×1080 box in the middle of the whole
+  picture, the rest dimmed; dragging inside the box moved it live, and on
+  release the clip on Basic showed the cropped part fitted to the canvas.
+  Undo is one step (the crop is one `inspector_set_crop`).
+- **Video › Basic.** "Reduce image noise" ticked adds the denoise effect
+  with Strength and Keep detail (50 / 50); "Enhance quality" and "Optical
+  flow" show a line and a button that opens their tab.
+- **Speed › Speed effects.** Smooth montage lit its tile, the clip got the
+  Montage ramp (6 s → 8.8 s on the timeline, "Montage ·" on the clip) and
+  frame blending; Ctrl+Z took both back at once.
+- **Settings › Performance.** Video decoding "Software" wrote
+  `"decode": "software"`, and the next decoded frames logged
+  `path=Software`; AI runtime lists Automatic and the three packs, marked
+  "(not installed)" in the empty test home, and wrote `"ml_runtime": "cpu"`.
+- **Export queue.** Two 4K exports queued; Ctrl+Q asked "Export running —
+  quit anyway?", Quit anyway led to the unsaved-changes prompt, and Don't
+  save quit the process within a second. The next start showed "2 exports
+  from the last session are waiting" with Run now in the queue; Run now
+  started them.
+- **Packaging.** `packaging/tarball.sh --no-build` with stand-in binaries
+  packed `bin/chukcut`, `bin/chukcut-ml-worker` and `bin/chukcut-cli`;
+  `scripts/install.sh` from the unpacked tarball installed and uninstalled
+  all three into a scratch `--bindir`.
+
+Not tested, and why: a real release tarball (a release build of all three
+takes long, and the stand-ins exercise the scripts); Hero moment and Bullet
+time on screen (they start an optical-flow bake, covered by the Smooth
+slow-mo tests); the crop box on a rotated or stabilised clip (the overlay
+uses the compositor's placement chain, and its pixel ↔ source mapping has a
+unit test).

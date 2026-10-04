@@ -37,6 +37,7 @@ mod body;
 mod clip;
 mod colour_tools;
 mod controls;
+mod crop;
 mod details;
 mod easing;
 mod effects;
@@ -103,6 +104,8 @@ pub(crate) struct Inspector {
     text: text_style::TextTab,
     /// Masks, chroma key and blend: sliders, drags, the eyedropper.
     masks: masks::MasksPanel,
+    /// Video › Crop: the ratio picked and the box being dragged.
+    crop: crop::CropTab,
 }
 
 /// The widgets behind one property: a number box and, for most, a slider.

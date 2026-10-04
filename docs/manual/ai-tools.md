@@ -196,8 +196,9 @@ quality can be on together.
 
 ## Optical flow (slow motion)
 
-**Where:** **Speed › Standard › Frame blending › Optical flow (AI)**, or the
-**Smooth slow-mo** button.
+**Where:** **Speed › Standard › Frame blending › Optical flow (AI)**, the
+**Smooth slow-mo** button, or the **Hero moment** and **Bullet time** tiles
+in **Speed › Speed effects**.
 
 RIFE makes new frames between the real ones, so slow motion is smooth and
 has no double image.

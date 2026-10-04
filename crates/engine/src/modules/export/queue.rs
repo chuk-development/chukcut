@@ -15,19 +15,29 @@
 //! Listeners hear about every change ([`QueueEvent`]); the app turns
 //! `Finished` into a notification. The runner is a trait so the ordering,
 //! cancel and reorder rules can be tested without a GPU.
+//!
+//! **Surviving a restart.** The app asks the queue to keep itself in a file
+//! ([`ExportQueue::persist_to`]): every item with its project snapshot,
+//! written after each change of the list or of an item's status (not on
+//! progress). On the next start the file is read back. An item that was
+//! queued or running comes back queued, and the queue is *held*: nothing runs
+//! until [`ExportQueue::resume`] or a new item, so an export that crashed the
+//! app cannot crash it again at start-up. The CLI never persists: its queue
+//! lives for one call.
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use parking_lot::{Condvar, Mutex};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::modules::project::document::Project;
 
 use super::job::{ExportProgress, ExportRequest, ProgressSink};
 
 /// Where an item is in its life.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum QueueStatus {
     Queued,
@@ -109,6 +119,11 @@ struct State {
     entries: Vec<Entry>,
     worker: bool,
     next_listener: u64,
+    /// Restored items wait for [`ExportQueue::resume`] or a new item.
+    held: bool,
+    /// Bumped on every saved change, so a slow write of an older list never
+    /// lands after a newer one.
+    generation: u64,
 }
 
 struct Inner {
@@ -116,7 +131,40 @@ struct Inner {
     idle: Condvar,
     listeners: Mutex<Vec<(u64, Listener)>>,
     runner: Box<dyn QueueRunner>,
+    /// The file the queue keeps itself in, once [`ExportQueue::persist_to`]
+    /// was called; and the generation last written to it.
+    store: Mutex<(Option<PathBuf>, u64)>,
 }
+
+/// One item as the queue file holds it.
+#[derive(Serialize, Deserialize)]
+struct SavedItem {
+    id: String,
+    label: String,
+    project_name: String,
+    request: ExportRequest,
+    status: QueueStatus,
+    #[serde(default)]
+    output_path: Option<String>,
+    #[serde(default)]
+    bytes: Option<u64>,
+    #[serde(default)]
+    elapsed_seconds: Option<f64>,
+    #[serde(default)]
+    error: Option<String>,
+    /// What it exports. Not kept for a finished item, which never runs again.
+    #[serde(default)]
+    project: Option<Project>,
+}
+
+/// The queue file.
+#[derive(Serialize, Deserialize)]
+struct Saved {
+    version: u32,
+    items: Vec<SavedItem>,
+}
+
+const SAVED_VERSION: u32 = 1;
 
 /// The queue. Cheap to clone; every clone is the same queue.
 #[derive(Clone)]
@@ -132,7 +180,196 @@ impl ExportQueue {
                 idle: Condvar::new(),
                 listeners: Mutex::new(Vec::new()),
                 runner: Box::new(runner),
+                store: Mutex::new((None, 0)),
             }),
+        }
+    }
+
+    /// Keep the queue in `path` from now on, and read back what an earlier
+    /// run left there. Returns how many items came back unfinished: they are
+    /// queued again and held until [`Self::resume`] or a new item. A file
+    /// that cannot be read is set aside (`.bad`) rather than blocking the
+    /// queue. Call it once, before anything is added.
+    pub fn persist_to(&self, path: PathBuf) -> usize {
+        let restored = match std::fs::read(&path) {
+            Ok(bytes) => match serde_json::from_slice::<Saved>(&bytes) {
+                Ok(saved) => saved.items,
+                Err(error) => {
+                    tracing::warn!(%error, path = %path.display(), "the export queue file is unreadable; starting empty");
+                    let _ = std::fs::rename(&path, path.with_extension("bad"));
+                    Vec::new()
+                }
+            },
+            Err(_) => Vec::new(),
+        };
+        let waiting = {
+            let mut state = self.inner.state.lock();
+            for saved in restored {
+                let unfinished = !saved.status.is_finished();
+                // An unfinished item without its project cannot run; it
+                // comes back failed, saying so.
+                let (status, error) = match (unfinished, &saved.project) {
+                    (true, Some(_)) => (QueueStatus::Queued, None),
+                    (true, None) => (
+                        QueueStatus::Failed,
+                        Some("its project was not saved with the queue".to_string()),
+                    ),
+                    (false, _) => (saved.status, saved.error),
+                };
+                state.entries.push(Entry {
+                    item: QueueItem {
+                        id: saved.id,
+                        label: saved.label,
+                        project_name: saved.project_name,
+                        request: saved.request,
+                        status,
+                        progress: None,
+                        output_path: saved.output_path,
+                        bytes: saved.bytes,
+                        elapsed_seconds: saved.elapsed_seconds,
+                        error,
+                    },
+                    project: Arc::new(saved.project.unwrap_or_else(|| {
+                        Project::new(
+                            "",
+                            crate::modules::project::document::CanvasConfig::default(),
+                            30.0,
+                        )
+                    })),
+                    cancel: Arc::new(AtomicBool::new(false)),
+                });
+            }
+            let waiting = state
+                .entries
+                .iter()
+                .filter(|e| e.item.status == QueueStatus::Queued)
+                .count();
+            state.held = waiting > 0;
+            waiting
+        };
+        self.inner.store.lock().0 = Some(path);
+        if waiting > 0 {
+            tracing::info!(waiting, "export queue restored; held until resumed");
+        }
+        self.emit(&QueueEvent::Changed);
+        waiting
+    }
+
+    /// Whether restored items are waiting for [`Self::resume`].
+    pub fn is_held(&self) -> bool {
+        let state = self.inner.state.lock();
+        state.held
+            && state
+                .entries
+                .iter()
+                .any(|e| e.item.status == QueueStatus::Queued)
+    }
+
+    /// Run what is queued: the restored items a start-up held back.
+    pub fn resume(&self) {
+        let start = {
+            let mut state = self.inner.state.lock();
+            state.held = false;
+            let queued = state
+                .entries
+                .iter()
+                .any(|e| e.item.status == QueueStatus::Queued);
+            queued && !std::mem::replace(&mut state.worker, true)
+        };
+        if start {
+            self.start_worker();
+        }
+        self.emit(&QueueEvent::Changed);
+    }
+
+    /// For quitting: keep the queue file as it is (what was queued or running
+    /// comes back at the next start), stop the running export without
+    /// recording it as cancelled, start nothing new, and wait up to `wait`
+    /// for the worker to end. An export left running while the process exits
+    /// can hang the exit inside the GPU driver.
+    pub fn shutdown(&self, wait: std::time::Duration) {
+        self.inner.store.lock().0 = None;
+        let deadline = std::time::Instant::now() + wait;
+        let mut state = self.inner.state.lock();
+        state.held = true;
+        for entry in &state.entries {
+            if entry.item.status == QueueStatus::Running {
+                entry.cancel.store(true, Ordering::Relaxed);
+            }
+        }
+        while state.worker {
+            if self.inner.idle.wait_until(&mut state, deadline).timed_out() {
+                tracing::warn!("the export queue did not stop in time; quitting anyway");
+                break;
+            }
+        }
+    }
+
+    fn start_worker(&self) {
+        let queue = self.clone();
+        let spawned = std::thread::Builder::new()
+            .name("chukcut-export-queue".into())
+            .spawn(move || queue.work());
+        if let Err(error) = spawned {
+            tracing::error!(%error, "could not start the export queue thread");
+            self.inner.state.lock().worker = false;
+        }
+    }
+
+    /// Write the list to the queue file, when there is one. The list is
+    /// copied under the lock and written outside it; the generation keeps an
+    /// older copy from overwriting a newer one.
+    fn save(&self) {
+        if self.inner.store.lock().0.is_none() {
+            return;
+        }
+        let (generation, saved) = {
+            let mut state = self.inner.state.lock();
+            state.generation += 1;
+            let items = state
+                .entries
+                .iter()
+                .map(|e| SavedItem {
+                    id: e.item.id.clone(),
+                    label: e.item.label.clone(),
+                    project_name: e.item.project_name.clone(),
+                    request: e.item.request.clone(),
+                    status: e.item.status,
+                    output_path: e.item.output_path.clone(),
+                    bytes: e.item.bytes,
+                    elapsed_seconds: e.item.elapsed_seconds,
+                    error: e.item.error.clone(),
+                    project: (!e.item.status.is_finished()).then(|| (*e.project).clone()),
+                })
+                .collect();
+            (
+                state.generation,
+                Saved {
+                    version: SAVED_VERSION,
+                    items,
+                },
+            )
+        };
+        let mut store = self.inner.store.lock();
+        if generation <= store.1 {
+            return;
+        }
+        let Some(path) = store.0.clone() else {
+            return;
+        };
+        let written = serde_json::to_vec(&saved)
+            .map_err(|e| e.to_string())
+            .and_then(|bytes| {
+                if let Some(dir) = path.parent() {
+                    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+                }
+                let temp = path.with_extension("json.part");
+                std::fs::write(&temp, bytes).map_err(|e| e.to_string())?;
+                std::fs::rename(&temp, &path).map_err(|e| e.to_string())
+            });
+        match written {
+            Ok(()) => store.1 = generation,
+            Err(error) => tracing::warn!(%error, "could not save the export queue"),
         }
     }
 
@@ -162,18 +399,14 @@ impl ExportQueue {
                 project: Arc::new(project),
                 cancel: Arc::new(AtomicBool::new(false)),
             });
+            // Adding is asking for the queue to run, restored items too.
+            state.held = false;
             !std::mem::replace(&mut state.worker, true)
         };
+        self.save();
         self.emit(&QueueEvent::Changed);
         if start {
-            let queue = self.clone();
-            let spawned = std::thread::Builder::new()
-                .name("chukcut-export-queue".into())
-                .spawn(move || queue.work());
-            if let Err(error) = spawned {
-                tracing::error!(%error, "could not start the export queue thread");
-                self.inner.state.lock().worker = false;
-            }
+            self.start_worker();
         }
         id
     }
@@ -230,6 +463,7 @@ impl ExportQueue {
                 _ => return false,
             }
         };
+        self.save();
         if let Some(item) = finished {
             self.emit(&QueueEvent::Finished {
                 item: Box::new(item),
@@ -265,6 +499,7 @@ impl ExportQueue {
             }
             state.entries.remove(index);
         }
+        self.save();
         self.emit(&QueueEvent::Changed);
         Ok(())
     }
@@ -282,6 +517,7 @@ impl ExportQueue {
             let to = to.min(state.entries.len());
             state.entries.insert(to, entry);
         }
+        self.save();
         self.emit(&QueueEvent::Changed);
         Ok(())
     }
@@ -295,6 +531,7 @@ impl ExportQueue {
             before - state.entries.len()
         };
         if removed > 0 {
+            self.save();
             self.emit(&QueueEvent::Changed);
         }
         removed
@@ -344,9 +581,12 @@ impl ExportQueue {
         loop {
             let next = {
                 let mut state = self.inner.state.lock();
+                // Held (restored, or shutting down): start nothing new.
+                let held = state.held;
                 let found = state
                     .entries
                     .iter_mut()
+                    .filter(|_| !held)
                     .find(|e| e.item.status == QueueStatus::Queued);
                 match found {
                     Some(entry) => {
@@ -369,6 +609,7 @@ impl ExportQueue {
                 self.emit(&QueueEvent::Idle);
                 return;
             };
+            self.save();
             self.emit(&QueueEvent::Changed);
 
             let sink = QueueSink {
@@ -402,6 +643,7 @@ impl ExportQueue {
                         item.clone()
                     })
             };
+            self.save();
             if let Some(item) = finished {
                 tracing::info!(
                     id = %item.id,
@@ -672,6 +914,97 @@ mod tests {
         queue.add(project(), request("two"), None);
         queue.wait_idle();
         assert_eq!(*log.lock(), vec!["one", "two"]);
+    }
+
+    #[test]
+    fn a_saved_queue_comes_back_held_and_runs_when_resumed() {
+        let dir = crate::modules::workspace::trim::test_scratch("export-queue");
+        let file = dir.join("export-queue.json");
+
+        // The first run: one export done, one queued behind a long one. The
+        // process "quits" while the long one runs.
+        let (first, _) = queue(400);
+        first.persist_to(file.clone());
+        let done = first.add(project(), request("done.mp4"), None);
+        wait_until("the first export to finish", || {
+            first.item(&done).unwrap().status == QueueStatus::Done
+        });
+        first.add(project(), request("long.mp4"), Some("Long".into()));
+        let waiting = first.add(project(), request("waiting.mp4"), None);
+        wait_until("the file to say the long export runs", || {
+            saved_statuses(&file).get(1) == Some(&QueueStatus::Running)
+        });
+        let saved: Saved = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        assert_eq!(saved.items.len(), 3);
+        assert!(
+            saved.items[0].project.is_none(),
+            "a finished item keeps no project"
+        );
+        assert_eq!(saved.items[1].status, QueueStatus::Running);
+        assert!(saved.items[2].project.is_some());
+
+        // The next run: the unfinished two come back queued, and wait.
+        let (second, log) = queue(2);
+        assert_eq!(second.persist_to(file.clone()), 2);
+        assert!(second.is_held());
+        let items = second.items();
+        assert_eq!(
+            items.iter().map(|i| i.status).collect::<Vec<_>>(),
+            [QueueStatus::Done, QueueStatus::Queued, QueueStatus::Queued]
+        );
+        assert_eq!(items[1].label, "Long");
+        std::thread::sleep(Duration::from_millis(30));
+        assert!(log.lock().is_empty(), "nothing runs before resume");
+
+        second.resume();
+        second.wait_idle();
+        assert_eq!(*log.lock(), ["long.mp4", "waiting.mp4"]);
+        assert!(!second.is_held());
+        assert!(second.item(&waiting).is_some());
+        first.cancel_all();
+        first.wait_idle();
+    }
+
+    #[test]
+    fn shutting_down_keeps_the_file_as_it_was_and_starts_nothing() {
+        let dir = crate::modules::workspace::trim::test_scratch("export-queue-quit");
+        let file = dir.join("export-queue.json");
+        let (q, log) = queue(400);
+        q.persist_to(file.clone());
+        q.add(project(), request("running.mp4"), None);
+        q.add(project(), request("next.mp4"), None);
+        let in_flight = [QueueStatus::Running, QueueStatus::Queued];
+        wait_until("the file to say the export runs", || {
+            saved_statuses(&file) == in_flight
+        });
+        q.shutdown(Duration::from_secs(5));
+        assert!(!q.inner.state.lock().worker, "the worker stopped");
+        assert_eq!(*log.lock(), ["running.mp4"], "nothing new started");
+        assert_eq!(
+            saved_statuses(&file),
+            in_flight,
+            "the file still says what was in flight"
+        );
+    }
+
+    fn saved_statuses(file: &std::path::Path) -> Vec<QueueStatus> {
+        std::fs::read(file)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Saved>(&bytes).ok())
+            .map(|saved| saved.items.iter().map(|i| i.status).collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn an_unreadable_queue_file_is_set_aside() {
+        let dir = crate::modules::workspace::trim::test_scratch("export-queue-bad");
+        let file = dir.join("export-queue.json");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&file, b"{ not json").unwrap();
+        let (q, _) = queue(1);
+        assert_eq!(q.persist_to(file.clone()), 0);
+        assert!(q.items().is_empty());
+        assert!(file.with_extension("bad").is_file());
     }
 
     #[test]

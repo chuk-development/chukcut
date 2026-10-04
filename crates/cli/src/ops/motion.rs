@@ -169,6 +169,84 @@ impl Operation for SmoothSlowMoArgs {
     }
 }
 
+/// A speed effect (the Speed › "Speed effects" tab): a speed ramp and the
+/// frame smoothing that suits it, as one undo step. `hero` and `bullet` use
+/// optical flow (RIFE, baked before it returns unless --no-bake); the others
+/// use frame blending. --remove takes the ramp and the smoothing off.
+/// Without --effect or --remove, lists the effects and says which one the
+/// clip wears.
+#[derive(Debug, Clone, Default, Args, Deserialize, JsonSchema)]
+pub struct SpeedEffectArgs {
+    /// The clip: id, id prefix or `lane:index`.
+    pub clip: String,
+    /// montage, hero, bullet, jump_cut, flash_in or flash_out.
+    #[arg(long)]
+    pub effect: Option<String>,
+    /// Take the clip's speed effect off: constant speed, no smoothing.
+    #[arg(long, conflicts_with = "effect")]
+    #[serde(default)]
+    pub remove: bool,
+    /// With an optical-flow effect: set it and return without baking (an
+    /// export bakes what is missing).
+    #[arg(long)]
+    #[serde(default)]
+    pub no_bake: bool,
+}
+
+impl Operation for SpeedEffectArgs {
+    const NAME: &'static str = "speed_effect";
+    fn run(self, session: &mut Session, ctx: &Ctx) -> CliResult<Outcome> {
+        let id = session.with(|p| select::clip(p, &self.clip))?;
+        let clip = |s: &Session| s.with(|p| summary::clip_by_id(p, &id));
+        if self.remove {
+            speed::speed_remove_effect(&session.state, id.clone())?;
+            return Ok(Outcome::changed(
+                "speed effect removed",
+                json!({"clip": clip(session)}),
+            ));
+        }
+        let Some(name) = &self.effect else {
+            let worn = session.with(|p| speed::speed_effect_of(p, &id));
+            let list: Vec<_> = speed::speed_effects()
+                .into_iter()
+                .map(|d| json!({"effect": d.effect, "label": d.label, "smoothing": d.smoothing}))
+                .collect();
+            let message = match worn {
+                Some(effect) => format!("the clip wears {}", effect.label()),
+                None => "the clip wears no speed effect".to_string(),
+            };
+            return Ok(Outcome::read(
+                message,
+                json!({"clip": clip(session), "effect": worn, "effects": list}),
+            ));
+        };
+        let effect = speed::SpeedEffect::parse(name).map_err(CliError::usage)?;
+        let response = speed::speed_apply_effect(&session.state, id.clone(), effect)?;
+        let edited = response.edit.is_some();
+        let mut value = json!({
+            "clip": clip(session),
+            "effect": effect,
+            "frame_blend": effect.smoothing().name(),
+        });
+        if effect.smoothing() == FrameBlend::Flow {
+            if self.no_bake {
+                if let Some(job) = response.job {
+                    speed::speed_flow_cancel(job);
+                }
+            } else {
+                value["bake"] = wait_for_flow(ctx, response.job)?;
+            }
+            value["flow"] = coverage(session, &id);
+        }
+        let message = effect.label().to_string();
+        Ok(if edited {
+            Outcome::changed(message, value)
+        } else {
+            Outcome::read(message, value)
+        })
+    }
+}
+
 /// An animated sticker (Lottie, animated GIF or WebP): `loop` plays it again
 /// and again for as long as the clip lasts, `once` plays it one time and
 /// holds the last frame. Without --mode, says what the clip has and how long

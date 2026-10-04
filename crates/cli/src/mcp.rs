@@ -91,6 +91,7 @@ const OPEN_WORLD: &[&str] = &[
     // Download RIFE on first use (`--mode flow`).
     "frame_blend",
     "smooth_slow_mo",
+    "speed_effect",
     // Download HTDemucs or the face mesh on first use.
     "isolate_voice",
     "face_landmarks",

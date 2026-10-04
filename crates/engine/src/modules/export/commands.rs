@@ -378,6 +378,51 @@ pub fn export_queue_wait_idle() {
     export_queue().wait_idle()
 }
 
+/// Where the app keeps its queue between runs.
+pub fn export_queue_file() -> std::path::PathBuf {
+    crate::modules::workspace::paths::data_root().join("export-queue.json")
+}
+
+/// Make the queue survive a restart: keep it in [`export_queue_file`] from
+/// now on and read back what the last run left. Returns how many exports came
+/// back unfinished; they wait for [`export_queue_resume`] (or a new item).
+/// The app calls this once at start-up; the CLI never does.
+pub fn export_queue_restore() -> usize {
+    export_queue().persist_to(export_queue_file())
+}
+
+/// Whether restored exports are waiting to be resumed.
+pub fn export_queue_held() -> bool {
+    export_queue().is_held()
+}
+
+/// Run the exports a restart brought back.
+pub fn export_queue_resume() {
+    export_queue().resume()
+}
+
+/// Whether an export runs, or a queued one is about to: the app's quit
+/// guard. Exports a restart brought back and that wait to be resumed do not
+/// count; quitting loses nothing of them.
+pub fn export_queue_busy() -> bool {
+    job::active_jobs() > 0 || QUEUE.get().is_some_and(|q| q.is_busy() && !q.is_held())
+}
+
+/// For quitting: stop every export, keep the queue file for the next start
+/// (`ExportQueue::shutdown`), and wait a few seconds for the exports to let
+/// go of the GPU. An export still rendering while the process exits can hang
+/// the exit in the driver.
+pub fn export_shutdown() {
+    job::cancel_all();
+    if let Some(queue) = QUEUE.get() {
+        queue.shutdown(std::time::Duration::from_secs(5));
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while job::active_jobs() > 0 && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
 /// Save the frame at `time` as a PNG at full canvas resolution.
 ///
 /// Renders fresh through the export compositor rather than reading anything

@@ -7,17 +7,13 @@ chukcut runs on Linux only. You need a Vulkan driver for your GPU.
 1. Install the system packages. The list is in the
    [README](../../README.md#system-packages).
 2. In a clone of the repository, run `scripts/install.sh`. The script builds
-   the editor and installs it in `~/.local/bin`, with a menu entry.
-3. For the AI tools, also build the worker program, and put it next to the
-   editor:
+   three programs and installs them in `~/.local/bin`, with a menu entry:
+   the editor `chukcut`, the worker `chukcut-ml-worker` that runs the AI
+   models, and the command line `chukcut-cli`. A release tarball has the
+   same three programs; run `scripts/install.sh` inside it.
 
-   ```bash
-   cargo build --release -p chukcut-ml-worker
-   install -m755 target/release/chukcut-ml-worker ~/.local/bin/
-   ```
-
-   Without the worker, the editor works, but the AI tools say that they
-   cannot run.
+   The editor looks for the worker next to its own binary. Without the
+   worker, the editor works, but the AI tools say that they cannot run.
 
 Start chukcut from the menu, or from a terminal:
 

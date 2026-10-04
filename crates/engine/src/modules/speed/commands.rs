@@ -231,3 +231,341 @@ pub fn speed_smooth_slow_mo(
     let job = speed_flow_bake(state, segment_id)?;
     Ok(SlowMoResponse { edit, job })
 }
+
+/// The Speed › "Speed effects" tiles: a ramp and the frame smoothing that
+/// suits it, in one click. A ramp alone (the Curve tab) stutters in its slow
+/// part, because a slowed clip holds each source frame; each effect here
+/// switches on the smoothing that hides that. The heavy ones, whose slow
+/// part is a tenth to a quarter of real time, get "Optical flow (AI)"; the
+/// rest get frame blending, which is free.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpeedEffect {
+    Montage,
+    Hero,
+    Bullet,
+    JumpCut,
+    FlashIn,
+    FlashOut,
+}
+
+impl SpeedEffect {
+    pub const ALL: [SpeedEffect; 6] = [
+        SpeedEffect::Montage,
+        SpeedEffect::Hero,
+        SpeedEffect::Bullet,
+        SpeedEffect::JumpCut,
+        SpeedEffect::FlashIn,
+        SpeedEffect::FlashOut,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SpeedEffect::Montage => "Smooth montage",
+            SpeedEffect::Hero => "Hero moment",
+            SpeedEffect::Bullet => "Bullet time",
+            SpeedEffect::JumpCut => "Smooth jump",
+            SpeedEffect::FlashIn => "Flash in",
+            SpeedEffect::FlashOut => "Flash out",
+        }
+    }
+
+    /// The ramp it lays over the clip.
+    pub fn preset(self) -> SpeedPreset {
+        match self {
+            SpeedEffect::Montage => SpeedPreset::Montage,
+            SpeedEffect::Hero => SpeedPreset::Hero,
+            SpeedEffect::Bullet => SpeedPreset::Bullet,
+            SpeedEffect::JumpCut => SpeedPreset::JumpCut,
+            SpeedEffect::FlashIn => SpeedPreset::FlashIn,
+            SpeedEffect::FlashOut => SpeedPreset::FlashOut,
+        }
+    }
+
+    /// The smoothing it switches on.
+    pub fn smoothing(self) -> super::blend::FrameBlend {
+        use super::blend::FrameBlend;
+        match self {
+            SpeedEffect::Hero | SpeedEffect::Bullet => FrameBlend::Flow,
+            _ => FrameBlend::Blend,
+        }
+    }
+
+    pub fn parse(text: &str) -> Result<Self, String> {
+        let wanted = text.trim().to_ascii_lowercase().replace([' ', '-'], "_");
+        Self::ALL
+            .into_iter()
+            .find(|e| {
+                serde_json::to_value(e)
+                    .ok()
+                    .and_then(|v| v.as_str().map(str::to_owned))
+                    == Some(wanted.clone())
+            })
+            .ok_or_else(|| {
+                format!(
+                    "there is no speed effect {text}; one of montage, hero, bullet, jump_cut, \
+                     flash_in, flash_out"
+                )
+            })
+    }
+}
+
+/// One speed effect as a UI offers it: its name, the ramp's shape for the
+/// thumbnail, and the smoothing it turns on.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SpeedEffectDescriptor {
+    pub effect: SpeedEffect,
+    pub label: &'static str,
+    pub shape: Vec<(f32, f32)>,
+    pub smoothing: &'static str,
+}
+
+/// Every speed effect, in the order the Speed effects tab shows them.
+pub fn speed_effects() -> Vec<SpeedEffectDescriptor> {
+    SpeedEffect::ALL
+        .iter()
+        .map(|&effect| SpeedEffectDescriptor {
+            effect,
+            label: effect.label(),
+            shape: effect.preset().shape().to_vec(),
+            smoothing: effect.smoothing().name(),
+        })
+        .collect()
+}
+
+/// Which speed effect `segment_id` wears now: its curve is the effect's
+/// untouched preset and its smoothing is the effect's. `None` otherwise.
+pub fn speed_effect_of(
+    project: &crate::modules::project::document::Project,
+    segment_id: &str,
+) -> Option<SpeedEffect> {
+    let (_, segment) = project.segment(segment_id)?;
+    let preset = project.materials.speed_curve_of(segment)?.preset?;
+    let blend = super::blend::frame_blend_of(&project.materials, segment);
+    SpeedEffect::ALL
+        .into_iter()
+        .find(|e| e.preset() == preset && e.smoothing() == blend)
+}
+
+/// Put a speed effect on a video clip: its ramp (on every clip linked to it,
+/// as the Curve tab does) and its smoothing, as one undo step, then start
+/// baking the optical-flow frames when the effect uses them. What is
+/// already in place is left alone, so applying an effect twice is not an
+/// error and changes nothing.
+pub fn speed_apply_effect(
+    state: &Arc<AppState>,
+    segment_id: String,
+    effect: SpeedEffect,
+) -> Result<SlowMoResponse, String> {
+    use super::blend::{frame_blend_of, set_frame_blend_command, FrameBlend};
+    let edited = {
+        let mut guard = state.project.write();
+        let project = guard.as_mut().ok_or("no project is open")?;
+        let (_, segment) = project
+            .segment(&segment_id)
+            .ok_or_else(|| format!("unknown segment {segment_id}"))?;
+        if project.materials.video(&segment.material_id).is_none() {
+            return Err("speed effects work on video clips".into());
+        }
+        let has_ramp = project
+            .materials
+            .speed_curve_of(segment)
+            .is_some_and(|c| c.preset == Some(effect.preset()));
+        let has_smoothing = frame_blend_of(&project.materials, segment) == effect.smoothing();
+        let mut commands = Vec::new();
+        let mut entry = None;
+        // The blend edit replaces the segment as it is after the ramp, so it
+        // is built against a copy with the ramp in place.
+        let mut after = project.clone();
+        if !has_ramp {
+            let command = edit::set_curve_command(
+                &after,
+                &segment_id,
+                CurveChange::Preset {
+                    preset: effect.preset(),
+                },
+            )?;
+            let mut scratch = crate::modules::timeline::History::new();
+            scratch.apply(&mut after, command.clone())?;
+            commands.push(command);
+        }
+        if !has_smoothing && effect.smoothing() != FrameBlend::None {
+            let (made, command) = set_frame_blend_command(&after, &segment_id, effect.smoothing())?;
+            entry = made;
+            commands.push(command);
+        }
+        if commands.is_empty() {
+            false
+        } else {
+            if let Some((id, value)) = &entry {
+                project.materials.extras.insert(id.clone(), value.clone());
+            }
+            let command = crate::modules::timeline::ops::EditCommand::Composite {
+                label: effect.label().into(),
+                commands,
+            };
+            if let Err(error) = state.history.write().apply(project, command) {
+                if let Some((id, _)) = entry {
+                    project.materials.extras.remove(&id);
+                }
+                return Err(error);
+            }
+            true
+        }
+    };
+    let edit = if edited {
+        Some(crate::modules::voice::commands::respond(state)?)
+    } else {
+        None
+    };
+    let job = if effect.smoothing() == super::blend::FrameBlend::Flow {
+        speed_flow_bake(state, segment_id)?
+    } else {
+        None
+    };
+    Ok(SlowMoResponse { edit, job })
+}
+
+/// Take a speed effect off: the ramp and the smoothing, one undo step. The
+/// clip plays at its constant speed again.
+pub fn speed_remove_effect(
+    state: &Arc<AppState>,
+    segment_id: String,
+) -> Result<EditResponse, String> {
+    use super::blend::{frame_blend_of, set_frame_blend_command, FrameBlend};
+    {
+        let mut guard = state.project.write();
+        let project = guard.as_mut().ok_or("no project is open")?;
+        let (_, segment) = project
+            .segment(&segment_id)
+            .ok_or_else(|| format!("unknown segment {segment_id}"))?;
+        let has_curve = project.materials.speed_curve_of(segment).is_some();
+        let blended = frame_blend_of(&project.materials, segment) != FrameBlend::None;
+        let mut after = project.clone();
+        let mut commands = Vec::new();
+        if has_curve {
+            let command = edit::set_curve_command(&after, &segment_id, CurveChange::Remove)?;
+            let mut scratch = crate::modules::timeline::History::new();
+            scratch.apply(&mut after, command.clone())?;
+            commands.push(command);
+        }
+        if blended {
+            let (_, command) = set_frame_blend_command(&after, &segment_id, FrameBlend::None)?;
+            commands.push(command);
+        }
+        if commands.is_empty() {
+            return Err("the clip has no speed effect".into());
+        }
+        let command = crate::modules::timeline::ops::EditCommand::Composite {
+            label: "Remove speed effect".into(),
+            commands,
+        };
+        state.history.write().apply(project, command)?;
+    }
+    crate::modules::voice::commands::respond(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::modules::project::document::{
+        CanvasConfig, Project, Segment, TimeRange, Track, TrackKind, Transform, VideoMaterial,
+    };
+    use crate::modules::speed::blend::{frame_blend_of, FrameBlend};
+    use crate::modules::timeline::commands::timeline_undo;
+
+    fn state() -> Arc<AppState> {
+        let mut p = Project::new("t", CanvasConfig::default(), 30.0);
+        p.materials.videos.push(VideoMaterial {
+            id: "v".into(),
+            path: "/nowhere.mp4".into(),
+            width: 64,
+            height: 64,
+            duration: 4_000_000,
+            fps: 30.0,
+            has_audio: false,
+            rotation: 0,
+        });
+        let mut track = Track::new(TrackKind::Video, "V1");
+        track.segments.push(Segment {
+            id: "s".into(),
+            material_id: "v".into(),
+            target_range: TimeRange::new(0, 2_000_000),
+            source_range: TimeRange::new(0, 2_000_000),
+            render_index: 0,
+            speed: 1.0,
+            volume: 1.0,
+            transform: Transform::default(),
+            crop: None,
+            extras: Vec::new(),
+            keyframes: Vec::new(),
+        });
+        p.tracks.push(track);
+        let state = AppState::new();
+        *state.project.write() = Some(p);
+        state
+    }
+
+    fn worn(state: &AppState) -> (Option<SpeedEffect>, bool, FrameBlend) {
+        state
+            .with_project(|p| {
+                let (_, s) = p.segment("s").unwrap();
+                (
+                    speed_effect_of(p, "s"),
+                    p.materials.speed_curve_of(s).is_some(),
+                    frame_blend_of(&p.materials, s),
+                )
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn a_speed_effect_is_a_ramp_and_its_smoothing_in_one_undo_step() {
+        let state = state();
+        let done = speed_apply_effect(&state, "s".into(), SpeedEffect::Montage).unwrap();
+        let edit = done.edit.expect("the first apply edits");
+        assert_eq!(edit.undo_label.as_deref(), Some("Smooth montage"));
+        assert_eq!(done.job, None, "frame blending bakes nothing");
+        assert_eq!(
+            worn(&state),
+            (Some(SpeedEffect::Montage), true, FrameBlend::Blend)
+        );
+
+        // Again: nothing left to do, and not an error.
+        let again = speed_apply_effect(&state, "s".into(), SpeedEffect::Montage).unwrap();
+        assert!(again.edit.is_none());
+
+        timeline_undo(&state).unwrap();
+        assert_eq!(worn(&state), (None, false, FrameBlend::None));
+    }
+
+    #[test]
+    fn removing_a_speed_effect_takes_the_ramp_and_the_smoothing() {
+        let state = state();
+        speed_apply_effect(&state, "s".into(), SpeedEffect::FlashOut).unwrap();
+        let length_with = state
+            .with_project(|p| p.segment("s").unwrap().1.target_range.duration)
+            .unwrap();
+        assert!(length_with < 2_000_000, "a flash out shortens the clip");
+        speed_remove_effect(&state, "s".into()).unwrap();
+        assert_eq!(worn(&state), (None, false, FrameBlend::None));
+        let length = state
+            .with_project(|p| p.segment("s").unwrap().1.target_range.duration)
+            .unwrap();
+        assert_eq!(length, 2_000_000);
+        assert!(speed_remove_effect(&state, "s".into()).is_err());
+    }
+
+    #[test]
+    fn effects_parse_by_name_and_name_their_smoothing() {
+        assert_eq!(SpeedEffect::parse("jump-cut"), Ok(SpeedEffect::JumpCut));
+        assert_eq!(SpeedEffect::parse("Bullet"), Ok(SpeedEffect::Bullet));
+        assert!(SpeedEffect::parse("warp").is_err());
+        let flow: Vec<_> = speed_effects()
+            .into_iter()
+            .filter(|d| d.smoothing == "flow")
+            .map(|d| d.effect)
+            .collect();
+        assert_eq!(flow, [SpeedEffect::Hero, SpeedEffect::Bullet]);
+    }
+}

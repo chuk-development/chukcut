@@ -302,6 +302,7 @@ operations!(
     library::StickerArgs,
     motion::FrameBlendArgs,
     motion::SmoothSlowMoArgs,
+    motion::SpeedEffectArgs,
     motion::StickerPlaybackArgs,
     library::MusicArgs,
     library::SfxArgs,

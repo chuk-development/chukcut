@@ -1,8 +1,7 @@
 # Speed and slow motion
 
 Select a video, audio or compound clip and open the **Speed** tab. It has
-the sub-tabs **Standard** and **Curve**. (**Speed effects** is there too, but
-it is empty: "Not in the engine yet.")
+the sub-tabs **Standard**, **Curve** and **Speed effects**.
 
 ## Standard: one speed for the whole clip
 
@@ -28,6 +27,29 @@ shows the ramp's name on the clip.
 
 The sound follows the curve. chukcut keeps its pitch unless **Change audio
 pitch** is on.
+
+## Speed effects: a ramp and smooth frames in one click
+
+A ramp from the **Curve** tab alone looks jerky in its slow part, because a
+slowed clip holds each source frame. **Speed › Speed effects** (video clips)
+puts a ramp and the frame smoothing that suits it on the clip, as one undo
+step:
+
+| Effect | Ramp | Smoothing |
+|---|---|---|
+| **Smooth montage** | Montage | Blend |
+| **Hero moment** | Hero (down to 0.25x) | Optical flow (AI) |
+| **Bullet time** | Bullet (down to 0.2x) | Optical flow (AI) |
+| **Smooth jump** | Jump cut | Blend |
+| **Flash in** | Flash in | Blend |
+| **Flash out** | Flash out | Blend |
+
+**Off** removes the ramp and the smoothing. The effects with optical flow
+start the bake at once; see "How optical flow works" below. A line under the
+tiles says which effect the clip has. After you pick one, you can change the
+ramp in **Curve** and the smoothing in **Standard**. The tile then no longer
+shows as selected. The ramp goes on the linked audio clip too, like a ramp
+from **Curve**.
 
 ## Frame blending: smooth slow motion
 

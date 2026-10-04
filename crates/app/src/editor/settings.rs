@@ -440,6 +440,69 @@ impl SettingsDialog {
         )
     }
 
+    /// Which decoder plays video and which ONNX Runtime the AI models load.
+    /// Both are choices the environment can still override, which the row
+    /// then says.
+    fn render_performance(&self, cx: &mut Context<Self>) -> AnyElement {
+        use chukcut_engine::modules::workspace::DecodePreference;
+        let decode = self.picker(
+            "settings-decode",
+            DecodePreference::ALL
+                .iter()
+                .map(|p| (p.label().into(), *p))
+                .collect(),
+            self.settings.decode,
+            |settings, preference| settings.decode = preference,
+            cx,
+        );
+        let decode_note: SharedString = match std::env::var("CHUKCUT_DECODE") {
+            Ok(value) => format!("CHUKCUT_DECODE={value} is set and overrides this.").into(),
+            Err(_) => "Automatic uses VAAPI when the GPU takes its frames without a copy, \
+                       then NVDEC, then the CPU. A file the chosen decoder cannot read plays \
+                       in software. Applies to clips opened from now on."
+                .into(),
+        };
+
+        let packs = chukcut_engine::modules::ml::runtime_packs();
+        let mut options: Vec<(SharedString, Option<&'static str>)> =
+            vec![("Automatic".into(), None)];
+        options.extend(packs.iter().map(|(id, name, installed)| {
+            let label = if *installed {
+                (*name).to_string()
+            } else {
+                format!("{name} (not installed)")
+            };
+            (label.into(), Some(*id))
+        }));
+        let current = self
+            .settings
+            .ml_runtime
+            .as_deref()
+            .and_then(|chosen| packs.iter().find(|(id, _, _)| *id == chosen))
+            .map(|(id, _, _)| *id);
+        let runtime = self.picker(
+            "settings-ml-runtime",
+            options,
+            current,
+            |settings, pack| settings.ml_runtime = pack.map(str::to_string),
+            cx,
+        );
+        let runtime_note: SharedString = match std::env::var("CHUKCUT_ML_RUNTIME") {
+            Ok(value) => format!("CHUKCUT_ML_RUNTIME={value} is set and overrides this.").into(),
+            Err(_) => "Automatic picks the GPU bundle your driver runs, else the CPU. A pack \
+                       that is not installed falls back to Automatic. Install packs in AI \
+                       acceleration above."
+                .into(),
+        };
+        section(
+            "Performance",
+            vec![
+                row("Video decoding", Some(decode_note.as_ref()), decode),
+                row("AI runtime", Some(runtime_note.as_ref()), runtime),
+            ],
+        )
+    }
+
     fn render_hardware(&self) -> AnyElement {
         let Some(report) = &self.hardware else {
             return section(
@@ -532,6 +595,7 @@ impl Render for SettingsDialog {
             .child(self.render_playback(cx))
             .child(self.render_storage(cx))
             .child(self.ai.clone())
+            .child(self.render_performance(cx))
             .child(super::keymap::settings_section())
             .child(self.accounts.clone())
             .child(self.render_hardware())

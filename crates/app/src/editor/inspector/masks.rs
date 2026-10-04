@@ -557,7 +557,13 @@ impl Editor {
     /// The project the preview should draw: the document, or — while "Show
     /// matte" is on — a copy with the selected clip's matte view switched on.
     /// The flag is runtime-only, so it never reaches the file or an export.
+    /// While Video › Crop is open, the cropped clip is shown whole
+    /// (`crop::crop_view_project`).
     pub(crate) fn preview_project(&self) -> Arc<Project> {
+        self.crop_view_project(self.matte_view_project())
+    }
+
+    fn matte_view_project(&self) -> Arc<Project> {
         let matte =
             self.inspector.masks.matte_view && self.video_sub_tab() == Some("Remove background");
         let Some(id) = self.selected.as_ref().filter(|_| matte) else {

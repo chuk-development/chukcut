@@ -241,7 +241,7 @@ impl Editor {
         }
     }
 
-    fn started_flow(
+    pub(super) fn started_flow(
         &mut self,
         segment_id: &str,
         job: Result<Option<u64>, String>,

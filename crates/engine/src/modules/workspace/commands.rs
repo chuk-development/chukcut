@@ -28,7 +28,15 @@ pub fn workspace_settings_set(settings: Settings) -> Result<(), String> {
 /// - **Cache limit**: trims when the limit changes. The startup trim waits for
 ///   the first project to be opened, so it knows what not to delete; see
 ///   `workspace::trim`.
+/// - **Video decoding**: the decode path decoders opened from now on take
+///   (`media::provider::set_decode_preference`); `CHUKCUT_DECODE` wins.
+/// - **AI runtime**: the ONNX Runtime pack the ML worker loads; a change
+///   stops a running worker so the next request starts one on it
+///   (`ml::set_runtime_setting`); `CHUKCUT_ML_RUNTIME` wins.
 pub fn workspace_settings_apply(settings: &Settings) {
+    crate::modules::media::provider::set_decode_preference(settings.decode.acceleration());
+    crate::modules::ml::set_runtime_setting(settings.ml_runtime.clone());
+
     let was = proxy_commands::proxy_policy();
     proxy_commands::proxy_set_policy(settings.proxy_policy);
     if was == ProxyPolicy::Off && settings.proxy_policy != ProxyPolicy::Off {
