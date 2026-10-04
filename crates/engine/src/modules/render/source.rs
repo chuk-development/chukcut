@@ -239,6 +239,17 @@ pub trait SourceProvider: Send + Sync {
         _size: (u32, u32),
     ) {
     }
+
+    /// Who this provider is, for caches of what was rendered from it: the
+    /// compositor keeps compound clips' nested frames only for a provider
+    /// that answers. Two answers may be equal only when the same request
+    /// gets the same picture from both, so a provider changes it whenever
+    /// what it hands out changes for reasons the document does not show (a
+    /// proxy switched in, a title raster re-synced). `None`, the default,
+    /// opts out.
+    fn cache_identity(&self) -> Option<u64> {
+        None
+    }
 }
 
 impl<T: SourceProvider + ?Sized> SourceProvider for &T {
@@ -249,6 +260,10 @@ impl<T: SourceProvider + ?Sized> SourceProvider for &T {
     ) -> anyhow::Result<Option<SourceFrame>> {
         (**self).frame(ctx, request)
     }
+
+    fn cache_identity(&self) -> Option<u64> {
+        (**self).cache_identity()
+    }
 }
 
 impl<T: SourceProvider + ?Sized> SourceProvider for Arc<T> {
@@ -258,6 +273,10 @@ impl<T: SourceProvider + ?Sized> SourceProvider for Arc<T> {
         request: &SourceRequest<'_>,
     ) -> anyhow::Result<Option<SourceFrame>> {
         (**self).frame(ctx, request)
+    }
+
+    fn cache_identity(&self) -> Option<u64> {
+        (**self).cache_identity()
     }
 }
 

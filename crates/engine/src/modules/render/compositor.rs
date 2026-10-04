@@ -346,6 +346,10 @@ pub struct Compositor {
     /// the same reason as `transitions`: a project with no effects in it
     /// should not pay for the shader module.
     fx: OnceLock<FxRenderer>,
+    /// Nested views and nested frames of compound clips, kept between
+    /// frames. See [`super::nested`]. Never held across a render: a nested
+    /// render reaches it again from inside.
+    nested: Mutex<super::nested::NestedCache>,
 }
 
 /// A reusable GPU buffer that only ever grows.
@@ -687,6 +691,7 @@ impl Compositor {
             nv12_planes: OnceLock::new(),
             transitions: OnceLock::new(),
             fx: OnceLock::new(),
+            nested: Mutex::new(Default::default()),
         }
     }
 
@@ -698,6 +703,18 @@ impl Compositor {
     /// Zero the counters, so a benchmark can exclude its warm-up.
     pub fn reset_stats(&self) {
         self.stats.reset();
+    }
+
+    /// How the compound clip cache has done since this compositor was made.
+    pub fn nested_stats(&self) -> super::nested::NestedStats {
+        self.nested.lock().stats()
+    }
+
+    /// Drop every kept nested view and frame. Nothing needs this for
+    /// correctness — the keys change with the document — but a finished
+    /// render session can give the texture memory back.
+    pub fn clear_nested(&self) {
+        self.nested.lock().clear();
     }
 
     pub fn context(&self) -> &Arc<RenderContext> {
@@ -1728,6 +1745,11 @@ impl Compositor {
     /// the source frame still refers to it, and a pooled texture handed out
     /// again within the same frame would be drawn over.
     ///
+    /// The nested view and the finished frame are kept ([`super::nested`]),
+    /// keyed by a fingerprint of the compound clip's contents, so the pool is
+    /// cloned once per document rather than once per frame, and the same
+    /// inside at the same instant is rendered once.
+    ///
     /// Recursion is bounded by `sequence::MAX_DEPTH`, counted per thread
     /// because one render runs on one thread from start to end.
     #[allow(clippy::too_many_arguments)]
@@ -1748,10 +1770,27 @@ impl Compositor {
             tracing::warn!(segment = %segment.id, "compound clips nest too deep; drawing nothing");
             return Ok(None);
         }
-        let Some(view) =
-            crate::modules::sequence::nested_in(materials, canvas, &segment.material_id)
-        else {
+        let id = &segment.material_id;
+        let Some(key) = crate::modules::sequence::digest::digest(materials, canvas, id) else {
             return Ok(None);
+        };
+        let provider = sources.cache_identity();
+        if let Some(provider) = provider {
+            if let Some(texture) = self.nested.lock().frame(key, provider, source_time, size) {
+                return Ok(Some(SourceFrame::from_texture(texture)));
+            }
+        }
+        let cached = self.nested.lock().view(key);
+        let view = match cached {
+            Some(view) => view,
+            None => {
+                let Some(view) = crate::modules::sequence::nested_in(materials, canvas, id) else {
+                    return Ok(None);
+                };
+                let view = Arc::new(view);
+                self.nested.lock().put_view(key, Arc::clone(&view));
+                view
+            }
         };
         if source_time < 0 || source_time >= view.duration() {
             return Ok(None);
@@ -1760,9 +1799,20 @@ impl Compositor {
         let rendered = self.render_to_texture(&view, source_time, size, sources);
         DEPTH.set(depth);
         let target = rendered.map_err(|e| anyhow::anyhow!("compound clip: {e}"))?;
-        Ok(Some(SourceFrame::from_texture(Arc::new(
-            target.texture().clone(),
-        ))))
+        let texture = Arc::new(target.texture().clone());
+        if let Some(provider) = provider {
+            let texel = self.config.format.block_copy_size(None).unwrap_or(4) as u64;
+            let bytes = size.0 as u64 * size.1 as u64 * texel;
+            self.nested.lock().put_frame(
+                key,
+                provider,
+                source_time,
+                size,
+                Arc::clone(&texture),
+                bytes,
+            );
+        }
+        Ok(Some(SourceFrame::from_texture(texture)))
     }
 
     /// Copy a render target back to the CPU, unpadding the rows.

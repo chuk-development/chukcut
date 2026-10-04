@@ -29,6 +29,7 @@
 pub mod audio;
 pub mod build;
 pub mod commands;
+pub mod digest;
 pub mod edit;
 #[cfg(test)]
 mod tests;
