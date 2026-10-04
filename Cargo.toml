@@ -47,3 +47,12 @@ debug = false
 lto = "thin"
 codegen-units = 8
 strip = "debuginfo"
+
+# GPUI with one addition: an element that draws a buffer in another Vulkan
+# device's memory, so the preview no longer goes GPU → CPU → GPU. Vendored
+# copies of the exact versions `gpui-kit 0.7.0` pins, patched as little as
+# possible; `vendor/README.md` lists the diff and how to re-apply it on a
+# `gpui-kit` bump. `docs/decisions/0027-preview-frames-shared-with-gpui.md`.
+[patch.crates-io]
+gpui-pre = { path = "vendor/gpui-pre" }
+gpui-pre-wgpu = { path = "vendor/gpui-pre-wgpu" }
