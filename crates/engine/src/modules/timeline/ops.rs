@@ -1583,10 +1583,15 @@ fn split_one(project: &Project, segment_id: &str, at: Micros) -> Result<SplitHal
     // An animation is re-issued per half by `motion::edit::split_commands`
     // (the entrance stays left, the exit goes right), so the clone drops the
     // shared reference here.
+    // A template slot stays with the left half (decision 0022): the slot is
+    // one place to fill, and two clips naming one marker listed the slot
+    // twice in the fill dialog. The right half is an ordinary clip, which
+    // "Replace media" still fills.
     right.extras.retain(|id| {
         project.materials.transition(id).is_none()
             && !project.materials.links.contains(id)
             && project.materials.animation(id).is_none()
+            && !crate::modules::template::slot::is_marker(project, id)
     });
 
     // The right half keeps only the animation that describes *its* frames.

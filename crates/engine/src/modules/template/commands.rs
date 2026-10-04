@@ -541,6 +541,32 @@ mod tests {
     }
 
     #[test]
+    fn a_split_slot_stays_one_slot_on_the_left_half() {
+        let mut project = load_from("quick-cuts", Path::new("/nonexistent"))
+            .unwrap()
+            .project;
+        let before = slot::slots(&project);
+        let first = before[0].clone();
+        let cut = first.start + first.duration / 2;
+        let command =
+            crate::modules::timeline::ops::split_at(&project, &first.segment_id, cut).unwrap();
+        command.apply(&mut project).unwrap();
+
+        let after = slot::slots(&project);
+        assert_eq!(after.len(), before.len());
+        assert_eq!(after[0].segment_id, first.segment_id);
+        assert_eq!(after[0].duration, cut - first.start);
+        // The right half is a plain clip that names no marker.
+        let (track, _) = project.segment(&first.segment_id).unwrap();
+        let right = track
+            .segments
+            .iter()
+            .find(|s| s.target_range.start == cut)
+            .unwrap();
+        assert!(slot::marker_of(&project, right).is_none());
+    }
+
+    #[test]
     fn a_missing_file_is_named() {
         let quick = load_from("quick-cuts", Path::new("/nonexistent")).unwrap();
         let error = build_from(quick, &["/no/such/clip.mp4".into()], None).unwrap_err();
