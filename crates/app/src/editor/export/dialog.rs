@@ -296,6 +296,16 @@ impl ExportDialog {
         if let Some(cancel) = self.measure_cancel.take() {
             cancel.store(true, Ordering::Relaxed);
         }
+        // A cancelled measurement has no answer coming. Left in place, the
+        // footer said "measuring…" for good (an export started before the
+        // sample encode ended) and `ensure_measured` never asked again.
+        if self
+            .measured
+            .as_ref()
+            .is_some_and(|(_, answer)| answer.is_none())
+        {
+            self.measured = None;
+        }
     }
 
     fn apply_preset(&mut self, id: &str, cx: &mut Context<Self>) {

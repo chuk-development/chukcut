@@ -325,7 +325,12 @@ Fixed on this branch:
 5. **Details showed a relative project path** for a project given on the
    command line (`chukcut media/x.chukcut`); it is opened by its absolute
    path now.
-6. CLI: `timeline list` printed only the counts; it prints the table the
+6. **The export dialog said "measuring…" for good** when Export was pressed
+   before the sample encode for the size estimate ended: the cancelled
+   measurement stayed in place without an answer, so the Done page still read
+   "Size: about 5.1 MB · measuring…" and the dialog never measured again.
+   A cancelled measurement is now dropped. Seen on Xvfb: "Size: about 1.7 MB".
+7. CLI: `timeline list` printed only the counts; it prints the table the
    docs promise. `keyframe --property x|y` is accepted (`set` calls them
    `--x`/`--y`). `frame-blend` without `--mode` says "89 of 89 frames
    baked" in the human line too.
@@ -349,10 +354,6 @@ Open:
   /home/…/libcudart.so.13" instead of "with chukcut's CUDA libraries": the
   ML root is compared without resolving the link. Left to the ML owner
   (`modules/ml`).
-- **Low: the export dialog's size estimate keeps "measuring…" after an
-  export finished.** Steps: open the export dialog on a small project, press
-  Export at once; the footer still reads "Size: about 5.1 MB · measuring…"
-  on the Done page.
 
 Not tested, and why: playback with sound (Space and J/L are not pressed on
 this machine), voiceover recording, the portal file chooser, cloud
