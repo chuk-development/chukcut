@@ -29,6 +29,7 @@ pub(crate) use sequences::{
 use chukcut_engine::modules::inspector::commands as inspector_commands;
 use chukcut_engine::modules::project::{Marker, MarkerColor, Segment, TimeRange};
 use chukcut_engine::modules::text::commands as text_commands;
+use chukcut_engine::modules::timeline::gesture;
 use chukcut_engine::modules::timeline::ops::TrackFlags;
 use chukcut_engine::modules::tracking::commands as tracking_commands;
 use chukcut_engine::modules::transitions::commands as transition_commands;
@@ -1350,7 +1351,8 @@ impl Editor {
                     start = (time - grab).max(floor);
                     let mut exclude = group.clone();
                     exclude.push(segment_id.clone());
-                    if let Some((shift, point)) = self.snap(&[start, start + duration], &exclude) {
+                    let snapped = self.snap(&[start, start + duration], &exclude);
+                    if let Some((shift, point)) = snapped {
                         start = (start + shift).max(floor);
                         self.timeline.snap = Some(point);
                     } else {
@@ -1381,6 +1383,19 @@ impl Editor {
                                 }
                             }
                             None => {}
+                        }
+                    }
+                    // A frame boundary rounded into a neighbour whose edge is
+                    // off the grid slides flush against it, instead of the
+                    // move being refused for a few microseconds of overlap.
+                    if snapped.is_none() && !new_lane {
+                        if let Some(lane) = self.project.track(&track) {
+                            let frame = frame_length(self.project.fps);
+                            if let Some(at) =
+                                gesture::clear_of_neighbours(lane, &exclude, start, duration, frame)
+                            {
+                                start = at.max(floor);
+                            }
                         }
                     }
                 }
@@ -4066,6 +4081,12 @@ impl Editor {
         body.child(handle(fade_handle_x(fade_in, zoom)))
             .child(handle(width - fade_handle_x(fade_out, zoom)))
     }
+}
+
+/// One frame at `fps`, rounded up: the most a frame-grid rounding moves an
+/// edge.
+pub(crate) fn frame_length(fps: f64) -> Micros {
+    (1_000_000.0 / fps.max(1.0)).ceil() as Micros
 }
 
 /// The right-click menu of the lanes: what can be done to the clips under
