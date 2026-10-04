@@ -40,7 +40,6 @@ pub(crate) struct AnalysisUi {
 /// What the clip menu's analysis entries may do for the clicked selection.
 #[derive(Clone, Copy, Default)]
 pub(crate) struct MenuFlags {
-    video: bool,
     /// A video or a compound clip: something whose picture can be read.
     picture: bool,
     sound: bool,
@@ -70,7 +69,7 @@ pub(crate) fn analysis_menu(menu: PopupMenu, f: MenuFlags) -> PopupMenu {
             Box::new(SplitAtScenes),
             !f.picture,
         )
-        .menu_with_disabled("Stabilise", Box::new(StabiliseClip), !f.video)
+        .menu_with_disabled("Stabilise", Box::new(StabiliseClip), !f.picture)
         .menu_with_disabled("Detect beats", Box::new(DetectBeats), !f.sound)
         .menu_with_disabled("Auto-cut to beat", Box::new(AutoCutToBeat), !f.beats)
         .menu_with_disabled("Snap cuts to beats", Box::new(SnapCutsToBeats), !f.beats)
@@ -129,7 +128,6 @@ impl Editor {
                 .is_some_and(|aspect| (aspect / canvas_aspect - 1.0).abs() > 0.02)
         });
         MenuFlags {
-            video,
             picture: video || compound,
             sound,
             beats,

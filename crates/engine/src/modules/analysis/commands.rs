@@ -293,7 +293,8 @@ pub fn analysis_clear_scenes(
 
 /// Measure a clip's camera shake and stabilise it with `strength` (`0..=1`)
 /// and `crop` (`None`: just enough). A clip measured before is not measured
-/// again (the camera path is cached).
+/// again (the camera path is cached). A compound clip is measured on its
+/// rendered contents.
 pub fn analysis_stabilise(
     state: &Arc<AppState>,
     segment_id: Id,
@@ -304,7 +305,11 @@ pub fn analysis_stabilise(
     if !strength.is_finite() || crop.is_some_and(|c| !c.is_finite()) {
         return Err("strength and crop must be numbers".into());
     }
-    let (path, fps, range, media_id) = state.with_project(|p| video_of(p, &segment_id))??;
+    // A video's file, or a compound clip's contents rendered on the canvas
+    // it is drawn on: the camera path is measured in the clip's source time
+    // either way, and `stabilise::resolve` reads it back through the clip's
+    // time map, so a compound clip's speed and curve are followed.
+    let picture = state.with_project(|p| picture_of(p, &segment_id, None))??;
     let state = Arc::clone(state);
     let id = segment_id.clone();
     jobs::spawn(
@@ -312,15 +317,8 @@ pub fn analysis_stabilise(
         segment_id,
         channel,
         move |ctx: &JobContext| {
-            let walk = Walk {
-                path,
-                fps,
-                range,
-                height: stabilise::ANALYSIS_HEIGHT,
-                max_rate: None,
-                sequence: None,
-            };
-            let camera = stabilise::measure(&walk, &media_id, Some(ctx))?;
+            let walk = picture.walk(stabilise::ANALYSIS_HEIGHT, None);
+            let camera = stabilise::measure(&walk, &picture.media_id, Some(ctx))?;
             let settings = Stabilise {
                 motion_id: String::new(),
                 enabled: true,

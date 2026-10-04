@@ -121,13 +121,18 @@ fn walk_sequence(
         30.0
     };
     let rate = walk.max_rate.map_or(fps, |r| r.min(fps).max(0.5));
-    let period = ((1_000_000.0 / rate).round() as Micros).max(1);
     let (start, end) = (
         walk.range.start.max(0),
         walk.range.end().min(view.duration()),
     );
     let span = (end - start).max(1) as f32;
     let sources = MediaSourceProvider::from_project(view);
+    // Each step's time from its index, not a rounded period added up: at
+    // 30 fps the period rounds 1/3 µs short, which after thirty frames
+    // outgrew `SAMPLE_SLACK` and rendered every later step one frame early
+    // (a stabilised compound clip lagged its shake by a frame).
+    let step_time = |k: i64| start + (k as f64 * 1_000_000.0 / rate).round() as Micros;
+    let mut k = 0i64;
     let mut t = start;
     let result = (|| {
         while t < end {
@@ -139,7 +144,8 @@ fn walk_sequence(
                 .render(view, t + SAMPLE_SLACK, (width, height), &sources)
                 .map_err(|e| format!("could not render the compound clip at {t} µs: {e}"))?;
             let pts = t;
-            t += period;
+            k += 1;
+            t = step_time(k).max(t + 1);
             if let Some(ctx) = ctx {
                 let done = (t - start) as f32 / span;
                 ctx.progress(progress_span.0 + (progress_span.1 - progress_span.0) * done);
