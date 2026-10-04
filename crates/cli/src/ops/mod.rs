@@ -14,6 +14,7 @@ pub mod caption_edit;
 pub mod clip;
 pub mod cloud;
 pub mod cloud_tools;
+pub mod colour;
 pub mod delivery;
 pub mod frame;
 pub mod layout;
@@ -282,6 +283,11 @@ operations!(
     clip::TitleFontArgs,
     clip::MaskMoveArgs,
     clip::LaneAddArgs,
+    colour::AutoAdjustArgs,
+    colour::ColourMatchArgs,
+    colour::GradePresetSaveArgs,
+    colour::GradePresetApplyArgs,
+    colour::GradePresetsArgs,
     library::StickerArgs,
     motion::FrameBlendArgs,
     motion::SmoothSlowMoArgs,

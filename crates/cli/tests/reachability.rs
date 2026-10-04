@@ -86,6 +86,7 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ("text::text_style_tile", "the Text tab's preview tile"),
     ("text::text_template_tile", "the Text tab's preview tile"),
     ("library::library_look_tile", "the Filters tab's preview tile"),
+    ("grading::grading_preset_tile", "the Filters tab's preview tile for a grade preset"),
     ("library::library_font_preview", "the font picker's preview tile"),
     ("library::library_font_system_preview", "the font picker's preview tile"),
     ("library::library_sticker_thumb", "the Stickers tab's preview tile"),

@@ -138,6 +138,13 @@ pub fn luts_dir() -> PathBuf {
     data_root().join("luts")
 }
 
+/// Grade presets saved from the colour panel ("Save as preset"): one JSON
+/// file per preset. Under [`data_root`] beside the LUT library, for the same
+/// reason — a preset is the user's work, not cache.
+pub fn grade_presets_dir() -> PathBuf {
+    data_root().join("grade-presets")
+}
+
 /// Stills made by "Freeze frame". Under [`data_root`], never the cache: the
 /// project references the file, and "clear cache" must not take a picture
 /// out of somebody's cut.

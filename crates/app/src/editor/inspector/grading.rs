@@ -218,7 +218,10 @@ impl Editor {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let grade = self.current_grade(segment);
-        let mut sections = vec![self.lut_section(segment, &grade, window, cx)];
+        let mut sections = vec![
+            self.colour_tools(segment, window, cx),
+            self.lut_section(segment, &grade, window, cx),
+        ];
 
         let mut rest = grade.clone().reset(GradeSection::Basic);
         rest.lut = grade.lut.clone();

@@ -17,6 +17,7 @@ pub mod effects;
 pub mod export;
 pub mod fx;
 pub mod gpu;
+pub mod grading;
 pub mod inspector;
 pub mod keymap;
 pub mod library;

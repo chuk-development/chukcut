@@ -628,8 +628,8 @@ impl Editor {
                 "adjust-preset",
                 "Save as preset",
                 true,
-                false,
-                |_, _, _| {},
+                graded,
+                cx.listener(|this, _, window, cx| this.open_save_preset(window, cx)),
             ))
             .child(panel_button(
                 "adjust-all",

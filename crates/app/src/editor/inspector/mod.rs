@@ -34,6 +34,7 @@ mod analysis;
 mod animation;
 mod audio_fx;
 mod clip;
+mod colour_tools;
 mod controls;
 mod details;
 mod easing;
@@ -72,6 +73,8 @@ pub(crate) struct Inspector {
     settings: Option<SettingsForm>,
     /// The Adjust tab's own state: HSL band, curve and wheel drags, LUT list.
     grading: grading::GradingState,
+    /// Auto adjust, colour match and "Save as preset".
+    colour_tools: colour_tools::ColourToolsState,
     /// The Effects tab's sliders and drag.
     effects: effects::EffectsPanel,
     /// The audio effect sliders of the Audio tab.
