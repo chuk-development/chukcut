@@ -78,16 +78,24 @@ const WAVE: usize = 0;
 
 impl MediaCache {
     /// The best strip there is for `material` at `count` tiles: that one if
-    /// it is ready, otherwise the closest count that is.
+    /// it is ready, otherwise the closest count that is, otherwise — for a
+    /// compound clip, whose key carries a digest of its contents — the strip
+    /// of its contents before the last edit, while the new one renders.
     pub fn strip(&self, material: &str, count: usize) -> Option<&Strip> {
         if let Some(strip) = self.strips.get(&(material.to_string(), count)) {
             return Some(strip);
         }
-        self.strips
-            .iter()
-            .filter(|((id, _), _)| id == material)
-            .min_by_key(|((_, n), _)| n.abs_diff(count))
-            .map(|(_, strip)| strip)
+        let closest = |same: &dyn Fn(&str) -> bool| {
+            self.strips
+                .iter()
+                .filter(|((id, _), _)| same(id))
+                .min_by_key(|((_, n), _)| n.abs_diff(count))
+                .map(|(_, strip)| strip)
+        };
+        closest(&|id| id == material).or_else(|| {
+            let family = family(material)?;
+            closest(&|id| family_of(id) == Some(family))
+        })
     }
 
     pub fn wave(&self, material: &str) -> Option<&Arc<Waveform>> {
@@ -130,6 +138,21 @@ impl MediaCache {
         };
         let (material, count) = key.clone();
         self.strips.insert(key, strip);
+        let mut evicted = Vec::new();
+        // A compound clip's strip of new contents retires the old contents'.
+        if let Some(family) = family(&material) {
+            let stale: Vec<(String, usize)> = self
+                .strips
+                .keys()
+                .filter(|(id, _)| *id != material && family_of(id) == Some(family))
+                .cloned()
+                .collect();
+            for key in stale {
+                if let Some(strip) = self.strips.remove(&key) {
+                    evicted.extend(strip.tiles);
+                }
+            }
+        }
 
         // Keep the strips whose counts are closest to the one just made.
         let mut counts: Vec<usize> = self
@@ -139,7 +162,6 @@ impl MediaCache {
             .map(|(_, n)| *n)
             .collect();
         counts.sort_by_key(|n| n.abs_diff(count));
-        let mut evicted = Vec::new();
         for n in counts.into_iter().skip(KEEP_PER_MATERIAL) {
             if let Some(strip) = self.strips.remove(&(material.clone(), n)) {
                 evicted.extend(strip.tiles);
@@ -177,6 +199,40 @@ impl MediaCache {
             }
         }
     }
+}
+
+/// The compound clip a strip key names, for a compound clip's key
+/// (`sequence::thumbs::strip_key`: `sequence#digest`); `None` for a file.
+fn family(key: &str) -> Option<&str> {
+    key.split_once('#').map(|(id, _)| id)
+}
+
+fn family_of(key: &str) -> Option<&str> {
+    family(key)
+}
+
+/// Render a compound clip's strip: its sequence, `count` frames over its
+/// whole length. Blocking: run it off the UI thread.
+pub(crate) fn load_compound_strip(
+    project: &chukcut_engine::modules::project::Project,
+    sequence_id: &str,
+    count: usize,
+) -> Result<Strip, String> {
+    let tiles = chukcut_engine::modules::sequence::thumbs::sequence_strip(
+        project,
+        sequence_id,
+        count,
+        THUMB_PX,
+    )?;
+    tiles
+        .into_iter()
+        .map(|tile| {
+            let image = image::RgbaImage::from_raw(tile.width, tile.height, tile.bgra)
+                .ok_or("a tile came back the wrong size")?;
+            Ok(Arc::new(RenderImage::new(vec![image::Frame::new(image)])))
+        })
+        .collect::<Result<Vec<_>, String>>()
+        .map(|tiles| Strip { tiles })
 }
 
 /// Decode a strip. Blocking: run it off the UI thread.
@@ -238,6 +294,20 @@ mod tests {
         assert_eq!(strip_count(10_000_000, 60.0, 70.0), 16);
         assert_eq!(strip_count(1, 1.0, 70.0), 1);
         assert_eq!(strip_count(3_600_000_000, 2000.0, 20.0), MAX_TILES);
+    }
+
+    #[test]
+    fn a_compound_clips_new_strip_retires_the_old_contents_strip() {
+        let mut cache = MediaCache::default();
+        let key = cache.wanted_strip("seq#01", 8).unwrap();
+        cache.finish_strip(key, Ok(Strip { tiles: Vec::new() }));
+        // After an edit inside: the old strip stands in while the new loads.
+        assert!(cache.strip("seq#02", 8).is_some());
+        assert!(cache.strip("other#02", 8).is_none());
+        let key = cache.wanted_strip("seq#02", 8).unwrap();
+        cache.finish_strip(key, Ok(Strip { tiles: Vec::new() }));
+        assert!(!cache.strips.contains_key(&("seq#01".to_string(), 8)));
+        assert!(cache.strips.contains_key(&("seq#02".to_string(), 8)));
     }
 
     #[test]

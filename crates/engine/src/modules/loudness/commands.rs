@@ -27,12 +27,32 @@ pub struct ClipLoudness {
     pub gain_db: f32,
 }
 
-/// Measure the sound of `segment_id` (or of the clip that plays it).
+/// Measure the sound of `segment_id` (or of the clip that plays it). For a
+/// compound clip: the mix of its contents over the part it shows.
 pub fn loudness_measure_clip(
     state: &Arc<AppState>,
     segment_id: String,
     cancel: &AtomicBool,
 ) -> Result<ClipLoudness, String> {
+    let compound = state.with_project(|project| {
+        let (_, segment) = project.segment(&segment_id)?;
+        project.materials.sequence(&segment.material_id)?;
+        Some((project.clone(), segment.clone()))
+    })?;
+    if let Some((project, segment)) = compound {
+        let mixed = crate::modules::sequence::audio::mix_of(
+            &project,
+            &segment.material_id,
+            segment.source_range,
+            RATE,
+            cancel,
+        )?;
+        return Ok(ClipLoudness {
+            segment_id,
+            loudness: measure(&mixed, CHANNELS as u32, RATE)?,
+            gain_db: 0.0,
+        });
+    }
     let (audible, path, range, gain_db) = state.with_project(|project| {
         let audible = audible_segment(project, &segment_id).ok_or("the clip has no sound")?;
         let (_, segment) = project.segment(&audible).ok_or("unknown clip")?;
@@ -50,12 +70,14 @@ pub fn loudness_measure_clip(
 }
 
 /// Measure the whole timeline as it would export: every audible clip, with
-/// volumes, fades and cleanup, mixed to stereo.
+/// volumes, fades and cleanup, mixed to stereo. The root timeline, like the
+/// export, also while a compound clip is open; compound clips' contents are
+/// in the mix.
 pub fn loudness_measure_mix(
     state: &Arc<AppState>,
     cancel: &AtomicBool,
 ) -> Result<Loudness, String> {
-    let project = state.with_project(|p| p.clone())?;
+    let project = crate::modules::sequence::export_root(state.with_project(|p| p.clone())?);
     if project.duration() <= 0 {
         return Err("the timeline is empty".into());
     }

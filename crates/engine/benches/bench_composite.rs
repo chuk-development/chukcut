@@ -108,6 +108,11 @@ impl SourceProvider for StillProvider {
         self.warm(ctx);
         Ok(self.frame.lock().expect("still provider poisoned").clone())
     }
+
+    /// The one still never changes, so what is rendered from it may be kept.
+    fn cache_identity(&self) -> Option<u64> {
+        Some(1)
+    }
 }
 
 /// `Rgba8UnormSrgb`, matching `media::provider::upload_rgba`. Tagging the
@@ -417,7 +422,118 @@ pub fn run(ctx: &Arc<RenderContext>, budget: &Budget) -> Vec<Measurement> {
         out.push(without);
     }
     let _ = std::fs::remove_file(&lut);
+
+    out.extend(compound_rows(&compositor, &provider, canvas, budget));
     out
+}
+
+/// What a compound clip costs over the same layers drawn flat (the `3
+/// layer(s), plain` row above), decision 0024: a nested render of its
+/// sequence into a texture, then that texture drawn as the clip's source.
+///
+/// Four shapes, each a question the nested-render cache answers differently:
+/// playback (every instant new, nothing to reuse), the same sequence shown by
+/// four clips at once (one render, three reuses), the same instant again
+/// (paused: an edit to the outer clip re-renders an unchanged inside), and a
+/// project with a large pool, where building the nested view used to clone
+/// every material on every frame.
+fn compound_rows(
+    compositor: &Compositor,
+    provider: &StillProvider,
+    canvas: (u32, u32),
+    budget: &Budget,
+) -> Vec<Measurement> {
+    let mut out = Vec::new();
+    let shapes: [(&str, usize, usize, Micros); 4] = [
+        ("compound of 3 layers, playback", 1, 0, 33_333),
+        ("4 compound clips of one sequence, playback", 4, 0, 33_333),
+        ("compound of 3 layers, same instant", 1, 0, 0),
+        (
+            "compound of 3 layers, 5000-material pool, playback",
+            1,
+            5000,
+            33_333,
+        ),
+    ];
+    for (name, uses, padding, step) in shapes {
+        let project = compound_timeline(canvas, uses, padding);
+        let samples = rounds::<String>(budget.rounds, |_| {
+            Ok(sweep_by(
+                compositor,
+                &project,
+                provider,
+                canvas,
+                budget.frames,
+                true,
+                step,
+            ))
+        })
+        .expect("compositing does not fail once the first frame has");
+        let stats = compositor.stats();
+        compositor.reset_stats();
+        // Per frame on screen: `stats.frames` counts the nested renders too.
+        let outer = (budget.rounds * (budget.frames + 1)) as f64;
+        out.push(
+            Measurement::ms(GROUP, name.to_string(), samples).with_note(format!(
+                "{:.2} renders, sources {:.3} ms, composite {:.3} ms per frame",
+                stats.frames as f64 / outer,
+                stats.sources_ns as f64 / outer / 1e6,
+                stats.composite_ns as f64 / outer / 1e6
+            )),
+        );
+    }
+    out
+}
+
+/// The 3-layer plain timeline moved into one compound sequence, shown by
+/// `uses` compound clips on lanes of their own, all at the same inner time.
+/// `padding` unused titles in the pool stand in for a long project's
+/// materials.
+fn compound_timeline(canvas: (u32, u32), uses: usize, padding: usize) -> Project {
+    use chukcut_engine::modules::sequence::{Sequence, SequenceKind};
+    let inner = timeline(3, canvas, false);
+    let mut project = inner.clone();
+    project.tracks.clear();
+    let span = inner.duration();
+    let sequence_id = "bench-compound".to_string();
+    project.materials.sequences.push(Sequence {
+        id: sequence_id.clone(),
+        name: "Compound clip 1".into(),
+        kind: SequenceKind::Compound,
+        tracks: inner.tracks,
+        markers: Vec::new(),
+    });
+    for n in 0..padding {
+        project
+            .materials
+            .texts
+            .push(chukcut_engine::modules::project::TextMaterial {
+                id: format!("pad-{n}"),
+                content: format!("Unused title number {n}"),
+                ..Default::default()
+            });
+    }
+    for lane in 0..uses {
+        let mut track = Track::new(TrackKind::Video, format!("Compound {lane}"));
+        track.segments.push(Segment {
+            id: new_id(),
+            material_id: sequence_id.clone(),
+            target_range: TimeRange::new(0, span),
+            source_range: TimeRange::new(0, span),
+            render_index: lane as i32,
+            speed: 1.0,
+            volume: 1.0,
+            transform: Transform {
+                opacity: 0.9,
+                ..Transform::default()
+            },
+            crop: None,
+            extras: Vec::new(),
+            keyframes: Vec::new(),
+        });
+        project.tracks.push(track);
+    }
+    project
 }
 
 /// Milliseconds per frame across `frames` distinct instants.
@@ -433,7 +549,22 @@ fn sweep(
     frames: usize,
     readback: bool,
 ) -> f64 {
-    let step = 33_333;
+    sweep_by(
+        compositor, project, provider, size, frames, readback, 33_333,
+    )
+}
+
+/// [`sweep`] with the step between instants given; 0 renders one instant
+/// over and over, which is what a paused preview does after an edit.
+fn sweep_by(
+    compositor: &Compositor,
+    project: &Project,
+    provider: &StillProvider,
+    size: (u32, u32),
+    frames: usize,
+    readback: bool,
+    step: Micros,
+) -> f64 {
     // One untimed frame: the first acquires a render target and builds the
     // bind group layouts.
     let _ = compositor.render_frame(project, 0, size, provider);

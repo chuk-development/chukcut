@@ -574,3 +574,245 @@ fn a_project_without_compound_clips_is_not_copied_for_the_mixer() {
         std::borrow::Cow::Borrowed(_)
     ));
 }
+
+#[test]
+fn deleting_a_timeline_takes_the_compound_clips_only_it_showed() {
+    let mut p = project();
+    let original = json(&p);
+    let mut h = History::new();
+    // A compound inside a compound on the main timeline, and a second
+    // compound clip that is cut away and waits to be pasted.
+    let inner = build::create_compound(&p, &ids(&["b"]), None).unwrap();
+    step!(h, p, inner.command);
+    let outer = build::create_compound(&p, &ids(&[&inner.segment_id, "c"]), None).unwrap();
+    step!(h, p, outer.command);
+    let waiting = build::create_compound(&p, &ids(&["o"]), None).unwrap();
+    step!(h, p, waiting.command);
+    let (lane, clip) = p.segment(&waiting.segment_id).unwrap();
+    let (lane, clip) = (lane.id.clone(), clip.clone());
+    let index = p.track(&lane).unwrap().segments.len() - 1;
+    apply(
+        &mut h,
+        &mut p,
+        EditCommand::RemoveSegment {
+            track_id: lane,
+            segment: clip,
+            index,
+        },
+    );
+    let (cmd, _) = build::new_timeline(&p, None).unwrap();
+    step!(h, p, cmd);
+    let before = json(&p);
+
+    step!(h, p, build::delete_timeline(&p, MAIN_SEQUENCE_ID).unwrap());
+    assert!(p.materials.sequence(&outer.sequence_id).is_none());
+    assert!(p.materials.sequence(&inner.sequence_id).is_none());
+    assert!(
+        p.materials.sequence(&waiting.sequence_id).is_some(),
+        "a cut compound clip can still be pasted"
+    );
+
+    h.undo(&mut p).unwrap();
+    assert_eq!(json(&p), before);
+    while h.can_undo() {
+        h.undo(&mut p).unwrap();
+    }
+    assert_eq!(json(&p), original);
+}
+
+#[test]
+fn a_compound_used_elsewhere_survives_its_timeline() {
+    let mut p = project();
+    let mut h = History::new();
+    let made = build::create_compound(&p, &ids(&["b"]), None).unwrap();
+    step!(h, p, made.command);
+    let clip = p.segment(&made.segment_id).unwrap().1.clone();
+    let (cmd, second) = build::new_timeline(&p, None).unwrap();
+    step!(h, p, cmd);
+    // The same compound clip on the second timeline, as a paste puts it.
+    let mut copy = clip;
+    copy.id = "pasted".into();
+    copy.target_range.start = 0;
+    let lane = p.tracks[0].id.clone();
+    apply(
+        &mut h,
+        &mut p,
+        EditCommand::InsertSegment {
+            track_id: lane,
+            segment: copy,
+            index: 0,
+        },
+    );
+    step!(h, p, build::delete_timeline(&p, MAIN_SEQUENCE_ID).unwrap());
+    assert_eq!(p.sequence.id, second);
+    assert!(p.materials.sequence(&made.sequence_id).is_some());
+}
+
+/// The music (1..5 s) in a compound clip, the compound clip moved to 10 s.
+fn music_compound() -> (Project, String) {
+    let mut p = project();
+    let made = build::create_compound(&p, &ids(&["m"]), None).unwrap();
+    made.command.apply(&mut p).unwrap();
+    let compound = p.segment_mut(&made.segment_id).unwrap();
+    compound.target_range.start = 10 * S;
+    (p, made.segment_id)
+}
+
+fn heard(p: &Project, compound: &str) -> Vec<Segment> {
+    audio::flatten_audio(p)
+        .tracks
+        .iter()
+        .filter(|t| t.id.starts_with(compound))
+        .flat_map(|t| t.segments.iter().cloned())
+        .collect()
+}
+
+fn volume_keys(values: &[(Micros, f32)]) -> KeyframeTrack {
+    KeyframeTrack {
+        property: AnimatableProperty::Volume,
+        keyframes: values
+            .iter()
+            .map(|&(time, value)| Keyframe {
+                time,
+                value,
+                easing: Default::default(),
+            })
+            .collect(),
+    }
+}
+
+#[test]
+fn a_compound_clips_own_volume_keyframes_reach_its_sound() {
+    let (mut p, compound) = music_compound();
+    // A fade over the compound clip's first second; music starts 0 s inside.
+    p.segment_mut(&compound)
+        .unwrap()
+        .keyframes
+        .push(volume_keys(&[(0, 0.0), (S, 1.0)]));
+    let m = &heard(&p, &compound)[0];
+    assert_eq!(m.target_range.start, 10 * S);
+    let keys = &m.keyframes[0];
+    assert_eq!(keys.sample(0), Some(0.0));
+    assert_eq!(keys.sample(S / 2), Some(0.5));
+    assert_eq!(keys.sample(2 * S), Some(1.0));
+
+    // With a ramp of the music's own as well, the two multiply.
+    let inner = p.materials.sequences[0].tracks[0].segments[0]
+        .keyframes
+        .clone();
+    assert!(inner.is_empty());
+    p.materials.sequences[0].tracks[0].segments[0]
+        .keyframes
+        .push(volume_keys(&[(0, 1.0), (4 * S, 0.0)]));
+    let m = &heard(&p, &compound)[0];
+    let product = |t: Micros| m.keyframes[0].sample(t).unwrap();
+    for t in [0, S / 4, S / 2, S, 2 * S, 3 * S] {
+        let own = (t as f32 / S as f32).min(1.0);
+        let music = 1.0 - t as f32 / (4 * S) as f32;
+        assert!(
+            (product(t) - own * music).abs() < 0.01,
+            "at {t}: {} against {}",
+            product(t),
+            own * music
+        );
+    }
+}
+
+#[test]
+fn a_speed_curve_on_a_compound_clip_reaches_its_sound() {
+    use crate::modules::project::{SpeedCurveMaterial, SpeedPoint};
+    let (mut p, compound) = music_compound();
+    // Half speed for the first second of the contents, double after.
+    let points = vec![
+        SpeedPoint {
+            source: 0,
+            speed: 0.5,
+        },
+        SpeedPoint {
+            source: 2 * S,
+            speed: 2.0,
+        },
+    ];
+    let source = p.segment(&compound).unwrap().1.source_range;
+    let length = crate::modules::project::speed::curve_target_duration(&points, source);
+    p.materials.speed_curves.push(SpeedCurveMaterial {
+        id: "ramp".into(),
+        preset: None,
+        points,
+    });
+    let clip = p.segment_mut(&compound).unwrap();
+    clip.extras.push("ramp".into());
+    clip.target_range.duration = length;
+    assert!(errors(&p).is_empty(), "{:?}", errors(&p));
+
+    let flat = audio::flatten_audio(&p);
+    let m = flat
+        .tracks
+        .iter()
+        .flat_map(|t| t.segments.iter())
+        .find(|s| s.id.starts_with(&compound))
+        .unwrap();
+    // The whole compound clip, which is the whole music clip.
+    assert_eq!(m.target_range, TimeRange::new(10 * S, length));
+    assert_eq!(m.source_range, TimeRange::new(0, 4 * S));
+    let curve = flat
+        .materials
+        .speed_curve_of(m)
+        .expect("the music is ramped");
+    // The music starts at 0 inside and reads its file from 0 at 1x: the
+    // compound clip's curve, point for point.
+    assert_eq!(curve.points[0].source, 0);
+    assert_eq!(curve.points[1].source, 2 * S);
+    assert_eq!(curve.points[1].speed, 2.0);
+    let map = flat.materials.time_map(m);
+    assert_eq!(map.offset_of(4 * S), length);
+}
+
+#[test]
+fn a_compound_clip_at_another_speed_flattens_at_that_speed() {
+    let mut p = project();
+    let mut h = History::new();
+    let made = build::create_compound(&p, &ids(&["b", "o"]), None).unwrap();
+    step!(h, p, made.command);
+    // 2..5 s at double speed: 2..3.5 s.
+    let compound = p.segment_mut(&made.segment_id).unwrap();
+    compound.speed = 2.0;
+    compound.target_range.duration = 3 * S / 2;
+    assert!(errors(&p).is_empty(), "{:?}", errors(&p));
+    step!(h, p, build::flatten(&p, &made.segment_id).unwrap());
+    // b was 2..5 s reading 10..13 s; o was 3..4 s reading 30..31 s.
+    let b = p.segment("b").unwrap().1;
+    assert_eq!(b.target_range, TimeRange::new(2 * S, 3 * S / 2));
+    assert_eq!(b.source_range, TimeRange::new(10 * S, 3 * S));
+    assert_eq!(b.speed, 2.0);
+    let o = p.segment("o").unwrap().1;
+    assert_eq!(o.target_range, TimeRange::new(5 * S / 2, S / 2));
+    assert_eq!(o.source_range, TimeRange::new(30 * S, S));
+}
+
+#[test]
+fn a_curve_inside_a_curve_is_refused_with_a_reason() {
+    use crate::modules::project::{SpeedCurveMaterial, SpeedPoint};
+    let mut p = project();
+    let made = build::create_compound(&p, &ids(&["b"]), None).unwrap();
+    made.command.apply(&mut p).unwrap();
+    let flat_curve = |id: &str, speed: f32| SpeedCurveMaterial {
+        id: id.into(),
+        preset: None,
+        points: vec![SpeedPoint { source: 0, speed }],
+    };
+    p.materials.speed_curves.push(flat_curve("inner", 1.0));
+    p.materials.speed_curves.push(flat_curve("outer", 1.0));
+    p.materials.sequences[0].tracks[0].segments[0]
+        .extras
+        .push("inner".into());
+    p.segment_mut(&made.segment_id)
+        .unwrap()
+        .extras
+        .push("outer".into());
+    let refused = build::flatten(&p, &made.segment_id).unwrap_err();
+    assert!(
+        refused.contains("remove one of the two curves"),
+        "{refused}"
+    );
+}

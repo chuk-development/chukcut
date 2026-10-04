@@ -351,3 +351,357 @@ fn the_export_of_an_open_compound_clip_is_the_whole_timeline() {
     let clip = &root.tracks[0].segments[0];
     assert_eq!(clip.target_range, TimeRange::new(S / 2, 3 * S / 2));
 }
+
+/// One compositor and one provider across renders, the way the preview keeps
+/// them: the same instant twice is the cached nested frame, and an edit
+/// inside the compound clip — to a clip, or to a pool entry a clip names —
+/// is never served stale.
+#[test]
+fn the_nested_frame_cache_reuses_and_refreshes() {
+    let _ = require_media!();
+    let ctx = require_gpu!();
+    let Some(mut original) = laid_out() else {
+        return;
+    };
+    // A grade on the counter, so an edit to the pool entry can be checked.
+    original.materials.color_adjusts.push(
+        chukcut_engine::modules::project::document::ColorAdjustMaterial {
+            id: "look".into(),
+            brightness: 0.0,
+            contrast: 1.0,
+            saturation: 1.0,
+            temperature: 0.0,
+            lut: None,
+            grade: Default::default(),
+        },
+    );
+    original.tracks[0].segments[0].extras.push("look".into());
+    let (mut nested, _) = nested(&original);
+    // 0.75 s into the compound clip's contents: the overlay is on screen.
+    let at = S + 10;
+    let c = Compositor::new(Arc::clone(&ctx));
+    let sources = MediaSourceProvider::from_project(&nested);
+    let draw = |c: &Compositor, p: &Project| c.render(p, at, (W, H), &sources).unwrap().data;
+
+    let first = draw(&c, &nested);
+    let before = c.nested_stats();
+    let again = draw(&c, &nested);
+    let after = c.nested_stats();
+    assert_eq!(first, again, "the cached frame is the frame");
+    assert_eq!(
+        after.frame_hits,
+        before.frame_hits + 1,
+        "the outer compound clip came from the cache: {after:?}"
+    );
+
+    // Move the overlay inside the innermost compound clip.
+    let white = nested
+        .materials
+        .sequences
+        .iter_mut()
+        .flat_map(|s| s.tracks.iter_mut())
+        .flat_map(|t| t.segments.iter_mut())
+        .find(|s| s.material_id == "white")
+        .expect("the overlay is inside");
+    white.transform.position = [-0.3, 0.2];
+    let moved = draw(&c, &nested);
+    assert_ne!(moved, first, "an edit inside shows");
+    assert_eq!(
+        moved,
+        draw(&Compositor::new(Arc::clone(&ctx)), &nested),
+        "and matches a compositor that never saw the old frame"
+    );
+
+    // Brighten the grade the counter inside names.
+    nested.materials.color_adjusts[0].brightness = 0.3;
+    let graded = draw(&c, &nested);
+    assert_ne!(
+        graded, moved,
+        "an edit to a pool entry a clip inside names shows"
+    );
+    assert_eq!(graded, draw(&Compositor::new(ctx), &nested));
+}
+
+/// The outer compound clip of `nested` at twice the speed: it shows the same
+/// 1.5 s of its contents in 0.75 s.
+fn at_double_speed(nested: &Project, outer: &str) -> Project {
+    let mut p = nested.clone();
+    let clip = p.segment_mut(outer).unwrap();
+    clip.speed = 2.0;
+    clip.target_range.duration = 3 * S / 4;
+    let errors: Vec<String> = p
+        .validate()
+        .into_iter()
+        .filter(|i| i.severity == Severity::Error)
+        .map(|i| i.message)
+        .collect();
+    assert!(errors.is_empty(), "{errors:?}");
+    p
+}
+
+/// The outer compound clip of `nested` on the Hero speed ramp.
+fn on_a_curve(nested: &Project, outer: &str) -> Project {
+    use chukcut_engine::modules::project::SpeedPreset;
+    use chukcut_engine::modules::speed::edit::{set_curve_command, CurveChange};
+    let mut p = nested.clone();
+    let command = set_curve_command(
+        &p,
+        outer,
+        CurveChange::Preset {
+            preset: SpeedPreset::Hero,
+        },
+    )
+    .unwrap();
+    apply(&mut p, command);
+    p
+}
+
+/// Every frame of `a` against `b`, a tenth of a second apart, plus the
+/// counter digits where the counter shows.
+fn same_frames(c: &Compositor, a: &Project, b: &Project, what: &str) {
+    assert_eq!(a.duration(), b.duration(), "{what}: same length");
+    let mut at = 10;
+    while at < a.duration() {
+        let fa = render(c, a, at);
+        let fb = render(c, b, at);
+        assert_eq!(
+            read_counter_rgba(&fa, W, H),
+            read_counter_rgba(&fb, W, H),
+            "{what}: the same counter frame at {at} µs"
+        );
+        let (worst, pixel) = max_difference(&fa, &fb);
+        assert!(
+            worst <= 2,
+            "{what}: at {at} µs off by {worst} at pixel ({}, {})",
+            pixel as u32 % W,
+            pixel as u32 / W
+        );
+        at += S / 20;
+    }
+}
+
+fn mixes_agree(a: &Project, b: &Project, tolerance: f32, what: &str) {
+    let cancel = AtomicBool::new(false);
+    let source = chukcut_engine::modules::audio::FileAudioSource;
+    let ma = mix_timeline(a, &source, 48_000, 2, &cancel).unwrap();
+    let mb = mix_timeline(b, &source, 48_000, 2, &cancel).unwrap();
+    assert_eq!(ma.len(), mb.len(), "{what}");
+    let worst = ma
+        .iter()
+        .zip(&mb)
+        .map(|(x, y)| (x - y).abs())
+        .fold(0.0f32, f32::max);
+    assert!(worst < tolerance, "{what}: the mixes differ by {worst}");
+    assert!(ma.iter().any(|s| s.abs() > 0.05), "{what}: there is sound");
+}
+
+fn envelopes_agree(a: &Project, b: &Project, what: &str) {
+    let cancel = AtomicBool::new(false);
+    let source = chukcut_engine::modules::audio::FileAudioSource;
+    let ma = mix_timeline(a, &source, 48_000, 2, &cancel).unwrap();
+    let mb = mix_timeline(b, &source, 48_000, 2, &cancel).unwrap();
+    assert_eq!(ma.len(), mb.len(), "{what}");
+    let rms = |x: &[f32]| (x.iter().map(|s| s * s).sum::<f32>() / x.len() as f32).sqrt();
+    let (ra, rb) = (rms(&ma), rms(&mb));
+    assert!(ra > 0.01, "{what}: there is sound");
+    assert!(
+        (ra - rb).abs() <= 0.15 * ra.max(rb),
+        "{what}: {ra} against {rb}"
+    );
+}
+
+/// The sound pieces the mixer gets for `nested`'s compound clips against the
+/// clips `flat` holds: the same place, the same part of the file, the same
+/// curve.
+fn same_sound_pieces(nested: &Project, flat: &Project, material: &str) {
+    let heard = chukcut_engine::modules::sequence::audio::flatten_audio(nested);
+    type Piece = (TimeRange, TimeRange, Option<Vec<(Micros, f32)>>);
+    let pieces = |p: &Project| -> Vec<Piece> {
+        p.tracks
+            .iter()
+            .flat_map(|t| t.segments.iter())
+            .filter(|s| s.material_id == material)
+            .map(|s| {
+                (
+                    s.target_range,
+                    s.source_range,
+                    p.materials
+                        .speed_curve_of(s)
+                        .map(|c| c.points.iter().map(|q| (q.source, q.speed)).collect()),
+                )
+            })
+            .collect()
+    };
+    let a = pieces(heard.as_ref());
+    let b = pieces(flat);
+    assert_eq!(a.len(), b.len());
+    for ((ta, sa, ca), (tb, sb, cb)) in a.iter().zip(&b) {
+        assert!((ta.start - tb.start).abs() <= 2 && (ta.duration - tb.duration).abs() <= 4);
+        assert!((sa.start - sb.start).abs() <= 2 && (sa.duration - sb.duration).abs() <= 4);
+        let (ca, cb) = (ca.as_ref().unwrap(), cb.as_ref().unwrap());
+        assert_eq!(ca.len(), cb.len());
+        for (pa, pb) in ca.iter().zip(cb) {
+            assert!(
+                (pa.0 - pb.0).abs() <= 2 && (pa.1 - pb.1).abs() < 1e-4,
+                "{ca:?} {cb:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_compound_clip_at_double_speed_flattens_into_the_same_frames_and_sound() {
+    let _ = require_media!();
+    let ctx = require_gpu!();
+    let Some(original) = laid_out() else {
+        return;
+    };
+    let (nested, outer) = nested(&original);
+    let fast = at_double_speed(&nested, &outer);
+    let flat = flattened(&fast, &outer);
+    let c = Compositor::with_config(
+        ctx,
+        CompositorConfig {
+            strict_sources: true,
+            ..Default::default()
+        },
+    );
+    same_frames(&c, &fast, &flat, "double speed");
+    // Both sides play the sine at twice the speed through the same
+    // pitch-preserving render.
+    mixes_agree(&fast, &flat, 1e-3, "double speed");
+}
+
+#[test]
+fn a_compound_clip_on_a_speed_curve_flattens_into_the_same_frames_and_sound() {
+    let _ = require_media!();
+    let ctx = require_gpu!();
+    let Some(original) = laid_out() else {
+        return;
+    };
+    let (nested, outer) = nested(&original);
+    let ramped = on_a_curve(&nested, &outer);
+    let flat = flattened(&ramped, &outer);
+    // Every clip that runs with time took the curve.
+    for s in flat.tracks.iter().flat_map(|t| t.segments.iter()) {
+        if matches!(s.material_id.as_str(), "counter" | "quadrants" | "sine") {
+            assert!(
+                flat.materials.speed_curve_of(s).is_some(),
+                "{} plays on a curve",
+                s.material_id
+            );
+        }
+    }
+    let c = Compositor::with_config(
+        ctx,
+        CompositorConfig {
+            strict_sources: true,
+            ..Default::default()
+        },
+    );
+    same_frames(&c, &ramped, &flat, "speed curve");
+    // A pitch-preserving render through a curve does not come out sample
+    // for sample the same twice — the same document mixed twice differs by
+    // as much (docs/STATUS.md) — so the sound is compared by what the mixer
+    // is handed, and by its level.
+    same_sound_pieces(&ramped, &flat, "sine");
+    envelopes_agree(&ramped, &flat, "speed curve");
+}
+
+#[test]
+fn a_compound_clips_volume_keyframes_reach_the_mix() {
+    let _ = require_media!();
+    let Some(original) = laid_out() else {
+        return;
+    };
+    let (mut nested, outer) = nested(&original);
+    // Fade the compound clip from silence to full over its 1.5 s.
+    use chukcut_engine::modules::project::document::{AnimatableProperty, Keyframe, KeyframeTrack};
+    nested
+        .segment_mut(&outer)
+        .unwrap()
+        .keyframes
+        .push(KeyframeTrack {
+            property: AnimatableProperty::Volume,
+            keyframes: vec![
+                Keyframe {
+                    time: 0,
+                    value: 0.0,
+                    easing: Default::default(),
+                },
+                Keyframe {
+                    time: 3 * S / 2,
+                    value: 1.0,
+                    easing: Default::default(),
+                },
+            ],
+        });
+    let cancel = AtomicBool::new(false);
+    let source = chukcut_engine::modules::audio::FileAudioSource;
+    let peak = |p: &Project, from: Micros, to: Micros| {
+        let mix = mix_timeline(p, &source, 48_000, 2, &cancel).unwrap();
+        let a = (from * 48 / 1000) as usize * 2;
+        let b = (to * 48 / 1000) as usize * 2;
+        mix[a..b].iter().fold(0.0f32, |m, s| m.max(s.abs()))
+    };
+    // The compound clip plays its contents' 0.25..1.75 s at 0.5..2 s: quiet
+    // at its start, near full at its end — against the same stretch of the
+    // sine without the fade, where the inner clip's own volume applies.
+    let early = peak(&nested, S / 2, S / 2 + S / 20);
+    let plain_early = peak(&original, S / 4, S / 4 + S / 20);
+    let late = peak(&nested, 19 * S / 10, 2 * S);
+    let plain_late = peak(&original, 33 * S / 20, 35 * S / 20);
+    assert!(
+        early < 0.1 * plain_early,
+        "faded in: {early} against {plain_early}"
+    );
+    assert!(
+        late > 0.85 * plain_late,
+        "and full at the end: {late} against {plain_late}"
+    );
+}
+
+#[test]
+fn loudness_and_silence_hear_a_compound_clips_contents() {
+    let _ = require_media!();
+    let Some(original) = laid_out() else {
+        return;
+    };
+    let (nested, outer) = nested(&original);
+    let state = chukcut_engine::state::AppState::new();
+    *state.project.write() = Some(nested.clone());
+    let cancel = AtomicBool::new(false);
+
+    let clip = chukcut_engine::modules::loudness::commands::loudness_measure_clip(
+        &state,
+        outer.clone(),
+        &cancel,
+    )
+    .expect("a compound clip has a loudness");
+    assert!(clip.loudness.integrated.is_some(), "{clip:?}");
+
+    let analysis = chukcut_engine::modules::silence::commands::silence_analyse(
+        &state,
+        outer.clone(),
+        false,
+        &cancel,
+    )
+    .expect("a compound clip can be analysed");
+    let window = nested.segment(&outer).unwrap().1.source_range;
+    assert_eq!(analysis.source, window);
+    assert!(
+        analysis.envelope.peak_db(window) > -40.0,
+        "the sine inside is heard"
+    );
+
+    // The mix is the root timeline's, also from inside the compound clip.
+    let whole =
+        chukcut_engine::modules::loudness::commands::loudness_measure_mix(&state, &cancel).unwrap();
+    let open = build::open(&nested, &outer).unwrap();
+    if let Some(p) = state.project.write().as_mut() {
+        open.apply(p).unwrap();
+    }
+    let inside =
+        chukcut_engine::modules::loudness::commands::loudness_measure_mix(&state, &cancel).unwrap();
+    assert_eq!(whole.integrated, inside.integrated);
+}

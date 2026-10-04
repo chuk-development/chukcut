@@ -62,6 +62,46 @@ pub fn silence_analyse(
     with_voice: bool,
     cancel: &AtomicBool,
 ) -> Result<Analysis, String> {
+    // A compound clip: its contents' mix, over the part of its sequence it
+    // shows, measured in that sequence's time — the compound clip's source
+    // time, which is what the cuts are made in.
+    let compound = state.with_project(|project| {
+        let (_, picked) = project.segment(&segment_id)?;
+        project.materials.sequence(&picked.material_id)?;
+        Some((project.clone(), picked.clone()))
+    })?;
+    if let Some((project, picked)) = compound {
+        if project.materials.speed_curve_of(&picked).is_some() {
+            return Err(
+                "the compound clip plays on a speed curve; remove the curve to cut its silences"
+                    .into(),
+            );
+        }
+        let stereo = crate::modules::sequence::audio::mix_of(
+            &project,
+            &picked.material_id,
+            picked.source_range,
+            super::analyse::ANALYSIS_RATE,
+            cancel,
+        )?;
+        let mono: Vec<f32> = stereo
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|frame| (frame[0] + frame[1]) / 2.0)
+            .collect();
+        let envelope =
+            super::analyse::envelope_from_pcm(&mono, picked.source_range.start, with_voice);
+        return Ok(Analysis {
+            suggested_threshold_db: suggest_threshold(&envelope),
+            sound_segment_id: segment_id.clone(),
+            segment_id,
+            source: picked.source_range,
+            timeline_start: picked.target_range.start,
+            speed: picked.speed,
+            envelope,
+        });
+    }
     let (sound, path, source, timeline_start, speed) = state.with_project(|project| {
         let sound = audible_segment(project, &segment_id).ok_or("the clip has no sound")?;
         let (_, picked) = project.segment(&segment_id).ok_or("unknown clip")?;

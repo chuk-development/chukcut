@@ -50,8 +50,10 @@ Sound is a sum, so it is taken apart instead: both mixers (the preview's
 `sequence::audio::flatten_audio(project)`, a copy in which each compound clip's
 sound-bearing clips sit on lanes of their own, moved, cut to the window and
 retimed into the outer timeline. Position, the window, constant speed, clip
-and lane volume, mutes and the inner clips' volume keyframes map exactly. A
-project without compound clips is borrowed, not copied.
+and lane volume, mutes and the inner clips' volume keyframes map exactly; the
+compound clip's own volume keyframes multiply in, and its speed curve is
+composed with each inner clip's speed (`sequence::retime`, exact unless both
+are curves). A project without compound clips is borrowed, not copied.
 
 ### Export, proxies, thumbnails
 
@@ -60,8 +62,8 @@ the editor (`sequence::export_root`, applied in `export::commands`). Missing
 media inside compound clips is reported (`export::job::missing_media`
 recurses). Proxies are per material and pool-wide already, so media inside a
 compound clip gets its proxy like any other. The timeline draws a compound
-clip's filmstrip from the clips inside it (`sequence::picture_at`, recursive),
-out of the same thumbnail caches as every other clip.
+clip's filmstrip as nested renders of its sequence (`sequence::thumbs`),
+cached under a digest of its contents.
 
 ### Cycles
 
@@ -101,24 +103,26 @@ its inverse leaves the pool byte-identical. Tabs never jump around.
 
 ## What it costs
 
-- **A nested render per compound clip per frame**, plus a clone of the pool
-  and the sequence's lanes to build its view, and a texture that is not
-  pooled (the source frame still refers to it). Fine at the depths people use;
-  measure before nesting deep compound clips in a long project.
-- **A compound clip's own volume keyframes and its own speed curve do not
-  reach the sound** (the picture follows the curve; the sound plays at the
-  clip's constant speed and plain volume).
-- **Flattening needs normal speed** on the compound clip, and refuses to cut
-  a speed-curved clip at the window's edge. What the compound clip itself
-  carried — transform, grade, effects — goes with it.
+- **A nested render per compound clip per frame**, and a texture that is not
+  pooled (the source frame still refers to it). The nested view (the pool
+  clone) and the nested frame are cached per digest of the compound clip's
+  contents (`render::nested`, `sequence::digest`, added 2026-10-04), so a
+  paused frame, or two clips of one sequence, render the inside once.
+  Playback still renders the inside every frame: each frame is a new inner
+  instant.
+- **Flattening** composes the compound clip's speed into the clips inside
+  (constant or curve) but refuses a curve under a curve, and a speed-curved
+  clip cut at the window's edge. What the compound clip itself carried —
+  transform, grade, effects, its own volume keyframes — goes with it.
 - **An older build opening a multi-timeline project drops the parked
   timelines** on its next save: the format is additive, as every feature so
   far has been, and an old build ignores keys it does not know. The schema
   version was not bumped because that would rewrite every existing file.
-- **Deleting a timeline leaves its compound clips' sequences in the pool**,
-  unused, so undo finds them.
-- **Analysis, silence cutting, captions placement and loudness measurement**
-  see the active sequence only; they do not look inside compound clips.
+- **Deleting a timeline** removes the compound sequences only it reached, in
+  the same composite, so undo brings them back.
+- **Picture analyses** (scenes, beats, reframe) see the active sequence only.
+  Silence cutting and loudness on a compound clip measure its contents' mix;
+  captions and the mix loudness hear compound clips through the mixer.
 
 ## What would change our minds
 

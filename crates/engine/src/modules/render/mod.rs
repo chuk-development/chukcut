@@ -67,6 +67,7 @@ pub mod grade;
 pub mod layout;
 pub mod lut;
 pub mod matte;
+pub mod nested;
 pub mod nv12;
 pub mod readback;
 pub mod source;

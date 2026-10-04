@@ -251,6 +251,15 @@ pub struct MediaSourceProvider {
     /// Set once any frame came back as an imported decoder surface. See
     /// [`Self::hands_out_decoder_surfaces`].
     mapped: std::sync::atomic::AtomicBool,
+    /// [`SourceProvider::cache_identity`]: new for every provider, and again
+    /// whenever what it hands out changes without the document saying so.
+    identity: std::sync::atomic::AtomicU64,
+}
+
+/// A fresh [`MediaSourceProvider::identity`].
+fn next_identity() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 impl MediaSourceProvider {
@@ -302,6 +311,7 @@ impl MediaSourceProvider {
             decoders: Mutex::new(HashMap::new()),
             mapped: std::sync::atomic::AtomicBool::new(false),
             textures: Mutex::new(HashMap::new()),
+            identity: std::sync::atomic::AtomicU64::new(next_identity()),
         }
     }
 
@@ -321,6 +331,7 @@ impl MediaSourceProvider {
                 }
             }
         }
+        self.identity = std::sync::atomic::AtomicU64::new(next_identity());
         self
     }
 
@@ -364,6 +375,9 @@ impl MediaSourceProvider {
             textures.retain(|key, _| key != &text.id && !key.starts_with(&prefix));
             self.sources
                 .insert(text.id.clone(), MaterialSource::Text(text.clone()));
+            // A title's raster changed: nothing rendered from the old one may
+            // be served from a cache again.
+            *self.identity.get_mut() = next_identity();
         }
     }
 
@@ -399,31 +413,7 @@ impl MediaSourceProvider {
     ) {
         // Each clip's source instant, and the next frame's when the clip
         // blends frames (`speed::blend`): both are what the render asks for.
-        let mut wanted: Vec<(&str, Micros, Option<Micros>)> = Vec::new();
-        for (track, segment) in render::visible_segments(project, time) {
-            if project.materials.kind_of(&segment.material_id) != Some(MaterialKind::Video) {
-                continue;
-            }
-            if crate::modules::transitions::instant_for(track, &project.materials, segment, time)
-                .is_some()
-            {
-                continue;
-            }
-            let Some(source_time) = project.materials.time_map(segment).source_time_at(time) else {
-                continue;
-            };
-            // One position per decoder: the same file twice on screen is
-            // decoded twice by the render anyway, and prefetching both would
-            // make its one demuxer seek back and forth.
-            if wanted.iter().any(|(id, _, _)| *id == segment.material_id) {
-                continue;
-            }
-            match crate::modules::speed::blend::blend_for(&project.materials, segment, source_time)
-            {
-                Some(blend) => wanted.push((&segment.material_id, blend.first, Some(blend.second))),
-                None => wanted.push((&segment.material_id, source_time, None)),
-            }
-        }
+        let wanted = prefetch_requests(project, time);
         let fetch = |&(material_id, source_time, next): &(&str, Micros, Option<Micros>)| {
             for source_time in std::iter::once(source_time).chain(next) {
                 let request = SourceRequest {
@@ -855,7 +845,104 @@ impl MediaSourceProvider {
     }
 }
 
+/// What the decode-ahead decodes for a render of `project` at `time`: one
+/// `(material, source time)` per video file on screen, compound clips' insides
+/// included.
+fn prefetch_requests(project: &Project, time: Micros) -> Vec<Prefetch<'_>> {
+    let mut wanted: Vec<Prefetch<'_>> = Vec::new();
+    for (track, segment) in render::visible_segments(project, time) {
+        if project.materials.kind_of(&segment.material_id) == Some(MaterialKind::Sequence) {
+            inside_compound(&project.materials, track, segment, time, 0, &mut wanted);
+            continue;
+        }
+        if project.materials.kind_of(&segment.material_id) != Some(MaterialKind::Video) {
+            continue;
+        }
+        want_video(&project.materials, track, segment, time, &mut wanted);
+    }
+    wanted
+}
+
+/// What the decode-ahead fetches for one video: its material, the source
+/// instant, and the next frame's when the clip blends frames.
+type Prefetch<'a> = (&'a str, Micros, Option<Micros>);
+
+/// Video clip `segment` at timeline (or nested) time `time`, added to
+/// `wanted` unless a transition decides its times or its file is wanted
+/// already.
+fn want_video<'a>(
+    pool: &'a crate::modules::project::MaterialPool,
+    track: &crate::modules::project::Track,
+    segment: &'a crate::modules::project::Segment,
+    time: Micros,
+    wanted: &mut Vec<Prefetch<'a>>,
+) {
+    if crate::modules::transitions::instant_for(track, pool, segment, time).is_some() {
+        return;
+    }
+    let Some(source_time) = pool.time_map(segment).source_time_at(time) else {
+        return;
+    };
+    // One position per decoder: the same file twice on screen is decoded
+    // twice by the render anyway, and prefetching both would make its one
+    // demuxer seek back and forth.
+    if wanted.iter().any(|(id, _, _)| *id == segment.material_id) {
+        return;
+    }
+    match crate::modules::speed::blend::blend_for(pool, segment, source_time) {
+        Some(blend) => wanted.push((&segment.material_id, blend.first, Some(blend.second))),
+        None => wanted.push((&segment.material_id, source_time, None)),
+    }
+}
+
+/// The videos compound clip `segment` shows at `time`, for the decode-ahead:
+/// the same requests the nested render will make — its lanes at the inner
+/// instant, at the frame's size — followed into compound clips inside.
+fn inside_compound<'a>(
+    pool: &'a crate::modules::project::MaterialPool,
+    track: &crate::modules::project::Track,
+    segment: &'a crate::modules::project::Segment,
+    time: Micros,
+    depth: usize,
+    wanted: &mut Vec<Prefetch<'a>>,
+) {
+    if depth >= crate::modules::sequence::MAX_DEPTH {
+        return;
+    }
+    // A compound clip inside a transition window reads times the
+    // transition decides; left to the render, as a video there is.
+    if crate::modules::transitions::instant_for(track, pool, segment, time).is_some() {
+        return;
+    }
+    let Some(inner) = pool.time_map(segment).source_time_at(time) else {
+        return;
+    };
+    let Some(sequence) = pool.sequence(&segment.material_id) else {
+        return;
+    };
+    for track in sequence
+        .tracks
+        .iter()
+        .filter(|t| render::track_is_visible(t))
+    {
+        let Some(segment) = track.segment_at(inner) else {
+            continue;
+        };
+        match pool.kind_of(&segment.material_id) {
+            Some(MaterialKind::Sequence) => {
+                inside_compound(pool, track, segment, inner, depth + 1, wanted)
+            }
+            Some(MaterialKind::Video) => want_video(pool, track, segment, inner, wanted),
+            _ => {}
+        }
+    }
+}
+
 impl SourceProvider for MediaSourceProvider {
+    fn cache_identity(&self) -> Option<u64> {
+        Some(self.identity.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
     fn prefetch(&self, ctx: &RenderContext, project: &Project, time: Micros, size: (u32, u32)) {
         self.prefetch_clips(ctx, project, time, size);
     }
@@ -1216,6 +1303,79 @@ mod tests {
             height: 600,
         });
         project
+    }
+
+    #[test]
+    fn the_decode_ahead_looks_inside_compound_clips() {
+        use crate::modules::project::{Segment, TimeRange, Track, TrackKind, Transform};
+        use crate::modules::sequence::{Sequence, SequenceKind};
+        let clip = |id: &str, material: &str, start: Micros, source: Micros| Segment {
+            id: id.into(),
+            material_id: material.into(),
+            target_range: TimeRange::new(start, 2_000_000),
+            source_range: TimeRange::new(source, 2_000_000),
+            render_index: 0,
+            speed: 1.0,
+            volume: 1.0,
+            transform: Transform::default(),
+            crop: None,
+            extras: Vec::new(),
+            keyframes: Vec::new(),
+        };
+        let mut project = project_with_materials();
+        // Inside: v1 from 1 s of its file, in a compound inside a compound.
+        let mut lane = Track::new(TrackKind::Video, "inner");
+        lane.segments.push(clip("in", "v1", 0, 1_000_000));
+        project.materials.sequences.push(Sequence {
+            id: "deep".into(),
+            name: "deep".into(),
+            kind: SequenceKind::Compound,
+            tracks: vec![lane],
+            markers: Vec::new(),
+        });
+        let mut lane = Track::new(TrackKind::Video, "middle");
+        lane.segments.push(clip("mid", "deep", 0, 500_000));
+        project.materials.sequences.push(Sequence {
+            id: "middle".into(),
+            name: "middle".into(),
+            kind: SequenceKind::Compound,
+            tracks: vec![lane],
+            markers: Vec::new(),
+        });
+        let mut lane = Track::new(TrackKind::Video, "Video 1");
+        lane.segments.push(clip("outer", "middle", 3_000_000, 0));
+        project.tracks.push(lane);
+        // 3.25 s on the timeline: 0.25 s into "middle", 0.75 s into "deep",
+        // 1.75 s into the file.
+        assert_eq!(
+            prefetch_requests(&project, 3_250_000),
+            vec![("v1", 1_750_000, None)]
+        );
+        assert!(prefetch_requests(&project, 6_000_000).is_empty());
+
+        // With frame blending on the clip inside, its next frame is fetched
+        // too, as the nested render will ask for both.
+        let mut scratch = project_with_materials();
+        let mut lane = Track::new(TrackKind::Video, "scratch");
+        lane.segments.push(clip("in", "v1", 0, 1_000_000));
+        scratch.tracks.push(lane);
+        let (entry, _) = crate::modules::speed::blend::set_frame_blend_command(
+            &scratch,
+            "in",
+            crate::modules::speed::blend::FrameBlend::Blend,
+        )
+        .unwrap();
+        let (id, value) = entry.expect("blending on has an entry");
+        project.materials.extras.insert(id.clone(), value);
+        project.materials.sequences[0].tracks[0].segments[0]
+            .extras
+            .push(id);
+        let wanted = prefetch_requests(&project, 3_250_000);
+        assert_eq!(wanted.len(), 1);
+        let (material, first, next) = wanted[0];
+        assert_eq!(material, "v1");
+        let next = next.expect("the blend neighbour");
+        assert!(first <= 1_750_000 && 1_750_000 < next, "{first} {next}");
     }
 
     #[test]

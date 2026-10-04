@@ -13,10 +13,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::edit::SequenceEdit;
+use super::retime::Outer;
 use super::{exists, Sequence, SequenceKind};
+use crate::modules::project::speed::curve_target_duration;
 use crate::modules::project::{
-    new_id, source_duration_for, Id, Micros, Project, Segment, TimeRange, Track, TrackKind,
-    Transform,
+    new_id, source_duration_for, Id, MaterialKind, Micros, Project, Segment, SpeedCurveMaterial,
+    TimeRange, Track, TrackKind, Transform,
 };
 use crate::modules::timeline::ops::{EditCommand, PoolMaterial};
 
@@ -259,6 +261,14 @@ pub fn create_compound(
 /// order they were stacked inside. What the compound clip itself carried — a
 /// transform, a grade, effects — goes with it.
 ///
+/// A compound clip at another speed hands its speed down: each clip inside
+/// plays at its own speed times the compound clip's, and keeps its keyframes
+/// on the frames they were set on. A speed curve on the compound clip becomes
+/// a curve on each video, audio and compound clip inside (`super::retime`;
+/// exact), and a constant speed on the stills and titles that cover the same
+/// stretch. Refused: a clip with a curve of its own inside a compound clip
+/// with a curve (no exact form), and a curved clip the window's edge cuts.
+///
 /// When nothing else shows the sequence it is removed and the clips keep their
 /// ids, links and transitions. When another compound clip still uses it, the
 /// clips are copies: new ids, their own titles, and no links or transitions,
@@ -274,30 +284,33 @@ pub fn flatten(project: &Project, segment_id: &str) -> Result<EditCommand, Strin
     if track.locked {
         return Err(format!("\"{}\" is locked", track.name));
     }
-    if project.materials.speed_curve_of(segment).is_some() || (segment.speed - 1.0).abs() > 1e-6 {
-        return Err(
-            "set the compound clip back to normal speed before putting its clips back".into(),
-        );
-    }
-    let window_start = segment.source_range.start;
-    let window_end = window_start + segment.target_range.duration;
-    let offset = segment.target_range.start - window_start;
+    let outer = Outer::new(&project.materials, segment);
+    let window = outer.window();
     let shared = super::uses_of(project, &sequence.id) > 1;
     let pool = &project.materials;
 
     let mut texts: Vec<PoolMaterial> = Vec::new();
-    let mut lanes: Vec<(&Track, Vec<Segment>)> = Vec::new();
+    let mut lanes: Vec<(&Track, Vec<Piece>)> = Vec::new();
     for lane in &sequence.tracks {
         let mut mapped = Vec::new();
         for s in &lane.segments {
-            let a = s.target_range.start.max(window_start);
-            let b = s.target_range.end().min(window_end);
+            let a = s.target_range.start.max(window.start);
+            let b = s.target_range.end().min(window.end());
             if b <= a {
                 continue;
             }
+            let own = pool.speed_curve_of(s);
+            if own.is_some() && outer.curve().is_some() {
+                return Err(
+                    "a clip with its own speed curve is inside this compound clip, which has a \
+                     speed curve too; remove one of the two curves first"
+                        .into(),
+                );
+            }
+            // The clip cut to the window, still in nested time.
             let mut c = s.clone();
             if a > s.target_range.start || b < s.target_range.end() {
-                if pool.speed_curve_of(s).is_some() {
+                if own.is_some() {
                     return Err(
                         "a clip on a speed curve is cut by the compound clip's edge; \
                          trim the compound clip to whole clips first"
@@ -315,8 +328,12 @@ pub fn flatten(project: &Project, segment_id: &str) -> Result<EditCommand, Strin
                 c.target_range = TimeRange::new(a, b - a);
                 c.source_range.duration = source_duration_for(b - a, s.speed);
             }
-            c.target_range.start += offset;
+            let Some(piece) = retimed(pool, &outer, c, own)? else {
+                continue;
+            };
+            let mut piece = piece;
             if shared {
+                let c = &mut piece.segment;
                 c.id = new_id();
                 c.extras
                     .retain(|e| pool.transition(e).is_none() && !pool.links.contains(e));
@@ -327,7 +344,7 @@ pub fn flatten(project: &Project, segment_id: &str) -> Result<EditCommand, Strin
                     texts.push(PoolMaterial::Text(copy));
                 }
             }
-            mapped.push(c);
+            mapped.push(piece);
         }
         if !mapped.is_empty() {
             lanes.push((lane, mapped));
@@ -402,26 +419,164 @@ pub fn flatten(project: &Project, segment_id: &str) -> Result<EditCommand, Strin
             index: at.min(b.scratch.tracks.len()),
         })?;
     }
-    for ((_, segments), target) in lanes.into_iter().zip(targets) {
-        for s in segments {
+    for ((_, pieces), target) in lanes.into_iter().zip(targets) {
+        for piece in pieces {
             let index = b
                 .scratch
                 .track(&target)
                 .map(|t| {
                     t.segments
                         .iter()
-                        .filter(|o| o.target_range.start < s.target_range.start)
+                        .filter(|o| o.target_range.start < piece.segment.target_range.start)
                         .count()
                 })
                 .unwrap_or(0);
-            b.push(EditCommand::InsertSegment {
-                track_id: target.clone(),
-                segment: s,
-                index,
-            })?;
+            piece.insert(&mut b, &target, index)?;
         }
     }
     Ok(b.finish("Put compound clip back"))
+}
+
+/// One clip of a compound clip on its way back to the timeline.
+struct Piece {
+    /// As it enters the lane: at a constant speed, without any curve.
+    segment: Segment,
+    /// The curve it then plays through, with the source range and timeline
+    /// range that go with it.
+    curve: Option<(SpeedCurveMaterial, TimeRange, TimeRange)>,
+}
+
+impl Piece {
+    /// Insert the clip, then — for a curved one — give it its curve and its
+    /// exact ranges. The curve goes on in two steps because a clip only takes
+    /// a curve through `SetSpeedCurve`: it enters at a constant speed rounded
+    /// down, so its first length is never longer than its final one and never
+    /// reaches into the clip after it, and the trim then sets the ranges the
+    /// curve was composed for.
+    fn insert(self, b: &mut Builder, track_id: &str, index: usize) -> Result<(), String> {
+        let id = self.segment.id.clone();
+        let entered = self.segment.target_range;
+        let source = self.segment.source_range;
+        b.push(EditCommand::InsertSegment {
+            track_id: track_id.to_string(),
+            segment: self.segment,
+            index,
+        })?;
+        let Some((curve, final_source, final_target)) = self.curve else {
+            return Ok(());
+        };
+        // Never past the final end: the implied length of the shorter
+        // source can round a microsecond over it.
+        let first = TimeRange::new(
+            entered.start,
+            curve_target_duration(&curve.points, source)
+                .min(final_target.duration)
+                .max(1),
+        );
+        b.push(EditCommand::SetSpeedCurve {
+            segment_id: id.clone(),
+            before: None,
+            after: Some(curve),
+            before_target: entered,
+            after_target: first,
+            slot: None,
+        })?;
+        if first != final_target || source != final_source {
+            b.push(EditCommand::TrimSegment {
+                segment_id: id,
+                before_target: first,
+                before_source: source,
+                after_target: final_target,
+                after_source: final_source,
+            })?;
+        }
+        Ok(())
+    }
+}
+
+/// Clip `c` (already cut to the window, in nested time) moved and retimed onto
+/// the outer timeline through `outer`. `own` is its speed curve. `None` for a
+/// piece that rounds to nothing.
+fn retimed(
+    pool: &crate::modules::project::MaterialPool,
+    outer: &Outer<'_>,
+    mut c: Segment,
+    own: Option<&SpeedCurveMaterial>,
+) -> Result<Option<Piece>, String> {
+    let (a, b) = (c.target_range.start, c.target_range.end());
+    let start = outer.at(a);
+    let end = outer.at(b);
+    if end <= start {
+        return Ok(None);
+    }
+    let target = TimeRange::new(start, end - start);
+    c.keyframes = super::retime::keyframes(outer, &c, start);
+
+    // Media whose picture or sound runs with time takes the compound clip's
+    // curve; a still or a title only needs to cover the same stretch.
+    let runs = matches!(
+        pool.kind_of(&c.material_id),
+        Some(MaterialKind::Video | MaterialKind::Audio | MaterialKind::Sequence)
+    );
+    let points = match (outer.curve(), own) {
+        (None, None) => {
+            c.speed = (super::retime::sane(c.speed) * outer.speed()) as f32;
+            c.target_range = target;
+            // The speed invariant is checked against the rounded product; the
+            // source stays exactly what the clip showed.
+            if (c.source_range.duration - source_duration_for(target.duration, c.speed)).abs()
+                > crate::modules::project::speed_slack(c.speed)
+            {
+                c.source_range.duration = source_duration_for(target.duration, c.speed);
+            }
+            return Ok(Some(Piece {
+                segment: c,
+                curve: None,
+            }));
+        }
+        (None, Some(curve)) => super::retime::scaled(curve, outer.speed()),
+        (Some(curve), None) if runs => super::retime::under_curve(curve, &c),
+        (Some(_), None) => {
+            c.target_range = target;
+            c.speed = average_speed(c.source_range.duration, target.duration);
+            c.source_range.duration = source_duration_for(target.duration, c.speed);
+            return Ok(Some(Piece {
+                segment: c,
+                curve: None,
+            }));
+        }
+        (Some(_), Some(_)) => unreachable!("refused by the caller"),
+    };
+    if let Some(curve) = own {
+        c.extras.retain(|e| *e != curve.id);
+    }
+    let final_source = c.source_range;
+    c.target_range = target;
+    c.speed = average_speed(final_source.duration, target.duration);
+    c.source_range.duration = source_duration_for(target.duration, c.speed);
+    Ok(Some(Piece {
+        segment: c,
+        curve: Some((
+            SpeedCurveMaterial {
+                id: new_id(),
+                preset: None,
+                points,
+            },
+            final_source,
+            target,
+        )),
+    }))
+}
+
+/// `source / target` as a clip speed, rounded down to the next `f32`, so the
+/// source it implies is never more than `source`.
+fn average_speed(source: Micros, target: Micros) -> f32 {
+    let exact = source as f64 / target.max(1) as f64;
+    let mut speed = exact as f32;
+    if speed as f64 > exact && speed > f32::MIN_POSITIVE {
+        speed = f32::from_bits(speed.to_bits() - 1);
+    }
+    speed
 }
 
 /// Open the compound clip `segment_id`: its sequence becomes the one being
@@ -541,7 +696,12 @@ pub fn rename(project: &Project, id: &str, name: &str) -> Result<EditCommand, St
 /// Delete timeline `id`. The last timeline cannot go. Deleting the one being
 /// edited opens its neighbour first.
 ///
-/// Compound clips its clips used stay in the pool, unused, so undo finds them.
+/// The compound clips only this timeline showed go with it: each sequence it
+/// reached, directly or through other compound clips, that no clip anywhere
+/// uses any more is removed in the same step, so undo brings them back with
+/// the timeline. A compound sequence that was already unused before — the
+/// contents of a compound clip that was cut and waits to be pasted — is left
+/// alone.
 pub fn delete_timeline(project: &Project, id: &str) -> Result<EditCommand, String> {
     if timeline_kind(project, id) != Some(SequenceKind::Timeline) {
         return Err(format!("there is no timeline {id}"));
@@ -573,13 +733,50 @@ pub fn delete_timeline(project: &Project, id: &str) -> Result<EditCommand, Strin
         .position(|s| s.id == id)
         .expect("parked by now");
     let sequence = b.scratch.materials.sequences[index].clone();
+    let reached = reachable(project, &sequence.tracks);
     b.sequence(SequenceEdit::Remove {
         sequence,
         index,
         transitions: Vec::new(),
         links: Vec::new(),
     })?;
+    // One at a time, outermost first: a compound clip inside another only
+    // becomes unused once the outer one's sequence is gone.
+    loop {
+        let scratch = &b.scratch;
+        let Some(index) = scratch.materials.sequences.iter().position(|s| {
+            s.kind == SequenceKind::Compound
+                && reached.contains(&s.id)
+                && super::uses_of(scratch, &s.id) == 0
+                && !scratch.sequence.path.contains(&s.id)
+        }) else {
+            break;
+        };
+        let sequence = scratch.materials.sequences[index].clone();
+        b.sequence(SequenceEdit::Remove {
+            sequence,
+            index,
+            transitions: Vec::new(),
+            links: Vec::new(),
+        })?;
+    }
     Ok(b.finish("Delete timeline"))
+}
+
+/// Every sequence the clips on `tracks` show, directly or through compound
+/// clips inside compound clips.
+fn reachable(project: &Project, tracks: &[Track]) -> BTreeSet<Id> {
+    let mut found: BTreeSet<Id> = BTreeSet::new();
+    let mut queue: Vec<Id> = super::children(project, tracks).into_iter().collect();
+    while let Some(id) = queue.pop() {
+        if !found.insert(id.clone()) {
+            continue;
+        }
+        if let Some(inner) = super::tracks_of(project, &id) {
+            queue.extend(super::children(project, inner));
+        }
+    }
+    found
 }
 
 /// A copy of timeline `id` as a new tab after the last one. Its clips get new

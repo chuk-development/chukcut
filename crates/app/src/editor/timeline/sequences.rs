@@ -461,9 +461,36 @@ impl Editor {
         out
     }
 
-    /// A compound clip's body: a filmstrip of what it shows, taken frame by
-    /// frame from the clips inside it (through further compound clips too),
-    /// and a band at the foot with its lanes drawn as bars, so it reads as a
+    /// Start rendering compound clip strip `key` (`sequence::thumbs::
+    /// strip_key`) at `count` tiles, unless it is there, on its way, or every
+    /// worker is busy. The render runs on the background executor against a
+    /// snapshot of the document.
+    fn request_compound_strip(&mut self, key: &str, count: usize, cx: &mut Context<Self>) {
+        let Some(job) = self.timeline.media.wanted_strip(key, count) else {
+            return;
+        };
+        let project = Arc::clone(&self.project);
+        let sequence_id = sequence::thumbs::strip_sequence(key).to_string();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(
+                    async move { media_cache::load_compound_strip(&project, &sequence_id, count) },
+                )
+                .await;
+            let _ = this.update(cx, |editor, cx| {
+                for image in editor.timeline.media.finish_strip(job, result) {
+                    cx.drop_image(image, None);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// A compound clip's body: a filmstrip of what it shows — its sequence
+    /// rendered, overlays and titles included, as the preview draws it — and
+    /// a band at the foot with its lanes drawn as bars, so it reads as a
     /// stack of clips rather than one.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn render_compound_clip(
@@ -488,38 +515,36 @@ impl Editor {
         let aspect = self.project.canvas.width as f32 / self.project.canvas.height.max(1) as f32;
         let tile_w = (thumbs_h * aspect).max(8.0);
 
-        // One tile per slot on screen: which file and frame it shows.
-        let first = ((-x0) / tile_w).floor().max(0.0) as i64;
-        let last = ((lanes_w - x0) / tile_w).ceil() as i64;
+        // The sequence rendered, as a strip over its whole length, keyed by
+        // a digest of its contents so an edit inside renders a new one.
+        let key = sequence::thumbs::strip_key(&self.project, &segment.material_id);
+        let duration = sequence::duration_of(&self.project, &segment.material_id).unwrap_or(0);
         let mut slots: Vec<(f32, Arc<RenderImage>)> = Vec::new();
-        for k in first..=last {
-            let slot = k as f32 * tile_w;
-            if slot >= width {
-                break;
-            }
-            let at = source.start + (slot as f64 / zoom as f64 * speed as f64 * 1e6) as Micros;
-            let Some((material, time)) =
-                sequence::picture_at(&self.project, &segment.material_id, at)
-            else {
-                continue;
-            };
-            let Some(picture) = self.picture(&material) else {
-                continue;
-            };
-            let count = if picture.still {
-                1
-            } else {
-                media_cache::strip_count(picture.duration, zoom / speed, tile_w)
-            };
-            self.request_strip(&material, picture.clone(), count, cx);
-            if let Some(strip) = self.timeline.media.strip(&material, count) {
+        if let Some(key) = key.filter(|_| duration > 0) {
+            let count = media_cache::strip_count(duration, zoom / speed, tile_w);
+            self.request_compound_strip(&key, count, cx);
+            // On a speed curve the tiles follow the curve, as the picture does.
+            let map = self.project.materials.time_map(segment);
+            let shift = source.start - segment.source_range.start;
+            let first = ((-x0) / tile_w).floor().max(0.0) as i64;
+            let last = ((lanes_w - x0) / tile_w).ceil() as i64;
+            if let Some(strip) = self.timeline.media.strip(&key, count) {
                 let n = strip.tiles.len();
-                if n == 0 {
-                    continue;
+                for k in first..=last {
+                    let slot = k as f32 * tile_w;
+                    if slot >= width || n == 0 {
+                        break;
+                    }
+                    let offset = (slot as f64 / zoom as f64 * 1e6) as Micros;
+                    let at = if map.is_curved() {
+                        map.source_at(offset) + shift
+                    } else {
+                        source.start + (offset as f64 * speed as f64) as Micros
+                    };
+                    let index =
+                        ((at.max(0) as f64 / duration as f64 * n as f64) as usize).min(n - 1);
+                    slots.push((slot, Arc::clone(&strip.tiles[index])));
                 }
-                let index =
-                    ((time as f64 / picture.duration.max(1) as f64 * n as f64) as usize).min(n - 1);
-                slots.push((slot, Arc::clone(&strip.tiles[index])));
             }
         }
         body = body.child(
