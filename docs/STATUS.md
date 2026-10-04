@@ -5,7 +5,7 @@ Sessions are long and are not reopened, so nothing important is allowed to live
 only in a conversation. If you learn something that would change how the next
 person works, it belongs in this repository, not in a chat log.
 
-Last updated: 2026-10-04 (ML worker: VitTrack re-finding, Remove background, CUDA — see "The ML worker" below). Previously 2026-10-02 (**the UI is native now** — decision 0011. The Tauri
+Last updated: 2026-10-04 (preview frames no longer leave the GPU: shared with GPUI through a patched GPUI, readback as the fallback — see "Preview frames shared with GPUI" under Perf). Previously 2026-10-04 (ML worker: VitTrack re-finding, Remove background, CUDA — see "The ML worker" below). Previously 2026-10-02 (**the UI is native now** — decision 0011. The Tauri
 shell and the React frontend are gone; the engine is `crates/engine`
 (`chukcut-engine`, no UI dependency) and the app is a GPUI window in
 `crates/app`. What the native app does today: import (dialog or command line),
@@ -81,10 +81,10 @@ Judge performance from a release build only.
      cut whose source offset was a rounded frame time showed the frame before —
      a duplicated frame at the cut. `project::SAMPLE_SLACK` (10 µs) fixes the
      export and the app's preview.
-2. **Shared GPU texture with GPUI** so preview frames never leave the GPU.
-   Investigated 2026-10-03: needs a patched GPUI either way; the plan (DMA-BUF
-   import, no wgpu alignment) is `docs/research/gpui-shared-texture.md`. The
-   readback path is now asynchronous and BGRA (see "Perf" below).
+2. ~~**Shared GPU texture with GPUI** so preview frames never leave the GPU.~~
+   Done 2026-10-04: the engine exports each frame's memory as an opaque fd,
+   a patched GPUI (`vendor/`) imports and draws it; the readback is the
+   fallback. Decision 0027, numbers under "Preview frames shared with GPUI".
 3. **Port the UI the webview had:** inspector, export dialog, text,
    transitions, trim handles, thumbnails and waveforms on clips, settings.
 4. ~~**CLI and MCP server** over the command layer (`crates/cli`).~~ Done
@@ -605,9 +605,53 @@ each frame on its instant.
   decode in time (4K HEVC; not 1080p H.264). The player previews from the
   proxy (`with_preview_proxies`) and picks up a finished one on its next
   request; the export never sees one (`proxy::switch`).
-- **Not done**: GPUI still re-uploads every frame (a new frame-sized atlas
-  texture each time). `docs/research/gpui-shared-texture.md` has the measured
-  path and the plan (DMA-BUF into a patched GPUI renderer).
+- ~~**Not done**: GPUI still re-uploads every frame.~~ Done 2026-10-04, next
+  section.
+
+### Preview frames shared with GPUI (2026-10-04)
+
+The player now swizzles each frame into a buffer whose memory is exported as
+an opaque fd (`render::shared_frame`); GPUI, patched under `vendor/`, imports
+it once per buffer and copies each frame GPU-side into a texture it draws
+(`Window::paint_external_buffer`). Decision 0027; how the fork is kept:
+`vendor/README.md`. `cargo run --release -p chukcut --example
+preview_share_bench`, RTX 3060, 6 s of 30 fps playback per arm, load 7–8,
+three runs:
+
+| | UI thread / frame | player latency | process CPU (100 % = a core) |
+|---|---:|---:|---:|
+| 1080p, readback (before) | 2.3–2.9 ms | 3.9–5.6 ms | 17–22 % |
+| 1080p, shared | **0.05–0.08 ms** | 2.1–2.5 ms | **5–7 %** |
+| 4K, readback (before) | 10.4–14.9 ms | 21–27 ms | 88–111 % |
+| 4K, shared | **0.05–0.08 ms** | 5.8–15.8 ms | **14–39 %** |
+
+Every arm showed all 180 frames; what changed is the cost of showing them —
+at 4K the readback spent a whole core moving pixels.
+
+- **The fallback is the old readback**, chosen by `CHUKCUT_PREVIEW_READBACK=1`,
+  by an engine device that cannot export (`Sharing::Unavailable`), or
+  automatically when GPUI's renderer cannot import (another GPU — GPUI follows
+  the compositor's GPU on a hybrid laptop —, another driver, GL): the
+  renderer flags the `ExternalBuffer`, the app's next `take` turns sharing off
+  and the current request is rendered again as bytes. The app logs
+  `preview frames reach GPUI sharing=…` once per change.
+- **Lavapipe shares too.** Mesa's software Vulkan exports and imports opaque
+  fds, so agents testing on lavapipe exercise the shared path, not the
+  fallback. The fallback is covered by `player::tests` in the app.
+- **Trap: `queue.on_submitted_work_done` is not per submission.** It fires for
+  the queue's last submission *at registration*, which another thread's
+  later work can be. Used as a "my frame is done" flag it is late, never
+  early; after a `poll(Wait { submission_index })` trust the wait. Treating the
+  flag as authoritative dropped frames under parallel tests.
+- **Trap fixed in `FramePlayer::still_step`**: it recomputed the request's key
+  from live flags (sharing, proxies). A flag flipped between adoption and
+  render produced a frame the next adoption threw away, and a paused preview
+  stayed blank. It now uses the key the request was adopted under.
+- **Not checked**: playback in the real window (it would play audio on the
+  owner's speakers) — the harness is the playback measurement; Intel/VAAPI
+  machines; a hybrid laptop's automatic fallback outside the unit test.
+- **Seen, not caused here**: the export dialog's cover is black on both paths
+  (checked with `CHUKCUT_PREVIEW_READBACK=1`).
 
 ### Export, 60 s of 1080p, the 5-layer project (1800 frames)
 

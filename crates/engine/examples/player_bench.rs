@@ -48,7 +48,7 @@ use parking_lot::{Condvar, Mutex};
 use chukcut_engine::modules::media::MediaSourceProvider;
 use chukcut_engine::modules::motion::edit;
 use chukcut_engine::modules::preview::clock::{frame_at, frame_time};
-use chukcut_engine::modules::preview::player::{FramePlayer, PlayerRequest};
+use chukcut_engine::modules::preview::player::{FramePixels, FramePlayer, PlayerRequest};
 use chukcut_engine::modules::project::animation::{TextPreset, TextSlot};
 use chukcut_engine::modules::project::document::{
     ColorAdjustMaterial, TextAlign, TextMaterial, VideoMaterial,
@@ -405,7 +405,13 @@ impl Arm for NewPlayer {
     }
 
     fn take(&self, clock: Micros) -> Option<(Micros, Vec<u8>)> {
-        self.0.take(clock).map(|frame| (frame.time, frame.bgra))
+        self.0.take(clock).map(|frame| {
+            let time = frame.time;
+            match frame.pixels {
+                FramePixels::Bgra(bytes) => (time, bytes),
+                FramePixels::Shared(_) => (time, Vec::new()),
+            }
+        })
     }
 }
 

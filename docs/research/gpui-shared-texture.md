@@ -1,10 +1,11 @@
 # Showing an engine texture in GPUI without a readback — what blocks it
 
-Status: investigated 2026-10-03 by the perf agent; **not implemented**. The
-preview still reads every frame back and hands GPUI a `RenderImage`. This file
-says why, what each way out costs, and the exact steps for the one we should
-take. It supersedes the "path (a)" paragraph of `GPUI_SPIKE.md`, which assumed
-the snapshot it read was the one we would link.
+Status: investigated 2026-10-03 by the perf agent; **implemented 2026-10-04**
+by the gputex agent as a variant of option (b) — see "What was built" at the
+end, and `docs/decisions/0027-preview-frames-shared-with-gpui.md`. The rest of
+this file is the investigation as it was written, and still explains why a
+patched GPUI was unavoidable. It supersedes the "path (a)" paragraph of
+`GPUI_SPIKE.md`, which assumed the snapshot it read was the one we would link.
 
 ## What the app links today
 
@@ -127,3 +128,68 @@ Small, but it is still a fork for a partial win.
 Estimated size: ~400 lines in the GPUI fork, ~300 in the engine. The fork is
 the cost to weigh: every `gpui-kit` bump re-applies it. Upstreaming patch 2/3
 to zed (a Linux counterpart of `surface()`) is the way to make it free.
+
+## What was built (2026-10-04)
+
+Option (b), with three changes against the plan above, each made because the
+plan's version needed something wgpu cannot express:
+
+- **A buffer, not an image.** The engine exports a `VkBuffer` (BGRA rows
+  padded to 256 bytes), not a `Bgra8Unorm` render target. An imported image
+  would need its layout handed over (`QUEUE_FAMILY_EXTERNAL` release and
+  acquire) and, as a DMA-BUF, a DRM modifier; wgpu does neither, and its first
+  use of a texture made with `create_texture_from_hal` transitions from
+  `UNDEFINED`, which may discard the contents. A buffer has no layout. GPUI
+  copies it into a texture of its own with `copy_buffer_to_texture` — one GPU
+  copy, ~0.1 ms at 4K.
+- **An opaque fd, not a DMA-BUF.** Both devices are in one process on one GPU
+  and driver. `VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT` is the handle
+  type for exactly that, NVIDIA and Mesa export and import buffers with it,
+  and the importer checks `deviceUUID`/`driverUUID` instead of probing
+  modifiers. **Lavapipe supports it too** (Mesa 25.2 here), so the shared path
+  runs on the software adapter as well; the readback is the fallback only
+  where a side cannot export or import.
+- **No new pipeline.** The element is drawn as a polychrome sprite (the image
+  pipeline) whose atlas tile is the whole copied texture: corner radii,
+  opacity and content masks come for free, and there is no new shader.
+
+The engine side: `render::shared_frame` (`SharedFrames`, the `BgraReadback`
+shape: submit, `try_collect`, `collect_oldest`), `render::dmabuf`'s
+`ExportableBuffer` with an `ExportHandle`, and `FramePlayer::use_shared_frames`
+with `FramePixels::{Bgra, Shared}`. The GPUI side: `vendor/README.md`. The app
+side: `crates/app/src/player.rs` (`Picture`, the automatic fallback).
+
+Synchronisation is completion plus liveness, no semaphore: the engine hands a
+frame out after its submission finished; a buffer is reused only when the
+engine's pool holds the last `Arc`, and GPUI's renderer holds one until its
+copy finished (`on_submitted_work_done`). One trap found on the way:
+`on_submitted_work_done` fires for the queue's *last* submission at
+registration, which may be another thread's later one — so it is late, never
+early, and `collect_oldest` trusts the submission-index wait instead.
+
+### Measured, RTX 3060, driver 610.57, 2026-10-04
+
+`cargo run --release -p chukcut --example preview_share_bench`: a 30 fps
+H.264 clip played in real time for 6 s through `FramePlayer`; a second wgpu 29
+device does what GPUI's renderer does with each frame (readback arm: copy the
+bytes, create a frame-sized texture, `write_texture`; shared arm: import once
+per buffer, one `copy_buffer_to_texture`). Load average 7–8 from other agents'
+builds; three runs, ranges:
+
+| | UI thread per frame | UI worst frame | player latency | process CPU |
+|---|---:|---:|---:|---:|
+| 1080p, readback | 2.3–2.9 ms | 7.5–20 ms | 3.9–5.6 ms | 17–22 % |
+| 1080p, shared | 0.05–0.08 ms | 0.2–0.4 ms | 2.1–2.5 ms | 5–7 % |
+| 4K, readback | 10.4–14.9 ms | 28–33 ms | 21–27 ms | 88–111 % |
+| 4K, shared | 0.05–0.08 ms | 0.3–0.4 ms | 5.8–15.8 ms | 14–39 % |
+
+All arms showed 180 of 180 frames. "Player latency" is the player's smoothed
+start-to-ready time per frame (`PlayerStats::latency_ms`); "process CPU" is
+user + system time over wall time, 100 % = one core, decoding included. At 4K
+the readback arm spent a whole core moving pixels; the shared arm's UI work
+per frame no longer depends on the frame size.
+
+The real app was checked on a private Xvfb display on both adapters: GPUI
+picks the RTX 3060 (Vulkan) there and the log says `sharing=Shared`; on
+lavapipe likewise. Playback in the real window was not driven (it would play
+audio on the owner's speakers); the harness above is the playback measurement.

@@ -65,6 +65,64 @@ pub const DRM_FORMAT_MOD_LINEAR: u64 = 0;
 pub const DRM_FORMAT_NV12: u32 =
     (b'N' as u32) | ((b'V' as u32) << 8) | ((b'1' as u32) << 16) | ((b'2' as u32) << 24);
 
+/// How the memory of an [`ExportableBuffer`] leaves the device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportHandle {
+    /// A DMA-BUF: what VAAPI and other drivers import. The encoder paths.
+    DmaBuf,
+    /// An opaque file descriptor, which only another Vulkan device on the same
+    /// physical GPU and driver can import — GPUI's, for the preview
+    /// (`render::shared_frame`). Supported more widely than DMA-BUF buffers,
+    /// and it carries no layout question at all.
+    OpaqueFd,
+}
+
+impl ExportHandle {
+    fn vk(self) -> vk::ExternalMemoryHandleTypeFlags {
+        match self {
+            Self::DmaBuf => vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT,
+            Self::OpaqueFd => vk::ExternalMemoryHandleTypeFlags::OPAQUE_FD,
+        }
+    }
+}
+
+/// The `VkBufferUsageFlags` every exportable buffer is created with. An
+/// importer of an opaque, dedicated allocation must create its `VkBuffer`
+/// with identical parameters, so this is part of what is handed over.
+pub const EXPORT_BUFFER_USAGE: vk::BufferUsageFlags = vk::BufferUsageFlags::from_raw(
+    vk::BufferUsageFlags::STORAGE_BUFFER.as_raw()
+        | vk::BufferUsageFlags::TRANSFER_SRC.as_raw()
+        | vk::BufferUsageFlags::TRANSFER_DST.as_raw(),
+);
+
+/// Which GPU and driver a device runs on, as Vulkan names them
+/// (`VkPhysicalDeviceIDProperties`). Opaque memory moves only between devices
+/// whose two UUIDs both match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeviceIdentity {
+    pub device_uuid: [u8; 16],
+    pub driver_uuid: [u8; 16],
+}
+
+/// The identity of `ctx`'s physical device, or `None` when it is not Vulkan.
+pub fn device_identity(ctx: &RenderContext) -> Option<DeviceIdentity> {
+    // SAFETY: only reads the identity of the device wgpu already opened; the
+    // borrow ends with this function.
+    let hal = unsafe { ctx.device().as_hal::<wgpu_hal::api::Vulkan>() }?;
+    let physical = hal.raw_physical_device();
+    let instance = hal.shared_instance().raw_instance().clone();
+    drop(hal);
+    let mut id = vk::PhysicalDeviceIDProperties::default();
+    let mut properties = vk::PhysicalDeviceProperties2::default().push_next(&mut id);
+    // SAFETY: Vulkan 1.1 core, which wgpu requires; both structs are live
+    // stack values and the physical device outlives the instance borrow.
+    unsafe { instance.get_physical_device_properties2(physical, &mut properties) };
+    Some(DeviceIdentity {
+        device_uuid: id.device_uuid,
+        driver_uuid: id.driver_uuid,
+    })
+}
+
 /// A wgpu storage buffer whose memory can be handed to another driver.
 pub struct ExportableBuffer {
     /// What the compute pass binds. Wrapped `External`, so dropping it does not
@@ -76,6 +134,11 @@ pub struct ExportableBuffer {
     /// [`Self::fd`] for the duration of a call rather than the value.
     fd: OwnedFd,
     size: u64,
+    /// What an importer has to repeat: `VkMemoryAllocateInfo`'s size and
+    /// memory type.
+    allocation_size: u64,
+    memory_type_index: u32,
+    handle: ExportHandle,
     device: ash::Device,
     /// Keeps the wgpu device — and therefore the `VkDevice` `device` is a
     /// handle to — alive for at least as long as we will call into it, and is
@@ -90,6 +153,16 @@ impl ExportableBuffer {
     /// `VK_KHR_external_memory_fd`. Both are reasons to use the copying path,
     /// not reasons to fail.
     pub fn new(ctx: &Arc<RenderContext>, size: u64, label: &str) -> Option<Self> {
+        Self::with_handle(ctx, size, label, ExportHandle::DmaBuf)
+    }
+
+    /// [`Self::new`], exported as `handle` instead of a DMA-BUF.
+    pub fn with_handle(
+        ctx: &Arc<RenderContext>,
+        size: u64,
+        label: &str,
+        handle: ExportHandle,
+    ) -> Option<Self> {
         // A zero-sized allocation is not a degenerate case worth handling; it
         // is a caller bug that would show up as a confusing driver error.
         if size == 0 {
@@ -115,15 +188,11 @@ impl ExportableBuffer {
         // return value. It cannot fail.
         let memory_properties = unsafe { instance.get_physical_device_memory_properties(physical) };
 
-        let mut external_info = vk::ExternalMemoryBufferCreateInfo::default()
-            .handle_types(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT);
+        let mut external_info =
+            vk::ExternalMemoryBufferCreateInfo::default().handle_types(handle.vk());
         let buffer_info = vk::BufferCreateInfo::default()
             .size(size)
-            .usage(
-                vk::BufferUsageFlags::STORAGE_BUFFER
-                    | vk::BufferUsageFlags::TRANSFER_SRC
-                    | vk::BufferUsageFlags::TRANSFER_DST,
-            )
+            .usage(EXPORT_BUFFER_USAGE)
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .push_next(&mut external_info);
 
@@ -159,8 +228,7 @@ impl ExportableBuffer {
             return None;
         };
 
-        let mut export_info = vk::ExportMemoryAllocateInfo::default()
-            .handle_types(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT);
+        let mut export_info = vk::ExportMemoryAllocateInfo::default().handle_types(handle.vk());
         // A dedicated allocation is not strictly required for a buffer, but
         // every driver that supports DMA-BUF export supports it and it removes
         // the question of what the fd's offset is: with a dedicated allocation
@@ -200,7 +268,7 @@ impl ExportableBuffer {
             return None;
         }
 
-        let Some(fd) = export_fd(&instance, &device, memory) else {
+        let Some(fd) = export_fd(&instance, &device, memory, handle) else {
             // SAFETY: nothing else holds a reference — the export is what would
             // have created one and it failed.
             unsafe {
@@ -247,6 +315,9 @@ impl ExportableBuffer {
             memory,
             fd,
             size,
+            allocation_size: requirements.size,
+            memory_type_index: type_index,
+            handle,
             device,
             ctx: Arc::clone(ctx),
         })
@@ -259,6 +330,22 @@ impl ExportableBuffer {
 
     pub fn size(&self) -> u64 {
         self.size
+    }
+
+    /// The size of the memory behind the buffer, which can exceed
+    /// [`Self::size`]; an importer allocates exactly this much.
+    pub fn allocation_size(&self) -> u64 {
+        self.allocation_size
+    }
+
+    /// The memory type it was allocated from, which an opaque import must
+    /// repeat.
+    pub fn memory_type_index(&self) -> u32 {
+        self.memory_type_index
+    }
+
+    pub fn handle(&self) -> ExportHandle {
+        self.handle
     }
 
     /// The DMA-BUF, borrowed.
@@ -314,11 +401,12 @@ impl std::fmt::Debug for ExportableBuffer {
     }
 }
 
-/// `vkGetMemoryFdKHR` on `memory`, as a DMA-BUF.
+/// `vkGetMemoryFdKHR` on `memory`, as `handle`.
 fn export_fd(
     instance: &ash::Instance,
     device: &ash::Device,
     memory: vk::DeviceMemory,
+    handle: ExportHandle,
 ) -> Option<OwnedFd> {
     // The extension's entry points are loaded from the device rather than taken
     // from wgpu-hal's own table, which is private. Loading them twice is
@@ -327,7 +415,7 @@ fn export_fd(
 
     let info = vk::MemoryGetFdInfoKHR::default()
         .memory(memory)
-        .handle_type(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT);
+        .handle_type(handle.vk());
 
     // SAFETY: `info` is a live stack value naming memory we allocated with a
     // matching `VkExportMemoryAllocateInfo`, which is what makes the export
@@ -337,7 +425,7 @@ fn export_fd(
     let raw = match unsafe { external.get_memory_fd(&info) } {
         Ok(raw) => raw,
         Err(e) => {
-            tracing::warn!(error = ?e, "the driver refused to export a DMA-BUF");
+            tracing::warn!(error = ?e, ?handle, "the driver refused to export memory");
             return None;
         }
     };

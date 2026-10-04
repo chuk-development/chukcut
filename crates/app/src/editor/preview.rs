@@ -115,9 +115,10 @@ impl Editor {
                 .text_color(rgb(DANGER))
                 .child(failure)
                 .into_any_element(),
-            (Some(frame), None) => img(Arc::clone(frame))
+            (Some(frame), None) => div()
                 .w(px(dw))
                 .h(px(dh))
+                .child(frame.element())
                 .into_any_element(),
             (None, None) => div().w(px(dw)).h(px(dh)).bg(rgb(VIEWER)).into_any_element(),
         };

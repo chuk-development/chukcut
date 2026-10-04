@@ -1013,6 +1013,7 @@ dependencies = [
  "chukcut-engine",
  "futures-channel",
  "gpui-kit",
+ "gpui-pre-wgpu",
  "image",
  "parking_lot",
  "serde_json",
@@ -2957,8 +2958,6 @@ dependencies = [
 [[package]]
 name = "gpui-pre"
 version = "0.3.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0e87a42bb37c7cb4e76dd1ac0ce88851e46e976e0373a47ab3e0757abffee54d"
 dependencies = [
  "accesskit",
  "anyhow",
@@ -3378,10 +3377,9 @@ dependencies = [
 [[package]]
 name = "gpui-pre-wgpu"
 version = "0.3.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f0b02657b56b09140ce542f5e4434fb96d9fdaba0fd0035ba7dba13c171ddb9b"
 dependencies = [
  "anyhow",
+ "ash",
  "bytemuck",
  "cosmic-text",
  "etagere",
