@@ -39,6 +39,7 @@ use crate::modules::render::texture_pool::{PooledTexture, TextureKey, TexturePoo
 use crate::modules::render::RenderContext;
 
 use super::catalog::{self, descriptor, EffectDescriptor, ParamKind};
+use super::retouch;
 
 /// Intermediate format: linear light needs more than eight bits, and a glow
 /// adds light above 1.0 that must survive until the export pass.
@@ -65,6 +66,10 @@ pub struct FxInstance {
     /// matrix, column major), for effects drawn in the clip's own frame. `None`
     /// on an effect clip, where "the clip" is the whole canvas.
     pub placement: Option<[f32; 16]>,
+    /// The faces a face effect (`catalog::RETOUCH`) works on, as key points
+    /// in the clip's unit quad (`retouch::to_quad`). Filled by the
+    /// compositor from the clip's landmarks; empty everywhere else.
+    pub faces: [Option<crate::modules::landmarks::shape::KeyPoints>; super::retouch::MAX_FACES],
 }
 
 impl FxInstance {
@@ -98,6 +103,7 @@ impl FxInstance {
             time: source_time,
             seed: effect.seed & 0x00ff_ffff,
             placement,
+            faces: [None; super::retouch::MAX_FACES],
         };
         (!instance.at_rest()).then_some(instance)
     }
@@ -148,6 +154,10 @@ impl FxInstance {
             LETTERBOX => self.get("opacity") <= 0.0,
             FRAME => {
                 self.get("radius") <= 0.0 && self.get("border") <= 0.0 && self.get("shadow") <= 0.0
+            }
+            RETOUCH => {
+                self.get("strength") <= 0.0
+                    || retouch::PRESET_PARAMS.iter().all(|id| self.get(id) <= 0.0)
             }
             _ => false,
         }
@@ -1013,6 +1023,15 @@ impl<'a> FxFrame<'a> {
                     0.0,
                 ];
                 self.step(encoder, "fs_frame", &input, None, size, frame, p)
+            }
+            RETOUCH => {
+                let mut current = input;
+                for (entry, p) in super::retouch::passes(fx, size) {
+                    let next = self.step(encoder, entry, &current, None, size, frame, p);
+                    self.retire(current);
+                    current = next;
+                }
+                return current;
             }
             _ => return input,
         };

@@ -20,6 +20,7 @@ pub mod gpu;
 pub mod grading;
 pub mod inspector;
 pub mod keymap;
+pub mod landmarks;
 pub mod library;
 pub mod loudness;
 pub mod matting;

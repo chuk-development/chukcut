@@ -633,3 +633,134 @@ fn fs_blend(in: VertexOutput) -> @location(0) vec4<f32> {
     let a = top.a;
     return vec4<f32>(shown * a + base.rgb * (1.0 - a), a + base.a * (1.0 - a));
 }
+
+// ---------------------------------------------------------------------------
+// Retouch (fx/retouch.rs): passes driven by a face's landmarks, all lengths
+// in output pixels. One face per pass.
+// ---------------------------------------------------------------------------
+
+// Straight colour of a premultiplied sample.
+fn unpremultiply(c: vec4<f32>) -> vec3<f32> {
+    if (c.a <= 0.00001) {
+        return vec3<f32>(0.0);
+    }
+    return c.rgb / c.a;
+}
+
+// How far `q` is into the ellipse at `c` with half extents `half` along
+// `across` and its normal: 0 at the centre, 1 on the edge.
+fn ellipse_radius(q: vec2<f32>, c: vec2<f32>, half: vec2<f32>, across: vec2<f32>) -> f32 {
+    let d = q - c;
+    let u = dot(d, across);
+    let v = dot(d, vec2<f32>(-across.y, across.x));
+    return length(vec2<f32>(u / max(half.x, 0.001), v / max(half.y, 0.001)));
+}
+
+// A local translation: inside the circle of radius `r` around `c`, the
+// content at `c` moves to `m`, the shift falling off as (1 - d²/r²)² to
+// nothing at the edge. Its steepest slope is 1.54 |m - c| / r, so while the
+// shift is well under the radius the mapping never folds (Gustafsson's
+// formula, tried first, folds unless |m - c| is near r). Returns how far to
+// look back from `q`.
+fn local_translation(q: vec2<f32>, c: vec2<f32>, m: vec2<f32>, r: f32) -> vec2<f32> {
+    let d = q - c;
+    let t = 1.0 - dot(d, d) / max(r * r, 0.0001);
+    if (t <= 0.0) {
+        return vec2<f32>(0.0);
+    }
+    return t * t * (m - c);
+}
+
+// p0: right jaw point (xy), left jaw point (zw); p1: where each is pulled
+// to; p2.x: the radius of each pull.
+@fragment
+fn fs_face_slim(in: VertexOutput) -> @location(0) vec4<f32> {
+    let q = in.uv * fx.out_size.xy;
+    let r = fx.p[2].x;
+    var back = local_translation(q, fx.p[0].xy, fx.p[1].xy, r);
+    back = back + local_translation(q, fx.p[0].zw, fx.p[1].zw, r);
+    return sample0((q - back) * fx.in_size.zw);
+}
+
+// Likelihood that a straight linear colour is skin: the classic CbCr box
+// (Chai and Ngan, 1999), softened, and not too dark to judge.
+fn skin_likelihood(linear: vec3<f32>) -> f32 {
+    let s = sqrt(max(linear, vec3<f32>(0.0)));
+    let y = dot(s, vec3<f32>(0.299, 0.587, 0.114));
+    let cb = dot(s, vec3<f32>(-0.1687, -0.3313, 0.5));
+    let cr = dot(s, vec3<f32>(0.5, -0.4187, -0.0813));
+    let in_cb = smoothstep(-0.24, -0.19, cb) * (1.0 - smoothstep(-0.01, 0.03, cb));
+    let in_cr = smoothstep(0.0, 0.03, cr) * (1.0 - smoothstep(0.17, 0.22, cr));
+    return in_cb * in_cr * smoothstep(0.08, 0.16, y);
+}
+
+// p0: face oval centre (xy) and half extents (zw); p1: the eye line (xy),
+// the tap radius in pixels (z), the amount (w); p2, p3: each eye's
+// protected area (centre, half extents); p4: the lips'.
+@fragment
+fn fs_skin_smooth(in: VertexOutput) -> @location(0) vec4<f32> {
+    let q = in.uv * fx.out_size.xy;
+    let c = sample0(in.uv);
+    let across = fx.p[1].xy;
+    let face = 1.0 - smoothstep(0.8, 1.0, ellipse_radius(q, fx.p[0].xy, fx.p[0].zw, across));
+    let eye_r = 1.0 - smoothstep(0.8, 1.15, ellipse_radius(q, fx.p[2].xy, fx.p[2].zw, across));
+    let eye_l = 1.0 - smoothstep(0.8, 1.15, ellipse_radius(q, fx.p[3].xy, fx.p[3].zw, across));
+    let lips = 1.0 - smoothstep(0.8, 1.15, ellipse_radius(q, fx.p[4].xy, fx.p[4].zw, across));
+    let straight = unpremultiply(c);
+    let weight = face * (1.0 - eye_r) * (1.0 - eye_l) * (1.0 - lips) * skin_likelihood(straight);
+    if (weight <= 0.001 || c.a <= 0.0) {
+        return c;
+    }
+    // A bilateral average: a ring of taps at the radius and half of it,
+    // each weighted by how close its colour is in perceptual units, so an
+    // edge (a nostril, a jaw line) does not blur into the skin beside it.
+    let radius = fx.p[1].z;
+    let centre = sqrt(straight);
+    var sum = c;
+    var total = 1.0;
+    for (var i = 0u; i < 16u; i = i + 1u) {
+        let angle = f32(i) * TAU / 16.0;
+        let r = select(radius, radius * 0.5, (i & 1u) == 1u);
+        let tap = sample0((q + vec2<f32>(cos(angle), sin(angle)) * r) * fx.in_size.zw);
+        let diff = sqrt(unpremultiply(tap)) - centre;
+        let w = exp(-dot(diff, diff) / (2.0 * 0.05 * 0.05));
+        sum = sum + tap * w;
+        total = total + w;
+    }
+    let averaged = sum / total;
+    // Never all the way: some texture keeps it skin.
+    return mix(c, averaged, clamp(fx.p[1].w * weight * 0.85, 0.0, 1.0));
+}
+
+// p0, p1: each eye opening (centre, half extents); p2: the mouth opening;
+// p3: eyes amount (x), teeth amount (y), the eye line (zw).
+@fragment
+fn fs_face_bright(in: VertexOutput) -> @location(0) vec4<f32> {
+    let q = in.uv * fx.out_size.xy;
+    let c = sample0(in.uv);
+    if (c.a <= 0.0) {
+        return c;
+    }
+    let across = fx.p[3].zw;
+    var s = sqrt(unpremultiply(c));
+    let eye = max(
+        1.0 - smoothstep(0.6, 1.0, ellipse_radius(q, fx.p[0].xy, fx.p[0].zw, across)),
+        1.0 - smoothstep(0.6, 1.0, ellipse_radius(q, fx.p[1].xy, fx.p[1].zw, across)),
+    );
+    let e = fx.p[3].x * eye;
+    // Eyes: a lift and a touch of contrast, so the white is whiter and the
+    // iris keeps its ring.
+    s = s * (1.0 + 0.25 * e);
+    s = mix(s, (s - vec3<f32>(0.5)) * 1.15 + vec3<f32>(0.5), 0.5 * e);
+    // Teeth: light, unsaturated, not red. Lips, tongue and the dark inside
+    // of the mouth stay as they are.
+    let mouth = 1.0 - smoothstep(0.7, 1.0, ellipse_radius(q, fx.p[2].xy, fx.p[2].zw, across));
+    let y = dot(s, vec3<f32>(0.299, 0.587, 0.114));
+    let redness = s.r - (s.g + s.b) * 0.5;
+    let tooth = smoothstep(0.35, 0.55, y) * (1.0 - smoothstep(0.1, 0.22, redness));
+    let t = fx.p[3].y * mouth * tooth;
+    s = mix(s, vec3<f32>(y), 0.6 * t);
+    s = s * (1.0 + 0.15 * t);
+    let rgb = s * s;
+    return vec4<f32>(rgb * c.a, c.a);
+}

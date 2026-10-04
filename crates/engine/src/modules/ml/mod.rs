@@ -13,6 +13,8 @@
 //!   URL and SHA-256 in the registry (`chukcut_ml_worker::registry`), into
 //!   the cache (`~/.cache/chukcut/ml`), on first use, with progress.
 //! - **Faces** ([`faces`]): YuNet, for auto reframe.
+//! - **Landmarks** ([`landmarks`]): MediaPipe's face mesh, 478 points per
+//!   face, for retouch and face-follow (`modules::landmarks`).
 //! - **Tracker** ([`tracker`]): VitTrack, tracker T2 for fast motion, with a
 //!   whole-frame scan that finds the object again after it was hidden.
 //! - **Matte** ([`matte`]): Robust Video Matting (people) and BiRefNet
@@ -41,6 +43,7 @@ pub mod commands;
 pub mod download;
 pub mod faces;
 pub mod interpolate;
+pub mod landmarks;
 pub mod matte;
 pub mod segment;
 pub mod separate;

@@ -17,6 +17,8 @@
 //! - [`motion_blur`] — the one effect the compositor draws itself, by
 //!   averaging the clip at several instants of its movement.
 //! - [`render`] — the pipelines and the pass recorder the compositor drives.
+//! - [`retouch`] — the face retouch effect's geometry, from the clip's
+//!   landmarks.
 //! - [`tiles`] — preview tiles rendered by the compositor and cached on disk.
 
 pub mod catalog;
@@ -24,6 +26,7 @@ pub mod commands;
 pub mod edit;
 pub mod motion_blur;
 pub mod render;
+pub mod retouch;
 pub mod tiles;
 
 #[cfg(test)]

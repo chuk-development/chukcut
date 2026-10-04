@@ -267,6 +267,7 @@ impl Editor {
         changed |= self.poll_matting(cx);
         changed |= self.poll_flow(cx);
         changed |= self.poll_analysis(cx);
+        changed |= self.poll_landmarks();
         changed |= self.poll_voiceover(cx);
         if let Some(frame) = self.player.take(self.clock.position()) {
             if let Some(crate::player::Picture::Image(old)) = self.frame.replace(frame.picture) {
@@ -389,6 +390,7 @@ impl Editor {
         self.queue_missing_mattes(cx);
         self.queue_missing_flow(cx);
         self.queue_missing_isolation(cx);
+        self.queue_missing_landmarks(cx);
         cx.notify();
     }
 

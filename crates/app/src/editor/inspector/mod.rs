@@ -39,6 +39,7 @@ mod controls;
 mod details;
 mod easing;
 mod effects;
+mod face;
 mod flow;
 mod grading;
 mod isolate;
@@ -78,6 +79,8 @@ pub(crate) struct Inspector {
     colour_tools: colour_tools::ColourToolsState,
     /// Isolate voice's background renders.
     isolate: isolate::IsolatePanel,
+    /// Retouch and face-follow.
+    face: face::FacePanel,
     /// The Effects tab's sliders and drag.
     effects: effects::EffectsPanel,
     /// The audio effect sliders of the Audio tab.

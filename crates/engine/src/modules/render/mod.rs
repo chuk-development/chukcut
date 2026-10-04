@@ -63,6 +63,7 @@ pub mod context;
 #[cfg(target_os = "linux")]
 pub mod dmabuf;
 pub mod error;
+pub mod faces;
 pub mod flow;
 pub mod grade;
 pub mod layout;

@@ -325,6 +325,8 @@ pub struct Compositor {
     backgrounds: super::background::MatteFrames,
     /// Baked optical-flow frames. See [`super::flow`].
     flows: super::flow::FlowFrames,
+    /// Face landmark tracks, for the retouch effect (`fx::retouch`).
+    faces: super::faces::FaceTracks,
     vertices: wgpu::Buffer,
     indices: wgpu::Buffer,
     /// Per-draw uniforms, addressed with dynamic offsets. Grown, never shrunk —
@@ -766,6 +768,7 @@ impl Compositor {
             matte_placeholder,
             backgrounds: super::background::MatteFrames::default(),
             flows: super::flow::FlowFrames::default(),
+            faces: super::faces::FaceTracks::default(),
             vertices,
             indices,
             uniforms: Mutex::new(Scratch::default()),
@@ -1692,6 +1695,43 @@ impl Compositor {
         (sum, layer)
     }
 
+    /// Give the retouch effects in `chain` the faces of `segment`'s video at
+    /// `source_time`, mapped through the quad's `crop` into its unit quad.
+    /// A frame without landmarks leaves them faceless, drawn as they are.
+    fn place_faces(
+        &self,
+        materials: &crate::modules::project::document::MaterialPool,
+        segment: &Segment,
+        source_time: Micros,
+        crop: [f32; 4],
+        chain: &mut [fx::FxInstance],
+    ) {
+        use crate::modules::fx::{catalog::RETOUCH, retouch};
+        if !chain.iter().any(|f| f.desc.id == RETOUCH) {
+            return;
+        }
+        let Some(video) = materials.video(&segment.material_id) else {
+            return;
+        };
+        let fps = if video.fps.is_finite() && video.fps > 1.0 {
+            video.fps
+        } else {
+            30.0
+        };
+        let period = (1_000_000.0 / fps) as Micros;
+        let faces = self.faces.faces(&video.path, source_time, period);
+        let quads: Vec<_> = faces
+            .iter()
+            .take(retouch::MAX_FACES)
+            .map(|f| retouch::to_quad(&crate::modules::landmarks::shape::key_points(f), crop))
+            .collect();
+        for instance in chain.iter_mut().filter(|f| f.desc.id == RETOUCH) {
+            for (slot, face) in instance.faces.iter_mut().zip(&quads) {
+                *slot = Some(*face);
+            }
+        }
+    }
+
     /// What the frame is made of: one entry per thing that gets drawn, in
     /// painter's order.
     fn collect_draws(
@@ -1764,12 +1804,20 @@ impl Compositor {
                     let side_fx =
                         |quad: &Option<QuadDraw>, layer: &transitions::TransitionLayer| {
                             quad.as_ref().map_or_else(Vec::new, |q| {
-                                fx::chain_for(
+                                let mut chain = fx::chain_for(
                                     &project.materials,
                                     layer.segment,
                                     layer.source_time,
                                     Some(q.placement.mvp),
-                                )
+                                );
+                                self.place_faces(
+                                    &project.materials,
+                                    layer.segment,
+                                    layer.source_time,
+                                    q.placement.crop,
+                                    &mut chain,
+                                );
+                                chain
                             })
                         };
                     let from_fx = side_fx(&from, &instant.from);
@@ -1859,11 +1907,18 @@ impl Compositor {
                 (quad, _) => (quad, blend),
             };
             if let Some(quad) = quad {
-                let chain = fx::chain_for(
+                let mut chain = fx::chain_for(
                     &project.materials,
                     segment,
                     source_time,
                     Some(quad.placement.mvp),
+                );
+                self.place_faces(
+                    &project.materials,
+                    segment,
+                    source_time,
+                    quad.placement.crop,
+                    &mut chain,
                 );
                 // A blend mode needs the frame beneath, so the clip goes
                 // through a layer and the blend pass. Normal, and a mode
