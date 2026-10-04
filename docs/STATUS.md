@@ -98,6 +98,43 @@ Judge performance from a release build only.
    `pub fn` in a `commands.rs` that nothing calls. Pending: the tracking
    commands (attach, bake, smoothing), which the tracking branch exposes.
 
+## Timelines and compound clips (2026-10-04, agent/compound)
+
+Decision 0024. A project holds several **sequences**: timelines (tabs above
+the lanes, "+" adds one, right-click renames, duplicates or deletes) and
+compound clips (select clips, Alt+G or the clip menu; double-click to open,
+breadcrumbs or the clip menu to close; Alt+Shift+G puts the clips back).
+
+- **How:** the open sequence *is* `Project::tracks`/`markers`;
+  `Project::sequence` says which one, the rest are parked in
+  `MaterialPool::sequences`. A segment whose material is a sequence is a
+  compound clip (`MaterialKind::Sequence`). Engine: `modules/sequence/`
+  (`build.rs` makes every gesture a `Composite`; `edit.rs` holds the four
+  `SequenceEdit` primitives behind `EditCommand::Sequence`). CLI/MCP:
+  `timeline …`, `compound …` (docs/cli.md).
+- **Opening and closing a compound clip are undoable edits.** That is on
+  purpose: undo of an edit made inside only works with that compound open.
+- **Rendering:** a compound clip is its sequence rendered into a texture of
+  the frame's size, drawn as the clip's source (`Compositor::nested_frame`).
+  The nested render is premultiplied; the quad carries
+  `grade::feature::PREMULTIPLIED` and `quad.wgsl` divides it out. Verified on
+  the RTX 3060 and on lavapipe: nested vs flattened frames within 2 code
+  values, exports within 6, mixes within 1e-4 (`tests/compound.rs`).
+- **Sound** is flattened for both mixers (`sequence::audio::flatten_audio`).
+  Not mapped: a compound clip's own volume keyframes and its own speed curve.
+- **Export** always renders the root timeline, also from inside a compound
+  clip (`sequence::export_root` in `export::commands`).
+- **Cycles** are refused at `InsertSegment` (a paste of a compound clip into
+  itself) and nesting stops at 8 levels (`sequence::MAX_DEPTH`).
+- **Old files** round-trip byte for byte; neither key is written for a
+  project with one timeline.
+- **Rough:** every compound clip costs a nested render per frame plus a pool
+  clone; the preview's decode-ahead (`MediaSourceProvider::prefetch_clips`)
+  does not look inside compound clips; analysis, silence cutting, captions
+  and loudness see only the open sequence; flatten needs normal speed;
+  deleting a timeline leaves its compound sequences parked and unused;
+  an older build opening a multi-timeline file drops the parked timelines.
+
 ## Polish pass, 2026-10-03 (agent/polish)
 
 - **File dialogs work without a portal.** `editor::files::choose` asks

@@ -23,6 +23,7 @@ pub mod markers;
 pub mod mask;
 pub mod project;
 pub mod render;
+pub mod sequence;
 pub mod summary;
 pub mod text;
 pub mod timeline;
@@ -277,6 +278,16 @@ operations!(
     cloud_tools::SoundArgs,
     cloud_tools::FalArgs,
     cloud_tools::CreditsArgs,
+    sequence::TimelineListArgs,
+    sequence::TimelineNewArgs,
+    sequence::TimelineRenameArgs,
+    sequence::TimelineDeleteArgs,
+    sequence::TimelineDuplicateArgs,
+    sequence::TimelineSwitchArgs,
+    sequence::CompoundCreateArgs,
+    sequence::CompoundOpenArgs,
+    sequence::CompoundCloseArgs,
+    sequence::CompoundFlattenArgs,
 );
 
 /// Parse a snake_case engine enum from its name, listing the valid names

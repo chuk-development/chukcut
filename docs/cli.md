@@ -413,6 +413,75 @@ chukcut-cli marker add reel.chukcut --at 12.5 --label "Drop" --color red
 chukcut-cli marker set reel.chukcut 0 --at 13
 ```
 
+### Timelines and compound clips
+
+A project can hold several timelines. One is open at a time, and every
+other command (`info`, `split`, `append`, `export` …) works on the open one.
+Name a timeline by its id, a unique id prefix of 4 or more characters, its
+exact name, or its index in tab order (`0` is the first). A compound clip is
+a clip that holds a timeline of its own. Opening one is an edit like any
+other: the saved file remembers it, and later commands edit the compound
+clip's lanes until `compound close`. `export` always renders the whole
+timeline, even while a compound clip is open. Decision 0024.
+
+#### `timeline list PROJECT`
+
+Lists the timelines and the compound clips' sequences: index, id, name,
+length, lanes, clips, how many compound clips use it, and which is open. With
+`--json`, also the breadcrumb path into an open compound clip. It does not
+change the project.
+
+#### `timeline new PROJECT [--name NAME]`
+
+Adds an empty timeline with a video and an audio lane, and opens it.
+
+#### `timeline rename PROJECT TIMELINE NAME`
+
+#### `timeline duplicate PROJECT TIMELINE`
+
+Copies a timeline into a new one after the last. The copy's clips have new
+ids, their own link groups, transitions and titles.
+
+#### `timeline delete PROJECT TIMELINE`
+
+The last timeline cannot be deleted. Deleting the open one opens its
+neighbour.
+
+#### `timeline switch PROJECT TIMELINE`
+
+Opens another timeline, closing any open compound clip.
+
+#### `compound create PROJECT CLIP... [--name NAME]`
+
+Moves the clips into a new compound clip in their place, linked partners
+included. The compound clip goes on the lowest video lane the clips used when
+it fits there, otherwise on another video lane or a new one. Prints the new
+clip's id.
+
+#### `compound open PROJECT CLIP`
+
+#### `compound close PROJECT [--all]`
+
+Closes the open compound clip, or with `--all` every open level.
+
+#### `compound flatten PROJECT CLIP`
+
+Puts a compound clip's clips back on the timeline in its place, cut at its
+edges. The compound clip must play at normal speed.
+
+```bash
+chukcut-cli compound create reel.chukcut 0:1 0:2 1:0 --name "Intro"
+chukcut-cli compound open reel.chukcut 0:1
+chukcut-cli split reel.chukcut --at 1.5
+chukcut-cli compound close reel.chukcut
+chukcut-cli timeline duplicate reel.chukcut 0
+chukcut-cli timeline rename reel.chukcut 1 "Shorts cut"
+```
+
+The MCP tools are `timeline_list`, `timeline_new`, `timeline_rename`,
+`timeline_delete`, `timeline_duplicate`, `timeline_switch`, `compound_create`,
+`compound_open`, `compound_close` and `compound_flatten`.
+
 ### Look
 
 #### `grade PROJECT CLIP`

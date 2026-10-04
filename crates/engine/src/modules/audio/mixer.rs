@@ -87,6 +87,10 @@ pub struct PlannedSegment {
 /// lane and the sound on an audio lane — would mix the same waveform with
 /// itself. See `Project::sound_is_on_a_linked_lane`.
 pub fn plan(project: &Project) -> Vec<PlannedSegment> {
+    // Compound clips' sound, laid out on lanes of its own; see
+    // `sequence::audio`. Borrowed when there are none.
+    let flat = crate::modules::sequence::audio::flatten_audio(project);
+    let project = flat.as_ref();
     let mut planned = Vec::new();
     for track in &project.tracks {
         if track.muted || !track_bears_audio(track.kind) {

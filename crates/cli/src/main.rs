@@ -36,6 +36,7 @@ use ops::markers::*;
 use ops::mask::*;
 use ops::project::*;
 use ops::render::*;
+use ops::sequence::*;
 use ops::text::*;
 use ops::timeline::*;
 use ops::{Ctx, Operation, Outcome};
@@ -183,6 +184,12 @@ enum Command {
     /// Cloud features: caption translation, text to speech, stock media.
     #[command(subcommand)]
     Cloud(CloudCommand),
+    /// Add, rename, delete, duplicate, list or open timelines.
+    #[command(subcommand)]
+    Timeline(TimelineCommand),
+    /// Make, open, close or flatten compound clips.
+    #[command(subcommand)]
+    Compound(CompoundCommand),
     /// Render the timeline to a file: video, sound only or GIF.
     Export(On<ExportArgs>),
     /// List the export presets as they fit this project, with sizes and warnings.
@@ -206,6 +213,34 @@ enum Command {
     Catalog(CatalogArgs),
     /// Serve every operation to an MCP client over stdio.
     Mcp,
+}
+
+#[derive(Subcommand)]
+enum TimelineCommand {
+    /// List the timelines and compound clips, and which is open.
+    List(On<TimelineListArgs>),
+    /// Add an empty timeline and open it.
+    New(On<TimelineNewArgs>),
+    /// Rename a timeline.
+    Rename(On<TimelineRenameArgs>),
+    /// Delete a timeline.
+    Delete(On<TimelineDeleteArgs>),
+    /// Copy a timeline into a new one.
+    Duplicate(On<TimelineDuplicateArgs>),
+    /// Open another timeline.
+    Switch(On<TimelineSwitchArgs>),
+}
+
+#[derive(Subcommand)]
+enum CompoundCommand {
+    /// Move clips into a new compound clip in their place.
+    Create(On<CompoundCreateArgs>),
+    /// Open a compound clip; later commands edit its lanes.
+    Open(On<CompoundOpenArgs>),
+    /// Close the open compound clip (--all: every level).
+    Close(On<CompoundCloseArgs>),
+    /// Put a compound clip's clips back on the timeline.
+    Flatten(On<CompoundFlattenArgs>),
 }
 
 #[derive(Subcommand)]
@@ -566,6 +601,16 @@ fn dispatch(command: Command, dry: bool, ctx: &Ctx) -> CliResult<(&'static str, 
         Command::Cloud(CloudCommand::StockKinds(o)) => on(o, dry, ctx),
         Command::Cloud(CloudCommand::StockSearch(o)) => on(o, dry, ctx),
         Command::Cloud(CloudCommand::StockDownload(o)) => on(o, dry, ctx),
+        Command::Timeline(TimelineCommand::List(o)) => on(o, dry, ctx),
+        Command::Timeline(TimelineCommand::New(o)) => on(o, dry, ctx),
+        Command::Timeline(TimelineCommand::Rename(o)) => on(o, dry, ctx),
+        Command::Timeline(TimelineCommand::Delete(o)) => on(o, dry, ctx),
+        Command::Timeline(TimelineCommand::Duplicate(o)) => on(o, dry, ctx),
+        Command::Timeline(TimelineCommand::Switch(o)) => on(o, dry, ctx),
+        Command::Compound(CompoundCommand::Create(o)) => on(o, dry, ctx),
+        Command::Compound(CompoundCommand::Open(o)) => on(o, dry, ctx),
+        Command::Compound(CompoundCommand::Close(o)) => on(o, dry, ctx),
+        Command::Compound(CompoundCommand::Flatten(o)) => on(o, dry, ctx),
         Command::Export(o) => on(o, dry, ctx),
         Command::Presets(o) => on(o, dry, ctx),
         Command::Preset(PresetCommand::Save(o)) => on(o, dry, ctx),

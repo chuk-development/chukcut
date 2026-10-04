@@ -23,6 +23,10 @@ pub(crate) fn source_limit(project: &Project, material_id: &str) -> Option<Micro
     if let Some(video) = pool.videos.iter().find(|m| m.id == material_id) {
         return Some(video.duration);
     }
+    // A compound clip reads as far as its sequence goes.
+    if let Some(sequence) = pool.sequence(material_id) {
+        return Some(sequence.duration());
+    }
     pool.audios
         .iter()
         .find(|m| m.id == material_id)

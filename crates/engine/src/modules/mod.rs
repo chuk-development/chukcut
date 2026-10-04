@@ -25,6 +25,7 @@ pub mod preview;
 pub mod project;
 pub mod proxy;
 pub mod render;
+pub mod sequence;
 pub mod silence;
 pub mod speech;
 pub mod speed;
