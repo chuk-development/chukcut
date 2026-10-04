@@ -265,6 +265,7 @@ impl Editor {
         changed |= self.expire_status();
         changed |= self.poll_tracking(cx);
         changed |= self.poll_matting(cx);
+        changed |= self.poll_flow(cx);
         changed |= self.poll_analysis(cx);
         changed |= self.poll_voiceover(cx);
         if let Some(frame) = self.player.take(self.clock.position()) {
@@ -379,6 +380,7 @@ impl Editor {
         // An edit can leave a removed background with frames to bake (a
         // trim made the clip longer); bake them in the background.
         self.queue_missing_mattes(cx);
+        self.queue_missing_flow(cx);
         cx.notify();
     }
 

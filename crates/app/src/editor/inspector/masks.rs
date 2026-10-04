@@ -546,7 +546,7 @@ impl Editor {
         }
     }
 
-    fn after_command<T>(&mut self, result: Result<T, String>, cx: &mut Context<Self>) {
+    pub(super) fn after_command<T>(&mut self, result: Result<T, String>, cx: &mut Context<Self>) {
         self.refresh(cx);
         self.report(result.map(|_| ()), cx);
     }
@@ -1259,7 +1259,9 @@ impl Editor {
             );
         }
         let setting = material.background.clone();
-        let on = setting.is_some();
+        // A matte that only steers the grade or the effects does not cut:
+        // Auto remove is off for it.
+        let on = setting.as_ref().is_some_and(|s| s.cut);
         let mode = setting
             .as_ref()
             .map(RemoveMode::of)
@@ -1405,7 +1407,7 @@ impl Editor {
             _ => {}
         }
 
-        if let Some(setting) = &setting {
+        if let Some(setting) = setting.as_ref().filter(|s| s.cut) {
             let id = segment.id.clone();
             rows.push(label_row(
                 "Cut out instead",
@@ -1433,6 +1435,23 @@ impl Editor {
         Section {
             checkbox: Some(on),
             on_check: Some(Box::new(move |this: &mut Editor, checked, cx| {
+                let has_matte = this
+                    .project
+                    .segment(&id)
+                    .and_then(|(_, s)| this.project.materials.compositing_of(s))
+                    .is_some_and(|m| m.background.is_some());
+                if checked && has_matte {
+                    // The matte the grade or the effects use already: cut
+                    // by it, whatever made it.
+                    let result = matting::matting_set_cut(&this.state, id.clone(), true);
+                    let job = result.as_ref().ok().and_then(|r| r.job);
+                    let failed = result.is_err();
+                    this.after_command(result, cx);
+                    if !failed {
+                        this.started_bake(&id, Ok(job), cx);
+                    }
+                    return;
+                }
                 if checked {
                     let mode = this.inspector.masks.mode;
                     this.set_remove_mode(&id, mode, cx);
@@ -1473,7 +1492,7 @@ impl Editor {
             .segment(segment_id)
             .and_then(|(_, s)| self.project.materials.compositing_of(s))
             .and_then(|m| m.background.clone());
-        if current.is_some_and(|s| s.model == model.model() && s.prompt.is_none()) {
+        if current.is_some_and(|s| s.model == model.model() && s.prompt.is_none() && s.cut) {
             cx.notify();
             return;
         }
@@ -1580,6 +1599,15 @@ impl Editor {
             });
         })
         .detach();
+    }
+
+    /// Redraw the preview as bake `job`'s frames land, as for a re-bake the
+    /// engine started on its own (`poll_background_bakes`).
+    pub(super) fn follow_matte_bake(&mut self, job: u64) {
+        let known = &mut self.inspector.masks.background_jobs;
+        if !known.iter().any(|(j, _)| *j == job) {
+            known.push((job, 0));
+        }
     }
 
     /// Show the progress of bake `job` (when one started) for `segment_id`.

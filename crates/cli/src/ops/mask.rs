@@ -5,7 +5,7 @@ use chukcut_engine::modules::compositing::commands as compositing;
 use chukcut_engine::modules::compositing::edit::ResetPart;
 use chukcut_engine::modules::matting::commands as matting;
 use chukcut_engine::modules::project::compositing::{
-    BlendMode, ChromaKey, CompositingMaterial, MaskOp, MaskShape, MASK_PARAMS,
+    BlendMode, ChromaKey, CompositingMaterial, MaskOp, MaskShape, MatteTarget, MASK_PARAMS,
 };
 use chukcut_engine::modules::timeline::commands as timeline_commands;
 use chukcut_engine::modules::timeline::ops::EditCommand;
@@ -47,6 +47,7 @@ pub fn describe(m: &CompositingMaterial) -> Value {
         "blend": m.blend.name(),
         "background": m.background.as_ref().map(|b| json!({
             "model": b.model, "version": b.version, "invert": b.invert,
+            "cut": b.cut, "grade": b.grade.name(), "effects": b.effects.name(),
             "points": b.prompt.as_ref().map(|p| p.points.iter().map(|q| json!({
                 "x": q.x, "y": q.y, "keep": q.keep,
             })).collect::<Vec<_>>()),
@@ -523,7 +524,10 @@ impl Operation for RemoveBackgroundArgs {
             (Some(setting), Some(mode)) => setting.model == mode.model(),
             (None, _) => false,
         };
-        let mut job = if same {
+        let mut job = if same && current.as_ref().is_some_and(|s| !s.cut) {
+            // A matte that only steered the grade or the effects: cut by it.
+            matting::matting_set_cut(&state, segment_id.clone(), true)?.job
+        } else if same {
             matting::matting_bake(&state, segment_id.clone())?
         } else {
             matting::matting_remove_background_with(
@@ -690,5 +694,90 @@ impl Operation for BlendArgs {
             return Err(CliError::usage("blend needs a mode or --opacity"));
         }
         Ok(outcome(session, &segment_id, done.join(", ")))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Grade and effects by the matte
+// ---------------------------------------------------------------------------
+
+/// Where a clip's colour grade and its effects apply, by its matte:
+/// `whole` (the default), `subject` (only what the matte keeps: the person,
+/// the selected object) or `background` (only the rest). "Grade only the
+/// person" is `--grade subject`, "blur only the background" is `--effects
+/// background`, on the clip itself, no copy needed. A clip without a matte
+/// gets the people matte (Robust Video Matting) without cutting anything;
+/// one with Remove background or Select object uses that matte. Bakes the
+/// matte before it returns. Without options, says what the clip has.
+#[derive(Debug, Clone, Default, Args, Deserialize, JsonSchema)]
+pub struct ApplyToArgs {
+    /// The clip: id, id prefix or `lane:index`.
+    pub clip: String,
+    /// whole, subject or background: where the grade (the Adjust tab)
+    /// applies.
+    #[arg(long)]
+    #[serde(default)]
+    pub grade: Option<String>,
+    /// whole, subject or background: where the clip's effects apply.
+    #[arg(long)]
+    #[serde(default)]
+    pub effects: Option<String>,
+}
+
+fn target_named(name: &str) -> CliResult<MatteTarget> {
+    match MatteTarget::parse(name.trim().to_ascii_lowercase().as_str()) {
+        MatteTarget::Other(other) => Err(CliError::usage(format!(
+            "{other:?} is not a part of the clip; choose whole, subject or background"
+        ))),
+        target => Ok(target),
+    }
+}
+
+impl Operation for ApplyToArgs {
+    const NAME: &'static str = "apply_to";
+    fn run(self, session: &mut Session, ctx: &Ctx) -> CliResult<Outcome> {
+        let segment_id = session.with(|p| select::clip(p, &self.clip))?;
+        let state = session.state.clone();
+        if self.grade.is_none() && self.effects.is_none() {
+            let m = material(session, &segment_id);
+            let (grade, effects) = m
+                .background
+                .as_ref()
+                .map(|b| (b.grade.name().to_string(), b.effects.name().to_string()))
+                .unwrap_or(("whole".into(), "whole".into()));
+            let clip = session.with(|p| summary::clip_by_id(p, &segment_id));
+            return Ok(Outcome::read(
+                format!("grade on {grade}, effects on {effects}"),
+                json!({"clip": clip, "grade": grade, "effects": effects, "compositing": describe(&m)}),
+            ));
+        }
+        let mut job = None;
+        let mut said = Vec::new();
+        for (part, value) in [
+            (matting::MattePart::Grade, &self.grade),
+            (matting::MattePart::Effects, &self.effects),
+        ] {
+            let Some(value) = value else { continue };
+            let target = target_named(value)?;
+            let response =
+                matting::matting_set_target(&state, segment_id.clone(), part, target.clone())?;
+            job = job.or(response.job);
+            said.push(format!(
+                "{} on {}",
+                match part {
+                    matting::MattePart::Grade => "grade",
+                    matting::MattePart::Effects => "effects",
+                },
+                target.name()
+            ));
+        }
+        let what = said.join(", ");
+        let uses_matte = material(session, &segment_id).background.is_some();
+        if uses_matte {
+            job = job.or(matting::matting_bake(&state, segment_id.clone())?);
+            wait_for_bake(session, ctx, &segment_id, job, &what)
+        } else {
+            Ok(outcome(session, &segment_id, what))
+        }
     }
 }

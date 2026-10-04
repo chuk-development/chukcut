@@ -52,6 +52,9 @@ pub enum Task {
     SegmentEncoder,
     /// The prompt half: an embedding and clicks in, a mask out.
     SegmentDecoder,
+    /// Frame interpolation: two frames and a phase in, the frame between
+    /// them out (RIFE).
+    Interpolate,
 }
 
 /// One downloadable model.
@@ -192,6 +195,32 @@ pub const MODELS: &[ModelSpec] = &[
         bytes: 16_501_323,
         file: "sam_mask_decoder_single.onnx",
         providers_tested: &["CPU", "CUDA"],
+        cpu_ok: true,
+        companion: None,
+    },
+    // RIFE v4 (Huang et al., ECCV 2022; github.com/hzwer/Practical-RIFE,
+    // MIT, weights included) for "Optical flow (AI)" frame blending. The
+    // ONNX file is walterlow/RIFE_fp32_timestep (MIT), FuryTMP/RIFE_fp32's
+    // export with its baked t = 0.5 exposed as a `timestep` input, so one
+    // session makes any phase. Chosen over yuvraj108c/rife-onnx's RIFE 4.9
+    // export, which works the same (both checked on a moving square, within
+    // 1 px of the true position at t = 0.25 and 0.5) but whose repository
+    // states no licence. Hugging Face commit ee09066; SHA-256 = LFS object
+    // id, read 2026-10-04.
+    ModelSpec {
+        id: "rife",
+        version: "v4-fp32-timestep-ee09066",
+        name: "RIFE (optical-flow frame interpolation)",
+        task: Task::Interpolate,
+        licence: "MIT",
+        commercial_ok: true,
+        url: "https://huggingface.co/walterlow/RIFE_fp32_timestep/resolve/ee09066f9822f8b28b8477a1b4cc30f19d607590/RIFE_fp32_timestep.onnx",
+        sha256: "4da60c1f20d42dba4f21503140940aa48a488585ead977532bf22e95a0319327",
+        bytes: 21_604_567,
+        file: "RIFE_fp32_timestep.onnx",
+        providers_tested: &["CPU", "CUDA"],
+        // Slow on the CPU (seconds per 1080p frame) but bounded in memory;
+        // the bake says how long it will take instead of refusing.
         cpu_ok: true,
         companion: None,
     },

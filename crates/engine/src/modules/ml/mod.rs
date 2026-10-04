@@ -19,6 +19,8 @@
 //!   (objects), for "Remove background" (`modules/matting`).
 //! - **Segment** ([`segment`]): MobileSAM, the object under a click, for
 //!   "Select object".
+//! - **Interpolate** ([`interpolate`]): RIFE, frames between frames, for
+//!   "Optical flow (AI)" slow motion (`speed::flow`).
 //! - **Commands** ([`commands`]): what the UI, the CLI and MCP call.
 //!
 //! **Degrading.** Every caller treats ML as optional. No worker binary, no
@@ -36,6 +38,7 @@ use chukcut_ml_worker::registry;
 pub mod commands;
 pub mod download;
 pub mod faces;
+pub mod interpolate;
 pub mod matte;
 pub mod segment;
 pub mod tracker;

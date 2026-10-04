@@ -34,7 +34,9 @@ use serde::{Deserialize, Serialize};
 /// payload).
 /// 3: per-frame mattes (BiRefNet), click segmentation (`segment`), the
 /// `needs_gpu` error and the loaded CUDA libraries in a probe.
-pub const PROTOCOL_VERSION: u32 = 3;
+/// 4: frame interpolation (`interpolate`), the first request with two frames
+/// in its payload and several out.
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// A header longer than this is a broken stream, not a message.
 const MAX_HEADER: usize = 1 << 20;
@@ -128,6 +130,18 @@ pub enum RequestBody {
         #[serde(default)]
         bbox: Option<[f32; 4]>,
     },
+    /// The frames between two consecutive frames, at each of `phases`
+    /// (`0 < t < 1`, the share of the way from the first to the second), by
+    /// interpolation model `model`. The payload is both RGBA8 frames,
+    /// `width × height` each, the earlier first. Answered with
+    /// [`Outcome::Interpolated`] and the frames as the payload, one RGBA8
+    /// frame per phase in the order asked.
+    Interpolate {
+        model: String,
+        width: u32,
+        height: u32,
+        phases: Vec<f32>,
+    },
     /// Run `model` `iterations` times on a synthetic input of `width` ×
     /// `height` and report the time per run. Reports progress and can be
     /// cancelled; it is how a speed claim in the docs is measured.
@@ -208,6 +222,15 @@ pub enum Outcome {
         /// The model's own estimate of the mask's quality (SAM's predicted
         /// IoU), about 0..1.
         score: f32,
+        millis: f32,
+        provider: String,
+    },
+    /// The payload is `count` RGBA8 frames of `width × height`, back to
+    /// back, in the order of the request's phases.
+    Interpolated {
+        width: u32,
+        height: u32,
+        count: u32,
         millis: f32,
         provider: String,
     },

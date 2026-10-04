@@ -384,16 +384,40 @@ chukcut-cli speed-curve reel.chukcut 0:2 --preset hero
 chukcut-cli speed-curve reel.chukcut 0:2 --point 0=1 --point 1.2s=0.3 --point 2.5s=1
 ```
 
-#### `frame-blend PROJECT CLIP [--mode none|blend]`
+#### `frame-blend PROJECT CLIP [--mode none|blend|flow] [--no-bake]`
 
 Frame blending for a video clip. With `blend`, a frame that falls between two
 frames of the file shows both, mixed by where it falls, so slow motion and
-speed ramps play smoothly instead of holding each frame. `none` switches it
-off. Without `--mode`, says what the clip has. One undo step. Optical flow is
-not built.
+speed ramps play smoothly instead of holding each frame. With `flow`
+("Optical flow (AI)"), it shows a frame RIFE (MIT, 22 MB, downloads on first
+use) made between the two instead: one sharp picture of a moving edge where
+the blend shows two faint ones. The new frames are made in the ML worker and
+baked into the cache (`~/.cache/chukcut/flow`) before the command returns,
+with progress; on the CPU it also says how long the rest will take (a GPU
+bundle, `ml install gpu`, is 10–30 times faster). `--no-bake` only sets the
+mode; an export bakes the frames it needs before it renders, and the app
+bakes them in the background and shows the blend until they are there.
+`flow` again on a clip that has it bakes what is missing (after a speed
+change, a trim or a cleared cache). `none` switches blending off. Without
+`--mode`, says what the clip has and, for `flow`, how many of its frames are
+baked. One undo step.
 
 ```bash
 chukcut-cli frame-blend reel.chukcut 0:2 --mode blend
+chukcut-cli frame-blend reel.chukcut 0:2 --mode flow
+```
+
+#### `smooth-slow-mo PROJECT CLIP [--speed N] [--no-bake]`
+
+"Smooth slow-mo" in one step: optical flow on, and the clip slowed to 0.5x
+when it is not slowed already (a clip below 1x or on a speed curve keeps
+its speed), or to `--speed` (below 1) when given. The clips after it on its
+lanes move with its end, as with `set --speed`. One undo step for both,
+then the frames are baked as `frame-blend --mode flow` does.
+
+```bash
+chukcut-cli smooth-slow-mo reel.chukcut 0:2
+chukcut-cli smooth-slow-mo reel.chukcut 0:2 --speed 0.25
 ```
 
 Motion blur for fast moves is an effect: `effect add PROJECT motion_blur
@@ -931,7 +955,9 @@ Runtime download on first use. The setting is one undo step; the command
 then bakes the clip's matte into the cache (`~/.cache/chukcut/mattes`) and
 waits for it. Run it again on a clip that has it to bake frames that are
 missing (after a trim, or a cleared cache); an export also bakes them.
-`--off` keeps the background again.
+`--off` keeps the background again; when the clip's grade or effects are
+limited to its subject (`apply-to`), the matte stays, uncut, and running
+`remove-background` again without `--model` cuts by it again.
 
 ```bash
 chukcut-cli remove-background reel.chukcut 0:0
@@ -947,13 +973,35 @@ shows it: `--point` on the object (repeat it for a large or thin one),
 `--exclude` on a part to leave out. MobileSAM (Apache-2.0, 45 MB) segments
 that frame; the VitTrack tracker follows the object forwards and backwards
 and MobileSAM draws its mask on every frame. `--invert` cuts the object out
-instead (to remove it from the picture, or to grade or blur only the rest of
-a copy of the clip on the lane above). One undo step, then a bake as
-`remove-background` does.
+instead (to remove it from the picture). One undo step, then a bake as
+`remove-background` does. To grade or blur only the object or only the
+rest without cutting anything, use `apply-to` after it.
 
 ```bash
 chukcut-cli select-object reel.chukcut 0:0 --at 2.5 --point 0.42,0.55
 chukcut-cli select-object reel.chukcut 1:0 --at 1 --point 0.5,0.5 --exclude 0.5,0.2 --invert
+```
+
+#### `apply-to PROJECT CLIP [--grade whole|subject|background] [--effects whole|subject|background]`
+
+Limits a clip's colour grade (everything in the app's Adjust tab: the
+sliders, curves, wheels, HSL, LUT, vignette, grain) or its effects to the
+subject of its matte or to the rest, on the clip itself, without a copy:
+`--grade subject` grades only the person, `--effects background` blurs (or
+glows, or pixelates) only the background. `whole` is the default and the way
+back. The subject is the clip's matte: the one `remove-background` or
+`select-object` made, or, on a clip without one, the people matte (Robust
+Video Matting), made without cutting anything. The effects run over the
+whole picture and are then mixed by the matte, so a background blur leaves
+no dark seam around the person. Each option is one undo step; the command
+then bakes the matte and waits for it. Without options, says what the clip
+has. A frame whose matte is not baked yet shows the grade and the effects
+on the whole clip; an export bakes what is missing first.
+
+```bash
+chukcut-cli apply-to reel.chukcut 0:0 --grade subject
+chukcut-cli effect add reel.chukcut gaussian_blur --clip 0:0 --set radius=30
+chukcut-cli apply-to reel.chukcut 0:0 --effects background
 ```
 
 #### `blend PROJECT CLIP [MODE] [--opacity N]`
@@ -1527,7 +1575,8 @@ The operation names are the MCP tool names: `info`, `validate`, `configure`,
 `trim`, `clip_set`, `grade`, `effect_add`, `effect_set`, `effect_remove`,
 `animate`, `animate_text`, `zoom`, `keyframe`, `title_add`, `title_set`,
 `transition_add`, `transition_remove`, `track`, `track_set`, `mask`, `chroma_key`,
-`remove_background`, `select_object`, `blend`, `captions_transcribe`,
+`remove_background`, `select_object`, `apply_to`, `blend`,
+`frame_blend`, `smooth_slow_mo`, `captions_transcribe`,
 `captions_import`, `captions_export`, `captions_style`, `captions_list`,
 `silence_detect`, `silence_remove`, `normalize`, `denoise`, `loudness`,
 `marker_add`, `marker_set`, `marker_remove`, `marker_list`, `crop`, `curve`,
@@ -1597,8 +1646,9 @@ Tools that send data to a service outside this machine have
 `openWorldHint`: `captions_transcribe`, `translate_captions`, `tts`,
 `stock_kinds`, `stock_search`, `stock_download`, `sound`, `fal`, `sticker`,
 `music`, `sfx`, `title_font`, `catalog` (the library and `voices` kinds),
-and `ml`, `remove_background` and `select_object`, which download a model
-or ONNX Runtime on first use (they send nothing about the project).
+and `ml`, `remove_background`, `select_object`, `apply_to`, `frame_blend`
+and `smooth_slow_mo`, which download a model or ONNX Runtime on first use
+(they send nothing about the project).
 
 ### Resources
 

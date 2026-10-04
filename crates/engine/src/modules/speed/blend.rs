@@ -28,9 +28,15 @@
 //! two frames of each file (`media::provider`), so the earlier of the two is
 //! almost always a cache hit and the decoder only ever moves forward.
 //!
-//! Optical flow ("Optical-flow-light") is not built: a dense flow field per
-//! frame pair is a compute pipeline of its own and not cheap; the mode list
-//! is where it would go.
+//! ## Optical flow
+//!
+//! The third mode, "Optical flow (AI)" (`FrameBlend::Flow`), shows a frame
+//! that RIFE made between the two neighbours instead of a mix of them, so a
+//! moving edge is in one place rather than in two at half strength. Those
+//! frames are baked into the cache by the ML worker (`speed::flow`); until a
+//! frame is there the clip falls back to the mix, so the preview never waits
+//! and never shows a hole. [`blend_for`] answers the same sample for both
+//! modes; the compositor decides which picture to draw.
 
 use serde::{Deserialize, Serialize};
 
@@ -50,15 +56,19 @@ pub enum FrameBlend {
     None,
     /// Mix the two neighbouring source frames by the fractional position.
     Blend,
+    /// Show the frame RIFE made between the two neighbours (`speed::flow`),
+    /// baked into the cache; the mix of [`FrameBlend::Blend`] until it is.
+    Flow,
 }
 
 impl FrameBlend {
-    pub const ALL: [FrameBlend; 2] = [FrameBlend::None, FrameBlend::Blend];
+    pub const ALL: [FrameBlend; 3] = [FrameBlend::None, FrameBlend::Blend, FrameBlend::Flow];
 
     pub fn label(self) -> &'static str {
         match self {
             FrameBlend::None => "None",
             FrameBlend::Blend => "Frame blend",
+            FrameBlend::Flow => "Optical flow (AI)",
         }
     }
 
@@ -67,6 +77,7 @@ impl FrameBlend {
         match self {
             FrameBlend::None => "none",
             FrameBlend::Blend => "blend",
+            FrameBlend::Flow => "flow",
         }
     }
 
@@ -74,13 +85,16 @@ impl FrameBlend {
         match text.trim().to_ascii_lowercase().as_str() {
             "none" | "off" => Ok(FrameBlend::None),
             "blend" | "frame_blend" | "frame-blend" | "on" => Ok(FrameBlend::Blend),
-            "optical_flow" | "optical-flow" | "flow" => {
-                Err("optical flow is not built; use blend".into())
-            }
+            "flow" | "optical_flow" | "optical-flow" | "ai" => Ok(FrameBlend::Flow),
             other => Err(format!(
-                "unknown frame blending {other:?}: use none or blend"
+                "unknown frame blending {other:?}: use none, blend or flow"
             )),
         }
+    }
+
+    /// Whether the clip draws something between its source frames.
+    pub fn blends(self) -> bool {
+        self != FrameBlend::None
     }
 }
 
@@ -109,6 +123,9 @@ pub fn frame_blend_of(materials: &MaterialPool, segment: &Segment) -> FrameBlend
 /// The two source instants a blended frame mixes, and how much of the second.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BlendSample {
+    /// The earlier source frame's number in the file (`floor` of the
+    /// position in frames), which names a baked optical-flow frame.
+    pub index: i64,
     /// Inside the earlier source frame (its middle, so rounding cannot tip
     /// the request into a neighbour).
     pub first: Micros,
@@ -142,6 +159,7 @@ pub fn blend_sample(fps: f64, duration: Micros, source_time: Micros) -> Option<B
         return None;
     }
     Some(BlendSample {
+        index: frame as i64,
         first: middle(frame),
         second,
         weight: weight as f32,
@@ -149,13 +167,14 @@ pub fn blend_sample(fps: f64, duration: Micros, source_time: Micros) -> Option<B
 }
 
 /// The blend for `segment` at `source_time`: `Some` only for a video clip
-/// with frame blending on, at an instant between two of its frames.
+/// with frame blending or optical flow on, at an instant between two of its
+/// frames.
 pub fn blend_for(
     materials: &MaterialPool,
     segment: &Segment,
     source_time: Micros,
 ) -> Option<BlendSample> {
-    if segment.extras.is_empty() || frame_blend_of(materials, segment) != FrameBlend::Blend {
+    if segment.extras.is_empty() || !frame_blend_of(materials, segment).blends() {
         return None;
     }
     let video = materials
@@ -194,6 +213,7 @@ pub fn set_frame_blend_command(
     let label = match mode {
         FrameBlend::None => "Frame blending off",
         FrameBlend::Blend => "Frame blending on",
+        FrameBlend::Flow => "Optical flow on",
     };
     let command =
         crate::modules::inspector::edit::replace_segment(project, segment_id, label, |segment| {
@@ -269,6 +289,7 @@ mod tests {
         // 30 fps: frame 3 covers 100 000..133 333 µs. A quarter of the way in.
         let s = blend_sample(30.0, 2_000_000, 108_333).unwrap();
         assert!((s.weight - 0.25).abs() < 1e-4, "{s:?}");
+        assert_eq!(s.index, 3);
         assert_eq!(s.first, 116_667);
         assert_eq!(s.second, 150_000);
     }
@@ -310,11 +331,31 @@ mod tests {
     }
 
     #[test]
-    fn names_parse_and_optical_flow_says_it_is_not_built() {
+    fn names_parse_both_ways() {
         assert_eq!(FrameBlend::parse("Blend"), Ok(FrameBlend::Blend));
         assert_eq!(FrameBlend::parse("off"), Ok(FrameBlend::None));
-        assert!(FrameBlend::parse("optical_flow")
-            .unwrap_err()
-            .contains("not built"));
+        assert_eq!(FrameBlend::parse("optical_flow"), Ok(FrameBlend::Flow));
+        for mode in FrameBlend::ALL {
+            assert_eq!(FrameBlend::parse(mode.name()), Ok(mode));
+        }
+        assert!(FrameBlend::parse("sideways").is_err());
+    }
+
+    #[test]
+    fn optical_flow_samples_like_blending_and_switches_from_it_in_one_step() {
+        let mut p = project();
+        let mut history = History::new();
+        apply(&mut p, &mut history, FrameBlend::Blend);
+        apply(&mut p, &mut history, FrameBlend::Flow);
+        let (_, seg) = p.segment("s").unwrap();
+        assert_eq!(frame_blend_of(&p.materials, seg), FrameBlend::Flow);
+        assert_eq!(seg.extras.len(), 2, "one block replaced the other");
+        assert_eq!(
+            blend_for(&p.materials, seg, 108_333),
+            blend_sample(30.0, 2_000_000, 108_333)
+        );
+        history.undo(&mut p).unwrap();
+        let (_, seg) = p.segment("s").unwrap();
+        assert_eq!(frame_blend_of(&p.materials, seg), FrameBlend::Blend);
     }
 }

@@ -12,6 +12,7 @@
 pub mod birefnet;
 pub mod protocol;
 pub mod registry;
+pub mod rife;
 pub mod rvm;
 pub mod sam;
 pub mod vittrack;
