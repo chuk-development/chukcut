@@ -338,7 +338,11 @@ impl FileBrowser {
                     .unwrap_or_default();
                 let Some(target) = browse::save_target(&self.dir, &typed, self.request.filter)
                 else {
-                    self.notice = Some("Type a file name".into());
+                    self.notice = Some(if typed.contains('/') {
+                        "A file name cannot contain /".into()
+                    } else {
+                        "Type a file name".into()
+                    });
                     cx.notify();
                     return;
                 };

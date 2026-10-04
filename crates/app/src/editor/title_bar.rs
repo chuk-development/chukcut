@@ -212,7 +212,7 @@ impl Editor {
         let mut request = FileRequest::save(
             "Save as",
             Filter::Projects,
-            format!("{}.chukcut", self.project.name),
+            files::suggested_name(&self.project.name, "chukcut"),
         );
         if let Some(dir) = files::project_dir(self.state.project_path.read().as_deref()) {
             request = request.starting_in(dir);

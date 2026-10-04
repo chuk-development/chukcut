@@ -150,7 +150,7 @@ impl Editor {
         if self.state.project_path.read().is_some() {
             return Task::ready(self.save_to(None, cx));
         }
-        let name = format!("{}.chukcut", self.project.name);
+        let name = files::suggested_name(&self.project.name, "chukcut");
         let picked = files::choose_one(FileRequest::save("Save", Filter::Projects, name), cx);
         cx.spawn(async move |this, cx| {
             // Cancelled: the work is not saved, so nothing may proceed.

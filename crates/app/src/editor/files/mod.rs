@@ -172,3 +172,33 @@ enum Portal {
 pub(crate) fn project_dir(path: Option<&Path>) -> Option<PathBuf> {
     path.and_then(Path::parent).map(Path::to_path_buf)
 }
+
+/// A file name suggested from a project name: a name like "Before / After"
+/// (a built-in template's) would otherwise be read as a folder and refused
+/// by the save dialog. The `/` becomes `_`, as the export dialog does.
+pub(crate) fn suggested_name(stem: &str, extension: &str) -> String {
+    let stem = stem.trim().replace('/', "_");
+    let stem = if stem.is_empty() {
+        "Untitled"
+    } else {
+        stem.as_str()
+    };
+    format!("{stem}.{extension}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_suggested_name_has_no_folder_in_it() {
+        assert_eq!(
+            suggested_name("Before / After", "chukcut"),
+            "Before _ After.chukcut"
+        );
+        assert_eq!(suggested_name("  ", "png"), "Untitled.png");
+        assert_eq!(suggested_name("Trip", "chukcut"), "Trip.chukcut");
+        let typed = suggested_name("a/b/c", "chukcut");
+        assert!(browse::save_target(Path::new("/x"), &typed, Filter::Projects).is_some());
+    }
+}
