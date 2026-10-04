@@ -12,7 +12,7 @@
 # docs/demo.md explains the result.
 set -euo pipefail
 
-root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+root=$(CDPATH="" cd -- "$(dirname "$0")/.." && pwd)
 cd "$root"
 
 cli=${CHUKCUT_CLI:-$root/target/release/chukcut-cli}

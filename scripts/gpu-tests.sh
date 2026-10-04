@@ -13,7 +13,7 @@
 # (render::test_context).
 set -uo pipefail
 
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || exit 1
 LVP=/usr/share/vulkan/icd.d/lvp_icd.json
 status=0
 
