@@ -66,8 +66,24 @@ libraries. See also [AI tools](ai-tools.md).
 - **Remade frames**: the frames of Remove object and Enhance quality.
   **Clear** deletes them.
 
-There is no setting to choose the runtime by hand. To force one, start
-chukcut with `CHUKCUT_ML_RUNTIME=cpu`, `cuda12` or `cuda13`.
+To choose the runtime by hand, use **Settings › Performance › AI
+runtime**.
+
+## Performance
+
+- **Video decoding**: **Automatic**, **VAAPI (Intel, AMD)**, **NVDEC
+  (NVIDIA)** or **Software**. **Automatic** uses VAAPI when the GPU takes its
+  frames without a copy, then NVDEC, then the CPU. A file that the chosen
+  decoder cannot read plays in software. The change applies to the clips
+  that open after it; restart chukcut to apply it to all of them. When
+  `CHUKCUT_DECODE` is set, the row says so, and the variable wins.
+- **AI runtime**: **Automatic**, or one ONNX Runtime pack: **ONNX Runtime
+  (CPU)**, **ONNX Runtime for NVIDIA (CUDA 12)** or **(CUDA 13)**. A pack
+  that is not installed shows "(not installed)", and chukcut then uses
+  **Automatic**. **Automatic** uses the GPU bundle that your driver can run,
+  else the CPU. A change stops the AI worker; the next AI tool starts it
+  again with the new runtime. When `CHUKCUT_ML_RUNTIME` is set, the row says
+  so, and the variable wins.
 
 ## Keyboard shortcuts
 
@@ -105,7 +121,7 @@ What each account is for:
 
 ## Hardware
 
-A report, with no switches:
+A report. The switches are in **Performance**:
 
 - **Graphics card** and **Render backend**.
 - **Zero-copy decode**: **Yes** when decoded frames go to the GPU without a
@@ -114,8 +130,8 @@ A report, with no switches:
   backend, and **works**, the reason it was refused, or **not in this
   build**.
 
-To force a decode path, use `CHUKCUT_DECODE` (see
-[Troubleshooting](troubleshooting.md)).
+To choose a decode path, use **Performance › Video decoding**.
+`CHUKCUT_DECODE` overrides it (see [Troubleshooting](troubleshooting.md)).
 
 ## Logs
 

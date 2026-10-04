@@ -7,13 +7,14 @@ writes opens in the app, and the reverse. The full reference is
 
 ## Install
 
+The install script (`scripts/install.sh`) and the release tarball install
+`chukcut-cli` into `~/.local/bin`, next to the editor. To build it by hand:
+
 ```bash
 cargo build --release -p chukcut-cli
 install -m755 target/release/chukcut-cli ~/.local/bin/
 chukcut-cli --help
 ```
-
-The install script and the release tarball do not install `chukcut-cli`.
 
 ## How it works
 

@@ -36,8 +36,8 @@ the **Video** tab, then the **Enhance** sub-tab.
 5. [Templates](templates.md): make a project from a template, save your own
 6. [Text and captions](text-and-captions.md): titles, styles, auto captions, SRT
 7. [Colour](colour.md): adjust, HSL, curves, wheels, LUTs, auto adjust, colour match
-8. [Effects and transitions](effects-and-transitions.md): effects, effect clips, masks, chroma key, stickers
-9. [Speed and slow motion](speed.md): speed, curves, frame blending, optical flow
+8. [Effects and transitions](effects-and-transitions.md): effects, effect clips, crop, masks, chroma key, stickers, noise reduction
+9. [Speed and slow motion](speed.md): speed, curves, speed effects, frame blending, optical flow
 10. [Tracking](tracking.md): make a title follow an object or a face
 11. [AI tools](ai-tools.md): each AI tool, its model, its cost on GPU and CPU, its cache
 12. [Audio](audio.md): volume, fades, cleanup, effects, isolate voice, silences, voiceover

@@ -19,9 +19,11 @@ works on the code.
   easing, several timelines, compound clips, 11 templates, shortcut editor
   with three presets. Undo for everything; autosave and crash recovery.
 - **Picture:** grading (basic, HSL, curves, wheels, LUTs, auto adjust, colour
-  match, presets), masks, chroma key, blend modes, 19 effects, effect clips,
-  ~130 transitions, titles and the text animator, captions (whisper.cpp or a
-  server), animated stickers, frame blending, motion blur, speed curves.
+  match, presets), masks, chroma key, blend modes, 20 effects (one of them a
+  GPU denoise), crop with a box on the player, effect clips, ~130
+  transitions, titles and the text animator, captions (whisper.cpp or a
+  server), animated stickers, frame blending, motion blur, speed curves and
+  speed effects.
 - **Local AI** (`chukcut-ml-worker`, ONNX Runtime, CUDA bundle or CPU):
   VitTrack tracking, RVM / BiRefNet background removal, MobileSAM select
   object, matte-limited grade and effects, RIFE slow motion, LaMa remove
@@ -36,23 +38,23 @@ works on the code.
 
 **Rough, in short** (details in the sections below and in `docs/QA.md`):
 AMD and Intel/hybrid laptops are not checked regularly; OpenVINO untested;
-the tarball ships neither the ML worker nor the CLI and runs only on the
-build machine's FFmpeg major; AI on the CPU takes minutes per clip, BiRefNet
+the tarball (editor, ML worker and CLI) runs only on the build machine's
+FFmpeg major; AI on the CPU takes minutes per clip, BiRefNet
 refuses it; RIFE ~6 fps and BiRefNet ~2 fps at 1080p on an RTX 3060; voice
 isolation peaks at 7–8 GB in the worker; body landmarks are not built; the
-inspector has no crop control (CLI only) and Speed › Speed effects is empty;
-cloud integrations are untested against live services.
+cloud integrations are untested against live services; a crop has no
+keyframes and the denoise is spatial only.
 
 **Before you change code:** read "Traps that have already cost time" and
 the CLAUDE.md non-negotiables. Judge performance from a release build only.
 
-**Newest sections first:** Polish pass 3, CI, Colour AI, QA pass 2, Flaky
+**Newest sections first:** UX gaps, Polish pass 3, CI, Colour AI, QA pass 2, Flaky
 tests, Frame blending, Timelines and compound clips. The ML sections are at
 the end of the file ("The ML worker" and its sub-sections).
 
 ## Update history
 
-Last updated: 2026-10-04 (the "At a glance" block above, after polish pass 3). Previously 2026-10-04 (QA pass 2 over the wave 7–9 features and a showcase that shows them — see "QA pass 2" below). Previously 2026-10-04 (CI: clippy is fatal, the engine tests run on lavapipe with ffmpeg, the CLI and ML worker tests run too — see "CI" below). Previously 2026-10-04 (preview frames no longer leave the GPU: shared with GPUI through a patched GPUI, readback as the fallback — see "Preview frames shared with GPUI" under Perf). Previously 2026-10-04 (ML worker: VitTrack re-finding, Remove background, CUDA — see "The ML worker" below). Previously 2026-10-02 (**the UI is native now** — decision 0011. The Tauri
+Last updated: 2026-10-04 (crop, speed effects, denoise, Performance settings, a persisted export queue with a quit guard, and the ML worker and CLI in the tarball — see "UX gaps" below). Previously 2026-10-04 (the "At a glance" block above, after polish pass 3). Previously 2026-10-04 (QA pass 2 over the wave 7–9 features and a showcase that shows them — see "QA pass 2" below). Previously 2026-10-04 (CI: clippy is fatal, the engine tests run on lavapipe with ffmpeg, the CLI and ML worker tests run too — see "CI" below). Previously 2026-10-04 (preview frames no longer leave the GPU: shared with GPUI through a patched GPUI, readback as the fallback — see "Preview frames shared with GPUI" under Perf). Previously 2026-10-04 (ML worker: VitTrack re-finding, Remove background, CUDA — see "The ML worker" below). Previously 2026-10-02 (**the UI is native now** — decision 0011. The Tauri
 shell and the React frontend are gone; the engine is `crates/engine`
 (`chukcut-engine`, no UI dependency) and the app is a GPUI window in
 `crates/app`. What the native app does today: import (dialog or command line),
@@ -81,6 +83,54 @@ forgets). Previously 2026-07-27: the preview stopped copying its frames — the
 JPEG encoder now reads a surface the compositor drew into, 2.7–2.9× on a whole
 frame; and earlier the same day, the attempt that went the other way round and
 the `vkDeviceWaitIdle` crash it found.
+
+## UX gaps (2026-10-04, `agent/ux`)
+
+Gaps the docs pass found, closed:
+
+- **Packaging.** `scripts/install.sh` and `packaging/tarball.sh` build and
+  ship `chukcut`, `chukcut-ml-worker` and `chukcut-cli` together in one
+  `bin/`; the CI release job checks the tarball holds all three. The editor
+  finds the worker beside its own resolved binary, one directory up, or in
+  `<prefix>/libexec/chukcut/` / `<prefix>/lib/chukcut/`
+  (`ml::worker::beside`).
+- **Video › Crop.** Ratio presets, a box with eight handles on the player,
+  quarter turns, flips, reset; `inspector_set_crop` on release, one undo
+  step. While the tab is open the preview draws the clip **uncropped**
+  (`Editor::crop_view_project`, the same seam as "Show matte"), so the box
+  lives in source fractions and stays under the pointer. Switching the view
+  must bump `generation`, or the player keeps the old picture:
+  `sync_crop_view` runs before every preview request. The overlay places
+  the box through the same follow → stabilise → keyframes → motion chain as
+  the compositor, so a rotated, flipped or animated clip gets a matching box.
+  A crop is still one rectangle per clip, no keyframes.
+- **Speed › Speed effects** (`speed_apply_effect`, CLI `speed-effect`): a
+  curve preset plus the smoothing that suits it (frame blending; optical
+  flow for Hero and Bullet), one composite undo step, built like Smooth
+  slow-mo (the blend edit against a copy with the curve applied).
+- **Reduce image noise** in Video › Basic is the new `denoise` effect: a
+  5×5 bilateral pass in √-linear units (`fs_denoise`), twice above strength
+  60, stride scaled to the frame so preview and export match. Spatial only;
+  no temporal or ML denoise. "Enhance quality" and "Optical flow" in Basic
+  are buttons that open their tabs.
+- **Settings › Performance.** "Video decoding" (`Settings::decode`,
+  `media::provider::set_decode_preference`) and "AI runtime"
+  (`Settings::ml_runtime`, `ml::set_runtime_setting`). The environment still
+  wins. A decode path chosen in Settings falls back to software for a file it
+  cannot open; `CHUKCUT_DECODE` still fails loudly. The runtime choice reaches
+  the worker as `CHUKCUT_ML_RUNTIME` on its command (`worker::runtime_env`),
+  and a change stops a running worker.
+- **Export queue persistence** (`ExportQueue::persist_to`, the app only, in
+  `~/.local/share/chukcut/export-queue.json`): written on every change of
+  the list or an item's status, not on progress. Restored unfinished items
+  are **held** until Run now or a new item, so an export that crashed the app
+  cannot crash its next start. **Trap found on the way:** quitting while a
+  queued export rendered left the process alive at 0 % CPU with every thread
+  in a futex wait (window gone, export stopped mid-frame). `Shell::finish`
+  now calls `export_shutdown`: it freezes the queue file, stops the exports
+  and waits up to 5 s for them to let go before the exit. Verified on Xvfb:
+  the process exits within a second and the file keeps the running and the
+  queued item for the next start.
 
 ## What this is
 

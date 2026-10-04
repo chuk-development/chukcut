@@ -7,7 +7,7 @@ preview and in the export.
 
 | Category | Effects |
 |---|---|
-| **Blur** | Blur, Zoom blur |
+| **Blur** | Reduce noise, Blur, Zoom blur |
 | **Light** | Glow, Light sweep |
 | **Motion** | Shake, Motion blur |
 | **Retro** | RGB split, Glitch, VHS, Pixelate |
@@ -151,6 +151,32 @@ Limits: chukcut draws no text layers and no image layers inside a Lottie
 file. A GIF must have a transparent colour in its palette, or it shows as a
 box.
 
+## Crop, rotate and flip
+
+Select a video or image clip and open **Video › Crop**. While this tab is
+open, the player shows the whole picture of the clip. A box marks the part
+that stays, and the rest is dark.
+
+- **Crop**: the ratio buttons **Free**, **Original**, **9:16**, **16:9**,
+  **1:1**, **4:5**, **4:3**, **3:4** and **2.35:1**. A ratio sets the largest
+  box of that shape around the centre of the current box. **Original**
+  removes the crop. A line says how many pixels the crop keeps.
+- **On the player**: drag inside the box to move it. Drag a corner or an
+  edge to resize it. With a ratio other than **Free**, the box keeps its
+  shape. The box never leaves the picture. The crop is written when you let
+  go: one undo step.
+- **Rotate and flip**: **Rotate 90° left**, **Rotate 90° right**, **Flip
+  horizontally**, **Flip vertically**, and **Rotate** for any angle. A flip
+  button is lit while the clip is flipped. The rotation takes keyframes like
+  the one in **Basic › Transform**.
+- The reset arrow of **Crop** removes the crop. The reset arrow of **Rotate
+  and flip** sets the rotation to 0 and removes the flips.
+
+When you leave the tab, the player shows the cropped clip again. The cropped
+part fills the clip's frame: a 9:16 crop of a 16:9 clip becomes a 9:16 clip
+on the canvas. A crop has no keyframes. `chukcut-cli crop` sets the same
+crop from a script.
+
 ## Video › Basic
 
 The other sections of **Video › Basic**:
@@ -161,3 +187,22 @@ The other sections of **Video › Basic**:
 - **Keyframe easing**: see [Timeline editing](timeline.md#keyframes).
 - **Stabilise**, **Scene detection**, **Auto reframe**: see
   [Timeline editing](timeline.md#analysis-tools-no-ai-model).
+- **Reduce image noise** (video and image clips): tick it to smooth sensor
+  noise. **Strength** sets how much. **Keep detail** keeps fine texture: a
+  high value averages only pixels whose colour is very close. Edges stay
+  sharp at every setting. It is the **Reduce noise** effect, so it also shows
+  in the **Effects** tab, and both sliders take keyframes. Clearing the tick
+  removes the effect. It runs on the GPU, in the preview and in the export.
+- **Enhance quality**: a button that opens **Video › Enhance**, where the AI
+  upscaling is (see [AI tools](ai-tools.md#enhance-quality)).
+- **Optical flow** (video clips): a button that opens **Speed › Standard**,
+  where **Optical flow (AI)** is (see [Speed](speed.md)).
+
+### Reduce noise
+
+**Effects › Blur › Reduce noise** is an edge-preserving filter: it averages
+each pixel with its neighbours, but only with those of a similar colour.
+Grain and sensor noise go; an edge, which is a large difference, stays.
+Above a **Strength** of 60 it runs twice, which smooths more without
+blotches. The radius grows with the frame, so the preview and a 4K export
+look the same. It does not compare frames over time, and it does not use AI.

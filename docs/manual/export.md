@@ -73,7 +73,15 @@ sample frames, so the estimate is close.
   **Run earlier**, **Run later**, **Show in folder**, **Remove from the
   list**, **Stop this export**.
 
-The queue is not saved. It stops when you quit chukcut.
+The queue is saved. When you quit while an export runs, chukcut asks
+"Export running — quit anyway?": **Keep exporting** or **Quit anyway**.
+After a restart, the exports that were queued or running are in the queue
+again. They do not start on their own: the queue says "N exports from the
+last session are waiting" with **Run now**, and the status line says so
+too. Adding a new export also runs them. An export that was running when
+you quit starts from the beginning. Finished exports stay in the list until
+you **Clear finished**. The queue file is
+`~/.local/share/chukcut/export-queue.json`.
 
 ## Before the export renders
 

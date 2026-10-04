@@ -39,6 +39,7 @@ format, hardware H.264/HEVC export on the GPU, and AAC audio.
 - Multi-select, rubber-band selection, cut, copy, paste and duplicate
 - Linked audio and video, detach audio, fade handles on the clip
 - Keyframes with an easing graph, transform, opacity, freeze frame, replace media
+- Crop with ratio presets and a crop box on the player, rotate and flip
 - Several timelines in one project, as tabs
 - Compound clips: put clips into one clip, open it, edit inside, flatten it again
 - Project templates: 11 built-in templates with slots for your clips, and your own templates
@@ -65,11 +66,11 @@ format, hardware H.264/HEVC export on the GPU, and AAC audio.
 
 ### Motion and effects
 
-- 19 GPU effects: blur, glow, shake, motion blur, RGB split, glitch, VHS, film grain, halation, bloom, retouch and more
+- 20 GPU effects: blur, noise reduction, glow, shake, motion blur, RGB split, glitch, VHS, film grain, halation, bloom, retouch and more
 - Effects on a clip, or as an effect clip that changes everything below it
 - In, Out and Combo animation presets with an easing library, punch-in zoom
 - 120 transitions from the gl-transitions library, plus basic and seamless transitions
-- Speed changes and speed curves, with pitch-preserving audio
+- Speed changes, speed curves and one-click speed effects (a ramp with smooth frames), with pitch-preserving audio
 - Frame blending and AI optical flow for smooth slow motion
 - Stickers, also animated: Lottie, GIF, WebP and Noto animated emoji
 - Motion tracking: draw a box on the player, and a title or sticker follows the object
@@ -159,8 +160,10 @@ What the hardware parts do:
   models on the CPU.
 
 chukcut uses the hardware path when the driver supports it. When it does
-not, chukcut uses software. `CHUKCUT_DECODE=software|auto|vaapi|cuda`
-forces a decode path.
+not, chukcut uses software. **Settings › Performance** chooses the decode
+path (Automatic, VAAPI, NVDEC, Software) and the ONNX Runtime the AI models
+load; `CHUKCUT_DECODE=software|auto|vaapi|cuda` and
+`CHUKCUT_ML_RUNTIME=cpu|cuda12|cuda13` override the settings.
 
 ## Install
 
@@ -175,35 +178,32 @@ scripts/install.sh
 The script checks the build dependencies first. When something is missing,
 it prints the exact `apt` (Debian, Ubuntu, Mint) or `dnf` (Fedora) command
 for you to run, and stops. It never installs packages itself. Then it builds
-a release binary and installs it for your user only, with no sudo:
+the release binaries and installs them for your user only, with no sudo:
 
-- `~/.local/bin/chukcut`
+- `~/.local/bin/chukcut`, the editor
+- `~/.local/bin/chukcut-ml-worker`, the process that runs the AI models. The
+  editor looks for it next to its own binary.
+- `~/.local/bin/chukcut-cli`, the command line and the MCP server
 - a menu entry, icons, the `.chukcut` file type and AppStream metadata under `~/.local/share`
 
 Other options: `--check` (only check dependencies), `--cuda` (whisper.cpp
-with CUDA, needs `nvcc`), `--no-build` (install the binary you already
-built) and `--uninstall`. Uninstalling keeps your projects and settings.
-
-The script installs the editor only. For the AI tools and the command line,
-build the two other programs and put them next to the editor:
-
-```bash
-cargo build --release -p chukcut-ml-worker -p chukcut-cli
-install -m755 target/release/chukcut-ml-worker target/release/chukcut-cli ~/.local/bin/
-```
+with CUDA, needs `nvcc`), `--no-build` (install the binaries you already
+built) and `--uninstall`. Uninstalling removes the three binaries and keeps
+your projects and settings.
 
 ### From a release tarball
 
 `packaging/tarball.sh` makes `chukcut-<version>-x86_64-linux.tar.xz`. Unpack
-it and run `scripts/install.sh` inside. The tarball contains the editor
-binary, the installer and the desktop files.
+it and run `scripts/install.sh` inside. The tarball contains the three
+binaries (`chukcut`, `chukcut-ml-worker`, `chukcut-cli`), the installer and
+the desktop files.
 
 The tarball uses the FFmpeg libraries of the system. It starts only on a
 distribution with the same FFmpeg major version as the build machine (for
-example FFmpeg 6.1 on Ubuntu 24.04 and Mint 22). The tarball does not
-contain `chukcut-ml-worker` or `chukcut-cli`. Build them from source as
-shown above. [`packaging/README.md`](packaging/README.md) says what is
-bundled and what is not.
+example FFmpeg 6.1 on Ubuntu 24.04 and Mint 22). The AI models and ONNX
+Runtime are not in the tarball. They download on first use.
+[`packaging/README.md`](packaging/README.md) says what is bundled and what
+is not.
 
 ### System packages
 
@@ -301,11 +301,9 @@ and [0030](docs/decisions/0030-colour-ai-faces-and-voice-isolation.md).
 - **Memory.** Isolate voice uses 7 to 8 GB of RAM in the worker process.
 - **Cloud accounts** (ElevenLabs, fal.ai, stock, DeepL) are not tested
   against the live services.
-- **Export queue.** The queue is not saved. Quitting the app while it runs
-  stops it.
 - **Lottie stickers** draw no text layers and no image layers.
-- **Crop** is only in the CLI (`chukcut-cli crop`). The inspector has no
-  crop control yet. The Speed tab's **Speed effects** is empty.
+- **Crop** is one rectangle per clip; it has no keyframes. **Reduce image
+  noise** is a spatial filter; it does not compare frames over time.
 
 [`docs/STATUS.md`](docs/STATUS.md) and [`docs/QA.md`](docs/QA.md) have the
 full list.
