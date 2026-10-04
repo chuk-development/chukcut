@@ -123,3 +123,24 @@ export renders what is missing first.
   GPU): the cache could become a cache of a live path.
 - A permissively licensed speech-separation model that is smaller and
   better on speech than HTDemucs.
+
+## Amendment, 2026-10-04 (agent/body)
+
+- **Every timeline and every compound clip.** The landmark queue
+  (`landmarks_queue_missing`), the export's landmark step and the list of
+  missing isolated voices (`voice_isolation_missing`) found only clips on
+  the open timeline. They walk all timelines and the contents of compound
+  clips now (`sequence::all_tracks`). The isolation of a compound clip is
+  found by its mix-down.
+- **The preparation of an opened project makes them too**
+  (`modules::prepare`). After the frames, it finds the faces and then
+  renders the voices that its clips do not have, one clip at a time. The
+  title-bar chip counts them: landmark frames as frames, voices as
+  "N voices" ("Preparing 90 frames and 1 voice"). A voice counts as 30
+  frames in the percentage.
+- **One render per recording.** A render claims its cache files; a second
+  render of the same file waits for the first and then finds the file. The
+  list of missing voices does not name a file that a render makes now.
+  Thus the preparation and the app's own queue after an edit never render
+  one recording twice.
+- Body landmarks: decision 0032.

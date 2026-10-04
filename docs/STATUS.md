@@ -5,7 +5,7 @@ Sessions are long and are not reopened, so nothing important is allowed to live
 only in a conversation. If you learn something that would change how the next
 person works, it belongs in this repository, not in a chat log.
 
-Last updated: 2026-10-04 (QA pass 2 over the wave 7–9 features and a showcase that shows them — see "QA pass 2" below). Previously 2026-10-04 (CI: clippy is fatal, the engine tests run on lavapipe with ffmpeg, the CLI and ML worker tests run too — see "CI" below). Previously 2026-10-04 (preview frames no longer leave the GPU: shared with GPUI through a patched GPUI, readback as the fallback — see "Preview frames shared with GPUI" under Perf). Previously 2026-10-04 (ML worker: VitTrack re-finding, Remove background, CUDA — see "The ML worker" below). Previously 2026-10-02 (**the UI is native now** — decision 0011. The Tauri
+Last updated: 2026-10-04 (body landmarks, follow a body part, reframe on a body, zipped models, faces and voices in the preparation — see "Body landmarks" below). Previously 2026-10-04 (QA pass 2 over the wave 7–9 features and a showcase that shows them — see "QA pass 2" below). Previously 2026-10-04 (CI: clippy is fatal, the engine tests run on lavapipe with ffmpeg, the CLI and ML worker tests run too — see "CI" below). Previously 2026-10-04 (preview frames no longer leave the GPU: shared with GPUI through a patched GPUI, readback as the fallback — see "Preview frames shared with GPUI" under Perf). Previously 2026-10-04 (ML worker: VitTrack re-finding, Remove background, CUDA — see "The ML worker" below). Previously 2026-10-02 (**the UI is native now** — decision 0011. The Tauri
 shell and the React frontend are gone; the engine is `crates/engine`
 (`chukcut-engine`, no UI dependency) and the app is a GPUI window in
 `crates/app`. What the native app does today: import (dialog or command line),
@@ -97,6 +97,54 @@ Judge performance from a release build only.
    `pub fn` in a `commands.rs` that nothing calls. Pending: the tracking
    commands (attach, bake, smoothing), which the tracking branch exposes.
 
+## Body landmarks, follow a body part (2026-10-04, agent/body)
+
+Decision 0032 (and an amendment to 0030). Measured on the RTX 3060 (CUDA 13
+bundle) and on the CPU pack, load 7–9 from other agents' builds.
+
+- **Zipped models** (`ml::download`, `registry::PACKED_MODELS`): the
+  archive is verified against its pinned SHA-256, then only the member the
+  registry names is copied, to the model's own path; its size is checked
+  before and during the copy, its own SHA-256 after; the archive is
+  deleted. tar.gz works the same. Any pinned download now stops when it
+  grows past its size. `chukcut-cli ml install rtmpose-m` fetched 48 MB and
+  unpacked 54 MB.
+- **Body landmarks** (`modules::body`, protocol `detect_people` and
+  `body_landmarks`): YOLOX-tiny finds people, RTMPose-m reads 17 COCO
+  keypoints per person (both Apache-2.0), followed by region from frame to
+  frame, the detector once a second for newcomers. `ml bench` at 1280×720:
+  pose 7.1 ms per person on CUDA, 21.6 ms on the CPU; detector 24 ms on
+  CUDA (the graph's NMS runs on the CPU) and 55 ms on the CPU. Analysis is
+  decode-bound: 60 frames of 1280×720 in 2.1 s (CUDA), 2.7 s (CPU). Track:
+  90 bytes per person per frame, next to the face tracks. Ids: people keep
+  their number by box overlap for 2 s. Tested on NASA's public-domain
+  full-length portrait S63-01755 sliding 150 px/s (`tests/body.rs` fetches
+  it once, pinned SHA-256): the hips moved 222 px in 1.5 s against 225.
+- **Follow a body part** (Tracking tab › Body part / Person / Follow body
+  part; CLI `follow-body`, `body-landmarks`; MCP `follow_body`,
+  `body_landmarks`): head, shoulders, chest, hips, whole body, hands,
+  elbows, knees, feet (the person's own left and right). A motion track
+  stamped `body`, 40 % smoothing, one undo step. A hand turns with the
+  forearm. Seen on Xvfb with lavapipe: a title on the left hand moved with
+  the person; the panel shows "Follows a body part … Body landmarks" and
+  hides Re-track and Tracker, as for a face.
+- **Auto reframe without a face**: on a frame where YuNet finds nothing,
+  the person detector's boxes stand in (the top fifth, the middle two
+  fifths of each). On the portrait with its head covered: "followed faces
+  in 35 % of frames · people in 65 %" (YuNet takes the helmet in his
+  hands for a face now and then) and the 9:16 window stayed on him.
+- **Faces and voices in every sequence, and in the preparation**: the
+  landmark queue, the export's landmark step and the missing-voice list
+  walk all timelines and compound clips' contents. The project's
+  preparation finds the faces and renders the voices it lacks, after the
+  frames, and the chip counts them ("Preparing 90 frames and 1 voice").
+  A voice render claims its files, so the preparation and the app's queue
+  never render one recording twice. `tests/prepare.rs` builds a retouched
+  clip inside a compound clip and an isolated clip on a parked timeline;
+  with the models installed the run made both (12 s).
+- **Not done:** whole-body keypoints (fingers, RTMW) and identity across
+  people who cross; the detector's NMS on the GPU.
+
 ## Polish pass 3, 2026-10-04 (agent/polish3)
 
 The open items of QA pass 2 and two follow-ups of the ML waves.
@@ -133,7 +181,8 @@ The open items of QA pass 2 and two follow-ups of the ML waves.
   65 % Stop"; failures are said once at the end. Face landmarks (retouch)
   and voice isolation keep their own queues (agent/colourai); the app runs
   them when the preparation ends, so they wait rather than compete, and
-  they are not in the chip's count. Seen on Xvfb with the CUDA
+  they are not in the chip's count. (Since agent/body they are part of
+  the run and of the count: see "Body landmarks" above.) Seen on Xvfb with the CUDA
   bundle: a project with a cleared matte cache and a 0.5x optical-flow clip
   baked 90 mattes and 119 flow frames in 14 s and the chip went away.
 - **Found on the way:** `matting_queue_missing` started bakes by clip id,
@@ -252,11 +301,9 @@ release worker and CLI, load 8–9 from other agents' builds).
   went from 4.3 dB in the mix to 20.7 dB; "keep background" took the music
   from −4.3 to 16.5 dB. The clip plays as it was until the render is
   there; the app renders in the background and re-plans the preview.
-- **Not done:** body landmarks (RTMPose): the research found the models
-  (`docs/research/ml-features.md` §3.13) but a top-down pose model needs a
-  person box per frame and the files come zipped, which the downloader does
-  not unpack yet. The worker's memory for HTDemucs is high; ORT's arena
-  settings were not tuned.
+- **Not done:** ~~body landmarks (RTMPose)~~ — done by agent/body, see
+  "Body landmarks" above. The worker's memory for HTDemucs is high; ORT's
+  arena settings were not tuned.
 
 ## QA pass 2 (2026-10-04, agent/qa2)
 

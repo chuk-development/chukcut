@@ -1436,8 +1436,11 @@ impl Worker {
                         w as f32 * 0.3,
                         h as f32 * 0.8,
                     ];
+                    // The pose model only: on a frame with nobody in it,
+                    // `body_landmarks` would run the detector too.
+                    let mut people = Vec::new();
                     worker
-                        .body_landmarks(spec, &rgba, w, h, &[hint], 1, false)
+                        .pose_regions(spec, &rgba, w, h, &[hint], &mut people)
                         .map(|_| ())
                 }
                 Task::FaceLandmarks => {
