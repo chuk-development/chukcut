@@ -144,6 +144,59 @@ What CI still cannot run:
   that adds a lint can turn master red without a change in the repository.
   Fix the lint; pin the toolchain only if that becomes frequent.
 
+## Colour AI, faces, voice isolation (2026-10-04, agent/colourai)
+
+Decision 0030. Measured on the RTX 3060 (driver 610.57, CUDA 13 bundle,
+release worker and CLI, load 8–9 from other agents' builds).
+
+- **Auto adjust, colour match, grade presets** (`modules::grading`; Adjust ›
+  Basic › Auto; Save as preset in the Adjust footer, the presets in Filters ›
+  My presets; CLI `auto-adjust`, `colour-match`, `grade-preset-*`). No
+  model: statistics of eight frames (or one, "Frame at playhead") fitted on
+  the shader's CPU twin and written into the ordinary grade controls, one
+  undo step. A match of a cast, darkened 1080×1920 clip to its original:
+  L*a*b* distance 25.7 → 1.0 in 4.2 s (16 frames decoded); auto adjust
+  2.5 s. In `tests/colour_tools.rs` the compositor's render of a matched
+  testsrc2 clip went from 42.5 to 2.5 against the reference, on NVIDIA and
+  lavapipe, and its L* landed within 3 of the fit's prediction. **Trap:**
+  the neutral pixels a cast is measured on must be chosen once, before the
+  fit — re-choosing them each step made the cast jump and Newton diverge
+  (temperature to −1 on a picture that needed nothing). And the levels
+  stretch scales the remaining cast, so the white balance runs twice.
+  Limit: grey-world can take a coloured backdrop the cast made grey for
+  grey (the warm portrait test got temperature +0.16, not a cooling).
+- **Face landmarks** (`modules::landmarks`, protocol 6 `face_landmarks`):
+  MediaPipe face mesh v2 (478 points, Apache-2.0, 4.9 MB) behind YuNet,
+  tracked by region from frame to frame. 300 frames of 1080×1920 analysed
+  in 6.1 s on CUDA and 5.5 s on the CPU (decode-bound; the mesh is ~10 ms
+  per frame); track file 577 kB. Tested on a public-domain NASA portrait
+  (`tests/landmarks.rs` fetches it once, pinned SHA-256): a 60 px pan is
+  followed within 8 px.
+- **Retouch** (Video › Retouch; Effects › Face; CLI `retouch`): presets
+  Natural, Soft, Bright, Sculpt plus five sliders. A 10 s 1080×1920 export
+  took 4.9 s with Sculpt against 4.8 s without. **Trap:** Gustafsson's
+  local-translation warp folds the picture (an ear cut in half, a kink in
+  the flag) when the shift is small against the radius; the slim uses a
+  `(1 − d²/r²)²` falloff instead, whose slope stays under 0.3 here.
+- **Follow a face** (Tracking tab › Follow face; CLI `follow-face`): the
+  face's pose becomes a motion track stamped `face` (30 % smoothing) and the
+  overlay an ordinary follower; one undo step. The Tracking panel hides
+  Tracker and Re-track for it.
+- **Isolate voice** (Audio › Isolate voice; CLI `isolate-voice`):
+  HTDemucs-ft vocals (MIT, 316 MB) on 7.8 s segments with a quarter
+  overlap. 60 s of speech over music: 10.6 s on CUDA (0.23 s per segment),
+  35.8 s on the CPU (2.6 s per segment), start-up included; the worker's
+  resident memory peaked at 6.8 GB (CUDA) and 8.0 GB (CPU). On the
+  synthetic test (flite speech over a chord and a beat) the speech's SDR
+  went from 4.3 dB in the mix to 20.7 dB; "keep background" took the music
+  from −4.3 to 16.5 dB. The clip plays as it was until the render is
+  there; the app renders in the background and re-plans the preview.
+- **Not done:** body landmarks (RTMPose): the research found the models
+  (`docs/research/ml-features.md` §3.13) but a top-down pose model needs a
+  person box per frame and the files come zipped, which the downloader does
+  not unpack yet. The worker's memory for HTDemucs is high; ORT's arena
+  settings were not tuned.
+
 ## Flaky tests, fixed (2026-10-04, agent/stable)
 
 The engine suite now passes three runs in a row on the RTX 3060 and one on

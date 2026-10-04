@@ -66,7 +66,18 @@ impl Operation for IsolateVoiceArgs {
             };
             Some(IsolationSetting { strength, keep })
         };
-        voice_commands::voice_set_isolation(&session.state, id.clone(), setting)?;
+        // The same setting again is a request to make what is missing (a
+        // cleared cache), not an edit.
+        let current = voice_commands::voice_cleanup(&session.state, id.clone())?
+            .and_then(|c| c.isolate)
+            .map(|i| IsolationSetting {
+                strength: i.strength,
+                keep: i.keep,
+            });
+        let changed = current != setting;
+        if changed {
+            voice_commands::voice_set_isolation(&session.state, id.clone(), setting)?;
+        }
         let mut rendered = None;
         if setting.is_some() && !self.no_render {
             let progress = |f: f32| ctx.progress("Isolating the voice", Some(f));
@@ -78,14 +89,15 @@ impl Operation for IsolateVoiceArgs {
             )?);
         }
         let cleanup = voice_commands::voice_cleanup(&session.state, id.clone())?;
-        Ok(Outcome::changed(
-            match (&setting, &rendered) {
+        Ok(Outcome {
+            message: match (&setting, &rendered) {
                 (None, _) => "voice isolation off".to_string(),
                 (Some(_), Some(r)) => format!("voice isolated in {:.1} s", r.seconds),
                 (Some(_), None) => "voice isolation set; it renders on first use".to_string(),
             },
-            json!({"clip": id, "cleanup": cleanup, "render": rendered}),
-        ))
+            data: json!({"clip": id, "cleanup": cleanup, "render": rendered}),
+            mutated: changed,
+        })
     }
 }
 
