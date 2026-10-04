@@ -111,7 +111,9 @@ pub const MODELS: &[ModelSpec] = &[
         sha256: "88d4531297118f595bf2fd60f6f566aec2e559393802d1f436c380f0cbbd2828",
         bytes: 14_975_696,
         file: "rvm_mobilenetv3_fp32.onnx",
-        providers_tested: &["CPU"],
+        // CUDA mattes differ from the CPU's by 1.3/255 on average over a
+        // 90-frame talking head (recurrent state carries float rounding).
+        providers_tested: &["CPU", "CUDA"],
     },
 ];
 
@@ -135,7 +137,19 @@ pub fn model_present(root: &Path, spec: &ModelSpec) -> bool {
     std::fs::metadata(model_path(root, spec)).is_ok_and(|m| m.len() == spec.bytes)
 }
 
-/// One ONNX Runtime build.
+/// How a runtime pack is packed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Archive {
+    /// A `.tgz`, unpacked while it downloads (Microsoft's ONNX Runtime).
+    TarGz,
+    /// A Python wheel (a zip, read from its end, so it is downloaded to a
+    /// file first): NVIDIA's own redistribution of a CUDA library on PyPI.
+    Wheel,
+}
+
+/// One downloadable set of runtime libraries: an ONNX Runtime build, or a
+/// library a GPU provider needs that systems often lack (cuDNN).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct RuntimePack {
     pub id: &'static str,
@@ -151,6 +165,9 @@ pub struct RuntimePack {
     /// named in `CHUKCUT_CUDA_LIB_DIRS`), for the settings page to explain a
     /// GPU that does not light up.
     pub needs: &'static str,
+    pub archive: Archive,
+    /// The file in `lib/` whose presence means the pack is installed.
+    pub library: &'static str,
 }
 
 /// The ONNX Runtime version `ort` 2.0.0-rc.13 is written against. A newer
@@ -167,6 +184,8 @@ pub const RUNTIME_PACKS: &[RuntimePack] = &[
         bytes: 9_130_098,
         providers: &[],
         needs: "",
+        archive: Archive::TarGz,
+        library: "libonnxruntime.so",
     },
     RuntimePack {
         id: "cuda12",
@@ -176,7 +195,9 @@ pub const RUNTIME_PACKS: &[RuntimePack] = &[
         sha256: "4e16d2ec66521a24fe917bd848eb8ae3a9107cb8b4aec978fb2b3ab1a640fcb7",
         bytes: 423_745_424,
         providers: &["CUDA"],
-        needs: "CUDA 12 runtime (cudart, cuBLAS, cuFFT, cuRAND, NVRTC) and cuDNN 9",
+        needs: "CUDA 12 runtime (cudart, cuBLAS, cuFFT, cuRAND, NVRTC) and cuDNN 9 (the cudnn9-cu12 pack, or the system's)",
+        archive: Archive::TarGz,
+        library: "libonnxruntime.so",
     },
     RuntimePack {
         id: "cuda13",
@@ -187,8 +208,31 @@ pub const RUNTIME_PACKS: &[RuntimePack] = &[
         bytes: 240_886_111,
         providers: &["CUDA"],
         needs: "CUDA 13 runtime (cudart, cuBLAS, cuFFT, cuRAND, NVRTC) and cuDNN 9 for CUDA 13",
+        archive: Archive::TarGz,
+        library: "libonnxruntime.so",
+    },
+    // cuDNN 9 for CUDA 12, as NVIDIA publishes it on PyPI
+    // (`nvidia-cudnn-cu12`, NVIDIA's cuDNN licence, which allows
+    // redistribution of the runtime libraries). The CUDA 12 runtime itself
+    // is usually on a machine with an NVIDIA driver and CUDA installed; cuDNN
+    // is the piece that usually is not, and without it the CUDA provider
+    // does not load. SHA-256 from PyPI's JSON API, read on 2026-10-04.
+    RuntimePack {
+        id: "cudnn9-cu12",
+        name: "cuDNN 9 for CUDA 12 (NVIDIA)",
+        version: "9.27.0.42",
+        url: "https://files.pythonhosted.org/packages/65/e4/c5a205d48ff00ed8b27882bb45d338d8138e976c76385f328a326bbfaeda/nvidia_cudnn_cu12-9.27.0.42-py3-none-manylinux_2_27_x86_64.whl",
+        sha256: "0a4aa3a7d2264256506c6857fc41fc0c499982f78d70195b1cfcc9055c1957cd",
+        bytes: 766_178_381,
+        providers: &[],
+        needs: "an NVIDIA driver and the CUDA 12 runtime",
+        archive: Archive::Wheel,
+        library: "libcudnn.so.9",
     },
 ];
+
+/// The cuDNN pack the CUDA provider looks in, when installed.
+pub const CUDNN_PACK: &str = "cudnn9-cu12";
 
 /// The pack called `id`.
 pub fn runtime_pack(id: &str) -> Option<&'static RuntimePack> {
@@ -201,11 +245,10 @@ pub fn runtime_dir(root: &Path, pack: &RuntimePack) -> PathBuf {
         .join(format!("{}-{}", pack.id, pack.version))
 }
 
-/// The library to load from an unpacked `pack`.
+/// The library that marks an unpacked `pack` (for an ONNX Runtime pack,
+/// the one to load).
 pub fn runtime_library(root: &Path, pack: &RuntimePack) -> PathBuf {
-    runtime_dir(root, pack)
-        .join("lib")
-        .join("libonnxruntime.so")
+    runtime_dir(root, pack).join("lib").join(pack.library)
 }
 
 pub fn runtime_present(root: &Path, pack: &RuntimePack) -> bool {
@@ -215,15 +258,28 @@ pub fn runtime_present(root: &Path, pack: &RuntimePack) -> bool {
 /// Which files of a runtime archive to keep, by their path inside it. Only
 /// the libraries: headers, docs and the TensorRT provider (which needs a
 /// TensorRT install nobody has by accident, and is 1 GB of the archive's
-/// contents) stay behind.
-pub fn keep_from_runtime_archive(path_in_archive: &str) -> Option<&str> {
+/// contents) stay behind. In a wheel, only the shared libraries under
+/// `nvidia/<package>/lib/`.
+pub fn keep_from_runtime_archive<'a>(
+    pack: &RuntimePack,
+    path_in_archive: &'a str,
+) -> Option<&'a str> {
     let name = path_in_archive.rsplit('/').next()?;
-    let in_lib = path_in_archive.contains("/lib/");
-    (in_lib
-        && name.starts_with("libonnxruntime")
-        && name.contains(".so")
-        && !name.contains("tensorrt"))
-    .then_some(name)
+    match pack.archive {
+        Archive::TarGz => {
+            let in_lib = path_in_archive.contains("/lib/");
+            (in_lib
+                && name.starts_with("libonnxruntime")
+                && name.contains(".so")
+                && !name.contains("tensorrt"))
+            .then_some(name)
+        }
+        Archive::Wheel => (path_in_archive.starts_with("nvidia/")
+            && path_in_archive.contains("/lib/")
+            && name.starts_with("lib")
+            && name.contains(".so"))
+        .then_some(name),
+    }
 }
 
 /// The installed pack the worker should load: the first GPU pack that is
@@ -257,7 +313,14 @@ mod tests {
         }
         for p in RUNTIME_PACKS {
             assert_eq!(p.sha256.len(), 64, "{}", p.id);
-            assert!(p.url.contains(&format!("/v{}/", p.version)), "{}", p.url);
+            match p.archive {
+                Archive::TarGz => {
+                    assert!(p.url.contains(&format!("/v{}/", p.version)), "{}", p.url)
+                }
+                Archive::Wheel => {
+                    assert!(p.url.contains(&format!("-{}-", p.version)), "{}", p.url)
+                }
+            }
         }
     }
 
@@ -273,7 +336,8 @@ mod tests {
 
     #[test]
     fn the_archive_filter_keeps_only_the_libraries() {
-        let keep = |p| keep_from_runtime_archive(p);
+        let ort = runtime_pack("cuda12").unwrap();
+        let keep = |p| keep_from_runtime_archive(ort, p);
         assert_eq!(
             keep("onnxruntime-linux-x64-gpu_cuda12-1.28.3/lib/libonnxruntime.so.1.28.3"),
             Some("libonnxruntime.so.1.28.3")
@@ -292,6 +356,16 @@ mod tests {
                 .is_none()
         );
         assert!(keep("onnxruntime-linux-x64-1.28.3/lib/pkgconfig/libonnxruntime.pc").is_none());
+        let wheel = runtime_pack(CUDNN_PACK).unwrap();
+        assert_eq!(
+            keep_from_runtime_archive(wheel, "nvidia/cudnn/lib/libcudnn_ops.so.9"),
+            Some("libcudnn_ops.so.9")
+        );
+        assert!(keep_from_runtime_archive(wheel, "nvidia/cudnn/include/cudnn.h").is_none());
+        assert!(
+            keep_from_runtime_archive(wheel, "nvidia_cudnn_cu12-9.27.0.42.dist-info/RECORD")
+                .is_none()
+        );
     }
 
     #[test]

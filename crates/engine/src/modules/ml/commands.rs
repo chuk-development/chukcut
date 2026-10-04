@@ -26,6 +26,68 @@ pub struct MlStatus {
     pub probe: Option<Probe>,
     /// Why ML is not available, as a sentence.
     pub problem: Option<String>,
+    /// GPU vendors on this machine (`NVIDIA`, `Intel`, `AMD`), from the
+    /// kernel's DRM devices.
+    pub gpus: Vec<String>,
+    /// What would make ML faster here, as a sentence: the packs to install
+    /// for an NVIDIA GPU, the OpenVINO build for an Intel one.
+    pub advice: Option<String>,
+}
+
+/// GPU vendors present, by PCI vendor id of each DRM card.
+pub fn gpu_vendors() -> Vec<String> {
+    let mut vendors = Vec::new();
+    let Ok(cards) = std::fs::read_dir("/sys/class/drm") else {
+        return vendors;
+    };
+    for card in cards.flatten() {
+        let name = card.file_name();
+        let name = name.to_string_lossy();
+        // card0, card1 — not the connectors (card0-HDMI-A-1).
+        if !name.starts_with("card") || name.contains('-') {
+            continue;
+        }
+        let vendor = std::fs::read_to_string(card.path().join("device/vendor")).unwrap_or_default();
+        let vendor = match vendor.trim() {
+            "0x10de" => "NVIDIA",
+            "0x8086" => "Intel",
+            "0x1002" => "AMD",
+            _ => continue,
+        };
+        if !vendors.iter().any(|v| v == vendor) {
+            vendors.push(vendor.to_string());
+        }
+    }
+    vendors
+}
+
+/// What to install to run models on this machine's GPU, if anything.
+fn advice(root: &std::path::Path, gpus: &[String]) -> Option<String> {
+    let has =
+        |id: &str| registry::runtime_pack(id).is_some_and(|p| registry::runtime_present(root, p));
+    if gpus.iter().any(|g| g == "NVIDIA") {
+        let mut missing = Vec::new();
+        if !has("cuda12") && !has("cuda13") {
+            missing.push("runtime:cuda12 (424 MB)");
+        }
+        if !has(registry::CUDNN_PACK) {
+            missing.push("runtime:cudnn9-cu12 (766 MB; skip it if the system has cuDNN 9)");
+        }
+        if !missing.is_empty() {
+            return Some(format!(
+                "An NVIDIA GPU is present; models run on it with {}",
+                missing.join(" and ")
+            ));
+        }
+    } else if gpus.iter().any(|g| g == "Intel") && std::env::var_os("CHUKCUT_ORT_DYLIB").is_none() {
+        return Some(
+            "An Intel GPU is present; models run on it through OpenVINO when \
+             CHUKCUT_ORT_DYLIB names an OpenVINO-enabled libonnxruntime.so \
+             (Microsoft's Linux builds have no OpenVINO); until then they run on the CPU"
+                .into(),
+        );
+    }
+    None
 }
 
 /// What is installed. With `probe`, the worker is started and loads the
@@ -33,7 +95,10 @@ pub struct MlStatus {
 /// with CUDA), so the settings page asks for it once, not per frame.
 pub fn ml_status(probe: bool) -> MlStatus {
     let root = super::root();
+    let gpus = gpu_vendors();
     let mut status = MlStatus {
+        advice: advice(&root, &gpus),
+        gpus,
         worker: worker::binary().map(|p| p.display().to_string()),
         runtime: std::env::var("CHUKCUT_ORT_DYLIB")
             .ok()

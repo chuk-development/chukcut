@@ -15,7 +15,7 @@ use crate::error::{CliError, CliResult};
 /// `status` (with `--probe`: start the worker and list the providers that
 /// work), `models`, `runtimes`, `install ITEM`, `remove ITEM` or `bench MODEL`.
 /// An ITEM is a model id (`yunet`, `vittrack`, `rvm`) or a runtime pack
-/// (`runtime:cpu`, `runtime:cuda12`, `runtime:cuda13`).
+/// (`runtime:cpu`, `runtime:cuda12`, `runtime:cuda13`, `runtime:cudnn9-cu12`).
 #[derive(Debug, Clone, Args, Deserialize, JsonSchema)]
 pub struct MlArgs {
     pub action: String,
@@ -58,12 +58,15 @@ impl MlArgs {
         match self.action.as_str() {
             "status" => {
                 let status = ml::ml_status(self.probe);
-                let message = status.problem.clone().unwrap_or_else(|| {
+                let mut message = status.problem.clone().unwrap_or_else(|| {
                     match &status.probe {
                         Some(p) => format!("ONNX Runtime {} · {}", p.runtime_version, p.providers.join(", ")),
                         None => format!("ready ({})", status.runtime.clone().unwrap_or_default()),
                     }
                 });
+                if let Some(advice) = &status.advice {
+                    message = format!("{message}. {advice}");
+                }
                 Ok(Outcome::read(message, json!(status)))
             }
             "models" => Ok(Outcome::read("models", json!(ml::ml_models()))),

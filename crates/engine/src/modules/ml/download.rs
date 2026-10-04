@@ -20,7 +20,7 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use chukcut_ml_worker::registry::{self, ModelSpec, RuntimePack};
+use chukcut_ml_worker::registry::{self, Archive, ModelSpec, RuntimePack};
 use sha2::{Digest as _, Sha256};
 
 use super::MlError;
@@ -78,6 +78,10 @@ pub fn ensure_runtime(
     if registry::runtime_present(root, pack) {
         return Ok(library);
     }
+    if pack.archive == Archive::Wheel {
+        install_wheel(root, pack, progress, cancel)?;
+        return Ok(library);
+    }
     let response = crate::modules::cloud::http::agent()
         .get(pack.url)
         .call()
@@ -90,6 +94,83 @@ pub fn ensure_runtime(
         })?;
     unpack_runtime(root, pack, response.into_reader(), progress, cancel)?;
     Ok(library)
+}
+
+/// A wheel is a zip, whose directory is at its end: it is downloaded
+/// (verified) to a file beside its destination, the libraries are taken out
+/// into a staging directory, and the file is deleted.
+fn install_wheel(
+    root: &Path,
+    pack: &RuntimePack,
+    progress: Progress,
+    cancel: &AtomicBool,
+) -> Result<(), MlError> {
+    let dir = registry::runtime_dir(root, pack);
+    let wheel = dir.with_extension("whl");
+    let failed = |e: String| {
+        if cancel.load(Ordering::Relaxed) {
+            MlError::Cancelled
+        } else {
+            MlError::Failed(format!("could not install {}: {e}", pack.name))
+        }
+    };
+    crate::modules::speech::models::download_verified(
+        pack.url,
+        pack.sha256,
+        Some(pack.bytes),
+        &wheel,
+        progress,
+        cancel,
+    )
+    .map_err(|e| failed(e.to_string()))?;
+    let staging = dir.with_extension("part");
+    let _ = std::fs::remove_dir_all(&staging);
+    let result = extract_wheel(pack, &wheel, &staging.join("lib"));
+    let _ = std::fs::remove_file(&wheel);
+    match result {
+        Ok(kept) if staging.join("lib").join(pack.library).exists() => {
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::rename(&staging, &dir)
+                .map_err(|e| MlError::Failed(format!("cannot write {}: {e}", dir.display())))?;
+            tracing::info!(
+                "{} unpacked: {kept} libraries in {}",
+                pack.name,
+                dir.display()
+            );
+            Ok(())
+        }
+        Ok(_) => {
+            let _ = std::fs::remove_dir_all(&staging);
+            Err(failed(format!("it holds no {}", pack.library)))
+        }
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&staging);
+            Err(failed(e))
+        }
+    }
+}
+
+/// The libraries of `wheel` into `lib`, flattened to their file names so an
+/// entry can never write outside it.
+fn extract_wheel(pack: &RuntimePack, wheel: &Path, lib: &Path) -> Result<usize, String> {
+    std::fs::create_dir_all(lib).map_err(|e| e.to_string())?;
+    let file = std::fs::File::open(wheel).map_err(|e| e.to_string())?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+    let mut kept = 0;
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i).map_err(|e| e.to_string())?;
+        let path = entry.name().to_string();
+        let Some(name) = registry::keep_from_runtime_archive(pack, &path) else {
+            continue;
+        };
+        let target = lib.join(name);
+        let mut out = std::fs::File::create(&target).map_err(|e| e.to_string())?;
+        io::copy(&mut entry, &mut out).map_err(|e| e.to_string())?;
+        use std::os::unix::fs::PermissionsExt as _;
+        let _ = std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755));
+        kept += 1;
+    }
+    Ok(kept)
 }
 
 /// Hashes and counts what passes through, and stops on cancel.
@@ -155,7 +236,7 @@ pub fn unpack_runtime(
                     .map_err(|e| e.to_string())?
                     .to_string_lossy()
                     .into_owned();
-                let Some(name) = registry::keep_from_runtime_archive(&path) else {
+                let Some(name) = registry::keep_from_runtime_archive(pack, &path) else {
                     continue;
                 };
                 // Flattened into `lib/`, by file name only: an entry can
@@ -200,7 +281,7 @@ pub fn unpack_runtime(
         Ok(kept)
     })();
     match outcome {
-        Ok(kept) if staging.join("lib/libonnxruntime.so").exists() => {
+        Ok(kept) if staging.join("lib").join(pack.library).exists() => {
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::rename(&staging, &dir)
                 .map_err(|e| MlError::Failed(format!("cannot write {}: {e}", dir.display())))?;

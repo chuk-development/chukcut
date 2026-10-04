@@ -55,25 +55,74 @@ pub fn library(root: &Path) -> Option<PathBuf> {
 }
 
 /// Directories to look in for CUDA and cuDNN libraries, beyond the system's
-/// loader path: `CHUKCUT_CUDA_LIB_DIRS` (colon-separated) and the runtime
-/// pack's own `lib/` (where a future cuDNN pack would unpack to).
-fn cuda_dirs(lib: &Path) -> Vec<PathBuf> {
+/// loader path: `CHUKCUT_CUDA_LIB_DIRS` (colon-separated), the cuDNN pack
+/// (`registry::CUDNN_PACK`) when it is installed and the CUDA 12 runtime is
+/// the one loading, and the runtime pack's own `lib/`.
+fn cuda_dirs(root: &Path, lib: &Path) -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = std::env::var_os("CHUKCUT_CUDA_LIB_DIRS")
         .map(|v| std::env::split_paths(&v).collect())
         .unwrap_or_default();
+    // The cuDNN pack is built for CUDA 12; only the CUDA 12 runtime pack
+    // may take it, or a CUDA 13 provider would meet a cuDNN for 12.
+    let cuda12 = registry::runtime_pack("cuda12").map(|p| registry::runtime_dir(root, p));
+    if cuda12.is_some_and(|dir| lib.starts_with(dir)) {
+        if let Some(pack) = registry::runtime_pack(registry::CUDNN_PACK) {
+            if registry::runtime_present(root, pack) {
+                dirs.push(registry::runtime_dir(root, pack).join("lib"));
+            }
+        }
+    }
     if let Some(parent) = lib.parent() {
         dirs.push(parent.to_path_buf());
     }
     dirs
 }
 
+/// The CUDA and cuDNN libraries the CUDA provider opens, by file-name
+/// prefix, in an order where each one's dependencies come before it. By
+/// prefix rather than by `ort`'s list of names because that list is CUDA
+/// 12's (`libcudart.so.12`), and the CUDA 13 provider asks for `.so.13`.
+const CUDA_PRELOAD: &[&str] = &[
+    "libcudart.so.",
+    "libnvJitLink.so.",
+    "libcublasLt.so.",
+    "libcublas.so.",
+    "libnvrtc.so.",
+    "libcurand.so.",
+    "libcufft.so.",
+    "libcudnn.so.",
+    "libcudnn_graph.so.",
+    "libcudnn_ops.so.",
+    "libcudnn_heuristic.so.",
+    "libcudnn_engines_precompiled.so.",
+    "libcudnn_engines_runtime_compiled.so.",
+    "libcudnn_adv.so.",
+    "libcudnn_cnn.so.",
+];
+
 /// Load each CUDA and cuDNN library the CUDA provider will ask for from the
 /// first of `dirs` that has it. A library loaded this way is found by its
 /// soname when the provider opens it later, so the user's loader path does
 /// not have to change. Libraries found nowhere are left to the system loader.
 fn preload_cuda(dirs: &[PathBuf]) {
-    for name in ep::cuda::CUDA_DYLIBS.iter().chain(ep::cuda::CUDNN_DYLIBS) {
-        if let Some(path) = dirs.iter().map(|d| d.join(name)).find(|p| p.is_file()) {
+    for prefix in CUDA_PRELOAD {
+        let found = dirs.iter().find_map(|dir| {
+            let mut names: Vec<PathBuf> = std::fs::read_dir(dir)
+                .ok()?
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with(prefix))
+                })
+                .collect();
+            // The soname (`libcudart.so.13`) sorts before the full version
+            // (`libcudart.so.13.0.96`); either is the same library.
+            names.sort();
+            names.into_iter().next()
+        });
+        if let Some(path) = found {
             if let Err(e) = ort::util::preload_dylib(&path) {
                 eprintln!(
                     "chukcut-ml-worker: could not preload {}: {e}",
@@ -97,7 +146,7 @@ impl Runtime {
                 format!("{} does not exist", lib.display()),
             ));
         }
-        preload_cuda(&cuda_dirs(&lib));
+        preload_cuda(&cuda_dirs(root, &lib));
         let committed = ort::init_from(&lib)
             .map_err(|e| {
                 (

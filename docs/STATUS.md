@@ -5,7 +5,7 @@ Sessions are long and are not reopened, so nothing important is allowed to live
 only in a conversation. If you learn something that would change how the next
 person works, it belongs in this repository, not in a chat log.
 
-Last updated: 2026-10-02 (**the UI is native now** — decision 0011. The Tauri
+Last updated: 2026-10-04 (ML worker: VitTrack re-finding, Remove background, CUDA — see "The ML worker" below). Previously 2026-10-02 (**the UI is native now** — decision 0011. The Tauri
 shell and the React frontend are gone; the engine is `crates/engine`
 (`chukcut-engine`, no UI dependency) and the app is a GPUI window in
 `crates/app`. What the native app does today: import (dialog or command line),
@@ -3164,6 +3164,60 @@ Rough or missing:
   OAuth originals (research waves 7–8).
 - Generated files are not offered to move into the project folder when it is
   first saved.
+
+## The ML worker: VitTrack re-finding, Remove background, GPU providers (2026-10-04)
+
+Decision 0025. `crates/ml-worker` is a separate process on ONNX Runtime
+loaded at run time; `modules/ml` supervises it; `chukcut-cli ml status
+--probe | models | runtimes | install | remove | bench` (also an MCP tool).
+
+- **Tracking T2 (VitTrack)** is a choice in the tracking inspector
+  ("Fast motion (AI)"), `chukcut-cli track --tracker vittrack` and MCP; it
+  falls back to KLT with a note when the worker cannot run. It now **finds
+  the object again**: when the search around the last box misses, the worker
+  scans the whole frame with the same template (lost frames 1–3, then every
+  third) and accepts a hit only with raw score ≥ 0.5, a plausible size and
+  the start box's colours. `tests/tracking.rs`
+  `vittrack_finds_the_ball_again_…`: a ball behind a bar and out of the frame
+  and back is held within 4.7 px after both. Traps found: at OpenCV's 0.2
+  threshold the box crept onto the occluder and grew without ever counting
+  as lost (now 0.25, sizes checked against the last confident box); without
+  the colour check the scan found "balls" in testsrc2's bars. Cost: a scan is
+  ~110 model runs at 640×360 (~0.3 s on the CPU); the hide-and-return
+  fixture tracks 134 frames in ~30 s on the CPU. No KLT-inside-the-box
+  rotation yet (VitTrack keeps the start angle).
+- **Remove background** (Video › Remove background › Auto remove, CLI/MCP
+  `remove_background`, `matting::commands`). The setting
+  (`CompositingMaterial::background`: model + version) is one undoable edit;
+  turning it on starts a bake of the clip's source range. Mattes are cache:
+  one greyscale PNG per source frame in `~/.cache/chukcut/mattes/<media
+  key>-rvm-<version>-960/`, written as they are made, shown by the preview at
+  once (`render::background::MatteFrames`, binding 5 of the quad shader,
+  `M_BACKGROUND`), and baked for whatever is missing before an export renders
+  (`matting_ensure`; an export fails in words if a matte cannot be made).
+  A frame without a matte yet draws whole. Verified on a 720×1280 talking
+  head: preview, `render-frame` and export all cut her out cleanly; an export
+  re-baked six deleted frames. Tests: `tests/matting.rs` (setting + undo,
+  hole detection, the compositor cutting at a hand-made matte in preview and
+  NV12 export on NVIDIA and lavapipe, a real RVM bake where installed).
+- **Rough:** RVM is people only (no BiRefNet for objects yet); no
+  click-to-select "custom" removal (needs SAM, T3); the matte is not
+  keyed by provider, so a clip half baked on the CPU and half on CUDA
+  differs by ~1/255 between the halves; changing a clip's speed or trimming
+  it longer leaves new frames unbaked until "Finish missing frames" or the
+  export; mattes are never cleaned up with the cache limit yet.
+- **GPU providers:** CUDA, then OpenVINO, then the CPU, probed per worker.
+  Runtime packs: `runtime:cpu` (fetched on first use), `cuda12`, `cuda13`,
+  and `cudnn9-cu12` (NVIDIA's PyPI wheel). `ml status` names the GPU vendors
+  and what to install. **Trap:** Ubuntu's CUDA 12.0 `libcudart.so.12` is too
+  old for ORT 1.28's CUDA 12 provider (`undefined symbol:
+  cudaLibraryGetKernel`). On the RTX 3060 here CUDA worked with the `cuda13`
+  pack and `CHUKCUT_CUDA_LIB_DIRS` pointing at a venv's
+  `nvidia/cu13/lib:nvidia/cudnn/lib`. RVM 15.6 ms per 540×960 frame on CUDA
+  against 99 ms on the CPU. OpenVINO needs an OpenVINO-enabled
+  `libonnxruntime.so` in `CHUKCUT_ORT_DYLIB` (Microsoft's Linux builds have
+  none); not tested on Intel hardware. All ML runs on job threads; the app
+  only polls status from its tick.
 
 ## The research
 
