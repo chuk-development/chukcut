@@ -5,7 +5,54 @@ Sessions are long and are not reopened, so nothing important is allowed to live
 only in a conversation. If you learn something that would change how the next
 person works, it belongs in this repository, not in a chat log.
 
-Last updated: 2026-10-04 (QA pass 2 over the wave 7–9 features and a showcase that shows them — see "QA pass 2" below). Previously 2026-10-04 (CI: clippy is fatal, the engine tests run on lavapipe with ffmpeg, the CLI and ML worker tests run too — see "CI" below). Previously 2026-10-04 (preview frames no longer leave the GPU: shared with GPUI through a patched GPUI, readback as the fallback — see "Preview frames shared with GPUI" under Perf). Previously 2026-10-04 (ML worker: VitTrack re-finding, Remove background, CUDA — see "The ML worker" below). Previously 2026-10-02 (**the UI is native now** — decision 0011. The Tauri
+## At a glance (2026-10-04)
+
+**State:** a working editor, not yet a daily driver. Waves 1–10 of
+`docs/plan/build-out.md` are merged; that table lists every feature and what
+each wave left open. Users read `docs/manual/`; this file is for whoever
+works on the code.
+
+- **Builds and runs** on Linux with Vulkan: `cargo build --release -p chukcut
+  -p chukcut-cli -p chukcut-ml-worker`. CI is green (fmt, clippy `-D
+  warnings`, engine tests on lavapipe, app, CLI and ML worker tests).
+- **Editing:** magnetic timeline, multi-select, linked A/V, keyframes with
+  easing, several timelines, compound clips, 11 templates, shortcut editor
+  with three presets. Undo for everything; autosave and crash recovery.
+- **Picture:** grading (basic, HSL, curves, wheels, LUTs, auto adjust, colour
+  match, presets), masks, chroma key, blend modes, 19 effects, effect clips,
+  ~130 transitions, titles and the text animator, captions (whisper.cpp or a
+  server), animated stickers, frame blending, motion blur, speed curves.
+- **Local AI** (`chukcut-ml-worker`, ONNX Runtime, CUDA bundle or CPU):
+  VitTrack tracking, RVM / BiRefNet background removal, MobileSAM select
+  object, matte-limited grade and effects, RIFE slow motion, LaMa remove
+  object, Real-ESRGAN enhance, face mesh retouch and follow face, HTDemucs
+  isolate voice. Baked frames are cache; `modules::prepare` bakes what an
+  opened project lacks.
+- **Hardware:** VAAPI decode zero-copy, NVDEC via NV12 textures, NVENC /
+  VAAPI / QSV export (trial-encoded first); preview frames shared with GPUI
+  as GPU memory (decision 0027), readback as fallback.
+- **CLI and MCP:** every command-layer function is reachable
+  (`crates/cli/tests/reachability.rs`).
+
+**Rough, in short** (details in the sections below and in `docs/QA.md`):
+AMD and Intel/hybrid laptops are not checked regularly; OpenVINO untested;
+the tarball ships neither the ML worker nor the CLI and runs only on the
+build machine's FFmpeg major; AI on the CPU takes minutes per clip, BiRefNet
+refuses it; RIFE ~6 fps and BiRefNet ~2 fps at 1080p on an RTX 3060; voice
+isolation peaks at 7–8 GB in the worker; body landmarks are not built; the
+inspector has no crop control (CLI only) and Speed › Speed effects is empty;
+cloud integrations are untested against live services.
+
+**Before you change code:** read "Traps that have already cost time" and
+the CLAUDE.md non-negotiables. Judge performance from a release build only.
+
+**Newest sections first:** Polish pass 3, CI, Colour AI, QA pass 2, Flaky
+tests, Frame blending, Timelines and compound clips. The ML sections are at
+the end of the file ("The ML worker" and its sub-sections).
+
+## Update history
+
+Last updated: 2026-10-04 (the "At a glance" block above, after polish pass 3). Previously 2026-10-04 (QA pass 2 over the wave 7–9 features and a showcase that shows them — see "QA pass 2" below). Previously 2026-10-04 (CI: clippy is fatal, the engine tests run on lavapipe with ffmpeg, the CLI and ML worker tests run too — see "CI" below). Previously 2026-10-04 (preview frames no longer leave the GPU: shared with GPUI through a patched GPUI, readback as the fallback — see "Preview frames shared with GPUI" under Perf). Previously 2026-10-04 (ML worker: VitTrack re-finding, Remove background, CUDA — see "The ML worker" below). Previously 2026-10-02 (**the UI is native now** — decision 0011. The Tauri
 shell and the React frontend are gone; the engine is `crates/engine`
 (`chukcut-engine`, no UI dependency) and the app is a GPUI window in
 `crates/app`. What the native app does today: import (dialog or command line),
