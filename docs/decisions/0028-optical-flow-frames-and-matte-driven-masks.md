@@ -125,3 +125,8 @@ background", on one clip, no copy on the lane above.
   the preview could interpolate while it plays.
 - Users asking for a separate mask per effect: the target would move from
   the clip's matte setting onto each effect.
+
+## Amendment, 2026-10-04 (agent/polish3)
+
+Missing frames are also baked when a project opens, not only after an edit
+or before an export: `modules::prepare`, decision 0029's amendment.

@@ -337,25 +337,69 @@ Fixed on this branch:
 
 Open:
 
-- **Medium: a template cannot be applied into an open project.** Templates
+- ~~**Medium: a template cannot be applied into an open project.** Templates
   only make new projects (`template_build_project`); there is no "use as a
   new timeline" or "insert at the playhead". The showcase therefore renders
   the Quick Cuts project and puts its video on the "Template cut" timeline,
   which is not editable there. Steps: open any project, Templates tab, click
-  a template: it asks for clips and opens a new project.
-- **Low: slots inside a compound clip are not slots any more.** After Alt+G
+  a template: it asks for clips and opens a new project.~~ Fixed on
+  agent/polish3: the fill dialog offers New project, New timeline and
+  Compound clip at playhead; CLI `template apply --into PROJECT [--as
+  timeline|compound] [--at T]`.
+- ~~**Low: slots inside a compound clip are not slots any more.** After Alt+G
   on a template project's slot clips, Templates › This project and
   `template slots` say the project has no slots, and Replace media is only
   reachable by opening the compound clip. Steps: `template apply x.chukcut
-  before-after a.mp4 b.mp4`, select both slot clips, Alt+G.
-- **Low: ML status names the CUDA runtime by path when the ML folder is a
+  before-after a.mp4 b.mp4`, select both slot clips, Alt+G.~~ Fixed on
+  agent/polish3: slots are listed in every timeline and inside compound
+  clips, and Replace media fills them where they are.
+- ~~**Low: ML status names the CUDA runtime by path when the ML folder is a
   symlink.** With `~/.cache/chukcut/ml` reached through a link, `ml status`
   and Settings say "CUDA 13 on the GPU with the CUDA runtime at
   /home/…/libcudart.so.13" instead of "with chukcut's CUDA libraries": the
   ML root is compared without resolving the link. Left to the ML owner
-  (`modules/ml`).
+  (`modules/ml`).~~ Fixed on agent/polish3: both paths are resolved first.
+  Seen: `ml status --probe` through the linked folder says "CUDA 13 on the
+  GPU with chukcut's CUDA libraries".
 
 Not tested, and why: playback with sound (Space and J/L are not pressed on
 this machine), voiceover recording, the portal file chooser, cloud
 providers, VAAPI/QSV (no Intel or AMD GPU here), and Select object by
 clicking on the player (covered by the ml2 pass; here through the CLI).
+
+## Polish pass 3, 2026-10-04 (`agent/polish3`)
+
+The three open items of QA pass 2 (above, struck through) and these, each
+seen in the debug app on Xvfb (lavapipe, `CHUKCUT_FILE_DIALOG=builtin`, no
+session bus, `HOME` and every `XDG_*` folder under `_scratch/`, the ML
+folder linked in, models on the RTX 3060):
+
+- **Template into the open project.** Quick Cuts as a compound clip at the
+  playhead: it went on a new lane above the busy main lane, selected, with
+  "The template was made for 1080×1920; it is laid out on this project's
+  1920×1080 canvas" in the title bar. Travel Diary as a new timeline: a
+  second tab "Travel Diary", opened, its slot 2 placeholder at 00:03.
+- **Slots inside the compound clip.** Templates › This project: "Slots (0 of
+  6 filled)"; the dialog lists six slots `in "Quick Cuts"`; Fill… on slot 1
+  with the built-in browser put the clip in, the compound clip's filmstrip
+  showed it, and the timeline stayed on Timeline 01.
+- **Bakes on open.** A project saved with Remove background on one clip
+  (its mattes then deleted from the cache) and Smooth slow-mo on another
+  (frames never baked) opened with "Preparing 209 frames · 43 % Stop" in
+  the title bar; 90 mattes and 119 flow frames were made in about 14 s and
+  the chip went away.
+- **Bake progress in a short window** (1366×700): Enhance 4x started from
+  the Enhance tab shows "Enhancing… 2 of 90", Stop and the bar pinned
+  under the body while the sections above scroll; Stop ended it and the
+  strip went away. Auto remove on the Remove background tab shows
+  "Removing the background… 20 of 120 frames" the same way.
+- **Stabilisation on a compound clip**: through the command layer
+  (`tests/analysis.rs`, RTX 3060); the inspector shows the Stabilise section
+  on a compound clip's Video › Basic and the clip menu enables Stabilise.
+  Not run from the UI on screen.
+
+Not tested, and why: the optical-flow strip was not seen running on screen
+(the prepare run baked that clip first; the strip is the same element as
+the other two); a user template whose own media is copied out, applied
+into a project (covered by the copy-out path `template_build_project`
+shares with it).

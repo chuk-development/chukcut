@@ -549,16 +549,35 @@ placeholder. More files than slots, a file that does not read, sound only,
 or a video in a photo-only slot is refused by name. The result lists each
 filled slot (`slowed_to` when it plays slowed) and the empty ones.
 
+#### `template apply --into PROJECT TEMPLATE [FILE...] [--as timeline|compound] [--at TIME] [--name NAME]`
+
+Puts a template into an existing project instead, its slots filled from the
+files the same way. `--as timeline` (the default) adds it as a new timeline
+and opens it; `--as compound` adds it as a compound clip starting at `--at`
+(default 0) on the first video lane with room there, or on a new lane on top.
+`--name` names the timeline or compound clip (the template's name by
+default). One undo step. The template's ids are made new, so the same
+template can go in twice; a media file the project already has is shared. A
+template made for another canvas shape is laid out on the project's canvas,
+and the result's `note` says so. The result has `sequence` (the new timeline
+or the compound clip's contents), `clip` (the compound clip), `filled` and
+`empty`.
+
 #### `template slots PROJECT`
 
-Lists a project's slots: number, clip, start, length, shape, and the file in
-it or `(empty)`.
+Lists a project's slots, in every timeline and inside compound clips: number,
+clip, start (in its own sequence), length, shape, and the file in it or
+`(empty)`. Each timeline's slots come together, in tab order; `sequence`,
+`sequence_name`, `in_compound` and `timeline` say where a slot is. A slot
+moved into a compound clip stays a slot.
 
 #### `template replace PROJECT --clip CLIP --media FILE [--from TIME]`
 
 Puts a file into a slot (`--clip slot:3`) or into any video or photo clip,
 with the same trimming, slowing and cropping. `--from` is where a longer clip
-starts. One undo step.
+starts. One undo step. `slot:N` is slot N of the open timeline when two
+timelines have one; a slot inside a compound clip is filled where it is,
+without opening it, and its clip id (or a prefix) names it too.
 
 #### `template save PROJECT --name NAME [--slot CLIP...] [--label TEXT...]`
 
@@ -577,10 +596,13 @@ chukcut-cli template apply trip.chukcut travel-diary a.mp4 b.mp4 c.jpg d.mp4
 chukcut-cli template slots trip.chukcut
 chukcut-cli template replace trip.chukcut --clip slot:2 --media better.mp4 --from 3
 chukcut-cli template save trip.chukcut --name "My trip look"
+chukcut-cli template apply --into trip.chukcut quick-cuts e.mp4 --as compound --at 12
 ```
 
 The MCP tools are `template_list` and `template_delete` (no `project`),
-`template_apply` (`project` is the file to write), `template_slots`,
+`template_apply` (`project` is the file to write; with `"into": true` it is
+the existing project, and `as` and `at` apply), `template_apply_into` (the
+same on an open project, also a batch op), `template_slots`,
 `template_replace` and `template_save`.
 
 ### Look
@@ -1127,7 +1149,8 @@ Removes the scene marks from the clip.
 
 #### `stabilise apply PROJECT CLIP`
 
-Measures the camera shake of a video clip and stabilises it. `--strength` from
+Measures the camera shake of a video clip, or of a compound clip's rendered
+contents, and stabilises it. `--strength` from
 0 to 1 (light 0.35, medium 0.6 (the default), strong 0.85, tripod 1).
 `--crop` is how much of the picture is cut off to hide the moving edges:
 `auto` (the default, the least that hides them) or a fraction up to 0.3. The

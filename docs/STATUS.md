@@ -97,6 +97,64 @@ Judge performance from a release build only.
    `pub fn` in a `commands.rs` that nothing calls. Pending: the tracking
    commands (attach, bake, smoothing), which the tracking branch exposes.
 
+## Polish pass 3, 2026-10-04 (agent/polish3)
+
+The open items of QA pass 2 and two follow-ups of the ML waves.
+
+- **A template goes into an open project** (`template_apply_into`,
+  `template/apply.rs`): as a new timeline tab (opened) or as a compound clip
+  at the playhead on the first video lane with room (a new lane on top when
+  none has room). The template is built as for a new project, then carried
+  in as a sequence, one undo step. Every id the template defines is made
+  fresh (a JSON walk over the known id fields), so the same template goes
+  in twice without clashing; media the project already has (same path) is
+  shared, not added again. A template made for another canvas is laid out
+  on the project's (a 9:16 template on 16:9 is pillarboxed) and the answer
+  says so. App: the fill dialog offers New project / New timeline /
+  Compound clip at playhead when a project is open. CLI: `template apply
+  --into PROJECT [--as timeline|compound] [--at T]`; MCP `template_apply`
+  with `into`, or `template_apply_into`. Seen on Xvfb: Quick Cuts as a
+  compound clip on a new lane, Travel Diary as a second tab.
+- **Slots inside compound clips stay slots.** `slot::slots` walks every
+  timeline in tab order and the compound clips each reaches; a slot carries
+  its sequence, whether that is a compound clip, and its timeline.
+  "Replace media" fills a slot where it is: `sequence::build::inside` wraps
+  the remove + insert in an activation of the slot's sequence and one back,
+  so the user stays where they were and undo walks the same way. The slots
+  dialog says `in "Quick Cuts"` instead of a time; `template replace
+  --clip slot:N` picks the open timeline's slot N, and a clip id prefix
+  reaches a slot inside a compound clip.
+- **Opening a project bakes what it lacks** (`modules::prepare`): mattes,
+  optical-flow frames, remade frames and compound mix-downs missing from
+  the cache, in every timeline and inside compound clips. Throttled: 1.5 s
+  of grace for the first frame, the cache read off the UI thread, then one
+  clip at a time through the modules' own jobs (so an edit meanwhile joins
+  the running bake). One chip in the title bar, "Preparing 209 frames ·
+  65 % Stop"; failures are said once at the end. Seen on Xvfb with the CUDA
+  bundle: a project with a cleared matte cache and a 0.5x optical-flow clip
+  baked 90 mattes and 119 flow frames in 14 s and the chip went away.
+- **Found on the way:** `matting_queue_missing` started bakes by clip id,
+  which only finds clips on the open timeline, so a matte inside a compound
+  clip never re-baked after an edit. It starts them by the job now.
+- **Stabilisation on compound clips**: measured on the rendered contents in
+  the clip's source time (`picture_of`, as scenes and reframe do), applied
+  through the compound clip's time map. `tests/analysis.rs` checks a 2x
+  compound clip's window follows the shake read at 2t.
+- **Trap, fixed: the sequence walk drifted a frame.** `walk_sequence` added
+  a rounded period (33 333 µs at 30 fps, a third of a microsecond short);
+  after thirty frames the drift outgrew `SAMPLE_SLACK` (10 µs) and every
+  later step rendered the previous frame. Scene times and reframe paths on
+  compound clips were a frame early after the first second. Each step's
+  time is now computed from its index.
+- **`ml status` through a linked ML folder** names "chukcut's CUDA
+  libraries": the root and the reported library paths are resolved before
+  the prefix test.
+- **A running bake's progress is pinned** under the inspector's scrolling
+  body (Enhance, Remove background, Speed's optical flow), with Stop and
+  the CPU warning, so a short window shows it without scrolling. A
+  compound clip that inherited a video clip's Enhance sub-tab showed the
+  Enhance body under a highlighted Basic; it falls back to Basic.
+
 ## CI (2026-10-04, agent/ci)
 
 `.github/workflows/ci.yml`, three jobs. What each one runs now:
@@ -161,7 +219,7 @@ code values, the H.264 encode). Table, fixes and open items: `docs/QA.md`,
   is `<cache>/chukcut/ml`; `scripts/demo.sh` links the user's one into its
   own cache, read-only in effect (mattes and flow frames go to
   `<cache>/chukcut/mattes` and `flow`, which stay isolated). A linked folder
-  makes `ml status` name the CUDA runtime by path (`docs/QA.md`, open).
+  made `ml status` name the CUDA runtime by path; fixed on agent/polish3.
 - **Trap: an ffmpeg GIF with transparency needs a reserved palette entry**
   (`palettegen=reserve_transparent=1`, `paletteuse=alpha_threshold=128`);
   without it the file is opaque and the sticker shows as a box. Not ours,
@@ -444,8 +502,8 @@ breadcrumbs or the clip menu to close; Alt+Shift+G puts the clips back).
   (`ClipKind::Text`), with no Audio, Speed or Adjust tab. Now
   `ClipKind::Compound`: Video (Basic, Mask), Audio, Speed, Animation,
   Adjust, Effects; scene detection in Video › Basic; the clip menu offers
-  scenes and beats. Stabilisation still refuses a compound clip (it would
-  need the camera path of a rendered composite).
+  scenes and beats. Stabilisation works on compound clips since
+  agent/polish3 (measured on the rendered contents).
 - **The export dialog's black cover** was the playhead at the end of the
   timeline: the preview rendered the empty instant after the last clip, so
   after playback had run to the end the player and the cover (the frame at
@@ -2671,9 +2729,11 @@ from our own styles, animations, effects, transitions, looks, drawn
 placeholders (`<data>/templates/placeholders/`) and synthesised music beds
 (`<data>/templates/music/`, `template/music.rs`). Commands:
 `template_list`, `template_build_project` / `template_new_project`,
-`template_open_project`, `template_slots`, `template_replace_media` (one
-undo step), `template_save`, `template_delete`, `template_thumbnail`. CLI and
-MCP: `template list|apply|slots|replace|save|delete` (`docs/cli.md`). App:
+`template_open_project`, `template_apply_into` (into the open project, as
+a timeline or a compound clip; agent/polish3), `template_slots`,
+`template_replace_media` (one undo step), `template_save`,
+`template_delete`, `template_thumbnail`. CLI and MCP: `template
+list|apply|slots|replace|save|delete`, `apply --into` (`docs/cli.md`). App:
 a Templates section on the start screen, a Templates tab in the asset panel
 (by category, "My templates", and "This project" with slots and "Save as
 template"), the fill dialog and the slots dialog (`editor/templates.rs`,
@@ -3933,10 +3993,10 @@ release worker and release CLI, load 6–7 from other agents' builds).
   LaMa's invention (steady in a still shot, shimmering in a moving one); a
   moving camera gets no memory, plate or smoothing; LaMa runs fp32 on the
   CUDA provider (TensorRT or fp16 next); a remade clip with optical flow on
-  blends instead; the inspector's progress sits below the two sections and
-  needs a scroll on a short window; a project opened with its frames
-  cleared from the cache bakes them at the first edit or the export, as
-  mattes and optical-flow frames do (opening does not queue bakes).
+  blends instead. (The progress below the two sections and the bakes not
+  queued on open were fixed on agent/polish3: the progress is pinned under
+  the inspector's body, and `modules::prepare` bakes what an opened
+  project lacks.)
   Settings › AI acceleration shows the remade frames' size with Clear.
 
 ## The research
