@@ -55,7 +55,10 @@ pub fn startup(state: &Arc<AppState>) -> (Startup, Option<RecoveryInfo>) {
                 Err(error) => eprintln!("chukcut: {error}"),
             }
         } else {
-            media.push(path);
+            // Absolute, like every other import: a relative path in the
+            // document breaks when the app starts elsewhere, and the same
+            // file imported again through a dialog became a second material.
+            media.push(PathBuf::from(absolute(&path)));
         }
     }
     if !opened && media.is_empty() {
