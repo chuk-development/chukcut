@@ -55,6 +55,9 @@ pub(crate) struct EnhancePanel {
     /// Bakes started after an edit, with the frames each had done.
     background: Vec<(u64, u32)>,
     redrawn: Option<std::time::Instant>,
+    /// The selected clip's made frames, read at most every two seconds:
+    /// (clip, when, made, total). Reading it lists the cache.
+    coverage: Option<(String, std::time::Instant, u32, u32)>,
 }
 
 struct Bake {
@@ -295,16 +298,30 @@ impl Editor {
                 ));
             }
             _ if removal.is_some() || upscale.is_some() => {
+                // A clip whose frames are all made has nothing to finish.
+                let coverage = self.enhance_coverage(&segment.id);
+                if let Some((made, total)) = coverage {
+                    progress.push(caption(
+                        if made >= total {
+                            format!("All {total} frames are made.")
+                        } else {
+                            format!("{made} of {total} frames are made.")
+                        },
+                        TEXT_MUTED,
+                    ));
+                }
                 let id = segment.id.clone();
-                progress.push(right(
-                    Button::new("enhance-rebake")
-                        .small()
-                        .label("Finish missing frames")
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            let result = enhance::enhance_bake(&this.state, id.clone());
-                            this.enhance_after(&id, result, cx);
-                        })),
-                ));
+                progress.extend(coverage.filter(|(m, t)| m < t).map(|_| {
+                    right(
+                        Button::new("enhance-rebake")
+                            .small()
+                            .label("Finish missing frames")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let result = enhance::enhance_bake(&this.state, id.clone());
+                                this.enhance_after(&id, result, cx);
+                            })),
+                    )
+                }));
             }
             _ => {}
         }
@@ -326,6 +343,24 @@ impl Editor {
             .into_any_element()
     }
 
+    /// How many of a clip's frames are made, cached for two seconds;
+    /// `None` when the engine cannot say.
+    fn enhance_coverage(&mut self, segment_id: &str) -> Option<(u32, u32)> {
+        if let Some((id, when, made, total)) = &self.inspector.enhance.coverage {
+            if id == segment_id && when.elapsed() < std::time::Duration::from_secs(2) {
+                return Some((*made, *total));
+            }
+        }
+        let coverage = enhance::enhance_coverage(&self.state, segment_id.to_string()).ok()?;
+        self.inspector.enhance.coverage = Some((
+            segment_id.to_string(),
+            std::time::Instant::now(),
+            coverage.baked,
+            coverage.total,
+        ));
+        Some((coverage.baked, coverage.total))
+    }
+
     /// After a command that may have started a bake for `segment_id`.
     fn enhance_after(
         &mut self,
@@ -334,6 +369,8 @@ impl Editor {
         cx: &mut Context<Self>,
     ) {
         self.refresh(cx);
+        // The setting changed: what is made changed with it.
+        self.inspector.enhance.coverage = None;
         match job {
             Ok(Some(job)) => {
                 self.inspector.enhance.background.retain(|(j, _)| *j != job);
@@ -646,6 +683,10 @@ impl Editor {
             .enhance
             .redrawn
             .is_none_or(|at| at.elapsed() >= std::time::Duration::from_millis(300));
+        if ended {
+            // Read the coverage afresh: the bake that ended changed it.
+            self.inspector.enhance.coverage = None;
+        }
         if ended || (landed && due) {
             // A new picture of the same document: frames just made.
             self.inspector.enhance.redrawn = Some(std::time::Instant::now());
