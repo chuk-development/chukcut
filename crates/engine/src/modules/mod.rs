@@ -7,6 +7,7 @@
 //! these modules and registered in `lib.rs`.
 
 pub mod analysis;
+pub mod animated;
 pub mod audio;
 pub mod audiofx;
 pub mod captions;

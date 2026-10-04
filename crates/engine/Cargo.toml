@@ -136,6 +136,14 @@ skrifa = "0.45.1"
 # The version GPUI already links, without default features, so it adds no
 # second copy to the build.
 resvg = { version = "0.46", default-features = false }
+# Animated stickers (modules/animated): Lottie parsed by velato into its own
+# model and drawn by vello, both linebender, Apache-2.0 OR MIT. velato without
+# its `vello` feature, because velato 0.12 pins vello 0.10 (wgpu 29); our
+# `RenderSink` adapter targets vello 0.11, which links the wgpu 30 we already
+# have, so vello runs on `gpu::render_context()`'s device and no second wgpu
+# enters the build. Check `cargo tree -d -i wgpu` after bumping either.
+velato = { version = "0.12", default-features = false }
+vello = { version = "0.11", default-features = false, features = ["wgpu"] }
 
 # --- cloud accounts and captions (modules/cloud, modules/speech) -------------
 #

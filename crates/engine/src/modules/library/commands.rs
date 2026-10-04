@@ -14,6 +14,7 @@ use std::sync::{Arc, OnceLock};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
+use super::animated_emoji::{self, AnimatedEmoji, AnimatedSource};
 use super::fonts::{self, FontCategory, FontEntry, FontSource, InstalledFont, PreviewHost};
 use super::looks::{self, LookEntry};
 use super::sounds::{self, MusicSource, SfxPack, Sound, Track};
@@ -264,6 +265,56 @@ pub async fn library_sticker_add(
         stickers::place(project, &imported.id, at)?
     };
     crate::modules::timeline::commands::timeline_apply(state, command)
+}
+
+// --- animated stickers -----------------------------------------------------------
+
+type AnimatedList = Arc<(Vec<AnimatedEmoji>, bool)>;
+
+fn animated_cell() -> &'static Mutex<Option<AnimatedList>> {
+    static LIST: OnceLock<Mutex<Option<AnimatedList>>> = OnceLock::new();
+    LIST.get_or_init(|| Mutex::new(None))
+}
+
+/// Noto Animated Emoji, most used first, and whether the list is an old copy
+/// (see `animated_emoji`).
+pub fn library_animated_index() -> Result<AnimatedList, String> {
+    if let Some(list) = animated_cell().lock().clone() {
+        return Ok(list);
+    }
+    let list = Arc::new(animated_emoji::index(
+        &AnimatedSource::default(),
+        &super::catalogue_dir(),
+    )?);
+    if !list.1 {
+        *animated_cell().lock() = Some(Arc::clone(&list));
+    }
+    Ok(list)
+}
+
+/// The animated emoji matching `query` (name, tag, glyph or code point).
+pub fn library_animated_search(query: &str) -> Result<Vec<AnimatedEmoji>, String> {
+    let list = library_animated_index()?;
+    Ok(animated_emoji::search(&list.0, query, None)
+        .into_iter()
+        .cloned()
+        .collect())
+}
+
+/// A small looping GIF of the emoji for a tile (`side` pixels).
+pub fn library_animated_preview(emoji: &AnimatedEmoji, side: u32) -> Result<PathBuf, String> {
+    animated_emoji::preview(
+        &AnimatedSource::default(),
+        emoji,
+        &super::cache_dir(),
+        &super::thumbs_dir().join("animated"),
+        side,
+    )
+}
+
+/// The emoji's Lottie file with its licence record, ready to import.
+pub fn library_animated_fetch(emoji: &AnimatedEmoji) -> Result<PathBuf, String> {
+    animated_emoji::fetch(&AnimatedSource::default(), emoji, &super::cache_dir())
 }
 
 // --- music and sound effects ---------------------------------------------------

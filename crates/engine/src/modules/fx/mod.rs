@@ -14,12 +14,15 @@
 //! - [`catalog`] — every effect, its parameters, ranges and defaults.
 //! - [`edit`] — the edits, as `EditCommand`s, and the layout builders.
 //! - [`commands`] — the shell-facing API, `fx_<verb>`.
+//! - [`motion_blur`] — the one effect the compositor draws itself, by
+//!   averaging the clip at several instants of its movement.
 //! - [`render`] — the pipelines and the pass recorder the compositor drives.
 //! - [`tiles`] — preview tiles rendered by the compositor and cached on disk.
 
 pub mod catalog;
 pub mod commands;
 pub mod edit;
+pub mod motion_blur;
 pub mod render;
 pub mod tiles;
 

@@ -44,6 +44,9 @@ pub(crate) struct LibraryPanel {
     pub(super) sticker_style: StickerStyle,
     /// How many stickers of the category are drawn; "Show more" raises it.
     pub(super) sticker_shown: usize,
+    /// Noto Animated Emoji and whether the list is an old copy.
+    pub(super) animated: Option<Result<AnimatedList, String>>,
+    pub(super) animated_loading: bool,
     pub(super) icons: Option<Result<Vec<IconHit>, String>>,
     /// The query the icons answer.
     pub(super) icons_for: String,
@@ -107,6 +110,8 @@ impl LibraryPanel {
             sticker_loading: false,
             sticker_style: StickerStyle::Fluent3d,
             sticker_shown: STICKER_PAGE,
+            animated: None,
+            animated_loading: false,
             icons: None,
             icons_for: String::new(),
             icons_loading: false,
@@ -128,6 +133,12 @@ impl LibraryPanel {
 
 /// Stickers drawn per category before "Show more".
 pub(super) const STICKER_PAGE: usize = 96;
+
+/// The animated emoji list as the library hands it out.
+pub(super) type AnimatedList = Arc<(
+    Vec<chukcut_engine::modules::library::animated_emoji::AnimatedEmoji>,
+    bool,
+)>;
 
 impl Editor {
     /// Run `work` on a blocking thread and hand its answer to `done`.
