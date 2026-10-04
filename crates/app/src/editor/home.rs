@@ -86,6 +86,7 @@ impl Home {
             let home = cx.entity().downgrade();
             super::templates::open_fill(
                 info.clone(),
+                false,
                 move |request, _, cx| {
                     let _ = home.update(cx, |_, cx| cx.emit(HomeEvent::FromTemplate(request)));
                 },

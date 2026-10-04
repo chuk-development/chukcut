@@ -245,6 +245,31 @@ pub fn tracks_of<'a>(project: &'a Project, id: &str) -> Option<&'a [Track]> {
     project.materials.sequence(id).map(|s| s.tracks.as_slice())
 }
 
+/// Clip `segment_id` wherever it is: on the active sequence's lanes or on a
+/// parked sequence's (another timeline, a compound clip's contents). Answers
+/// the sequence's id, the lane and the clip.
+pub fn find_segment<'a>(
+    project: &'a Project,
+    segment_id: &str,
+) -> Option<(&'a str, &'a Track, &'a crate::modules::project::Segment)> {
+    let active = project
+        .tracks
+        .iter()
+        .map(|t| (project.sequence.id.as_str(), t));
+    let parked = project
+        .materials
+        .sequences
+        .iter()
+        .flat_map(|s| s.tracks.iter().map(move |t| (s.id.as_str(), t)));
+    active.chain(parked).find_map(|(id, track)| {
+        track
+            .segments
+            .iter()
+            .find(|s| s.id == segment_id)
+            .map(|s| (id, track, s))
+    })
+}
+
 /// The length of sequence `id`: how far into it a compound clip can read.
 pub fn duration_of(project: &Project, id: &str) -> Option<Micros> {
     tracks_of(project, id).map(tracks_duration)

@@ -431,7 +431,8 @@ enum PresetCommand {
 enum TemplateCommand {
     /// List the templates: the built-ins, then your own.
     List(TemplateListArgs),
-    /// Make a new project file from a template, your files filling its slots.
+    /// Make a new project file from a template, your files filling its slots;
+    /// with --into, put it into the project as a timeline or compound clip.
     Apply(On<TemplateApplyArgs>),
     /// Save a project as a template of your own.
     Save(On<TemplateSaveArgs>),
@@ -674,6 +675,13 @@ fn dispatch(command: Command, dry: bool, ctx: &Ctx) -> CliResult<(&'static str, 
         Command::ExportQueue(o) => on(o, dry, ctx),
         Command::RenderFrame(o) => on(o, dry, ctx),
         Command::Template(TemplateCommand::List(args)) => Ok(("template_list", args.run()?, false)),
+        Command::Template(TemplateCommand::Apply(o)) if o.args.into => {
+            let into: On<TemplateApplyIntoArgs> = On {
+                project: o.project,
+                args: o.args.into_args(),
+            };
+            on(into, dry, ctx)
+        }
         Command::Template(TemplateCommand::Apply(o)) => {
             let (mut session, outcome) = o.args.create(&o.project)?;
             if !dry {

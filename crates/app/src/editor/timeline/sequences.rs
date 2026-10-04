@@ -97,7 +97,7 @@ impl Editor {
 
     /// After the open sequence changed: nothing selected, the view from the
     /// start unless the caller places the playhead.
-    fn after_switch(&mut self, at: Micros, cx: &mut Context<Self>) {
+    pub(crate) fn after_switch(&mut self, at: Micros, cx: &mut Context<Self>) {
         self.refresh(cx);
         self.clear_selection();
         self.timeline.selected_transition = None;

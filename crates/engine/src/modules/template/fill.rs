@@ -156,14 +156,17 @@ pub fn plan(
 /// the media's. A speed ramp is dropped, because it was timed to the
 /// placeholder. Any picture clip may be filled, slot or not: a clip without
 /// a marker gets one, which is how "replace media" works on a plain clip.
+///
+/// The clip may be on any sequence: a slot that was moved into a compound
+/// clip, or one on another timeline, is filled where it is
+/// (`sequence::build::inside`), without opening it.
 pub fn replace_command(
     project: &Project,
     segment_id: &str,
     media: &FillMedia,
     source_start: Option<Micros>,
 ) -> Result<((Id, serde_json::Value), FillPlan, EditCommand), String> {
-    let (track, before) = project
-        .segment(segment_id)
+    let (sequence_id, track, before) = crate::modules::sequence::find_segment(project, segment_id)
         .ok_or("the clip is no longer on the timeline")?;
     let pool = &project.materials;
     if pool.video(&before.material_id).is_none() && pool.image(&before.material_id).is_none() {
@@ -216,20 +219,21 @@ pub fn replace_command(
     });
     after.extras.push(entry.0.clone());
 
+    let commands = vec![
+        EditCommand::RemoveSegment {
+            track_id: track.id.clone(),
+            segment: before.clone(),
+            index,
+        },
+        EditCommand::InsertSegment {
+            track_id: track.id.clone(),
+            segment: after,
+            index,
+        },
+    ];
     let command = EditCommand::Composite {
         label: "Replace media".into(),
-        commands: vec![
-            EditCommand::RemoveSegment {
-                track_id: track.id.clone(),
-                segment: before.clone(),
-                index,
-            },
-            EditCommand::InsertSegment {
-                track_id: track.id.clone(),
-                segment: after,
-                index,
-            },
-        ],
+        commands: crate::modules::sequence::build::inside(project, sequence_id, commands),
     };
     Ok((entry, plan, command))
 }

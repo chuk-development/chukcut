@@ -1,8 +1,10 @@
 //! The Templates tab: the gallery by category, the user's own templates, and
 //! for the open project its slots and "Save as template".
 //!
-//! Using a template makes a new project, as on the start screen: the editor
-//! asks about unsaved changes first and hands the request to the shell.
+//! Using a template makes a new project, as on the start screen (the editor
+//! asks about unsaved changes first and hands the request to the shell), or
+//! puts it into the open project as a new timeline or a compound clip at the
+//! playhead, one undo step (`templates::apply_template_into`).
 
 use super::*;
 use crate::editor::lifecycle::EditorEvent;
@@ -37,6 +39,7 @@ pub(crate) fn gallery(
         let editor_handle = cx.entity().downgrade();
         templates::open_fill(
             info.clone(),
+            true,
             move |request, window, cx| {
                 let _ = editor_handle.update(cx, |editor, cx| {
                     editor.use_template(request, window, cx);
@@ -51,8 +54,13 @@ pub(crate) fn gallery(
 
 impl Editor {
     /// Make a new project from a template: the shell's job, after the
-    /// unsaved guard.
+    /// unsaved guard. Or put it into this project, which needs no guard: it
+    /// is one undo step.
     fn use_template(&mut self, request: FillRequest, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(mode) = request.into {
+            self.apply_template_into(request, mode, cx);
+            return;
+        }
         self.guard_unsaved(window, cx, move |editor, _, cx| {
             editor.pause();
             cx.emit(EditorEvent::FromTemplate(request.clone()));
@@ -84,7 +92,7 @@ impl Editor {
             .flex_col()
             .gap(px(10.0))
             .child(Self::hint(
-                "Click a template to choose your clips; it opens as a new project.",
+                "Click a template to choose your clips: a new project, a new timeline here, or a compound clip at the playhead.",
             ))
             .child(Self::tile_area("template-grid").child(Self::tile_grid(tiles)))
             .into_any_element()

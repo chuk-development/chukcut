@@ -262,6 +262,7 @@ operations!(
     cloud::StockDownloadArgs,
     render::ExportArgs,
     render::RenderFrameArgs,
+    template::TemplateApplyIntoArgs,
     template::TemplateSaveArgs,
     template::TemplateReplaceArgs,
     template::TemplateSlotsArgs,

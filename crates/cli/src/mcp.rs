@@ -309,6 +309,11 @@ impl Server {
             _ => {}
         }
         let project = take_project(args)?;
+        // `template_apply` with "into" is the operation on an existing
+        // project; everything else about it writes a new file.
+        let into =
+            name == "template_apply" && args.get("into").and_then(Value::as_bool) == Some(true);
+        let name = if into { "template_apply_into" } else { name };
         match name {
             "template_apply" => {
                 let args: TemplateApplyArgs = serde_json::from_value(args.clone())
@@ -589,7 +594,7 @@ fn tools() -> Vec<Value> {
     out.push(tool_json(
         apply.name,
         &format!(
-            "{} \"project\" is the new project file to write.",
+            "{} \"project\" is the new project file to write, or with \"into\" the existing project.",
             apply.description
         ),
         with_project(apply.schema),

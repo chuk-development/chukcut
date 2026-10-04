@@ -5,6 +5,8 @@
 //!   user's files filling its slots in order.
 //! - [`template_replace_media`] — put a file into one slot (or any picture
 //!   clip) of the open project, as one undo step.
+//! - [`template_apply_into`] — a template into the open project, as a new
+//!   timeline or a compound clip at the playhead (`apply.rs`).
 //! - [`template_slots`] — the open project's slots.
 //! - [`template_save`] — the open project as a template of the user's own.
 //! - [`template_delete`], [`template_thumbnail`].
@@ -19,6 +21,8 @@ use crate::modules::project::document::{MaterialKind, Micros, Project};
 use crate::modules::timeline::commands::EditResponse;
 use crate::state::AppState;
 
+use super::apply;
+pub use super::apply::ApplyAs;
 use super::fill::{self, FillKind, FillMedia, FillPlan};
 use super::format::{self, TemplateFile};
 use super::slot::{self, Slot, SlotMedia};
@@ -261,13 +265,17 @@ pub fn template_build_project(
     media: &[String],
     name: Option<String>,
 ) -> Result<TemplateApplied, String> {
-    build_from(load(id)?, media, name)
+    build_from(load(id)?, media, name, None)
 }
 
+/// `owner` is the project the template's own media is copied out for: the
+/// new project itself when `None`, or the open project a template is
+/// applied into.
 fn build_from(
     template: Loaded,
     media: &[String],
     name: Option<String>,
+    owner: Option<&str>,
 ) -> Result<TemplateApplied, String> {
     let mut project = template.project;
     let slots = slot::slots(&project);
@@ -292,7 +300,7 @@ fn build_from(
     // A user template's own media (a logo, a sound) is copied out of its
     // directory, so deleting or moving the template leaves the project whole.
     if let Some(dir) = &template.dir {
-        let to = assets::project_media_dir(&project.id);
+        let to = assets::project_media_dir(owner.unwrap_or(&project.id));
         format::copy_out_media(&mut project, dir, &to)?;
     }
 
@@ -362,6 +370,90 @@ pub fn template_open_project(state: &Arc<AppState>, project: &Project) {
     crate::modules::proxy::commands::proxy_request_media(
         pool.videos.iter().map(|m| m.path.clone()).collect(),
     );
+}
+
+/// What [`template_apply_into`] did.
+#[derive(Serialize)]
+pub struct AppliedInto {
+    pub edit: EditResponse,
+    /// The new timeline, or the compound clip's contents.
+    pub sequence_id: String,
+    /// The compound clip, when the template went in as one.
+    pub segment_id: Option<String>,
+    /// The slots filled, with the clip ids they have in the project.
+    pub filled: Vec<FilledSlot>,
+    /// Slots still showing their placeholder, by index.
+    pub empty: Vec<u32>,
+    /// Set when the template was made for another canvas shape.
+    pub note: Option<String>,
+}
+
+/// Put template `id` into the open project — `media` filling its slots in
+/// order, as for a new project — as a new timeline (opened) or as a compound
+/// clip starting at `at` on the first video lane with room. One undo step.
+/// `name` names the timeline or the compound clip; the template's name when
+/// `None`. Blocking: probes every file, without the project lock held.
+pub fn template_apply_into(
+    state: &Arc<AppState>,
+    id: &str,
+    media: &[String],
+    mode: ApplyAs,
+    at: Option<Micros>,
+    name: Option<String>,
+) -> Result<AppliedInto, String> {
+    let owner = state.with_project(|p| p.id.clone())?;
+    let template = load(id)?;
+    let built = build_from(template, media, name, Some(&owner))?;
+    let name = built.project.name.clone();
+    let merged = {
+        let mut guard = state.project.write();
+        let project = guard.as_mut().ok_or("no project is open")?;
+        let merged = apply::merge(project, &built.project, &name, mode, at.unwrap_or(0))?;
+        let before = project.materials.clone();
+        apply::insert_inert(&mut project.materials, &merged.inert);
+        if let Err(error) = state.history.write().apply(project, merged.command.clone()) {
+            project.materials = before;
+            return Err(error);
+        }
+        merged
+    };
+    let paths: Vec<String> = built
+        .project
+        .materials
+        .videos
+        .iter()
+        .map(|m| m.path.clone())
+        .collect();
+    crate::modules::proxy::commands::proxy_request_media(paths);
+    if let Some(project) = state.project.read().as_ref() {
+        let pool = &project.materials;
+        crate::modules::workspace::commands::workspace_cache_in_use(
+            pool.videos
+                .iter()
+                .map(|m| m.path.clone())
+                .chain(pool.audios.iter().map(|m| m.path.clone()))
+                .chain(pool.images.iter().map(|m| m.path.clone()))
+                .collect(),
+        );
+    }
+    let filled = built
+        .filled
+        .into_iter()
+        .map(|mut f| {
+            if let Some(new) = merged.ids.get(&f.segment_id) {
+                f.segment_id = new.clone();
+            }
+            f
+        })
+        .collect();
+    Ok(AppliedInto {
+        edit: crate::modules::voice::commands::respond(state)?,
+        sequence_id: merged.sequence_id,
+        segment_id: merged.segment_id,
+        filled,
+        empty: built.empty,
+        note: merged.note,
+    })
 }
 
 /// The slots of the open project, in fill order.
@@ -493,6 +585,18 @@ pub fn template_thumbnail(id: &str, short: u32) -> Result<PathBuf, String> {
     thumb::render(&loaded.file, &loaded.project, &loaded.tile_key(), short)
 }
 
+/// Templates for unit tests elsewhere in the module, built without drawing
+/// assets or reading the user's folder.
+#[cfg(test)]
+pub(crate) mod tests_support {
+    use super::*;
+
+    /// Built-in template `id`'s project, slots unfilled.
+    pub fn built(id: &str) -> Project {
+        load_from(id, Path::new("/nonexistent")).unwrap().project
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -536,7 +640,7 @@ mod tests {
     #[test]
     fn more_files_than_slots_is_refused_before_anything_is_read() {
         let quick = load_from("talking-points", Path::new("/nonexistent")).unwrap();
-        let error = build_from(quick, &["/a.mp4".into(), "/b.mp4".into()], None).unwrap_err();
+        let error = build_from(quick, &["/a.mp4".into(), "/b.mp4".into()], None, None).unwrap_err();
         assert!(error.contains("1 slot,"), "{error}");
     }
 
@@ -569,7 +673,7 @@ mod tests {
     #[test]
     fn a_missing_file_is_named() {
         let quick = load_from("quick-cuts", Path::new("/nonexistent")).unwrap();
-        let error = build_from(quick, &["/no/such/clip.mp4".into()], None).unwrap_err();
+        let error = build_from(quick, &["/no/such/clip.mp4".into()], None, None).unwrap_err();
         assert!(error.contains("/no/such/clip.mp4"), "{error}");
     }
 }

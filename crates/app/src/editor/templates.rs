@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use chukcut_engine::modules::template::commands::{
-    self as template_commands, SaveRequest, TemplateInfo,
+    self as template_commands, ApplyAs, SaveRequest, TemplateInfo,
 };
 use chukcut_engine::modules::template::slot::{Slot, SlotMedia};
 use gpui::assets::IconName as Lucide;
@@ -19,7 +19,7 @@ use gpui::component::{Disableable as _, Sizable as _, WindowExt as _};
 use gpui::{AnyElement, Entity, EventEmitter, ObjectFit, WeakEntity};
 
 use super::*;
-use crate::ui::Badge;
+use crate::ui::{Badge, SegmentedTabs};
 
 /// The short edge of a rendered preview tile, in pixels.
 const TILE_SHORT: u32 = 240;
@@ -276,19 +276,33 @@ pub(crate) struct FillRequest {
     pub template_id: String,
     pub media: Vec<PathBuf>,
     pub name: Option<String>,
+    /// `None`: a new project. Otherwise into the open project, as a new
+    /// timeline or a compound clip at the playhead.
+    pub into: Option<ApplyAs>,
 }
 
 type OnCreate = Rc<dyn Fn(FillRequest, &mut Window, &mut App)>;
 
+/// Where the fill dialog can put a template: only a new project from the
+/// start screen; from an open project, also into it.
+const DESTINATIONS: [(&str, Option<ApplyAs>); 3] = [
+    ("New project", None),
+    ("New timeline", Some(ApplyAs::Timeline)),
+    ("Compound clip at playhead", Some(ApplyAs::Compound)),
+];
+
 /// Open the fill dialog for `info`. `on_create` gets the files in slot order.
+/// `in_project`: a project is open, and the dialog offers to put the
+/// template into it.
 pub(crate) fn open_fill(
     info: TemplateInfo,
+    in_project: bool,
     on_create: impl Fn(FillRequest, &mut Window, &mut App) + 'static,
     window: &mut Window,
     cx: &mut App,
 ) {
     let on_create: OnCreate = Rc::new(on_create);
-    let dialog = cx.new(|cx| FillDialog::new(info, on_create, window, cx));
+    let dialog = cx.new(|cx| FillDialog::new(info, in_project, on_create, window, cx));
     window.open_dialog(cx, move |surface, _, _| {
         surface
             .w(px(620.0))
@@ -304,11 +318,16 @@ struct FillDialog {
     media: Vec<Option<PathBuf>>,
     name: Entity<InputState>,
     on_create: OnCreate,
+    /// Whether the open project is offered as a destination.
+    in_project: bool,
+    /// The chosen entry of [`DESTINATIONS`].
+    destination: usize,
 }
 
 impl FillDialog {
     fn new(
         info: TemplateInfo,
+        in_project: bool,
         on_create: OnCreate,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -319,6 +338,8 @@ impl FillDialog {
             info,
             name,
             on_create,
+            in_project,
+            destination: 0,
         }
     }
 
@@ -370,6 +391,7 @@ impl FillDialog {
             template_id: self.info.id.clone(),
             media,
             name: (!typed.is_empty()).then_some(typed),
+            into: DESTINATIONS[self.destination].1,
         }
     }
 }
@@ -489,11 +511,16 @@ impl Render for FillDialog {
         let create = {
             let on_create = Rc::clone(&self.on_create);
             let request = self.request(cx);
+            let what = match DESTINATIONS[self.destination].1 {
+                None => "Create project",
+                Some(ApplyAs::Timeline) => "Add timeline",
+                Some(ApplyAs::Compound) => "Add compound clip",
+            };
             Button::new("fill-create")
                 .label(if filled == total {
-                    "Create project".to_string()
+                    what.to_string()
                 } else {
-                    format!("Create with {filled} of {total}")
+                    format!("{what} with {filled} of {total}")
                 })
                 .small()
                 .primary()
@@ -535,6 +562,22 @@ impl Render for FillDialog {
                             )),
                     ),
             )
+            .when(self.in_project, |d| {
+                let dialog = cx.entity().downgrade();
+                d.child(
+                    SegmentedTabs::new(
+                        "fill-destination",
+                        DESTINATIONS.iter().map(|(label, _)| *label),
+                        self.destination,
+                    )
+                    .on_select(move |index, _, cx| {
+                        let _ = dialog.update(cx, |dialog, cx| {
+                            dialog.destination = index;
+                            cx.notify();
+                        });
+                    }),
+                )
+            })
             .child(
                 Input::new(&self.name)
                     .small()
@@ -582,6 +625,70 @@ impl Render for FillDialog {
                     )
                     .child(create),
             )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// A template into the open project
+// ---------------------------------------------------------------------------
+
+impl Editor {
+    /// Put the template `request` names into the open project, as a new
+    /// timeline (opened) or a compound clip at the playhead. One undo step;
+    /// the files are probed off the UI thread.
+    pub(crate) fn apply_template_into(
+        &mut self,
+        request: FillRequest,
+        mode: ApplyAs,
+        cx: &mut Context<Self>,
+    ) {
+        self.pause();
+        let at = self.clock.position();
+        let state = Arc::clone(&self.state);
+        self.status = Some("Adding the template\u{2026}".into());
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let media: Vec<String> = request
+                .media
+                .iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect();
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    template_commands::template_apply_into(
+                        &state,
+                        &request.template_id,
+                        &media,
+                        mode,
+                        Some(at),
+                        request.name,
+                    )
+                })
+                .await;
+            let _ = this.update(cx, |editor, cx| {
+                match result {
+                    Ok(applied) => {
+                        match mode {
+                            ApplyAs::Timeline => editor.after_switch(0, cx),
+                            ApplyAs::Compound => {
+                                editor.refresh(cx);
+                                if let Some(id) = &applied.segment_id {
+                                    editor.select_only(id);
+                                }
+                            }
+                        }
+                        editor.status = applied.note.map(SharedString::from);
+                    }
+                    Err(error) => {
+                        editor.refresh(cx);
+                        editor.status = Some(error.into());
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 }
 
@@ -767,25 +874,35 @@ impl Render for SlotsDialog {
                                     .text_size(px(TEXT_CAPTION))
                                     .text_color(rgb(TEXT_MUTED))
                                     .child(format!(
-                                        "{} at {} \u{b7} {}:{}",
+                                        "{} {} \u{b7} {}:{}",
                                         seconds_label(slot.duration),
-                                        seconds_label(slot.start),
+                                        // A slot inside a compound clip
+                                        // has its time in there, which the
+                                        // timeline does not show.
+                                        if slot.in_compound {
+                                            format!("in \u{201c}{}\u{201d}", slot.sequence_name)
+                                        } else {
+                                            format!("at {}", seconds_label(slot.start))
+                                        },
                                         slot.aspect[0],
                                         slot.aspect[1]
                                     )),
                             ),
                     )
                     .child(
-                        Button::new(SharedString::from(format!("slot-replace-{}", slot.index)))
-                            .label(if slot.filled {
-                                "Replace\u{2026}"
-                            } else {
-                                "Fill\u{2026}"
-                            })
-                            .xsmall()
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.replace(segment_id.clone(), cx)
-                            })),
+                        Button::new(SharedString::from(format!(
+                            "slot-replace-{}",
+                            slot.segment_id
+                        )))
+                        .label(if slot.filled {
+                            "Replace\u{2026}"
+                        } else {
+                            "Fill\u{2026}"
+                        })
+                        .xsmall()
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| this.replace(segment_id.clone(), cx)),
+                        ),
                     )
                     .into_any_element()
             })

@@ -867,6 +867,40 @@ pub fn duplicate_timeline(project: &Project, id: &str) -> Result<(EditCommand, I
     Ok((b.finish("Duplicate timeline"), new))
 }
 
+/// `commands`, made against the lanes of sequence `id`, as one list of edits
+/// on the open document: when `id` is not the active sequence they run
+/// between an activation of `id` and one back to where the user is, so an
+/// edit can reach a clip inside a compound clip or on another timeline
+/// without the user opening it. The two activations cancel out, so the
+/// breadcrumbs and the tab order are what they were, and undo walks the
+/// same way back.
+pub fn inside(project: &Project, id: &str, commands: Vec<EditCommand>) -> Vec<EditCommand> {
+    if project.sequence.id == id {
+        return commands;
+    }
+    let here = project.sequence.id.clone();
+    let path = project.sequence.path.clone();
+    let mut out = Vec::with_capacity(commands.len() + 2);
+    out.push(EditCommand::Sequence {
+        edit: SequenceEdit::Activate {
+            from: here.clone(),
+            from_path: path.clone(),
+            to: id.to_string(),
+            to_path: Vec::new(),
+        },
+    });
+    out.extend(commands);
+    out.push(EditCommand::Sequence {
+        edit: SequenceEdit::Activate {
+            from: id.to_string(),
+            from_path: Vec::new(),
+            to: here,
+            to_path: path,
+        },
+    });
+    out
+}
+
 /// Whether `material_id` is a sequence — a compound clip's material.
 pub fn is_compound(project: &Project, material_id: &str) -> bool {
     exists(project, material_id)
