@@ -583,17 +583,22 @@ or the compound clip's contents), `clip` (the compound clip), `filled` and
 
 Lists a project's slots, in every timeline and inside compound clips: number,
 clip, start (in its own sequence), length, shape, and the file in it or
-`(empty)`. Each timeline's slots come together, in tab order; `sequence`,
-`sequence_name`, `in_compound` and `timeline` say where a slot is. A slot
-moved into a compound clip stays a slot.
+`(empty)`. The numbers run across the whole project, so two templates in one
+project never both have a slot 1: each timeline's slots come together, in tab
+order, its own first and then each compound clip's. When slots are in more
+than one place, each line says where ("on the open timeline", "on timeline",
+"in compound clip"). In JSON, `number` is that number, `index` the fill order
+inside its own template, and `sequence`, `sequence_name`, `in_compound`,
+`timeline` and `open_timeline` say where a slot is. A slot moved into a
+compound clip stays a slot.
 
 #### `template replace PROJECT --clip CLIP --media FILE [--from TIME]`
 
 Puts a file into a slot (`--clip slot:3`) or into any video or photo clip,
 with the same trimming, slowing and cropping. `--from` is where a longer clip
-starts. One undo step. `slot:N` is slot N of the open timeline when two
-timelines have one; a slot inside a compound clip is filled where it is,
-without opening it, and its clip id (or a prefix) names it too.
+starts. One undo step. `slot:N` is the slot `template slots` numbers N; a
+slot inside a compound clip is filled where it is, without opening it, and
+its clip id (or a prefix) names it too.
 
 #### `template save PROJECT --name NAME [--slot CLIP...] [--label TEXT...]`
 

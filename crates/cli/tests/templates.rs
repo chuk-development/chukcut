@@ -134,7 +134,7 @@ fn a_template_goes_into_an_existing_project_as_a_timeline_or_a_compound_clip() {
     assert_eq!(slots.as_array().unwrap().len(), 6);
 
     // As a compound clip at 1 s on the first timeline: its slots are slots
-    // inside the compound clip, and `slot:N` fills the open timeline's.
+    // inside the compound clip, numbered after the ones before them.
     ok(&dir, &["timeline", "switch", p, "0"]);
     let compound = ok(
         &dir,
@@ -158,10 +158,26 @@ fn a_template_goes_into_an_existing_project_as_a_timeline_or_a_compound_clip() {
     let inside: Vec<&serde_json::Value> =
         slots.iter().filter(|s| s["in_compound"] == true).collect();
     assert_eq!(inside.len(), 2);
+    // Numbered across the project: 1 to 8, each once.
+    let mut numbers: Vec<u64> = slots
+        .iter()
+        .map(|s| s["number"].as_u64().unwrap())
+        .collect();
+    numbers.sort_unstable();
+    assert_eq!(numbers, (1..=8).collect::<Vec<u64>>());
+    let second_inside = inside.iter().find(|s| s["index"] == 2).unwrap()["number"]
+        .as_u64()
+        .unwrap();
     ok(
         &dir,
         &[
-            "template", "replace", p, "--clip", "slot:2", "--media", card,
+            "template",
+            "replace",
+            p,
+            "--clip",
+            &format!("slot:{second_inside}"),
+            "--media",
+            card,
         ],
     );
     let slots = ok(&dir, &["template", "slots", p]);
