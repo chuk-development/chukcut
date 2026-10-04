@@ -92,7 +92,7 @@ impl Editor {
             .flex_col()
             .gap(px(10.0))
             .child(Self::hint(
-                "Click a template to choose your clips: a new project, a new timeline here, or a compound clip at the playhead.",
+                "Click a template to choose your clips and where it goes.",
             ))
             .child(Self::tile_area("template-grid").child(Self::tile_grid(tiles)))
             .into_any_element()

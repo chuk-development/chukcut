@@ -94,6 +94,25 @@ impl Editor {
     }
 
     /// The sub-tab for a video clip.
+    /// The running bake of `segment`'s remade frames, pinned under the
+    /// Enhance tab's body; `None` when none runs.
+    pub(super) fn enhance_strip(&self, segment: &Segment) -> Option<AnyElement> {
+        let bake = self
+            .inspector
+            .enhance
+            .bake
+            .as_ref()
+            .filter(|b| b.segment_id == segment.id)?;
+        let job = bake.job;
+        Some(super::controls::bake_strip(
+            "enhance-cancel",
+            format!("{}\u{2026} {} of {}", bake.stage, bake.done, bake.total),
+            bake.done as f32 / bake.total.max(1) as f32,
+            bake.warning.clone(),
+            move |_, _, _| enhance::enhance_cancel(job),
+        ))
+    }
+
     pub(super) fn enhance_tab(&mut self, segment: &Segment, cx: &mut Context<Self>) -> AnyElement {
         let materials = &self.project.materials;
         let removal = enh::removal_of(materials, segment);
@@ -276,27 +295,8 @@ impl Editor {
         // --- Progress ---------------------------------------------------------------------
         let mut progress: Vec<AnyElement> = Vec::new();
         match &self.inspector.enhance.bake {
-            Some(bake) if bake.segment_id == segment.id => {
-                progress.push(caption(
-                    format!("{}\u{2026} {} of {}", bake.stage, bake.done, bake.total),
-                    TEXT_DIM,
-                ));
-                progress.push(
-                    gpui::component::progress::Progress::new("enhance-progress")
-                        .value(bake.done as f32 / bake.total.max(1) as f32 * 100.0)
-                        .into_any_element(),
-                );
-                if let Some(warning) = &bake.warning {
-                    progress.push(caption(warning.clone(), WARNING));
-                }
-                let job = bake.job;
-                progress.push(right(
-                    Button::new("enhance-cancel")
-                        .small()
-                        .label("Stop")
-                        .on_click(move |_, _, _| enhance::enhance_cancel(job)),
-                ));
-            }
+            // The progress is pinned under the body (`enhance_strip`).
+            Some(bake) if bake.segment_id == segment.id => {}
             _ if removal.is_some() || upscale.is_some() => {
                 // A clip whose frames are all made has nothing to finish.
                 let coverage = self.enhance_coverage(&segment.id);

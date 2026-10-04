@@ -118,7 +118,12 @@ impl Editor {
                     } else {
                         &["Basic", "Remove background", "Mask", "Retouch", "Enhance"]
                     };
-                    let current = sub(self, VIDEO, names[0]);
+                    // A sub-tab chosen on a video clip ("Enhance") that this
+                    // clip does not have (a compound clip) falls back to the
+                    // first, as the highlighted tab already does.
+                    let current = Some(sub(self, VIDEO, names[0]))
+                        .filter(|c| names.contains(c))
+                        .unwrap_or(names[0]);
                     let body = match current {
                         "Basic" => self.video_basic(&segment, kind, window, cx),
                         "Mask" => self.mask_tab(&segment, window, cx),
@@ -174,6 +179,20 @@ impl Editor {
                 }
             };
 
+        // A bake the shown tab started stays in sight, under the scrolling
+        // body, however short the window.
+        let strip = match active {
+            VIDEO if kind != ClipKind::Text && kind != ClipKind::Compound => {
+                match sub(self, VIDEO, "Basic") {
+                    "Remove background" => self.matte_strip(&segment),
+                    enhance::ENHANCE => self.enhance_strip(&segment),
+                    _ => None,
+                }
+            }
+            SPEED if sub(self, SPEED, "Standard") == "Standard" => self.flow_strip(&segment),
+            _ => None,
+        };
+
         div()
             .size_full()
             .flex()
@@ -189,6 +208,7 @@ impl Editor {
                     .overflow_y_scrollbar()
                     .child(body),
             )
+            .children(strip)
             .children(footer.map(panel_footer))
             .into_any_element()
     }
