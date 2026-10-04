@@ -154,6 +154,9 @@ struct InstanceBindings {
     monochrome_sprites: InstanceBinding,
     subpixel_sprites: InstanceBinding,
     polychrome_sprites: InstanceBinding,
+    // chukcut patch (vendor/README.md): one sprite per `PaintSurface`.
+    #[cfg(target_os = "linux")]
+    surfaces: InstanceBinding,
 }
 
 struct WgpuBindGroupLayouts {
@@ -194,6 +197,9 @@ struct WgpuResources {
     path_intermediate_view: Option<wgpu::TextureView>,
     path_msaa_texture: Option<wgpu::Texture>,
     path_msaa_view: Option<wgpu::TextureView>,
+    // chukcut patch (vendor/README.md): imported external buffers.
+    #[cfg(target_os = "linux")]
+    external: crate::external_buffer::ExternalBuffers,
 }
 
 struct CachedTextureBindGroup {
@@ -1353,6 +1359,8 @@ impl WgpuRendererCore {
                 path_intermediate_view: None,
                 path_msaa_texture: None,
                 path_msaa_view: None,
+                #[cfg(target_os = "linux")]
+                external: Default::default(),
             },
             atlas,
             path_globals_offset,
@@ -1505,6 +1513,41 @@ impl WgpuRendererCore {
                     label: Some("main_encoder"),
                 });
 
+        // chukcut patch (vendor/README.md): copy new external pictures into
+        // textures before the pass, and keep their memory from being
+        // rewritten until this submission has finished.
+        #[cfg(target_os = "linux")]
+        let mut external_owners = Vec::new();
+        #[cfg(target_os = "linux")]
+        {
+            let resources = &mut self.resources;
+            let device = Arc::clone(&resources.device);
+            let layout = resources.bind_group_layouts.texture.clone();
+            let sampler = resources.atlas_sampler.clone();
+            resources.external.prepare(
+                &device,
+                &mut encoder,
+                &scene.surfaces,
+                |view| {
+                    device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("external_buffer_bind_group"),
+                        layout: &layout,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::Sampler(&sampler),
+                            },
+                        ],
+                    })
+                },
+                &mut external_owners,
+            );
+        }
+
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("main_pass"),
@@ -1610,7 +1653,18 @@ impl WgpuRendererCore {
                         )?;
                     }
                     // Surfaces are macOS-only for video playback and are not
-                    // implemented by the WGPU renderer.
+                    // implemented by the WGPU renderer — except chukcut's
+                    // external buffers (vendor/README.md).
+                    #[cfg(target_os = "linux")]
+                    PrimitiveBatch::Surfaces(range) => {
+                        self.draw_external_surfaces(
+                            scene,
+                            &instance_bindings.surfaces,
+                            range,
+                            &mut pass,
+                        );
+                    }
+                    #[cfg(not(target_os = "linux"))]
                     PrimitiveBatch::Surfaces(_surfaces) => {}
                 }
             }
@@ -1620,6 +1674,12 @@ impl WgpuRendererCore {
             .resources()
             .queue
             .submit(std::iter::once(encoder.finish()));
+        #[cfg(target_os = "linux")]
+        if !external_owners.is_empty() {
+            self.resources()
+                .queue
+                .on_submitted_work_done(move || drop(external_owners));
+        }
         Ok(submission)
     }
 
@@ -1659,7 +1719,38 @@ impl WgpuRendererCore {
                 instance_offset,
                 &scene.polychrome_sprites,
             )?,
+            #[cfg(target_os = "linux")]
+            surfaces: self.write_instance_binding(
+                "external_surfaces_bind_group",
+                instance_offset,
+                &external_surface_sprites(scene),
+            )?,
         })
+    }
+
+    /// chukcut patch (vendor/README.md): draw the surfaces of `range` whose
+    /// pictures were prepared, each as a polychrome sprite over its texture.
+    #[cfg(target_os = "linux")]
+    fn draw_external_surfaces(
+        &self,
+        scene: &Scene,
+        instances: &InstanceBinding,
+        range: Range<usize>,
+        pass: &mut wgpu::RenderPass<'_>,
+    ) {
+        let resources = self.resources();
+        for index in range {
+            let frame_id = scene.surfaces[index].external.info().frame_id;
+            let Some(texture) = resources.external.bind_group(frame_id) else {
+                continue;
+            };
+            pass.set_pipeline(&resources.pipelines.poly_sprites);
+            pass.set_bind_group(0, &resources.globals_bind_group, &[]);
+            pass.set_bind_group(1, &instances.bind_group, &[]);
+            pass.set_bind_group(2, texture, &[]);
+            let instance = instances.first_instance + index as u32;
+            pass.draw(0..4, instance..instance + 1);
+        }
     }
 
     fn create_texture_bind_group(
@@ -2923,4 +3014,41 @@ mod tests {
             ]
         );
     }
+}
+
+/// chukcut patch (vendor/README.md): each `PaintSurface` as the polychrome
+/// sprite that draws its whole texture into its bounds.
+#[cfg(target_os = "linux")]
+fn external_surface_sprites(scene: &Scene) -> Vec<gpui::PolychromeSprite> {
+    scene
+        .surfaces
+        .iter()
+        .map(|surface| {
+            let info = surface.external.info();
+            gpui::PolychromeSprite {
+                order: surface.order,
+                pad: 0,
+                grayscale: false.into(),
+                opacity: 1.0,
+                bounds: surface.bounds,
+                content_mask: surface.content_mask.clone(),
+                corner_radii: Default::default(),
+                tile: gpui::AtlasTile {
+                    texture_id: gpui::AtlasTextureId {
+                        index: 0,
+                        kind: gpui::AtlasTextureKind::Polychrome,
+                    },
+                    tile_id: gpui::TileId(0),
+                    padding: 0,
+                    bounds: Bounds {
+                        origin: Point::default(),
+                        size: Size {
+                            width: DevicePixels(info.width as i32),
+                            height: DevicePixels(info.height as i32),
+                        },
+                    },
+                },
+            }
+        })
+        .collect()
 }

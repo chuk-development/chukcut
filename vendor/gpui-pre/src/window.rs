@@ -4985,6 +4985,27 @@ impl Window {
         });
     }
 
+    /// Paint a picture held in another Vulkan device's memory, scaled to
+    /// `bounds`, at the current z-index. The Linux counterpart of
+    /// `paint_surface`; chukcut patch (vendor/README.md).
+    ///
+    /// This method should only be called as part of the paint phase of element drawing.
+    #[cfg(target_os = "linux")]
+    pub fn paint_external_buffer(&mut self, bounds: Bounds<Pixels>, buffer: crate::ExternalBuffer) {
+        use crate::PaintSurface;
+
+        self.invalidator.debug_assert_paint();
+
+        let bounds = self.snap_bounds(bounds);
+        let content_mask = self.snapped_content_mask();
+        self.next_frame.scene.insert_primitive(PaintSurface {
+            order: 0,
+            bounds,
+            content_mask,
+            external: buffer,
+        });
+    }
+
     /// Removes an image from the sprite atlas.
     pub fn drop_image(&mut self, data: Arc<RenderImage>) -> Result<()> {
         for frame_index in 0..data.frame_count() {

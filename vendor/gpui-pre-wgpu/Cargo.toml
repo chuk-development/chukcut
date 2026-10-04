@@ -140,6 +140,10 @@ version = "1.10"
 [dependencies.wgpu]
 version = "29.0.4"
 
+# chukcut patch (vendor/README.md): raw Vulkan for importing external buffers.
+[target.'cfg(target_os = "linux")'.dependencies.ash]
+version = "0.38"
+
 [target.'cfg(target_family = "wasm")'.dependencies.web-sys]
 version = "0.3"
 features = ["HtmlCanvasElement"]

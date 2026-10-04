@@ -3359,6 +3359,7 @@ name = "gpui-pre-wgpu"
 version = "0.3.7"
 dependencies = [
  "anyhow",
+ "ash",
  "bytemuck",
  "cosmic-text",
  "etagere",

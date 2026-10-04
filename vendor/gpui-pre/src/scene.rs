@@ -771,7 +771,114 @@ pub struct PaintSurface {
     pub content_mask: ContentMask<ScaledPixels>,
     #[cfg(target_os = "macos")]
     pub image_buffer: core_video::pixel_buffer::CVPixelBuffer,
+    // chukcut patch (vendor/README.md): the Linux counterpart of `image_buffer`.
+    #[cfg(target_os = "linux")]
+    pub external: ExternalBuffer,
 }
+
+// chukcut patch (vendor/README.md): everything from here to the end marker.
+
+/// Where an [`ExternalBuffer`]'s memory is, and how its pixels are laid out:
+/// what a Vulkan device needs to import memory that another Vulkan device in
+/// this process exported as an opaque file descriptor.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExternalBufferInfo {
+    /// Identity of the allocation, never reused in the process. The renderer
+    /// imports each allocation once and keeps the import while the owner
+    /// lives.
+    pub allocation_id: u64,
+    /// Identity of the picture. The renderer copies each one once.
+    pub frame_id: u64,
+    /// An opaque file descriptor (`VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT`)
+    /// for a dedicated buffer allocation. Borrowed: the importer duplicates it.
+    pub fd: i32,
+    /// `VkBufferCreateInfo::size` of the exported buffer. The importer
+    /// creates its buffer identically.
+    pub buffer_size: u64,
+    /// `VkBufferCreateInfo::usage` of the exported buffer, raw.
+    pub usage: u32,
+    /// `VkMemoryAllocateInfo::allocationSize` of the export.
+    pub allocation_size: u64,
+    /// `VkMemoryAllocateInfo::memoryTypeIndex` of the export.
+    pub memory_type_index: u32,
+    /// `VkPhysicalDeviceIDProperties::deviceUUID` of the exporter. Memory
+    /// moves only between devices whose device and driver UUIDs both match.
+    pub device_uuid: [u8; 16],
+    /// `VkPhysicalDeviceIDProperties::driverUUID` of the exporter.
+    pub driver_uuid: [u8; 16],
+    /// Width of the BGRA8 picture in pixels.
+    pub width: u32,
+    /// Height in rows.
+    pub height: u32,
+    /// Bytes from one row to the next, a multiple of 256.
+    pub bytes_per_row: u32,
+}
+
+/// A BGRA8 picture in another Vulkan device's memory, for
+/// [`crate::Window::paint_external_buffer`].
+///
+/// The exporter must have finished writing before it hands the picture out,
+/// and must not write the memory again while anybody holds `owner`: the scene
+/// holds it while the picture is painted, and the renderer until its copy has
+/// finished on the GPU.
+#[cfg(target_os = "linux")]
+#[derive(Clone)]
+pub struct ExternalBuffer {
+    info: ExternalBufferInfo,
+    owner: std::sync::Arc<dyn std::any::Any + Send + Sync>,
+    failed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[cfg(target_os = "linux")]
+impl ExternalBuffer {
+    /// Describe a picture.
+    ///
+    /// # Safety
+    ///
+    /// `info.fd` must be an open opaque memory descriptor matching the rest
+    /// of `info`, and stay open for as long as `owner` lives.
+    pub unsafe fn new(
+        info: ExternalBufferInfo,
+        owner: std::sync::Arc<dyn std::any::Any + Send + Sync>,
+        failed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
+        Self {
+            info,
+            owner,
+            failed,
+        }
+    }
+
+    /// Where the memory is.
+    pub fn info(&self) -> &ExternalBufferInfo {
+        &self.info
+    }
+
+    /// What keeps the memory from being rewritten. A renderer holds a clone
+    /// until its GPU work on the memory has finished.
+    pub fn owner(&self) -> &std::sync::Arc<dyn std::any::Any + Send + Sync> {
+        &self.owner
+    }
+
+    /// Tell the producer that this renderer cannot draw the picture (another
+    /// GPU, no external memory), so it can fall back to `RenderImage`s.
+    pub fn report_failure(&self) {
+        self.failed
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Debug for ExternalBuffer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExternalBuffer")
+            .field("info", &self.info)
+            .finish_non_exhaustive()
+    }
+}
+
+// End of the chukcut patch in this file.
 
 impl From<PaintSurface> for Primitive {
     fn from(surface: PaintSurface) -> Self {
