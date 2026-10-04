@@ -53,6 +53,8 @@ Times are seconds as numbers, or strings like \"2.5s\", \"250ms\", \"1:02.5\", \
 /// The tools whose operation only reads: MCP's `readOnlyHint`.
 const READ_ONLY: &[&str] = &[
     "info",
+    "template_list",
+    "template_slots",
     "validate",
     "captions_list",
     "silence_detect",

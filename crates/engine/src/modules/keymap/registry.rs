@@ -429,6 +429,43 @@ pub const ACTIONS: &[ActionSpec] = &[
         [],
         []
     ),
+    a!(
+        "CreateCompound",
+        "Clip",
+        "Create compound clip",
+        true,
+        ["alt-g"],
+        ["alt-g"],
+        ["alt-g"]
+    ),
+    a!(
+        "FlattenCompound",
+        "Clip",
+        "Flatten compound clip",
+        true,
+        ["alt-shift-g"],
+        ["alt-shift-g"],
+        ["alt-shift-g"]
+    ),
+    a!(
+        "OpenCompound",
+        "Clip",
+        "Open compound clip",
+        false,
+        [],
+        [],
+        []
+    ),
+    a!(
+        "CloseCompound",
+        "Clip",
+        "Close compound clip",
+        false,
+        [],
+        [],
+        []
+    ),
+    a!("NewTimeline", "Timeline", "New timeline", false, [], [], []),
     // --- File -------------------------------------------------------------
     a!(
         "NewProject",

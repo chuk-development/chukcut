@@ -66,6 +66,11 @@ column current.
 | 5 | analysis | scene detection, stabilisation, beat detection + auto-cut, auto reframe | merged — no face detector (needs ML worker); maps time via legacy source_time_at, wrong on speed-curved clips |
 | 6 | titles | full title styling on the kit, colour picker, 20–30 title presets, 10 text templates | merged — new text commands not in CLI/MCP yet |
 | 6 | polish | in-app file browser fallback, explicit canvas choice kept, frame-snapped ruler, prune unused materials, analysis on TimeMap, QA lows | done on agent/polish — export resolution/loudness not remembered, size estimate untouched, stale tooltip text left |
+| 7 | mlworker | finish VitTrack (T2), person segmentation / background removal through the ML worker | running (agent/mlworker) |
+| 7 | demo | release build, showcase project via CLI (`scripts/demo.sh`), `docs/demo.md` feature tour | merged — showcase in `_scratch/demo` of the demo worktree; CLI gaps in docs/QA.md "Showcase pass" |
+| 7 | compound | compound clips, nested sequences, several timelines per project (backlog 5) | running (agent/compound) |
+| 7 | templates | project templates + shortcut editor (backlog 9, 10) | running (agent/templates) |
+| 7 | upkeep | full CLI/MCP coverage, Dependabot bumps, `effects/graph.rs:735` alpha check, GPU tests on both adapters (backlog 13) | running (agent/upkeep) |
 
 ## Backlog for the next waves (lead picks from the top)
 

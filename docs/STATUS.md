@@ -94,6 +94,43 @@ Judge performance from a release build only.
    every render. Markers, crop, curves, layouts, freeze frame, translation and
    TTS are not exposed yet.
 
+## Timelines and compound clips (2026-10-04, agent/compound)
+
+Decision 0024. A project holds several **sequences**: timelines (tabs above
+the lanes, "+" adds one, right-click renames, duplicates or deletes) and
+compound clips (select clips, Alt+G or the clip menu; double-click to open,
+breadcrumbs or the clip menu to close; Alt+Shift+G puts the clips back).
+
+- **How:** the open sequence *is* `Project::tracks`/`markers`;
+  `Project::sequence` says which one, the rest are parked in
+  `MaterialPool::sequences`. A segment whose material is a sequence is a
+  compound clip (`MaterialKind::Sequence`). Engine: `modules/sequence/`
+  (`build.rs` makes every gesture a `Composite`; `edit.rs` holds the four
+  `SequenceEdit` primitives behind `EditCommand::Sequence`). CLI/MCP:
+  `timeline …`, `compound …` (docs/cli.md).
+- **Opening and closing a compound clip are undoable edits.** That is on
+  purpose: undo of an edit made inside only works with that compound open.
+- **Rendering:** a compound clip is its sequence rendered into a texture of
+  the frame's size, drawn as the clip's source (`Compositor::nested_frame`).
+  The nested render is premultiplied; the quad carries
+  `grade::feature::PREMULTIPLIED` and `quad.wgsl` divides it out. Verified on
+  the RTX 3060 and on lavapipe: nested vs flattened frames within 2 code
+  values, exports within 6, mixes within 1e-4 (`tests/compound.rs`).
+- **Sound** is flattened for both mixers (`sequence::audio::flatten_audio`).
+  Not mapped: a compound clip's own volume keyframes and its own speed curve.
+- **Export** always renders the root timeline, also from inside a compound
+  clip (`sequence::export_root` in `export::commands`).
+- **Cycles** are refused at `InsertSegment` (a paste of a compound clip into
+  itself) and nesting stops at 8 levels (`sequence::MAX_DEPTH`).
+- **Old files** round-trip byte for byte; neither key is written for a
+  project with one timeline.
+- **Rough:** every compound clip costs a nested render per frame plus a pool
+  clone; the preview's decode-ahead (`MediaSourceProvider::prefetch_clips`)
+  does not look inside compound clips; analysis, silence cutting, captions
+  and loudness see only the open sequence; flatten needs normal speed;
+  deleting a timeline leaves its compound sequences parked and unused;
+  an older build opening a multi-timeline file drops the parked timelines.
+
 ## Polish pass, 2026-10-03 (agent/polish)
 
 - **File dialogs work without a portal.** `editor::files::choose` asks
@@ -2238,6 +2275,57 @@ a transition window and with motion blur; masks and key are not carried by
 "Paste attributes" or "Apply to all"; the handles follow a clip's motion
 but not a motion reveal (wipe-in animations); mask and key cost not
 measured.
+
+## Project templates and the shortcut editor (2026-10-04)
+
+**Templates** (`modules/template`, decision 0022). A template is a project
+whose picture clips carry a `template_slot` marker in `materials.extras`; on
+disk a directory `<data>/templates/user/<id>/` with `template.json` (manifest
+around an ordinary project) and `media/`. Eleven built-ins are built in code
+from our own styles, animations, effects, transitions, looks, drawn
+placeholders (`<data>/templates/placeholders/`) and synthesised music beds
+(`<data>/templates/music/`, `template/music.rs`). Commands:
+`template_list`, `template_build_project` / `template_new_project`,
+`template_open_project`, `template_slots`, `template_replace_media` (one
+undo step), `template_save`, `template_delete`, `template_thumbnail`. CLI and
+MCP: `template list|apply|slots|replace|save|delete` (`docs/cli.md`). App:
+a Templates section on the start screen, a Templates tab in the asset panel
+(by category, "My templates", and "This project" with slots and "Save as
+template"), the fill dialog and the slots dialog (`editor/templates.rs`,
+`editor/assets/templates.rs`). Tests: `template::*` unit tests (fill time
+math, crop, slot order, save), `tests/templates.rs` (real files, slowed
+fill, missing media, replace + undo, save then apply, a tile for every
+built-in), `crates/cli/tests/templates.rs`.
+
+- **Fill rule:** longer clips are trimmed from their start (or `--from`),
+  shorter ones slowed to span the slot (refused below 0.01×), other shapes
+  centre-cropped to the slot's aspect. A slot's own sound plays at the slot
+  volume; the built-ins set 0 under music.
+- **Trap:** two threads drawing the same missing placeholder raced on one
+  `.part` file and one rename failed ("cannot write …"). `assets::
+  write_atomically` names the partial file per write.
+- **Trap: a portal file dialog from a test instance opens on the owner's
+  desktop.** On Xvfb, run the app with `CHUKCUT_FILE_DIALOG=builtin` and
+  `DBUS_SESSION_BUS_ADDRESS` unset; otherwise "Choose…" asks the real
+  session's xdg-desktop-portal.
+- Rough: the media library lists the placeholder PNGs and the music bed like
+  any import; a template project references a user template's `media/` by
+  absolute path (deleting the template takes those files offline); splitting
+  a slot gives both halves the same marker.
+
+**Shortcuts** (`modules/keymap`). Every bindable action is in one registry
+(`keymap/registry.rs`) with its keys in three presets (chukcut, CapCut-like,
+Premiere-like); the user's changes are per-action overrides in
+`<config>/shortcuts.json`. The app binds only from it (`editor/keymap.rs`
+rebuilds the keymap and keeps GPUI Component's own bindings), the shortcuts
+sheet reads it, and Settings → Keyboard shortcuts → "Edit shortcuts…" opens a
+searchable editor: change, add, remove, reset per action or all, preset
+switch, conflict list. A new key is captured through
+`App::intercept_keystrokes`, so Ctrl+S is recorded rather than saving; a key
+another action has is offered with "Take it". **A new action needs a
+registry entry and a line in `editor/keymap.rs`'s `bindings!` list**; a
+test fails when the two disagree. Plain keys and `typing_off` actions are
+bound with `!Input` so typing in a field never runs them.
 
 ## Not built yet
 
