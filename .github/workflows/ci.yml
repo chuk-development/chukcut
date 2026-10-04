@@ -140,13 +140,21 @@ jobs:
           shared-key: release
 
       - name: Build
-        run: cargo build --release --locked -p chukcut
+        run: cargo build --release --locked -p chukcut -p chukcut-ml-worker -p chukcut-cli
 
       - name: Size
-        run: ls -l target/release/chukcut
+        run: ls -l target/release/chukcut target/release/chukcut-ml-worker target/release/chukcut-cli
 
       - name: Tarball
         run: packaging/tarball.sh --no-build
+
+      # The editor finds the worker next to itself: all three must ship in bin/.
+      - name: Tarball contents
+        run: |
+          listing="$(tar -tJf target/dist/chukcut-*.tar.xz)"
+          for name in chukcut chukcut-ml-worker chukcut-cli; do
+            echo "$listing" | grep -qx "chukcut-[^/]*/bin/$name" || { echo "missing bin/$name"; exit 1; }
+          done
 
       - uses: actions/upload-artifact@v4
         with:

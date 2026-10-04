@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Build a release tarball: our binary plus the desktop files and the installer.
+# Build a release tarball: our three binaries (the editor, the ML worker and
+# the CLI) plus the desktop files and the installer.
 #
 #   packaging/tarball.sh              build release, then pack
-#   packaging/tarball.sh --no-build   pack the existing target/release/chukcut
+#   packaging/tarball.sh --no-build   pack the binaries already in target/release
 #
 # Writes target/dist/chukcut-<version>-x86_64-linux.tar.xz. What is inside,
 # and why FFmpeg and the NVIDIA libraries are not: packaging/README.md.
@@ -24,15 +25,22 @@ name="chukcut-$version-$arch-linux"
 dist="$root/target/dist"
 stage="$dist/$name"
 
+# The editor finds the worker next to its own binary, so all three ship in
+# bin/ together. A tarball without the worker would have no AI tools, and
+# one without the CLI no MCP server: refuse rather than ship half.
+binaries=(chukcut chukcut-ml-worker chukcut-cli)
 if [ "$build" = 1 ]; then
-    cargo build --release --locked -p chukcut
+    cargo build --release --locked -p chukcut -p chukcut-ml-worker -p chukcut-cli
 fi
-binary="$root/target/release/chukcut"
-[ -x "$binary" ] || { echo "tarball.sh: no binary at $binary" >&2; exit 1; }
+for bin in "${binaries[@]}"; do
+    [ -x "$root/target/release/$bin" ] || { echo "tarball.sh: no binary at target/release/$bin" >&2; exit 1; }
+done
 
 rm -rf "$stage"
 mkdir -p "$stage/bin" "$stage/scripts" "$stage/packaging"
-install -m755 "$binary" "$stage/bin/chukcut"
+for bin in "${binaries[@]}"; do
+    install -m755 "$root/target/release/$bin" "$stage/bin/$bin"
+done
 install -m755 scripts/install.sh "$stage/scripts/install.sh"
 cp -r packaging/linux "$stage/packaging/linux"
 rm -f "$stage/packaging/linux/make-icons.sh"
@@ -46,8 +54,10 @@ cp LICENSE NOTICE.md README.md "$stage/"
     # shellcheck source=/dev/null
     echo "on $(. /etc/os-release && echo "$PRETTY_NAME"), $(pkg-config --modversion libavcodec 2>/dev/null | sed 's/^/libavcodec /')"
     echo
-    echo "Direct library dependencies (from the system, not bundled):"
-    readelf -d "$binary" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/  \1/p'
+    for bin in "${binaries[@]}"; do
+        echo "Direct library dependencies of bin/$bin (from the system, not bundled):"
+        readelf -d "$root/target/release/$bin" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/  \1/p'
+    done
 } >"$stage/BUILD-INFO.txt"
 
 tar -C "$dist" -cJf "$dist/$name.tar.xz" "$name"

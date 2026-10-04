@@ -42,20 +42,31 @@ CI runs these three checks in the `packaging` job.
 
 ## The release tarball
 
-`packaging/tarball.sh` builds the release binary (or takes the one in
-`target/release` with `--no-build`) and writes
-`target/dist/chukcut-<version>-x86_64-linux.tar.xz`:
+`packaging/tarball.sh` builds the three release binaries (or takes the ones
+in `target/release` with `--no-build`, and stops if one is missing) and
+writes `target/dist/chukcut-<version>-x86_64-linux.tar.xz`:
 
 ```
 chukcut-<version>-x86_64-linux/
-  bin/chukcut
+  bin/chukcut              the editor
+  bin/chukcut-ml-worker    the AI models' process; the editor finds it next to itself
+  bin/chukcut-cli          the command line and MCP server
   scripts/install.sh       the same installer; it finds bin/chukcut and skips the build
   packaging/linux/…        desktop entry, MIME type, metainfo, icons
   LICENSE NOTICE.md README.md CHANGELOG.md
 ```
 
-The user unpacks it and runs `scripts/install.sh`. It installs into `~/.local`
-without sudo. `--uninstall` removes it again.
+The user unpacks it and runs `scripts/install.sh`. It installs the three
+binaries into `~/.local/bin` and the desktop files into `~/.local/share`,
+without sudo. `--uninstall` removes them again. The CI `release` job checks
+that all three binaries are in the tarball.
+
+**Where the editor finds the worker.** `CHUKCUT_ML_WORKER` if set; else
+next to the editor's own (resolved) binary, one directory up, or in
+`<prefix>/libexec/chukcut/` or `<prefix>/lib/chukcut/`; else on `PATH`
+(`engine::modules::ml::worker::beside`). The worker loads ONNX Runtime with
+`dlopen` and downloads it on first use, so the tarball carries no ONNX
+Runtime and no models.
 
 ### What is bundled, and what is not
 
@@ -66,7 +77,7 @@ should not have to install anything" is a packaging goal, not a licence
 requirement. The rule for this recipe: **ship only our own binary, and nothing
 whose redistribution terms are unclear.**
 
-**Inside the binary (statically linked, built from source by cargo):**
+**Inside the binaries (statically linked, built from source by cargo):**
 
 | Component | Licence | Why it is static |
 |---|---|---|
