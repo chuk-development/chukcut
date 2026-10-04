@@ -237,7 +237,7 @@ pub fn ml_status(probe: bool) -> MlStatus {
     let root = super::root();
     let gpus = gpu_vendors();
     let driver = registry::nvidia_driver();
-    let preferred = registry::preferred_runtime(&root);
+    let preferred = super::preferred_runtime(&root);
     let mut status = MlStatus {
         advice: advice(&root, &gpus, driver.as_deref()),
         bundle: driver

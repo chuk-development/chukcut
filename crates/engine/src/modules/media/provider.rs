@@ -188,20 +188,63 @@ fn acceleration_override() -> Option<Acceleration> {
     })
 }
 
-/// Which decoder to open, given what this GPU can accept.
+/// The "Video decoding" setting (`workspace::Settings::decode`), as the
+/// decoders read it: 0 is automatic, otherwise [`encode_acceleration`].
+static DECODE_SETTING: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+fn encode_acceleration(a: Option<Acceleration>) -> u8 {
+    match a {
+        None => 0,
+        Some(Acceleration::Software) => 1,
+        Some(Acceleration::Auto) => 2,
+        Some(Acceleration::Vaapi) => 3,
+        Some(Acceleration::Cuda) => 4,
+    }
+}
+
+/// Put the "Video decoding" setting into effect: `None` is the automatic
+/// rule. `workspace_settings_apply` calls it. Decoders opened from now on
+/// follow it; open ones keep the path they have. `CHUKCUT_DECODE` still
+/// wins.
+pub fn set_decode_preference(preference: Option<Acceleration>) {
+    DECODE_SETTING.store(
+        encode_acceleration(preference),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+/// The "Video decoding" setting in effect, `None` for automatic.
+pub fn decode_preference() -> Option<Acceleration> {
+    match DECODE_SETTING.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => Some(Acceleration::Software),
+        2 => Some(Acceleration::Auto),
+        3 => Some(Acceleration::Vaapi),
+        4 => Some(Acceleration::Cuda),
+        _ => None,
+    }
+}
+
+/// Which decoder to open, given what this GPU can accept, and whether that
+/// came from the setting (which falls back to software for a file the
+/// chosen hardware cannot decode; see `video_frame`).
 ///
 /// The environment wins outright, including over the device check: somebody
 /// measuring `CHUKCUT_DECODE=vaapi` on a machine that cannot import wants to see
-/// the slow number, not a silent substitution.
-fn acceleration(ctx: &RenderContext) -> Acceleration {
+/// the slow number, not a silent substitution. The setting comes next, also
+/// over the device check: it is a choice the user made in the open.
+fn acceleration(ctx: &RenderContext) -> (Acceleration, bool) {
     if let Some(forced) = acceleration_override() {
-        return forced;
+        return (forced, false);
     }
-    if ctx.can_import_dmabuf() {
+    if let Some(chosen) = decode_preference() {
+        return (chosen, true);
+    }
+    let rule = if ctx.can_import_dmabuf() {
         DEFAULT_ACCELERATION
     } else {
         NO_IMPORT_ACCELERATION
-    }
+    };
+    (rule, false)
 }
 
 /// What a clip whose media is gone gets composited as: a flat dark-red field.
@@ -551,8 +594,24 @@ impl MediaSourceProvider {
         let open = match found {
             Some(open) => open,
             None => {
-                let wanted = self.forced.unwrap_or_else(|| acceleration(ctx));
-                let decoder = VideoDecoder::open_scaled_with(path, want_height, wanted)?;
+                let (wanted, chosen) = match self.forced {
+                    Some(forced) => (forced, false),
+                    None => acceleration(ctx),
+                };
+                // A decode path picked in Settings is a preference, not a
+                // test: a file that hardware cannot decode still plays, in
+                // software. (`CHUKCUT_DECODE` fails loudly instead.)
+                let decoder = match VideoDecoder::open_scaled_with(path, want_height, wanted) {
+                    Err(error) if chosen && wanted != Acceleration::Software => {
+                        tracing::debug!(
+                            file = %file_name(path),
+                            %error,
+                            "the decode path chosen in Settings cannot open this file; using software"
+                        );
+                        VideoDecoder::open_scaled_with(path, want_height, Acceleration::Software)?
+                    }
+                    other => other?,
+                };
                 let height = decoder.output_size().1;
                 let opened = Arc::new(OpenDecoder {
                     decoder: Mutex::new(decoder),

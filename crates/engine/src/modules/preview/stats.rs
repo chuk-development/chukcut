@@ -246,7 +246,8 @@ impl Histogram {
 /// **Inferred, not asked.** `media::provider::acceleration` is private and
 /// `MediaSourceProvider` reaches the preview as an opaque `dyn SourceProvider`,
 /// so there is nothing to ask. [`decode_path`] reproduces that function's rule
-/// from the same two public inputs it uses — `CHUKCUT_DECODE` and
+/// from the same three public inputs it uses — `CHUKCUT_DECODE`, the "Video
+/// decoding" setting (`provider::decode_preference`) and
 /// `RenderContext::can_import_dmabuf` — which is exact today and is the one
 /// thing in this module that could silently go stale if that rule changes.
 /// It is logged with its reason, so a log that disagrees with reality says so.
@@ -272,6 +273,8 @@ impl DecodePath {
 /// and the difference between "the user asked for it" and "the GPU cannot
 /// import a decoded surface" is the difference between a setting and a bug.
 pub fn decode_path(can_import_dmabuf: bool) -> (DecodePath, &'static str) {
+    use crate::modules::media::decoder::Acceleration;
+    let setting = crate::modules::media::provider::decode_preference();
     match std::env::var("CHUKCUT_DECODE").as_deref() {
         Ok("software") => (DecodePath::Software, "CHUKCUT_DECODE=software"),
         Ok("vaapi") => (DecodePath::Vaapi, "CHUKCUT_DECODE=vaapi"),
@@ -280,6 +283,14 @@ pub fn decode_path(can_import_dmabuf: bool) -> (DecodePath, &'static str) {
             DecodePath::Vaapi,
             "CHUKCUT_DECODE=auto, and the GPU cannot import a decoded surface, \
              so every frame is copied out of tiled memory",
+        ),
+        _ if setting == Some(Acceleration::Software) => (
+            DecodePath::Software,
+            "Settings › Performance › Video decoding is Software",
+        ),
+        _ if setting == Some(Acceleration::Vaapi) => (
+            DecodePath::Vaapi,
+            "Settings › Performance › Video decoding is VAAPI",
         ),
         _ if can_import_dmabuf => (DecodePath::Vaapi, "the GPU can import a decoded surface"),
         _ => (

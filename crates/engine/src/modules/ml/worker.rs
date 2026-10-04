@@ -75,9 +75,8 @@ impl From<MlError> for String {
 }
 
 /// Where the worker binary is: `CHUKCUT_ML_WORKER` if set (an empty value or
-/// `off` switches ML off), else next to the running executable (or one
-/// directory up, which is where cargo puts binaries relative to test
-/// executables in `deps/`), else on `PATH`.
+/// `off` switches ML off), else beside the running executable
+/// ([`beside`]), else on `PATH`.
 pub fn binary() -> Option<PathBuf> {
     if let Some(value) = std::env::var_os("CHUKCUT_ML_WORKER") {
         let value = PathBuf::from(value);
@@ -86,18 +85,42 @@ pub fn binary() -> Option<PathBuf> {
         }
         return value.is_file().then_some(value);
     }
+    // `current_exe` is the resolved path, so a symlinked `chukcut` on PATH
+    // still finds the worker next to the real binary.
     let exe = std::env::current_exe().ok()?;
-    let dir = exe.parent()?;
-    for candidate in [dir.join(BINARY), dir.parent()?.join(BINARY)] {
-        if candidate.is_file() {
-            return Some(candidate);
-        }
+    if let Some(found) = beside(exe.parent()?).into_iter().find(|p| p.is_file()) {
+        return Some(found);
     }
     std::env::var_os("PATH").and_then(|path| {
         std::env::split_paths(&path)
             .map(|d| d.join(BINARY))
             .find(|p| p.is_file())
     })
+}
+
+/// Where the worker may sit relative to the directory of the running
+/// executable, in the order they are tried: the same directory (the install
+/// script, the release tarball and `target/<profile>/`), one up (cargo's test
+/// executables live in `deps/`), and a distribution package's private
+/// directories (`<prefix>/libexec/chukcut/`, `<prefix>/lib/chukcut/`).
+pub fn beside(exe_dir: &std::path::Path) -> Vec<PathBuf> {
+    let mut candidates = vec![exe_dir.join(BINARY)];
+    if let Some(up) = exe_dir.parent() {
+        candidates.push(up.join(BINARY));
+        candidates.push(up.join("libexec").join("chukcut").join(BINARY));
+        candidates.push(up.join("lib").join("chukcut").join(BINARY));
+    }
+    candidates
+}
+
+/// The "AI runtime" setting for the worker, which reads it from
+/// `CHUKCUT_ML_RUNTIME`; nothing when the variable is set already (the
+/// child inherits it) or the setting is automatic.
+fn runtime_env() -> Option<(&'static str, String)> {
+    if std::env::var_os("CHUKCUT_ML_RUNTIME").is_some() {
+        return None;
+    }
+    super::runtime_choice().map(|pack| ("CHUKCUT_ML_RUNTIME", pack))
 }
 
 /// A reply and the payload that came with it (empty for most).
@@ -116,6 +139,7 @@ pub struct Client {
 impl Client {
     fn spawn(binary: &PathBuf) -> Result<Client, MlError> {
         let mut child = Command::new(binary)
+            .envs(runtime_env())
             .arg("--root")
             .arg(super::root())
             .stdin(Stdio::piped())
@@ -438,6 +462,21 @@ pub(crate) mod tests {
     /// Serialises tests that start, kill and count workers through the one
     /// global supervisor.
     pub(crate) static SERIAL: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn an_installed_worker_is_found_beside_the_editor_first() {
+        let found = beside(std::path::Path::new("/opt/chukcut/bin"));
+        assert_eq!(
+            found,
+            [
+                "/opt/chukcut/bin/chukcut-ml-worker",
+                "/opt/chukcut/chukcut-ml-worker",
+                "/opt/chukcut/libexec/chukcut/chukcut-ml-worker",
+                "/opt/chukcut/lib/chukcut/chukcut-ml-worker",
+            ]
+            .map(PathBuf::from)
+        );
+    }
 
     #[test]
     fn a_missing_binary_is_unavailable_not_an_error_loop() {

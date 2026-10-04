@@ -58,11 +58,66 @@ pub mod worker;
 
 pub use worker::MlError;
 
-/// The ML directory: `models/` and `runtime/` under the cache. A model is
-/// derived data that can always be fetched again, so "clear cache" may take
-/// it; the next use downloads it again.
+/// The ML directory: `models/` and `runtime/` under the cache. It sits in the
+/// cache because a model can always be fetched again, but "clear cache" and
+/// the cache limit leave it alone (`workspace::trim::EXEMPT_DIRS`): the
+/// downloads are large and the user chose them. Models and runtime packs are
+/// removed one by one in Settings › AI acceleration.
 pub fn root() -> PathBuf {
     crate::modules::workspace::paths::cache_root().join("ml")
+}
+
+/// The "AI runtime" setting (`workspace::Settings::ml_runtime`): a pack id,
+/// or `None` for the automatic choice.
+static RUNTIME_SETTING: parking_lot::Mutex<Option<String>> = parking_lot::Mutex::new(None);
+
+/// Put the "AI runtime" setting into effect. A change stops a running worker:
+/// it loaded its runtime when it started, and the next request starts a new
+/// one on the chosen pack.
+pub fn set_runtime_setting(pack: Option<String>) {
+    let pack = pack.filter(|p| !p.trim().is_empty() && p != "auto");
+    let changed = {
+        let mut current = RUNTIME_SETTING.lock();
+        let changed = *current != pack;
+        *current = pack;
+        changed
+    };
+    if changed && std::env::var_os("CHUKCUT_ML_RUNTIME").is_none() {
+        worker::shutdown();
+    }
+}
+
+/// The runtime pack asked for by name: `CHUKCUT_ML_RUNTIME` when set, else
+/// the "AI runtime" setting, else `None` (automatic). The worker reads the
+/// same variable; `worker::spawn` hands it the setting through it.
+pub fn runtime_choice() -> Option<String> {
+    std::env::var("CHUKCUT_ML_RUNTIME")
+        .ok()
+        .or_else(|| RUNTIME_SETTING.lock().clone())
+}
+
+/// The installed ONNX Runtime pack the worker will load: the one asked for
+/// ([`runtime_choice`]) when it is installed, else the automatic choice
+/// (`registry::choose_runtime`).
+pub fn preferred_runtime(root: &std::path::Path) -> Option<&'static registry::RuntimePack> {
+    registry::choose_runtime(
+        root,
+        registry::nvidia_driver()
+            .as_deref()
+            .and_then(registry::driver_major),
+        runtime_choice().as_deref(),
+    )
+}
+
+/// The ONNX Runtime packs the "AI runtime" setting can name, in registry
+/// order: `(id, name, installed)`.
+pub fn runtime_packs() -> Vec<(&'static str, &'static str, bool)> {
+    let root = root();
+    registry::RUNTIME_PACKS
+        .iter()
+        .filter(|p| p.kind == registry::PackKind::OnnxRuntime)
+        .map(|p| (p.id, p.name, registry::runtime_present(&root, p)))
+        .collect()
 }
 
 /// Make `model` ready to run and return the provider it runs on: find the
@@ -85,9 +140,7 @@ pub fn prepare(
     let spec = registry::model(model)
         .ok_or_else(|| MlError::Failed(format!("there is no model {model}")))?;
     let root = root();
-    if std::env::var_os("CHUKCUT_ORT_DYLIB").is_none()
-        && registry::preferred_runtime(&root).is_none()
-    {
+    if std::env::var_os("CHUKCUT_ORT_DYLIB").is_none() && preferred_runtime(&root).is_none() {
         let pack = registry::runtime_pack("cpu").expect("the registry has a CPU pack");
         download::ensure_runtime(
             &root,

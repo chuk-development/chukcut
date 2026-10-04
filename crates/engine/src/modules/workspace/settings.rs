@@ -62,6 +62,60 @@ pub struct Settings {
     pub audio_scrubbing: bool,
     /// When proxies are made for imported video.
     pub proxy_policy: ProxyPolicy,
+    /// Which decoder plays video: Settings › Performance › "Video decoding".
+    /// `CHUKCUT_DECODE` overrides it. Read once per opened decoder, so a
+    /// change reaches the clips opened after it.
+    pub decode: DecodePreference,
+    /// The ONNX Runtime pack the ML worker loads (a pack id: `cpu`,
+    /// `cuda12`, `cuda13`), or `None` to let the driver decide
+    /// (`registry::choose_runtime`). `CHUKCUT_ML_RUNTIME` overrides it. A
+    /// pack that is not installed falls back to the automatic choice.
+    pub ml_runtime: Option<String>,
+}
+
+/// The "Video decoding" setting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DecodePreference {
+    /// VAAPI when the GPU can take its frames without a copy, then NVDEC,
+    /// then software (`media::provider`'s own rule).
+    #[default]
+    Auto,
+    /// VAAPI (Intel, AMD), software where it cannot decode the file.
+    Vaapi,
+    /// NVDEC through CUDA (NVIDIA), software where it cannot decode the file.
+    Cuda,
+    /// The CPU only.
+    Software,
+}
+
+impl DecodePreference {
+    pub const ALL: [DecodePreference; 4] = [
+        DecodePreference::Auto,
+        DecodePreference::Vaapi,
+        DecodePreference::Cuda,
+        DecodePreference::Software,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            DecodePreference::Auto => "Automatic",
+            DecodePreference::Vaapi => "VAAPI (Intel, AMD)",
+            DecodePreference::Cuda => "NVDEC (NVIDIA)",
+            DecodePreference::Software => "Software",
+        }
+    }
+
+    /// What the decoders are told, or `None` for the automatic rule.
+    pub fn acceleration(self) -> Option<crate::modules::media::decoder::Acceleration> {
+        use crate::modules::media::decoder::Acceleration;
+        match self {
+            DecodePreference::Auto => None,
+            DecodePreference::Vaapi => Some(Acceleration::Vaapi),
+            DecodePreference::Cuda => Some(Acceleration::Cuda),
+            DecodePreference::Software => Some(Acceleration::Software),
+        }
+    }
 }
 
 /// When proxies are made for imported video.
@@ -111,6 +165,8 @@ impl Default for Settings {
             preview_scale: 1.0,
             audio_scrubbing: true,
             proxy_policy: ProxyPolicy::Auto,
+            decode: DecodePreference::Auto,
+            ml_runtime: None,
         }
     }
 }
