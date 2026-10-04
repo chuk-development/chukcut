@@ -659,6 +659,23 @@ M, priority 3.** Video denoise (CapCut "Bildrauschen reduzieren",
 `CCLensVideoDenoiseFilter`) has a classic answer already in our FFmpeg:
 `nlmeans_vulkan`, `hqdn3d`, `bm3d` [meas]. Deflicker: FFmpeg `deflicker`.
 
+**Built (2026-10-04, decision 0029).** "Enhance quality" with
+`realesr-general-x4v3` through `ort` in the worker: the ONNX export
+`huggingface.co/CoderViking/realesr-general-x4v3-onnx` (BSD-3-Clause, a
+re-export of the official v0.2.5.0 weights, commit `c6a9717`, 4.9 MB):
+`input` `[1, 3, H, W]` RGB 0..1, any size, `output` `[1, 3, 4H, 4W]`, not
+clamped in the graph. Measured on the RTX 3060, fp32, CUDA provider: 30 ms
+at 320×180, 121 ms at 640×360, 520 ms at 720p, 1.23 s at 1080p (about
+0.6 s per input megapixel; the network is ~2.4 TFLOP per megapixel, so
+that is about a third of the card's fp32 peak); CPU about 8 s per
+megapixel. That is far
+from the "1–3 fps for 1080p → 4K" guessed above for x4plus because the
+compact model was the one built: x4plus would be several times slower. The
+4x picture is reduced by area averaging for 2x, as Real-ESRGAN's own
+`--outscale` does. Frames are baked per source frame (JPEG) and drawn in
+place of the decoded ones, in the preview and the export. fp16 and
+TensorRT are the open speed-ups.
+
 ### 3.13 Face and body landmarks
 
 **CapCut:** effect packages require `tt_face`, `tt_face_extra`,
@@ -747,6 +764,26 @@ strings).
 LaMa (Apache-2.0) per frame flickers on video. ProPainter (good video
 inpainting) has the **S-Lab NC** licence → excluded. No strong permissive video
 inpainting model is known to us today. **Priority 3; revisit.**
+
+**Built (2026-10-04, decision 0029).** Rechecked: E2FGVI is CC BY-NC 4.0
+and ProPainter S-Lab 1.0, both non-commercial, so both are excluded. Built
+as per-frame LaMa with temporal help, in the engine: a background memory
+(a pixel the object covers now was seen earlier in a still shot), a clean
+plate per still stretch from a first pass (for a selected object, which
+moves: what it covers at the start is seen later), LaMa only for what was
+never seen, on a square crop around it (as much picture again on every
+side, at least 512 px), blended with a soft edge and mixed with the
+previous frame's fill while the camera holds still. On a locked-off shot a
+moving object is removed without the model at all. The ONNX file is
+Carve's `lama_fp32.onnx` (`huggingface.co/Carve/LaMa-ONNX`, Apache-2.0,
+commit `c3c0c9e`, 208 MB): `image` `[1, 3, 512, 512]` RGB 0..1 and `mask`
+`[1, 1, 512, 512]`, `output` RGB **0..255**, unmasked pixels copied through
+exactly. OpenCV Zoo's `inpainting_lama_2025jan.onnx` (Apache-2.0, 93 MB,
+made from it) filled a 120² test hole within 1.2 code values of it, but its
+block-quantized `DequantizeLinear` nodes are refused by ORT 1.28's CUDA
+provider. Measured on the RTX 3060: 160 ms per crop on CUDA, 1.96 s on four
+CPU threads. The mask is a selected object (MobileSAM + VitTrack, the
+"Select object" machinery), painted strokes and boxes.
 
 ### 3.17 Generative features (note only, out of scope)
 

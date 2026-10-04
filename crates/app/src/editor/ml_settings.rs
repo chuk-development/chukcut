@@ -1,8 +1,9 @@
 //! Settings › AI acceleration: what runs the models, the GPU bundles to
-//! install or remove with their sizes, the downloaded models, and the baked
-//! mattes.
+//! install or remove with their sizes, the downloaded models, the baked
+//! mattes and the remade frames (Remove object, Enhance quality).
 //!
-//! Everything here calls `ml::commands` and `matting::commands`. Probing
+//! Everything here calls `ml::commands`, `matting::commands` and
+//! `enhance::commands`. Probing
 //! starts the ML worker and loads ONNX Runtime (a second or two, longer with
 //! CUDA), and an install downloads up to 2 GB, so both run off the UI thread;
 //! the section polls their progress a few times a second while one runs.
@@ -11,6 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use chukcut_engine::modules::enhance::commands::{self as enhance, EnhanceCacheInfo};
 use chukcut_engine::modules::matting::commands::{self as matting, MatteCacheInfo};
 use chukcut_engine::modules::ml::commands::{
     self as ml, BundleInfo, MlItem, MlProgress, MlStatus, ModelInfo, RuntimeInfo,
@@ -30,6 +32,7 @@ struct Snapshot {
     runtimes: Vec<RuntimeInfo>,
     models: Vec<ModelInfo>,
     mattes: Option<MatteCacheInfo>,
+    remade: Option<EnhanceCacheInfo>,
 }
 
 /// An install in progress.
@@ -74,6 +77,7 @@ impl AiSettings {
                         runtimes: ml::ml_runtimes(),
                         models: ml::ml_models(),
                         mattes: Some(matting::matting_cache_info()),
+                        remade: Some(enhance::enhance_cache_info()),
                     }
                 })
                 .await;
@@ -178,6 +182,17 @@ impl AiSettings {
         cx.notify();
     }
 
+    fn clear_remade(&mut self, cx: &mut Context<Self>) {
+        self.notice = Some(match enhance::enhance_cache_clear() {
+            Ok(()) => "Remade frames cleared; clips with Remove object or Enhance quality on \
+                       bake again"
+                .into(),
+            Err(error) => error.into(),
+        });
+        self.reload(false, cx);
+        cx.notify();
+    }
+
     fn render_status(&self) -> Vec<AnyElement> {
         let mut rows = Vec::new();
         let status = self.snapshot.status.as_ref();
@@ -186,11 +201,27 @@ impl AiSettings {
             Some(status) => status.active.clone(),
             None => "Checking\u{2026}".to_string(),
         };
-        rows.push(row(
-            "Models run on",
-            status.and_then(|s| s.advice.as_deref()),
-            dim(active),
-        ));
+        // The answer can be a sentence with a library path in it. As the
+        // row's control it took the whole width and squeezed the label to one
+        // letter per line, so it goes under the label here, where it wraps.
+        let advice = status.and_then(|s| s.advice.clone());
+        rows.push(
+            div()
+                .min_h(px(44.0))
+                .px_3()
+                .py_2()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .border_b_1()
+                .border_color(rgb(PANEL))
+                .child(div().text_sm().child("Models run on"))
+                .child(dim(active))
+                .children(
+                    advice.map(|advice| div().text_xs().text_color(rgb(TEXT_DIM)).child(advice)),
+                )
+                .into_any_element(),
+        );
         if let Some(status) = status {
             let gpus = if status.gpus.is_empty() {
                 "None found".to_string()
@@ -420,6 +451,34 @@ impl AiSettings {
     }
 }
 
+impl AiSettings {
+    fn render_remade(&self, cx: &mut Context<Self>) -> AnyElement {
+        let size = self
+            .snapshot
+            .remade
+            .as_ref()
+            .map(|m| bytes_label(m.bytes))
+            .unwrap_or_else(|| "\u{2026}".into());
+        let control = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .child(dim(size))
+            .child(
+                Button::new("ml-clear-remade")
+                    .label("Clear")
+                    .small()
+                    .on_click(cx.listener(|this, _, _, cx| this.clear_remade(cx))),
+            );
+        row(
+            "Remade frames",
+            Some("Remove object and Enhance quality, one picture per frame. Part of the cache limit; the open project's are kept."),
+            control,
+        )
+    }
+}
+
 impl Render for AiSettings {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mut rows = self.render_status();
@@ -485,6 +544,7 @@ impl Render for AiSettings {
         rows.extend(self.render_loose_packs(cx));
         rows.extend(self.render_models(cx));
         rows.push(self.render_mattes(cx));
+        rows.push(self.render_remade(cx));
         if let Some(notice) = &self.notice {
             rows.push(row("", Some(notice.as_ref()), div()));
         }

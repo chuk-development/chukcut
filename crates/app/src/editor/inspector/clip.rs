@@ -116,8 +116,10 @@ impl Editor {
                     // Retouch reads faces over time: a video clip's.
                     let names: &[&'static str] = match kind {
                         ClipKind::Compound => &["Basic", "Mask"],
-                        ClipKind::Video => &["Basic", "Remove background", "Mask", "Retouch"],
-                        _ => &["Basic", "Remove background", "Mask"],
+                        ClipKind::Video => {
+                            &["Basic", "Remove background", "Mask", "Retouch", "Enhance"]
+                        }
+                        _ => &["Basic", "Remove background", "Mask", "Enhance"],
                     };
                     let current = sub(self, VIDEO, names[0]);
                     let body = match current {
@@ -125,6 +127,7 @@ impl Editor {
                         "Mask" => self.mask_tab(&segment, window, cx),
                         "Remove background" => self.remove_background_tab(&segment, window, cx),
                         "Retouch" => self.retouch_tab(&segment, window, cx),
+                        enhance::ENHANCE => self.enhance_tab(&segment, cx),
                         _ => not_yet(current),
                     };
                     (

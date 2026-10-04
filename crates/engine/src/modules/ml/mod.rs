@@ -25,6 +25,10 @@
 //!   "Optical flow (AI)" slow motion (`speed::flow`).
 //! - **Separate** ([`separate`]): HTDemucs, the voice out of a recording,
 //!   for "Isolate voice" (`voice::isolate`).
+//! - **Inpaint** ([`inpaint`]): LaMa, a part of a picture painted over, for
+//!   "Remove object" (`enhance`).
+//! - **Upscale** ([`upscale`]): Real-ESRGAN, a larger, cleaner picture, for
+//!   "Enhance quality" (`enhance`).
 //! - **Commands** ([`commands`]): what the UI, the CLI and MCP call.
 //!
 //! **Degrading.** Every caller treats ML as optional. No worker binary, no
@@ -42,12 +46,14 @@ use chukcut_ml_worker::registry;
 pub mod commands;
 pub mod download;
 pub mod faces;
+pub mod inpaint;
 pub mod interpolate;
 pub mod landmarks;
 pub mod matte;
 pub mod segment;
 pub mod separate;
 pub mod tracker;
+pub mod upscale;
 pub mod worker;
 
 pub use worker::MlError;

@@ -94,6 +94,9 @@ const OPEN_WORLD: &[&str] = &[
     "face_landmarks",
     "retouch",
     "follow_face",
+    // Download LaMa or Real-ESRGAN on first use.
+    "remove_object",
+    "enhance_quality",
     "sound",
     "fal",
     "sticker",

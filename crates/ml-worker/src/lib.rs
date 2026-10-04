@@ -10,6 +10,8 @@
 //! Design: `docs/decisions/0025-ml-worker-process.md`.
 
 pub mod birefnet;
+pub mod esrgan;
+pub mod lama;
 pub mod protocol;
 pub mod registry;
 pub mod rife;

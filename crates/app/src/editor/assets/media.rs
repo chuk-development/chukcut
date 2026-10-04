@@ -92,11 +92,10 @@ impl Editor {
         items
     }
 
-    /// The materials some clip on the timeline uses.
+    /// The materials some clip uses, on any timeline or inside a compound
+    /// clip: a file moved into a compound clip is still in the edit.
     fn used_materials(&self) -> HashSet<String> {
-        self.project
-            .tracks
-            .iter()
+        chukcut_engine::modules::sequence::all_tracks(&self.project)
             .flat_map(|track| track.segments.iter())
             .map(|segment| segment.material_id.clone())
             .collect()

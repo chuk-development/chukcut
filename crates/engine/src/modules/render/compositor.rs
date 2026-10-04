@@ -327,6 +327,9 @@ pub struct Compositor {
     flows: super::flow::FlowFrames,
     /// Face landmark tracks, for the retouch effect (`fx::retouch`).
     faces: super::faces::FaceTracks,
+    /// Remade frames ("Remove object", "Enhance quality"). See
+    /// [`super::enhance`].
+    enhanced: super::enhance::EnhancedFrames,
     vertices: wgpu::Buffer,
     indices: wgpu::Buffer,
     /// Per-draw uniforms, addressed with dynamic offsets. Grown, never shrunk —
@@ -769,6 +772,7 @@ impl Compositor {
             backgrounds: super::background::MatteFrames::default(),
             flows: super::flow::FlowFrames::default(),
             faces: super::faces::FaceTracks::default(),
+            enhanced: super::enhance::EnhancedFrames::default(),
             vertices,
             indices,
             uniforms: Mutex::new(Scratch::default()),
@@ -1879,8 +1883,14 @@ impl Compositor {
                 .flatten();
             // Optical flow draws the frame RIFE made for this instant, once
             // it is baked; until then the clip takes the frame blend above.
+            // RIFE's frames are made from the decoded ones, so a clip whose
+            // frames are remade (an object removed) blends its remade
+            // frames instead.
             let flowed = blend
                 .filter(|_| crate::modules::speed::flow::is_on(&project.materials, segment))
+                .filter(|_| {
+                    crate::modules::enhance::Chain::of(&project.materials, segment).is_none()
+                })
                 .and_then(|b| crate::modules::speed::flow::FlowSample::of(&b))
                 .and_then(|sample| {
                     let video = project.materials.video(&segment.material_id)?;
@@ -2005,7 +2015,13 @@ impl Compositor {
                 segment_id: &segment.id,
                 max_size: size,
             };
-            match sources.frame(&self.ctx, &request) {
+            // A remade clip blends its remade frames.
+            let second = match self.enhanced_frame(&project.materials, segment, blend.second, size)
+            {
+                Some((frame, _)) => Ok(Some(frame)),
+                None => sources.frame(&self.ctx, &request),
+            };
+            match second {
                 Ok(Some(second)) => {
                     frames[0].1 = 1.0 - blend.weight;
                     frames.push((second, blend.weight));
@@ -2076,6 +2092,43 @@ impl Compositor {
         Some(quads)
     }
 
+    /// The remade frame of a video clip with "Remove object" or "Enhance
+    /// quality" on at `source_time`, decoded to cover what a render of
+    /// `size` shows of it, with the source's display size (which places
+    /// it); `None` when the clip has neither or the frame is not made yet.
+    fn enhanced_frame(
+        &self,
+        materials: &MaterialPool,
+        segment: &Segment,
+        source_time: Micros,
+        size: (u32, u32),
+    ) -> Option<(SourceFrame, (u32, u32))> {
+        let chain = crate::modules::enhance::Chain::of(materials, segment)?;
+        let video = materials.video(&segment.material_id)?;
+        let period = if video.fps.is_finite() && video.fps > 1.0 {
+            ((1_000_000.0 / video.fps).round() as Micros).max(1)
+        } else {
+            33_333
+        };
+        let display = (video.width.max(1), video.height.max(1));
+        // What the clip covers in this render: fitted into it and zoomed by
+        // its scale. A crop or a keyframed zoom shows more of fewer pixels;
+        // the next JPEG size up covers most of that.
+        let fit = (size.0 as f32 / display.0 as f32).min(size.1 as f32 / display.1 as f32);
+        let zoom = segment.transform.scale[0]
+            .abs()
+            .max(segment.transform.scale[1].abs())
+            .max(1.0);
+        let want = (
+            (display.0 as f32 * fit * zoom).ceil() as u32,
+            (display.1 as f32 * fit * zoom).ceil() as u32,
+        );
+        let frame = self
+            .enhanced
+            .get(&self.ctx, &video.path, &chain, source_time, period, want)?;
+        Some((frame, display))
+    }
+
     /// One segment's texture and where it goes, with a uniform slot reserved.
     ///
     /// `None` when there is nothing to draw: an audio material, a source that
@@ -2116,13 +2169,21 @@ impl Compositor {
                 motion::text::animated_text_frame(&self.ctx, materials, segment, time, size, canvas)
             })
             .flatten();
-        let fetched = match animated_text {
-            Some(frame) => Ok(Some(frame)),
+        // A clip whose frames are remade ("Remove object", "Enhance
+        // quality") draws the made frame once it is baked, placed by the
+        // source's own size (the made frame may be larger, never another
+        // shape); until then the decoded one.
+        let enhanced = (kind == MaterialKind::Video && animated_text.is_none())
+            .then(|| self.enhanced_frame(materials, segment, fetch_time, size))
+            .flatten();
+        let place_size = enhanced.as_ref().map(|(_, display)| *display);
+        let fetched = match (animated_text, enhanced) {
+            (Some(frame), _) | (None, Some((frame, _))) => Ok(Some(frame)),
             // A compound clip: its sequence, rendered whole at this instant.
-            None if kind == MaterialKind::Sequence => {
+            (None, None) if kind == MaterialKind::Sequence => {
                 self.nested_frame(canvas, materials, segment, source_time, size, sources)
             }
-            None => sources.frame(&self.ctx, &request),
+            (None, None) => sources.frame(&self.ctx, &request),
         };
         let frame = match fetched {
             Ok(Some(frame)) => frame,
@@ -2145,7 +2206,13 @@ impl Compositor {
             }
         };
 
-        let Some(placement) = place(canvas, materials, segment, frame.size(), time) else {
+        let Some(placement) = place(
+            canvas,
+            materials,
+            segment,
+            place_size.unwrap_or(frame.size()),
+            time,
+        ) else {
             return Ok(None);
         };
 

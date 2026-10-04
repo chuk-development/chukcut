@@ -61,6 +61,12 @@ pub enum Task {
     /// Frame interpolation: two frames and a phase in, the frame between
     /// them out (RIFE).
     Interpolate,
+    /// Inpainting: a picture and a mask in, the picture with the masked
+    /// part painted over out (LaMa).
+    Inpaint,
+    /// Super-resolution: a picture in, the same picture at a larger size
+    /// out (Real-ESRGAN).
+    Upscale,
 }
 
 /// One downloadable model.
@@ -285,6 +291,56 @@ pub const MODELS: &[ModelSpec] = &[
         providers_tested: &["CPU", "CUDA"],
         // Slow on the CPU (seconds per 1080p frame) but bounded in memory;
         // the bake says how long it will take instead of refusing.
+        cpu_ok: true,
+        companion: None,
+    },
+    // LaMa (Suvorov et al., WACV 2022; github.com/advimman/lama, Apache-2.0,
+    // weights included) for "Remove object". The ONNX file is Carve's
+    // lama_fp32.onnx export of big-lama (Apache-2.0): fixed 512² input, fp32,
+    // opset 17. OpenCV Zoo's inpainting_lama_2025jan.onnx (Apache-2.0, made
+    // from this file, 93 MB) is half the size and filled a test hole within
+    // 1.2 code values of it, but its weights are block-quantized and ORT
+    // 1.28's CUDA provider refuses its DequantizeLinear nodes ("Unsupported
+    // quantization type"), so it would run on the CPU only. Video inpainters
+    // were checked and excluded by licence: ProPainter (S-Lab,
+    // non-commercial) and E2FGVI (CC BY-NC 4.0). Hugging Face commit
+    // c3c0c9e; SHA-256 = LFS object id, read 2026-10-04.
+    ModelSpec {
+        id: "lama",
+        version: "big-lama-fp32-c3c0c9e",
+        name: "LaMa (remove an object)",
+        task: Task::Inpaint,
+        licence: "Apache-2.0",
+        commercial_ok: true,
+        url: "https://huggingface.co/Carve/LaMa-ONNX/resolve/c3c0c9e468934d62e79c329e35d82dd09ff8c444/lama_fp32.onnx",
+        sha256: "1faef5301d78db7dda502fe59966957ec4b79dd64e16f03ed96913c7a4eb68d6",
+        bytes: 208_044_816,
+        file: "lama_fp32.onnx",
+        providers_tested: &["CPU", "CUDA"],
+        // A 512² crop takes ~2.6 s on four CPU threads: slow, bounded.
+        cpu_ok: true,
+        companion: None,
+    },
+    // Real-ESRGAN realesr-general-x4v3 (Wang et al., ICCVW 2021;
+    // github.com/xinntao/Real-ESRGAN, BSD-3-Clause, weights included) for
+    // "Enhance quality". The ONNX file is CoderViking's re-export of the
+    // official v0.2.5.0 weights (BSD-3-Clause; dynamic size, opset 17, the
+    // output not clamped in the graph). Hugging Face commit c6a9717;
+    // SHA-256 = LFS object id, read 2026-10-04.
+    ModelSpec {
+        id: "realesr-general-x4v3",
+        version: "x4v3-c6a9717",
+        name: "Real-ESRGAN general x4v3 (enhance quality)",
+        task: Task::Upscale,
+        licence: "BSD-3-Clause",
+        commercial_ok: true,
+        url: "https://huggingface.co/CoderViking/realesr-general-x4v3-onnx/resolve/c6a971706797c7502945a2b4c4274fce4900d4ab/realesr-general-x4v3.onnx",
+        sha256: "1940a93ee08283a0a7286183186357b1688fe9fa8ede74604b424586aaddf112",
+        bytes: 4_866_417,
+        file: "realesr-general-x4v3.onnx",
+        providers_tested: &["CPU", "CUDA"],
+        // ~2.3 s for a 640×360 frame on four CPU threads, ~20 s at 1080p:
+        // allowed, with the estimate said up front.
         cpu_ok: true,
         companion: None,
     },

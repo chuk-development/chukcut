@@ -25,6 +25,9 @@ pub(crate) struct FlowPanel {
     /// Bakes started after an edit, with the frames each had done.
     background: Vec<(u64, u32)>,
     redrawn: Option<std::time::Instant>,
+    /// The selected clip's baked frames, read at most every two seconds:
+    /// (clip, when, baked, total). Reading it stats every frame's file.
+    coverage: Option<(String, std::time::Instant, u32, u32)>,
 }
 
 struct FlowBake {
@@ -127,6 +130,28 @@ impl Editor {
             }
             _ if mode == FrameBlend::Flow => {
                 let id = segment.id.clone();
+                // A clip whose frames are all baked has nothing to finish;
+                // the button stood there after every complete bake.
+                if let Some((baked, total)) = self.flow_coverage(&segment.id) {
+                    if baked >= total {
+                        rows.push(caption(
+                            format!("All {total} in-between frames are baked."),
+                            TEXT_MUTED,
+                        ));
+                        return Some(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(6.0))
+                                .children(rows)
+                                .into_any_element(),
+                        );
+                    }
+                    rows.push(caption(
+                        format!("{baked} of {total} in-between frames are baked."),
+                        TEXT_MUTED,
+                    ));
+                }
                 rows.push(
                     div()
                         .flex()
@@ -177,6 +202,24 @@ impl Editor {
                 .children(rows)
                 .into_any_element(),
         )
+    }
+
+    /// How many of a flow clip's in-between frames are baked, cached for two
+    /// seconds; `None` when the engine cannot say.
+    fn flow_coverage(&mut self, segment_id: &str) -> Option<(u32, u32)> {
+        if let Some((id, when, baked, total)) = &self.inspector.flow.coverage {
+            if id == segment_id && when.elapsed() < std::time::Duration::from_secs(2) {
+                return Some((*baked, *total));
+            }
+        }
+        let coverage = speed::speed_flow_coverage(&self.state, segment_id.to_string()).ok()?;
+        self.inspector.flow.coverage = Some((
+            segment_id.to_string(),
+            std::time::Instant::now(),
+            coverage.baked,
+            coverage.total,
+        ));
+        Some((coverage.baked, coverage.total))
     }
 
     fn set_frame_blend(&mut self, segment_id: &str, mode: FrameBlend, cx: &mut Context<Self>) {
@@ -332,6 +375,10 @@ impl Editor {
             .flow
             .redrawn
             .is_none_or(|at| at.elapsed() >= std::time::Duration::from_millis(300));
+        if ended {
+            // Read the coverage afresh: the bake that ended changed it.
+            self.inspector.flow.coverage = None;
+        }
         if ended || (landed && due) {
             // A new picture of the same document: frames just baked.
             self.inspector.flow.redrawn = Some(std::time::Instant::now());

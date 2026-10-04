@@ -266,6 +266,7 @@ impl Editor {
         changed |= self.poll_tracking(cx);
         changed |= self.poll_matting(cx);
         changed |= self.poll_flow(cx);
+        changed |= self.poll_enhance(cx);
         changed |= self.poll_analysis(cx);
         changed |= self.poll_landmarks();
         changed |= self.poll_voiceover(cx);
@@ -391,6 +392,7 @@ impl Editor {
         self.queue_missing_flow(cx);
         self.queue_missing_isolation(cx);
         self.queue_missing_landmarks(cx);
+        self.queue_missing_enhanced(cx);
         cx.notify();
     }
 

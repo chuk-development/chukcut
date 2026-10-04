@@ -739,6 +739,29 @@ pub fn run_export(job: &ExportJob, sink: &dyn ProgressSink) -> Result<ExportOutc
         }
     }
 
+    // "Remove object" and "Enhance quality" frames are cache too: make the
+    // missing ones first, so the file never shows an object the user
+    // removed or the picture they asked to have enhanced.
+    if !settings.audio_only {
+        let ensured = crate::modules::enhance::commands::enhance_ensure(
+            &job.project,
+            &|what, fraction| {
+                let mut preparing = tracker.snapshot(ExportStage::Preparing, 0, Instant::now());
+                preparing.message = Some(format!("{what} ({:.0} %)", fraction * 100.0));
+                sink.send(preparing);
+            },
+            &job.cancel,
+        );
+        if let Err(message) = ensured {
+            let error = ExportError::Settings(message);
+            tracing::error!(%error, "the export could not make its remade frames");
+            let mut failed = tracker.snapshot(ExportStage::Failed, 0, Instant::now());
+            failed.message = Some(error.to_string());
+            sink.send(failed);
+            return Err(error);
+        }
+    }
+
     // Open the file first: a codec that is not in this build, a directory that
     // does not exist or a path that is not writable all fail here, in
     // milliseconds, instead of after the audio mix.

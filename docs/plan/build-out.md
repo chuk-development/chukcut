@@ -81,9 +81,9 @@ column current.
 | 9 | ml3 | AI slow motion (RIFE-class optical flow through the ML worker), matte-driven grade/effect masks (subject / background) | merged — RIFE v4 (MIT) optical-flow frames as third blend mode + "Smooth slow-mo", baked JPEG cache; matte-driven grade/effect masks (subject/background); open: 1080p RIFE ~6 fps (fp16/TensorRT next), one matte per clip |
 | 9 | compound3 | scene/beat/reframe inside compound clips, compound clip's own audio effects in the mix, file identity in the nested cache, black export cover picture | merged — scenes/beats/reframe on compound content, compound EQ/comp/reverb/denoise/normalise via a cached mix-down, file identity in the nested digest, last frame shown at timeline end (black export cover fixed), compound inspector; open: stabilisation refuses compounds |
 | 9 | ci | CI green on every job, clippy warnings fixed and made fatal, CLI tests in CI, GPU tests on the runner if lavapipe is there | merged — master CI green, clippy fatal (0 warnings), CLI + ML worker tests in CI, engine GPU tests on lavapipe in CI |
-| 10 | ml4 | AI object removal (inpainting, LaMa-class) on SAM/painted masks, AI upscaling (Real-ESRGAN-class) | running (agent/ml4) |
+| 10 | ml4 | AI object removal (inpainting, LaMa-class) on SAM/painted masks, AI upscaling (Real-ESRGAN-class) | merged — Remove object (SAM click / strokes / boxes; background memory + clean plate + LaMa), Enhance quality 2x/4x (Real-ESRGAN), baked frames cache; open: static logos on moving camera shimmer, no fp16/TensorRT, bakes not queued on project open |
 | 10 | colourai | auto adjust, colour match, grade presets, face/body landmarks, beauty/retouch, face-follow, voice isolation | running (agent/colourai) |
-| 10 | qa2 | end-to-end QA of every new feature in the release app, fixes, showcase extended with the new features | running (agent/qa2) |
+| 10 | qa2 | end-to-end QA of every new feature in the release app, fixes, showcase extended with the new features | merged — every new feature renders, undoes, survives save/reopen, export matches preview; 7 bugs fixed; showcase extended (compound, 2nd timeline, RIFE, select-object colour pop, animated GIF + motion blur); open: apply template into an open project, slots inside compounds |
 
 ## Backlog for the next waves (lead picks from the top)
 
