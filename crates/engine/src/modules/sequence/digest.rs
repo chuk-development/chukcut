@@ -13,9 +13,13 @@
 //! its compound clip uses. Hashing the whole pool per frame would cost more
 //! than the clone it replaces.
 //!
-//! Not covered, on purpose: the contents of files on disk (a LUT edited in
-//! place, a missing file that comes back). Those are the provider's and the
-//! LUT cache's business, and a document edit refreshes the key.
+//! Files on disk are part of the picture too: a LUT edited in place, a
+//! title's font replaced, a missing video that comes back. Every absolute
+//! path any hashed entry names is fed in as its identity — size and
+//! modification time, or "missing" — so such a change makes a new key on the
+//! next frame without a document edit. That is one `stat` per file the
+//! compound clip uses, per frame; the LUT cache pays the same for every
+//! graded clip already (`render::lut::LutCache`).
 
 use std::collections::BTreeSet;
 use std::hash::{Hash, Hasher};
@@ -96,6 +100,7 @@ fn referenced(pool: &MaterialPool, ids: BTreeSet<&str>, hasher: &mut std::hash::
 
     let mut queue: Vec<String> = ids.into_iter().map(str::to_string).collect();
     let mut done: BTreeSet<String> = BTreeSet::new();
+    let mut paths: BTreeSet<String> = BTreeSet::new();
     while let Some(id) = queue.pop() {
         if !done.insert(id.clone()) {
             continue;
@@ -104,22 +109,24 @@ fn referenced(pool: &MaterialPool, ids: BTreeSet<&str>, hasher: &mut std::hash::
         id.hash(hasher);
         if let Some(m) = videos.iter().find(|m| m.id == id) {
             feed(hasher, m);
+            paths.insert(m.path.clone());
         } else if let Some(m) = images.iter().find(|m| m.id == id) {
             feed(hasher, m);
+            paths.insert(m.path.clone());
         } else if let Some(m) = texts.iter().find(|m| m.id == id) {
-            feed(hasher, m);
+            feed_with_files(hasher, m, &mut paths);
         } else if let Some(m) = transitions.iter().find(|m| m.id == id) {
-            feed(hasher, m);
+            feed_with_files(hasher, m, &mut paths);
         } else if let Some(m) = color_adjusts.iter().find(|m| m.id == id) {
-            feed(hasher, m);
+            feed_with_files(hasher, m, &mut paths);
         } else if let Some(m) = effects.iter().find(|m| m.id == id) {
-            feed(hasher, m);
+            feed_with_files(hasher, m, &mut paths);
         } else if let Some(m) = animations.iter().find(|m| m.id == id) {
-            feed(hasher, m);
+            feed_with_files(hasher, m, &mut paths);
         } else if let Some(m) = speed_curves.iter().find(|m| m.id == id) {
             feed(hasher, m);
         } else if let Some(m) = compositing.iter().find(|m| m.id == id) {
-            feed(hasher, m);
+            feed_with_files(hasher, m, &mut paths);
         } else if let Some(m) = follows.iter().find(|m| m.id == id) {
             feed(hasher, m);
             queue.push(m.track_id.clone());
@@ -130,9 +137,56 @@ fn referenced(pool: &MaterialPool, ids: BTreeSet<&str>, hasher: &mut std::hash::
             strings(value, &mut |s| {
                 if extras.contains_key(s) {
                     queue.push(s.to_string());
+                } else if is_path(s) {
+                    paths.insert(s.to_string());
                 }
             });
         }
+    }
+    for path in &paths {
+        file_identity(hasher, path);
+    }
+}
+
+/// Whether a string in a document entry names a file: the document stores
+/// absolute paths (`LutRef::path`, `VideoMaterial::path`, …).
+fn is_path(s: &str) -> bool {
+    s.starts_with('/') && s.len() > 1
+}
+
+/// Feed `value` and collect the file paths inside it.
+fn feed_with_files(
+    hasher: &mut std::hash::DefaultHasher,
+    value: &impl Serialize,
+    paths: &mut BTreeSet<String>,
+) {
+    feed(hasher, value);
+    if let Ok(json) = serde_json::to_value(value) {
+        strings(&json, &mut |s| {
+            if is_path(s) {
+                paths.insert(s.to_string());
+            }
+        });
+    }
+}
+
+/// Feed what a file on disk is now: its size and modification time, or that
+/// it is not there. A file edited in place, replaced, deleted or brought back
+/// changes this.
+pub(crate) fn file_identity(hasher: &mut impl Hasher, path: &str) {
+    path.hash(hasher);
+    match std::fs::metadata(path) {
+        Ok(meta) => {
+            hasher.write_u8(1);
+            hasher.write_u64(meta.len());
+            let modified = meta
+                .modified()
+                .ok()
+                .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_nanos());
+            hasher.write_u128(modified);
+        }
+        Err(_) => hasher.write_u8(0),
     }
 }
 
