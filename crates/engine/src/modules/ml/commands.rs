@@ -899,6 +899,7 @@ mod tests {
             bundle: None,
             active: String::new(),
             advice: None,
+            ..MlStatus::default()
         };
         assert_eq!(
             active_sentence(&root, &status),

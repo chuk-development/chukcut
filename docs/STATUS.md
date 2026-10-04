@@ -4216,7 +4216,10 @@ TensorRT 10.16.1.11, release worker and CLI, load 4–9 from other agents.
   Runtime's constant folding turned the export's shape arithmetic into
   gigabytes of constants while the session was created. It is off for
   this model (`accel::tuning`). Arena and memory patterns off as well:
-  1.7 GB on the CPU but 50 % slower, not taken.
+  1.7 GB on the CPU but 50 % slower, not taken. End to end
+  (`isolate-voice` on a 60 s clip, release CLI, the worker's RSS sampled
+  every 200 ms): **1.5 GB on CUDA (17.1 s), 1.9 GB on the CPU (39.5 s)**;
+  the session takes ~9 s to create without folding (7.5 s with).
 - **GPU memory:** a worker that has run every heavy model in Fast mode
   holds a CUDA and a TensorRT session of each and filled the 12 GB card:
   HTDemucs then failed to allocate and BiRefNet's cached engine could not
