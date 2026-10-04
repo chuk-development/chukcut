@@ -26,25 +26,37 @@ fn dir() -> PathBuf {
 
 /// The cache key of `algorithm` run over `range` of the file at `path`, or
 /// `None` when the file cannot be read (then nothing is cached).
+///
+/// A compound clip's walk names its sequence as `sequence:<id>#<digest>`
+/// (`sequence::digest`), which already covers its contents and the files
+/// they read, so that string is the identity and there is no file to stat.
 pub fn key(algorithm: &str, path: &str, range: TimeRange) -> Option<String> {
-    let meta = std::fs::metadata(path).ok()?;
-    let modified = meta
-        .modified()
-        .ok()
-        .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
-        .map_or(0, |d| d.as_nanos());
+    let (len, modified) = if path.starts_with(SEQUENCE_PREFIX) {
+        (0, 0)
+    } else {
+        let meta = std::fs::metadata(path).ok()?;
+        let modified = meta
+            .modified()
+            .ok()
+            .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_nanos());
+        (meta.len(), modified)
+    };
     let mut hash = Sha256::new();
     hash.update(algorithm.as_bytes());
     hash.update([0]);
     hash.update(path.as_bytes());
     hash.update([0]);
-    hash.update(meta.len().to_le_bytes());
+    hash.update(len.to_le_bytes());
     hash.update(modified.to_le_bytes());
     hash.update(range.start.to_le_bytes());
     hash.update(range.duration.to_le_bytes());
     let digest = hash.finalize();
     Some(digest.iter().take(16).map(|b| format!("{b:02x}")).collect())
 }
+
+/// How a walk over a compound clip names what it reads.
+pub const SEQUENCE_PREFIX: &str = "sequence:";
 
 fn file(key: &str) -> PathBuf {
     dir().join(format!("{key}.json"))
