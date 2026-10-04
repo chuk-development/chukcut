@@ -383,7 +383,8 @@ fn even(v: u32) -> u32 {
 /// Seconds per frame a chain takes on a `width × height` source, on an RTX
 /// 3060 (CUDA) and on four CPU threads, from the speeds measured there
 /// (`docs/STATUS.md`, "Remove object and enhance quality"): LaMa per crop,
-/// Real-ESRGAN per megapixel of input, plus decoding and writing. Rough,
+/// MobileSAM per frame of a selection, Real-ESRGAN per megapixel of input,
+/// plus decoding and writing. Rough,
 /// for a sentence that says seconds, minutes or hours before a bake starts;
 /// a running bake reports the pace it sees.
 pub fn seconds_per_frame(chain: &Chain, source: (u32, u32)) -> (f64, f64) {
@@ -395,9 +396,17 @@ pub fn seconds_per_frame(chain: &Chain, source: (u32, u32)) -> (f64, f64) {
     let (w, h) = chain.decode_size(source.0, source.1);
     let mp = w as f64 * h as f64 / 1e6;
     let (mut gpu, mut cpu) = (OVERHEAD_PER_MP * mp, OVERHEAD_PER_MP * mp);
-    if chain.removal.is_some() {
+    // MobileSAM's encoder and decoder per frame for a selected object,
+    // VitTrack's search beside them.
+    const SELECT_GPU: f64 = 0.08;
+    const SELECT_CPU: f64 = 0.75;
+    if let Some(removal) = &chain.removal {
         gpu += LAMA_GPU;
         cpu += LAMA_CPU;
+        if removal.prompt.is_some() {
+            gpu += SELECT_GPU;
+            cpu += SELECT_CPU;
+        }
     }
     if chain.upscale.is_some() {
         gpu += ESRGAN_GPU_PER_MP * mp;

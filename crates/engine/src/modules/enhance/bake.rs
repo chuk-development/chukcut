@@ -264,10 +264,10 @@ pub fn run(
     } else {
         missing.clone()
     };
-    let stage = if stateful {
-        "Removing the object"
-    } else {
-        "Enhancing"
+    let stage = match (stateful, job.chain.upscale.is_some()) {
+        (true, true) => "Removing the object and enhancing",
+        (true, false) => "Removing the object",
+        _ => "Enhancing",
     };
     let mut progress = EnhanceProgress {
         stage: stage.into(),

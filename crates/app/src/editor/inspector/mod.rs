@@ -38,6 +38,7 @@ mod controls;
 mod details;
 mod easing;
 mod effects;
+mod enhance;
 mod flow;
 mod grading;
 mod masks;
@@ -82,6 +83,8 @@ pub(crate) struct Inspector {
     speed: speed::SpeedTab,
     /// The Speed tab's optical-flow bakes.
     flow: flow::FlowPanel,
+    /// Video › Enhance: Remove object, Enhance quality, their bakes.
+    enhance: enhance::EnhancePanel,
     /// The keyframe easing graph.
     easing: easing::EasingState,
     /// The Text tab's words field and colour pickers.

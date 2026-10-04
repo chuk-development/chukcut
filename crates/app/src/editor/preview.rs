@@ -278,6 +278,7 @@ impl Editor {
                             .child(picture)
                             .children(self.motion_overlay(dw, dh, cx))
                             .children(self.mask_overlay(dw, dh, cx))
+                            .children(self.enhance_overlay(dw, dh, cx))
                             .children(self.caption_overlay((dw, dh), (bw, bh), cx))
                             .child(self.render_tracking_overlay(cx)),
                     ),

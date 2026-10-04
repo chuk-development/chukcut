@@ -116,13 +116,14 @@ impl Editor {
                     let names: &[&'static str] = if kind == ClipKind::Compound {
                         &["Basic", "Mask"]
                     } else {
-                        &["Basic", "Remove background", "Mask", "Retouch"]
+                        &["Basic", "Remove background", "Mask", "Retouch", "Enhance"]
                     };
                     let current = sub(self, VIDEO, names[0]);
                     let body = match current {
                         "Basic" => self.video_basic(&segment, kind, window, cx),
                         "Mask" => self.mask_tab(&segment, window, cx),
                         "Remove background" => self.remove_background_tab(&segment, window, cx),
+                        enhance::ENHANCE => self.enhance_tab(&segment, cx),
                         _ => not_yet(current),
                     };
                     (
