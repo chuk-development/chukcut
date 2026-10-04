@@ -1316,7 +1316,9 @@ mod tests {
         let row = {
             let view = slice.get_mapped_range().unwrap();
             view[..(width * 4) as usize]
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .map(|p| [p[0], p[1], p[2], p[3]])
                 .collect()
         };

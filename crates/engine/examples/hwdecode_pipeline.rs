@@ -419,7 +419,7 @@ fn compare(a: &[u8], b: &[u8]) -> (f64, u8) {
     let mut total = 0f64;
     let mut worst = 0u8;
     let mut count = 0usize;
-    for (pa, pb) in a.chunks_exact(4).zip(b.chunks_exact(4)) {
+    for (pa, pb) in a.as_chunks::<4>().0.iter().zip(b.as_chunks::<4>().0) {
         for channel in 0..3 {
             let delta = pa[channel].abs_diff(pb[channel]);
             total += delta as f64;

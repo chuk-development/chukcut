@@ -342,7 +342,9 @@ fn a_string_of_only_emoji_renders_or_at_least_survives() {
     assert_eq!(image.glyph_rects.len(), 3);
     let opaque = image
         .pixels
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .filter(|px| px[3] > 200)
         .count();
     assert!(
@@ -353,7 +355,9 @@ fn a_string_of_only_emoji_renders_or_at_least_survives() {
     // we drew the outline in the fill colour instead of the bitmap.
     let distinct: std::collections::HashSet<[u8; 3]> = image
         .pixels
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .filter(|px| px[3] > 200)
         .map(|px| [px[0], px[1], px[2]])
         .collect();
@@ -601,7 +605,9 @@ fn a_stroke_widens_the_ink_and_paints_its_own_colour() {
     );
     let red = stroked
         .pixels
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .filter(|px| px[3] > 200 && px[0] > 180 && px[1] < 70)
         .count();
     assert!(red > 200, "expected a red rim, found {red} pixels");
@@ -620,7 +626,9 @@ fn a_shadow_darkens_pixels_the_glyph_does_not_cover() {
     let image = renderer.rasterize_uncached(&request, &RasterOptions::tight());
     let semi = image
         .pixels
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .filter(|px| px[3] > 10 && px[3] < 200)
         .count();
     assert!(
@@ -768,7 +776,13 @@ fn golden_image_matches() {
 
     let mut worst = 0i32;
     let mut differing = 0usize;
-    for (actual, expected) in image.pixels.chunks_exact(4).zip(expected.chunks_exact(4)) {
+    for (actual, expected) in image
+        .pixels
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(expected.as_chunks::<4>().0)
+    {
         // Only alpha is compared. The RGB of a transparent pixel is whatever
         // the edge bleed put there, which is deliberately unspecified.
         let delta = (actual[3] as i32 - expected[3] as i32).abs();

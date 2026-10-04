@@ -522,7 +522,7 @@ fn describe(rgb: &[u8]) -> String {
     let mut sum = [0f64; 3];
     let mut sq = [0f64; 3];
     let n = (rgb.len() / 3) as f64;
-    for px in rgb.chunks_exact(3) {
+    for px in rgb.as_chunks::<3>().0 {
         for c in 0..3 {
             sum[c] += px[c] as f64;
             sq[c] += (px[c] as f64) * (px[c] as f64);

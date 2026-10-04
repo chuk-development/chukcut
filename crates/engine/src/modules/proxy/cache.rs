@@ -370,7 +370,7 @@ impl ProxyCache {
     /// Every entry, newest use first. For a settings pane.
     pub fn entries(&self) -> Vec<ProxyEntry> {
         let mut entries = self.index.lock().entries.clone();
-        entries.sort_by(|a, b| b.last_used.cmp(&a.last_used));
+        entries.sort_by_key(|entry| std::cmp::Reverse(entry.last_used));
         entries
     }
 

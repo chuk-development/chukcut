@@ -120,7 +120,7 @@ pub fn parse_index(bytes: &[u8]) -> Result<Vec<AnimatedEmoji>, String> {
             }
         })
         .collect();
-    list.sort_by(|a, b| b.popularity.cmp(&a.popularity));
+    list.sort_by_key(|icon| std::cmp::Reverse(icon.popularity));
     Ok(list)
 }
 

@@ -41,8 +41,9 @@ pub enum TrackingCommand {
         before: Option<FollowMaterial>,
         after: Option<FollowMaterial>,
     },
-    /// A segment edit that belongs to a tracking edit.
-    Edit(EditCommand),
+    /// A segment edit that belongs to a tracking edit. Boxed because an
+    /// `EditCommand` is several hundred bytes and the other variants are not.
+    Edit(Box<EditCommand>),
     Composite {
         label: String,
         commands: Vec<TrackingCommand>,
@@ -50,6 +51,10 @@ pub enum TrackingCommand {
 }
 
 impl TrackingCommand {
+    fn edit(command: EditCommand) -> Self {
+        Self::Edit(Box::new(command))
+    }
+
     pub fn label(&self) -> String {
         match self {
             Self::SetTrack { before, after, .. } => match (before, after) {
@@ -79,7 +84,7 @@ impl TrackingCommand {
                 before: after.clone(),
                 after: before.clone(),
             },
-            Self::Edit(command) => Self::Edit(command.invert()),
+            Self::Edit(command) => Self::edit(command.invert()),
             Self::Composite { label, commands } => Self::Composite {
                 label: label.clone(),
                 commands: commands.iter().rev().map(Self::invert).collect(),
@@ -297,7 +302,7 @@ pub fn attach(
         }
         copy
     };
-    commands.push(TrackingCommand::Edit(replace_segment(
+    commands.push(TrackingCommand::edit(replace_segment(
         &project_after_detach,
         overlay_id,
         "Follow track",
@@ -317,7 +322,7 @@ fn detach_parts(project: &Project, overlay: &Segment) -> Result<Vec<TrackingComm
         return Ok(Vec::new());
     };
     let link = link.clone();
-    let mut commands = vec![TrackingCommand::Edit(replace_segment(
+    let mut commands = vec![TrackingCommand::edit(replace_segment(
         project,
         &overlay.id,
         "Stop following",
@@ -356,7 +361,7 @@ pub fn detach(project: &Project, overlay_id: &str, at: Micros) -> Result<Trackin
             command.apply(&mut copy)?;
         }
         let animated = |p: AnimatableProperty| overlay.keyframes.iter().any(|t| t.property == p);
-        commands.push(TrackingCommand::Edit(replace_segment(
+        commands.push(TrackingCommand::edit(replace_segment(
             &copy,
             overlay_id,
             "Stop following",
@@ -498,7 +503,7 @@ pub fn bake(project: &Project, overlay_id: &str) -> Result<TrackingCommand, Stri
     for command in &commands {
         command.apply(&mut copy)?;
     }
-    commands.push(TrackingCommand::Edit(replace_segment(
+    commands.push(TrackingCommand::edit(replace_segment(
         &copy,
         overlay_id,
         "Bake track to keyframes",
@@ -557,7 +562,7 @@ pub fn bake_then(
     let edit = then(&scratch)?;
     let edit = crate::modules::timeline::ops::mirror_linked_edits(&scratch, edit);
     let edit = crate::modules::timeline::ops::detach_broken_transitions(&scratch, edit);
-    commands.push(TrackingCommand::Edit(edit));
+    commands.push(TrackingCommand::edit(edit));
     Ok(TrackingCommand::Composite {
         label: label.into(),
         commands,

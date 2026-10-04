@@ -1852,11 +1852,21 @@ mod tests {
         let mut req = request("/tmp/out.mp4");
         req.hardware = Some("nvenc_h264".into());
         // Either this machine has NVENC and the settings resolve, or it does
-        // not and the error names the encoder. Both are correct; what must not
-        // happen is a panic or a silent fallback to software.
+        // not and the error names the encoder, or it has an NVIDIA device whose
+        // trial encode failed and the error is that reason. All are correct;
+        // what must not happen is a panic or a silent fallback to software.
         match resolve_settings(&project, &req) {
             Ok(settings) => assert_eq!(settings.video.encoder_name, "h264_nvenc"),
-            Err(error) => assert!(error.to_string().contains("nvenc_h264")),
+            Err(error) => {
+                let error = error.to_string();
+                match hwaccel::find("nvenc_h264") {
+                    Some(found) => {
+                        assert!(!found.usable);
+                        assert!(found.note.is_some_and(|note| error.contains(&note)));
+                    }
+                    None => assert!(error.contains("nvenc_h264"), "{error}"),
+                }
+            }
         }
     }
 

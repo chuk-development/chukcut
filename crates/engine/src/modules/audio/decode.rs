@@ -395,7 +395,7 @@ impl AudioClipReader {
         let bytes = converted.data(0);
         let wanted = converted.samples() * self.channels * BYTES;
         let usable = wanted.min(bytes.len() - bytes.len() % BYTES);
-        for value in bytes[..usable].chunks_exact(BYTES) {
+        for value in bytes[..usable].as_chunks::<BYTES>().0 {
             // Packed f32 is native-endian, so this is a reinterpretation
             // rather than a byte-order conversion.
             let sample = f32::from_ne_bytes([value[0], value[1], value[2], value[3]]);

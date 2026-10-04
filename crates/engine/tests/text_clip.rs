@@ -167,7 +167,9 @@ fn ink_box(rgba: &[u8], width: u32, height: u32) -> Option<[f64; 4]> {
 }
 
 fn bright_pixels(rgba: &[u8]) -> usize {
-    rgba.chunks_exact(4)
+    rgba.as_chunks::<4>()
+        .0
+        .iter()
         .filter(|p| p[0] > 200 && p[3] > 0)
         .count()
 }
@@ -208,8 +210,10 @@ fn a_title_is_the_same_pixels_in_the_preview_and_the_export() {
 
     assert_eq!(at_export.len(), at_preview.len());
     let differing = at_export
-        .chunks_exact(4)
-        .zip(at_preview.chunks_exact(4))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(at_preview.as_chunks::<4>().0)
         .filter(|(a, b)| a != b)
         .count();
     assert_eq!(
@@ -296,8 +300,10 @@ fn one_provider_does_not_serve_the_preview_raster_to_the_export() {
     // rasterisation. Compared against a frame that never met the small one.
     let fresh = composite(&ctx, &project, 0, CANVAS);
     let differing = large
-        .chunks_exact(4)
-        .zip(fresh.chunks_exact(4))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(fresh.as_chunks::<4>().0)
         .filter(|(a, b)| a != b)
         .count();
     assert_eq!(
@@ -349,7 +355,9 @@ fn an_outline_puts_dark_pixels_around_white_glyphs() {
         project.canvas.background = [1.0, 1.0, 1.0, 1.0];
         let frame = composite(&ctx, &project, 0, CANVAS);
         frame
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .filter(|p| p[0] < 64 && p[1] < 64 && p[2] < 64)
             .count()
     };
@@ -834,7 +842,7 @@ fn psnr(a: &[u8], b: &[u8]) -> f64 {
     assert_eq!(a.len(), b.len());
     let mut sum = 0.0f64;
     let mut count = 0usize;
-    for (pa, pb) in a.chunks_exact(4).zip(b.chunks_exact(4)) {
+    for (pa, pb) in a.as_chunks::<4>().0.iter().zip(b.as_chunks::<4>().0) {
         for c in 0..3 {
             let d = pa[c] as f64 - pb[c] as f64;
             sum += d * d;

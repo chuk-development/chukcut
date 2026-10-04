@@ -466,7 +466,7 @@ impl Envelope {
             let mut lo = 0.0f32;
             let mut hi = 0.0f32;
             let mut loudest = 0.0f32;
-            for sample in group.chunks_exact(BYTES) {
+            for sample in group.as_chunks::<BYTES>().0 {
                 let value = f32::from_ne_bytes([sample[0], sample[1], sample[2], sample[3]]);
                 // Broken float streams do turn up; one NaN must not blank a file.
                 if !value.is_finite() {
@@ -629,7 +629,9 @@ fn read_cache(file: &Path) -> Option<Waveform> {
     }
     let floats = |start: usize| -> Vec<f32> {
         bytes[start..start + buckets * 4]
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect()
     };
@@ -755,7 +757,7 @@ mod tests {
         // Four hours would be 14.4 million buckets without the ceiling.
         assert_eq!(cache_buckets(4 * 3_600 * 1_000_000), MAX_CACHE_BUCKETS);
         // And nothing is ever stored that no caller could ask to read.
-        assert!(MAX_CACHE_BUCKETS <= MAX_REQUEST_BUCKETS);
+        const { assert!(MAX_CACHE_BUCKETS <= MAX_REQUEST_BUCKETS) };
         assert_eq!(cache_buckets(0), UNKNOWN_DURATION_BUCKETS);
         // A file shorter than one bucket still gets one.
         assert_eq!(cache_buckets(100), 1);

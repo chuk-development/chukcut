@@ -96,11 +96,7 @@ impl RasterCache {
 
     fn evict(&mut self) {
         while self.bytes > self.budget && self.entries.len() > 1 {
-            let Some((&oldest, _)) = self
-                .entries
-                .iter()
-                .min_by_key(|(_, entry)| entry.last_used)
-                .map(|(k, v)| (k, v))
+            let Some((&oldest, _)) = self.entries.iter().min_by_key(|(_, entry)| entry.last_used)
             else {
                 break;
             };

@@ -78,6 +78,9 @@ const MAX_DEPTH: usize = 500;
 ///
 /// Tracking edits are the third kind for the same reason: they write pool
 /// categories no `EditCommand` reaches (`modules::tracking::edit`).
+// `Edit` is the large variant and also by far the most common one; boxing it
+// would allocate on every timeline edit to make the rare kinds smaller.
+#[allow(clippy::large_enum_variant)]
 enum DocumentCommand {
     Edit(EditCommand),
     Configure(ConfigureCommand),
