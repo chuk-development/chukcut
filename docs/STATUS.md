@@ -3676,7 +3676,73 @@ Decision 0025, "Amended". What changed, with what it measured on the RTX
   "Select object" loses the object for as long as VitTrack does (full
   occlusion, leaving the frame) and is drawn empty there; the click mode
   works on the frame under the playhead only; no grade or effect mask from
-  a matte directly.
+  a matte directly (built since: "AI slow motion and matte masks" below).
+
+### AI slow motion and matte masks (2026-10-04, agent/ml3)
+
+Decision 0028. Measured on the RTX 3060 (driver 610.57, CUDA 13 bundle,
+release worker, load 9–11 from other agents' builds).
+
+- **Optical flow (AI)** is the third mode of Speed › Standard › Frame
+  blending (None / Blend / Optical flow (AI)), and **Smooth slow-mo** is
+  one click (0.5x unless the clip is slowed already, plus optical flow, one
+  undo step). RIFE v4 (`walterlow/RIFE_fp32_timestep`, MIT, 22 MB, timestep
+  as an input) runs in the ML worker (protocol 4, `interpolate`: two frames
+  in, one frame per phase out). Frames are baked as JPEG q95 4:4:4 into
+  `~/.cache/chukcut/flow/<digest>-rife-<version>-<provider>-<long side>/`,
+  one per (source frame, phase in 64ths), at most 1920 px on the long side;
+  in the cache limit, kept for the open project by a trim. The compositor
+  draws a baked frame in place of the decoded one and the plain blend until
+  it is there; edits queue missing frames in the background
+  (`speed_flow_queue_missing`); an export bakes the frames of its own frame
+  grid first and fails in words if it cannot. CLI: `frame-blend --mode
+  flow [--no-bake]`, `smooth-slow-mo [--speed]`.
+- **RIFE per frame** (`chukcut-cli ml bench rife`): CUDA 18.1 ms at
+  640×360, 70.3 ms at 1280×720, 173 ms at 1920×1080; CPU (4 threads) 248 ms
+  at 640×360, 1.2 s at 1280×720. A debug-profile worker (opt-level 1) was
+  21 / 100 / 233 ms on CUDA: measure with a release worker
+  (`CHUKCUT_ML_WORKER=target/release/chukcut-ml-worker`).
+- **End to end**: a 3 s 1280×720 clip at 0.25x needs 267 new frames; the
+  CLI baked them in 25.3 s on CUDA (80 ms model, the rest decode, transfer
+  and JPEG), 20 MB on disk. The 320×180 test clip: 22 frames in 2.1 s.
+- **Verified** (`tests/optical_flow.rs`, RTX 3060 and lavapipe): 22 frames
+  for a 0.25x quarter second; the preview draws the plain blend
+  byte-identical until a frame is baked and the baked frame after; an
+  export with every frame baked shows them and needs no worker; a real RIFE
+  bake puts a moving square half-way between its two frames within 2 px,
+  with no ghost, where the blend shows two half-strength squares. On a
+  1280×720 square moving 12 px a frame: flow edge at 226 (truth 226), the
+  blend a 24 px ghost. App checked on Xvfb + lavapipe: the three modes, the
+  progress bar ("Making slow-motion frames… 30 of 267") with Stop, Smooth
+  slow-mo.
+- **CPU fallback** works and warns while the bake runs: "Optical flow runs
+  on the CPU here: N frames, about M min. A GPU bundle … makes it 10–30
+  times faster" (the app's Speed tab, the CLI's progress, export progress).
+- **Matte masks**: a clip's matte (people, objects or a selected object) can
+  limit its **grade** (Adjust › Mask › Apply to) and its **effects**
+  (Effects tab › Apply to) to the subject or the rest, without cutting and
+  without a copy of the clip. `BackgroundRemoval` has `cut` (default true),
+  `grade` and `effects` (`whole`/`subject`/`background`); choosing Subject
+  on a clip without a matte gives it the people matte, uncut. The grade is
+  mixed in `quad.wgsl` by the matte; the effects run over the whole layer
+  and `render::matte_mix` mixes before and after by the matte drawn over
+  the quad, so a background blur leaves no dark seam. CLI: `apply-to
+  --grade … --effects …`; `remove-background --off` keeps an uncut matte
+  that still steers something, and `remove-background` again cuts by it.
+  Verified (`tests/matte_masks.rs`, RTX 3060 and lavapipe): the grade lifts
+  only its half (within 2 code values of the whole-clip lift; the other half
+  within 1 of ungraded), in RGBA and NV12 export renders; a blur removes the
+  checkerboard only on its half and leaves the other within 2 % of its
+  variance; no seam darker than 90 at the matte edge.
+- **Rough:** RIFE at 1080p is ~6 fps on a 3060 in fp32 with the CUDA
+  provider (TensorRT or fp16 would be the next step); the in-between frames
+  come from the software decoder's RGB, NVDEC-decoded neighbours may differ
+  by a code value; inside compound clips frames are baked on the preview's
+  grid only and an outer speed change falls back to the blend; the nested
+  render cache can hold a blended frame until the compound clip changes;
+  matte-limited effects are whole-clip inside a transition window and
+  while a blur animation runs; one matte per clip for both grade and
+  effects; a 4K clip's in-between frames are made at 1080p.
 
 ## The research
 
