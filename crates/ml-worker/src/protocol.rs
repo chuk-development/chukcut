@@ -32,7 +32,9 @@ use serde::{Deserialize, Serialize};
 ///
 /// 2: whole-frame re-detection for tracks, and mattes (the first reply with a
 /// payload).
-pub const PROTOCOL_VERSION: u32 = 2;
+/// 3: per-frame mattes (BiRefNet), click segmentation (`segment`), the
+/// `needs_gpu` error and the loaded CUDA libraries in a probe.
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// A header longer than this is a broken stream, not a message.
 const MAX_HEADER: usize = 1 << 20;
@@ -98,14 +100,34 @@ pub enum RequestBody {
     /// (or a new frame size) starts from a clean state. Answered with
     /// [`Outcome::Matte`] and the matte as the payload, `width × height`
     /// bytes.
+    ///
+    /// A model without state (`Task::MatteImage`) ignores the session. A
+    /// model too slow for the CPU (`ModelSpec::cpu_ok` false) answers
+    /// [`ErrorKind::NeedsGpu`] there unless `allow_cpu` is set.
     Matte {
         model: String,
         session: u64,
         width: u32,
         height: u32,
+        #[serde(default)]
+        allow_cpu: bool,
     },
     /// Forget a matting session's state. Answered with [`Outcome::Ok`].
     MatteEnd { session: u64 },
+    /// The mask of the object under `points` (and inside `bbox`, x, y, w, h)
+    /// in this frame (the payload), by promptable segmentation model `model`
+    /// (an encoder whose companion is the decoder). Answered with
+    /// [`Outcome::Segment`] and the mask as the payload, `width × height`
+    /// bytes. The worker keeps the last frame's embedding, so more clicks on
+    /// the same frame cost only the decoder.
+    Segment {
+        model: String,
+        width: u32,
+        height: u32,
+        points: Vec<SegmentPoint>,
+        #[serde(default)]
+        bbox: Option<[f32; 4]>,
+    },
     /// Run `model` `iterations` times on a synthetic input of `width` ×
     /// `height` and report the time per run. Reports progress and can be
     /// cancelled; it is how a speed claim in the docs is measured.
@@ -179,6 +201,16 @@ pub enum Outcome {
         millis: f32,
         provider: String,
     },
+    /// The payload is the mask, as for [`Outcome::Matte`].
+    Segment {
+        width: u32,
+        height: u32,
+        /// The model's own estimate of the mask's quality (SAM's predicted
+        /// IoU), about 0..1.
+        score: f32,
+        millis: f32,
+        provider: String,
+    },
     Benchmark {
         provider: String,
         iterations: u32,
@@ -201,6 +233,19 @@ pub struct Probe {
     /// Providers that were tried and failed, with why — "libcudnn.so.9 not
     /// found" is the common one.
     pub unavailable: Vec<(String, String)>,
+    /// The CUDA runtime, cuBLAS and cuDNN files the worker has loaded, by
+    /// path: whether they came from chukcut's packs or from the system.
+    #[serde(default)]
+    pub libraries: Vec<String>,
+}
+
+/// One click of a segmentation prompt, in the frame's pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SegmentPoint {
+    pub x: f32,
+    pub y: f32,
+    /// On the object, or a part to leave out.
+    pub keep: bool,
 }
 
 /// One detected face, in the frame's pixels.
@@ -226,6 +271,8 @@ pub enum ErrorKind {
     Cancelled,
     /// The runtime failed while running the model.
     Inference,
+    /// The model only runs on a GPU provider, and none works here.
+    NeedsGpu,
 }
 
 /// Write one frame. Flushes, so a message never waits in a buffer while the

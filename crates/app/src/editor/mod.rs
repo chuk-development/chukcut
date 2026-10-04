@@ -68,6 +68,7 @@ mod home;
 mod inspector;
 pub(crate) mod keymap;
 mod lifecycle;
+mod ml_settings;
 mod playback;
 mod preview;
 mod settings;
@@ -375,6 +376,9 @@ impl Editor {
                 self.selected = None;
             }
         }
+        // An edit can leave a removed background with frames to bake (a
+        // trim made the clip longer); bake them in the background.
+        self.queue_missing_mattes(cx);
         cx.notify();
     }
 

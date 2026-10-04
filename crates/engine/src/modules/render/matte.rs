@@ -44,6 +44,9 @@ pub mod flag {
     /// Set by the compositor, not by [`super::MatteBlock::new`]: whether a
     /// matte exists depends on the cache, not on the material.
     pub const BACKGROUND: u32 = 16;
+    /// With [`BACKGROUND`]: keep where the matte is clear, remove where it
+    /// is opaque (cut the subject out).
+    pub const BACKGROUND_INVERT: u32 = 32;
 }
 
 /// How far in the CbCr plane a tolerance or softness of 1 reaches. Pure
@@ -358,6 +361,7 @@ mod tests {
             ("M_KEY_SHRINK", flag::KEY_SHRINK),
             ("M_VIEW_MATTE", flag::VIEW_MATTE),
             ("M_BACKGROUND", flag::BACKGROUND),
+            ("M_BACKGROUND_INVERT", flag::BACKGROUND_INVERT),
         ] {
             assert!(
                 shader.contains(&format!("const {name}: u32 = {value}u;")),

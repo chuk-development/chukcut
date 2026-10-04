@@ -82,6 +82,7 @@ const OPEN_WORLD: &[&str] = &[
     "ml",
     // Downloads the model and ONNX Runtime on first use.
     "remove_background",
+    "select_object",
     "sound",
     "fal",
     "sticker",

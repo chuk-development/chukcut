@@ -44,6 +44,11 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ("matting::matting_ensure", "the export's own step; export calls it before rendering"),
     ("matting::job_for", "a helper the bake commands and tests share, not an operation"),
     ("matting::current_model", "the model version this build writes; remove_background uses it through matting_remove_background"),
+    ("matting::setting_for", "the setting a mode writes; remove_background --model uses it through matting_remove_background_with"),
+    ("matting::matting_remove_background", "the app's people-only toggle; remove_background calls matting_remove_background_with, the same edit with a model"),
+    ("matting::matting_queue_missing", "the app's re-bake after an edit made a clip longer; a CLI export bakes what is missing (matting_ensure) and remove_background bakes its clip"),
+    ("matting::matting_running", "the app's status line for background bakes"),
+    ("matting::matting_cache_clear", "Settings, Storage in the app; a CLI run must not delete what a running app shows"),
     ("compositing::compositing_set_background", "the setting alone; remove_background also bakes the matte"),
     ("ml::gpu_vendors", "part of ml status, which reports it"),
     // The live preview, playback and the app's own windows.

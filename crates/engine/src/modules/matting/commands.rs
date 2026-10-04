@@ -4,7 +4,10 @@
 //! `matting_remove_background` is the toggle: one undoable edit that records
 //! the setting (model and version) on the clip's compositing material, and,
 //! when turning it on, a bake job that fills the matte cache for the clip's
-//! source range. The job is polled with `matting_status` and stopped with
+//! source range. `matting_remove_background_with` picks the model (people
+//! or objects); `matting_select_object` keeps the object under the user's
+//! clicks (MobileSAM, propagated over the clip); `matting_set_invert` cuts
+//! the matte's subject out instead of keeping it. The job is polled with `matting_status` and stopped with
 //! `matting_cancel`; the preview shows each frame's matte as soon as it is
 //! written, and the clip unmatted where none is yet. `matting_ensure` is the
 //! export's blocking form: it bakes whatever is missing for the whole
@@ -17,20 +20,25 @@ use std::sync::{Arc, OnceLock};
 use parking_lot::Mutex;
 use serde::Serialize;
 
+use serde::Deserialize;
+
 use super::bake::{self, BakeJob, BakeOutcome, BakeProgress};
 use super::cache;
+pub use super::BackgroundMode;
 use crate::modules::compositing::commands::compositing_set_background;
-use crate::modules::ml::matte::{self, Matter};
-use crate::modules::project::compositing::BackgroundRemoval;
-use crate::modules::project::document::{Project, Segment};
+use crate::modules::ml::{matte, segment};
+use crate::modules::project::compositing::{BackgroundRemoval, ObjectPrompt, PromptPoint};
+use crate::modules::project::document::{Micros, Project, Segment};
 use crate::modules::timeline::commands::EditResponse;
 use crate::state::AppState;
 
 /// What the toggle answers: the edited project, and the bake it started.
 #[derive(Serialize)]
 pub struct BackgroundResponse {
+    /// `None` when the clip already had this setting: nothing to undo, only
+    /// frames to bake.
     #[serde(flatten)]
-    pub edit: EditResponse,
+    pub edit: Option<EditResponse>,
     /// The bake job, when the matte had frames to make.
     pub job: Option<u64>,
 }
@@ -54,9 +62,18 @@ pub struct Coverage {
 struct Job {
     cancel: AtomicBool,
     status: Mutex<BakeStatus>,
-    /// The cache directory it fills, so a second bake of the same frames
-    /// joins the running one instead of racing it.
-    dir: std::path::PathBuf,
+    /// The cache key it fills, so a second bake of the same frames joins
+    /// the running one instead of racing it.
+    key: String,
+}
+
+/// Cache keys whose last bake failed, with why: `matting_queue_missing`
+/// does not start them again after every edit (a selection that selects
+/// nothing, an objects matte on a machine without a GPU). An explicit
+/// `matting_bake` tries again.
+fn failed() -> &'static Mutex<HashMap<String, String>> {
+    static FAILED: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    FAILED.get_or_init(Default::default)
 }
 
 fn jobs() -> &'static Mutex<HashMap<u64, Arc<Job>>> {
@@ -67,8 +84,8 @@ fn jobs() -> &'static Mutex<HashMap<u64, Arc<Job>>> {
 static NEXT_JOB: AtomicU64 = AtomicU64::new(1);
 
 /// The bake for `segment` in `project`: its source range of its video file,
-/// with the model its setting names. `Err` in words when the clip cannot
-/// have its background removed.
+/// with the setting it has. `Err` in words when the clip cannot have its
+/// background removed.
 pub fn job_for(project: &Project, segment: &Segment) -> Result<BakeJob, String> {
     let video = project
         .materials
@@ -88,40 +105,197 @@ pub fn job_for(project: &Project, segment: &Segment) -> Result<BakeJob, String> 
         fps: video.fps,
         source_size: (video.width, video.height),
         range,
-        model: setting.model,
-        version: setting.version,
+        setting,
     })
 }
 
-/// The setting this build writes when the user turns it on.
+/// The setting this build writes for people.
 pub fn current_model() -> BackgroundRemoval {
+    setting_for(BackgroundMode::People)
+}
+
+/// The setting this build writes for `mode`.
+pub fn setting_for(mode: BackgroundMode) -> BackgroundRemoval {
+    let model = mode.model();
     BackgroundRemoval {
-        model: matte::MODEL.into(),
-        version: matte::model_version().into(),
+        model: model.into(),
+        version: matte::version_of(model)
+            .expect("the registry lists every matting model")
+            .into(),
+        prompt: None,
+        invert: false,
     }
 }
 
-/// Turn "Remove background" on or off for a video clip. On: one undoable
-/// edit, then a bake of the clip's matte in the background (its job id is in
-/// the answer; `None` when every frame was already baked). Off: the edit
-/// only; the baked frames stay in the cache for an undo.
+/// Turn "Remove background" (people) on or off for a video clip. On: one
+/// undoable edit, then a bake of the clip's matte in the background (its
+/// job id is in the answer; `None` when every frame was already baked).
+/// Off: the edit only; the baked frames stay in the cache for an undo.
 pub fn matting_remove_background(
     state: &Arc<AppState>,
     segment_id: String,
     enabled: bool,
 ) -> Result<BackgroundResponse, String> {
-    state.with_project(|project| {
+    let mode = enabled.then_some(BackgroundMode::People);
+    set_and_bake(state, segment_id, mode.map(setting_for))
+}
+
+/// Turn "Remove background" on with `mode`'s model, or off with `None`.
+/// Switching from one model to another keeps the clip's "invert" choice.
+pub fn matting_remove_background_with(
+    state: &Arc<AppState>,
+    segment_id: String,
+    mode: Option<BackgroundMode>,
+) -> Result<BackgroundResponse, String> {
+    let invert = current_setting(state, &segment_id)?.is_some_and(|s| s.invert);
+    let setting = mode.map(|mode| BackgroundRemoval {
+        invert,
+        ..setting_for(mode)
+    });
+    set_and_bake(state, segment_id, setting)
+}
+
+/// A point on the canvas (fractions of its width and height, top-left
+/// origin), as the player or a rendered frame shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct CanvasPoint {
+    pub x: f32,
+    pub y: f32,
+    /// On the object to keep (`true`), or on a part to leave out.
+    #[serde(default = "yes")]
+    pub keep: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// "Select object": keep the object under `points` (canvas fractions, at
+/// timeline time `time`) and remove the rest, on every frame of the clip.
+/// The clicks are turned into points of the clip's source frame, recorded
+/// as the setting (one undoable edit), and the matte is baked in the
+/// background: the clicked frame first, then forwards and backwards over
+/// the clip (`matting/object.rs`). `invert` cuts the object out instead;
+/// `None` keeps the clip's current choice.
+pub fn matting_select_object(
+    state: &Arc<AppState>,
+    segment_id: String,
+    time: Micros,
+    points: Vec<CanvasPoint>,
+    invert: Option<bool>,
+) -> Result<BackgroundResponse, String> {
+    if !points.iter().any(|p| p.keep) {
+        return Err("click at least once on the object to keep".into());
+    }
+    let (prompt, current) = state.with_project(|project| {
         let (_, segment) = project
             .segment(&segment_id)
             .ok_or("the clip is no longer on the timeline")?;
         project
             .materials
             .video(&segment.material_id)
-            .map(|_| ())
-            .ok_or_else(|| "Remove background works on video clips".to_string())
+            .ok_or("Select object works on video clips")?;
+        if !segment.target_range.contains(time) {
+            return Err(
+                "the playhead is not on the clip; move it onto the clip and click again".into(),
+            );
+        }
+        let source_time = project
+            .materials
+            .time_map(segment)
+            .clamped_source_time(time);
+        let mut prompt = ObjectPrompt {
+            time: source_time,
+            points: Vec::new(),
+        };
+        for p in &points {
+            // `canvas_to_source` works in clip space: -1..1, y up.
+            let at = crate::modules::tracking::follow::canvas_to_source(
+                project,
+                segment,
+                time,
+                [p.x * 2.0 - 1.0, 1.0 - p.y * 2.0],
+            )
+            .ok_or("the clip is not visible on the canvas at the playhead")?;
+            if !(0.0..=1.0).contains(&at[0]) || !(0.0..=1.0).contains(&at[1]) {
+                return Err("a click is outside the clip's picture".to_string());
+            }
+            prompt.points.push(PromptPoint {
+                x: at[0],
+                y: at[1],
+                keep: p.keep,
+            });
+        }
+        let current = project
+            .materials
+            .compositing_of(segment)
+            .and_then(|m| m.background.clone());
+        Ok((prompt, current))
     })??;
-    let edit = compositing_set_background(state, segment_id.clone(), enabled.then(current_model))?;
-    let job = if enabled {
+    let setting = BackgroundRemoval {
+        model: segment::MODEL.into(),
+        version: segment::model_version().into(),
+        prompt: Some(prompt),
+        invert: invert.unwrap_or(current.is_some_and(|s| s.invert)),
+    };
+    set_and_bake(state, segment_id, Some(setting))
+}
+
+/// Cut the matte's subject out (`true`) or keep only it (`false`). One
+/// undoable edit; the mattes are the same either way, so nothing re-bakes.
+pub fn matting_set_invert(
+    state: &Arc<AppState>,
+    segment_id: String,
+    invert: bool,
+) -> Result<EditResponse, String> {
+    let current = current_setting(state, &segment_id)?
+        .ok_or("the clip does not have Remove background on")?;
+    compositing_set_background(
+        state,
+        segment_id,
+        Some(BackgroundRemoval { invert, ..current }),
+    )
+}
+
+fn current_setting(
+    state: &Arc<AppState>,
+    segment_id: &str,
+) -> Result<Option<BackgroundRemoval>, String> {
+    state.with_project(|project| {
+        let (_, segment) = project
+            .segment(segment_id)
+            .ok_or("the clip is no longer on the timeline")?;
+        project
+            .materials
+            .video(&segment.material_id)
+            .ok_or("Remove background works on video clips")?;
+        Ok(project
+            .materials
+            .compositing_of(segment)
+            .and_then(|m| m.background.clone()))
+    })?
+}
+
+/// Record `setting` on the clip (one edit) and bake what it is missing.
+fn set_and_bake(
+    state: &Arc<AppState>,
+    segment_id: String,
+    setting: Option<BackgroundRemoval>,
+) -> Result<BackgroundResponse, String> {
+    let current = current_setting(state, &segment_id)?;
+    let on = setting.is_some();
+    // The same setting again (the same clicks, the same model) is a request
+    // to bake what is missing, not an edit.
+    let edit = if current == setting {
+        None
+    } else {
+        Some(compositing_set_background(
+            state,
+            segment_id.clone(),
+            setting,
+        )?)
+    };
+    let job = if on {
         matting_bake(state, segment_id)?
     } else {
         None
@@ -139,14 +313,17 @@ pub fn matting_bake(state: &Arc<AppState>, segment_id: String) -> Result<Option<
             .ok_or("the clip is no longer on the timeline")?;
         job_for(project, segment)
     })??;
-    let dir = cache::dir_for(job.path.as_ref(), &job.model, &job.version)?;
-    if job.missing(&cache::list(&dir)).is_empty() {
+    // A setting this build cannot bake fails now, in words, not on the
+    // bake's thread.
+    job.kind()?;
+    let key = job.key()?;
+    if cache::best(&key).is_some_and(|(_, times)| job.missing(&times).is_empty()) {
         return Ok(None);
     }
     {
         let jobs = jobs().lock();
         if let Some((id, _)) = jobs.iter().find(|(_, j)| {
-            j.dir == dir && j.status.lock().finished.is_none() && !j.cancel.load(Ordering::Relaxed)
+            j.key == key && j.status.lock().finished.is_none() && !j.cancel.load(Ordering::Relaxed)
         }) {
             // One bake per file at a time: two would write the same frames
             // and share one worker anyway. The second clip's frames are
@@ -155,6 +332,7 @@ pub fn matting_bake(state: &Arc<AppState>, segment_id: String) -> Result<Option<
             return Ok(Some(*id));
         }
     }
+    failed().lock().remove(&key);
     let id = NEXT_JOB.fetch_add(1, Ordering::Relaxed);
     let handle = Arc::new(Job {
         cancel: AtomicBool::new(false),
@@ -162,19 +340,15 @@ pub fn matting_bake(state: &Arc<AppState>, segment_id: String) -> Result<Option<
             segment_id: segment_id.clone(),
             ..BakeStatus::default()
         }),
-        dir,
+        key,
     });
     jobs().lock().insert(id, Arc::clone(&handle));
     std::thread::Builder::new()
         .name("chukcut-matting".into())
         .spawn(move || {
-            let result = Matter::prepare(&|_, _| {}, &handle.cancel)
-                .map_err(|e| e.to_string())
-                .and_then(|_| {
-                    bake::run(&job, &handle.cancel, |p| {
-                        handle.status.lock().progress = p.clone();
-                    })
-                });
+            let result = bake::run(&job, &handle.cancel, |p| {
+                handle.status.lock().progress = p.clone();
+            });
             match &result {
                 Ok(outcome) => tracing::info!(
                     written = outcome.written,
@@ -182,7 +356,10 @@ pub fn matting_bake(state: &Arc<AppState>, segment_id: String) -> Result<Option<
                     provider = ?outcome.provider,
                     "matte baked"
                 ),
-                Err(error) => tracing::warn!(%error, "background removal failed"),
+                Err(error) => {
+                    tracing::warn!(%error, "background removal failed");
+                    failed().lock().insert(handle.key.clone(), error.clone());
+                }
             }
             handle.status.lock().finished = Some(result);
         })
@@ -198,6 +375,9 @@ pub fn matting_status(job: u64) -> Option<BakeStatus> {
 pub fn matting_cancel(job: u64) {
     if let Some(job) = jobs().lock().get(&job) {
         job.cancel.store(true, Ordering::Relaxed);
+        // Stopped by the user: the next edit must not start it again on
+        // its own ("Finish missing frames" does).
+        failed().lock().insert(job.key.clone(), "stopped".into());
     }
 }
 
@@ -218,9 +398,9 @@ pub fn matting_coverage(state: &Arc<AppState>, segment_id: String) -> Result<Cov
 }
 
 fn coverage(job: &BakeJob) -> Result<Coverage, String> {
-    let dir = cache::dir_for(job.path.as_ref(), &job.model, &job.version)?;
+    let times = job.best()?.map(|(_, times)| times).unwrap_or_default();
     let total = job.frame_times(job.range.0, job.range.1).len() as u32;
-    let missing = job.missing(&cache::list(&dir)).len() as u32;
+    let missing = job.missing(&times).len() as u32;
     Ok(Coverage {
         baked: total.saturating_sub(missing),
         total,
@@ -267,9 +447,6 @@ pub fn matting_ensure(
         return Ok(());
     }
     progress("Preparing background removal", 0.0);
-    Matter::prepare(&|what, _| progress(what, 0.0), cancel).map_err(|e| {
-        format!("Remove background is on for a clip, but its matte cannot be made: {e}")
-    })?;
     let total: u32 = todo.iter().map(|(_, n)| *n).sum::<u32>().max(1);
     let mut before = 0u32;
     for (job, frames) in &todo {
@@ -279,11 +456,113 @@ pub fn matting_ensure(
                 "Removing backgrounds",
                 ((before as f32 + share) / total as f32).min(1.0),
             );
+        })
+        .map_err(|e| {
+            format!("Remove background is on for a clip, but its matte cannot be made: {e}")
         })?;
         if outcome.cancelled {
             return Err("cancelled".into());
         }
         before += frames;
+    }
+    Ok(())
+}
+
+/// Start a bake for every clip of the open project whose matte is missing
+/// frames: after a trim made a clip longer, a speed change, an undo that
+/// brought a clip back, or a cache clean-up. Clips whose bake runs already
+/// are joined, not started twice. Returns the jobs. Reads the media files'
+/// heads and lists the cache: call it off the UI thread.
+pub fn matting_queue_missing(state: &Arc<AppState>) -> Result<Vec<u64>, String> {
+    let wanted: Vec<(String, BakeJob)> = state.with_project(|project| {
+        let compounds = project
+            .materials
+            .sequences
+            .iter()
+            .filter(|s| s.kind == crate::modules::sequence::SequenceKind::Compound)
+            .flat_map(|s| &s.tracks);
+        project
+            .tracks
+            .iter()
+            .chain(compounds)
+            .flat_map(|t| &t.segments)
+            .filter_map(|segment| {
+                let job = job_for(project, segment).ok()?;
+                Some((segment.id.clone(), job))
+            })
+            .collect()
+    })?;
+    let mut started = Vec::new();
+    for (segment_id, job) in wanted {
+        // A setting this build cannot bake (an old model version) is the
+        // export's to report; it must not stop the others here.
+        if job.kind().is_err() || coverage(&job).is_ok_and(|c| c.baked >= c.total) {
+            continue;
+        }
+        if job
+            .key()
+            .is_ok_and(|key| failed().lock().contains_key(&key))
+        {
+            continue;
+        }
+        match matting_bake(state, segment_id) {
+            Ok(Some(job)) => started.push(job),
+            Ok(None) => {}
+            Err(error) => tracing::debug!(%error, "no background bake"),
+        }
+    }
+    started.sort_unstable();
+    started.dedup();
+    Ok(started)
+}
+
+/// The jobs running now, for the app's status: (job, segment id, progress).
+pub fn matting_running() -> Vec<(u64, String, BakeProgress)> {
+    let mut running: Vec<_> = jobs()
+        .lock()
+        .iter()
+        .filter_map(|(id, j)| {
+            let status = j.status.lock();
+            status
+                .finished
+                .is_none()
+                .then(|| (*id, status.segment_id.clone(), status.progress.clone()))
+        })
+        .collect();
+    running.sort_by_key(|(id, _, _)| *id);
+    running
+}
+
+/// What the matte cache holds, for Settings.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct MatteCacheInfo {
+    pub bytes: u64,
+    /// Directories: one per clip source, model, selection and provider.
+    pub sets: u32,
+}
+
+/// The size of the matte cache. Walks it: call it off the UI thread.
+pub fn matting_cache_info() -> MatteCacheInfo {
+    let root = cache::root();
+    let sets = std::fs::read_dir(&root)
+        .map(|entries| entries.flatten().filter(|e| e.path().is_dir()).count() as u32)
+        .unwrap_or(0);
+    MatteCacheInfo {
+        bytes: crate::modules::ml::download::size_of(&root),
+        sets,
+    }
+}
+
+/// Delete every baked matte. Running bakes are stopped first; a clip with
+/// Remove background on bakes again when it is next shown or exported.
+pub fn matting_cache_clear() -> Result<(), String> {
+    for job in jobs().lock().values() {
+        job.cancel.store(true, Ordering::Relaxed);
+    }
+    let root = cache::root();
+    if root.exists() {
+        std::fs::remove_dir_all(&root)
+            .map_err(|e| format!("could not delete {}: {e}", root.display()))?;
     }
     Ok(())
 }

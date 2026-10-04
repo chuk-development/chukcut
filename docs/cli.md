@@ -917,18 +917,43 @@ the key.
 chukcut-cli chroma-key reel.chukcut 1:0 --pick 0.05,0.5 --spill 0.7
 ```
 
-#### `remove-background PROJECT CLIP [--off]`
+#### `remove-background PROJECT CLIP [--model people|objects] [--invert|--no-invert] [--off]`
 
-Removes the background behind the people in a video clip, with Robust Video
-Matting (GPL-3.0) in the ML worker. The model (15 MB) and ONNX Runtime
-download on first use. The setting is one undo step; the command then bakes
-the clip's matte into the cache (`~/.cache/chukcut/mattes`) and waits for it.
-Run it again on a clip that has it to bake frames that are missing (after a
-trim, or a cleared cache); an export also bakes them. `--off` keeps the
-background again.
+Removes a video clip's background with a model in the ML worker.
+`--model people` (the default) keeps people: Robust Video Matting (GPL-3.0,
+15 MB), fast and stable from frame to frame. `--model objects` keeps the
+main object of the picture (a product, a pet, a car): BiRefNet lite (MIT,
+224 MB). It needs a GPU (see `ml install gpu`); on the CPU it refuses in
+words, because one frame would take 12–25 s and 6–11 GB of memory.
+`--invert` cuts the subject out and keeps the rest (`--no-invert` undoes
+that); it changes how the matte is drawn, not the matte. The model and ONNX
+Runtime download on first use. The setting is one undo step; the command
+then bakes the clip's matte into the cache (`~/.cache/chukcut/mattes`) and
+waits for it. Run it again on a clip that has it to bake frames that are
+missing (after a trim, or a cleared cache); an export also bakes them.
+`--off` keeps the background again.
 
 ```bash
 chukcut-cli remove-background reel.chukcut 0:0
+chukcut-cli remove-background reel.chukcut 0:0 --model objects
+```
+
+#### `select-object PROJECT CLIP --at TIME --point X,Y [--point X,Y …] [--exclude X,Y …] [--invert]`
+
+Keeps the object you point at and removes the rest, on every frame of the
+clip ("Select object" in the app). The points are canvas fractions (0,0 is
+the top-left corner) on the frame at timeline time `--at`, as `render-frame`
+shows it: `--point` on the object (repeat it for a large or thin one),
+`--exclude` on a part to leave out. MobileSAM (Apache-2.0, 45 MB) segments
+that frame; the VitTrack tracker follows the object forwards and backwards
+and MobileSAM draws its mask on every frame. `--invert` cuts the object out
+instead (to remove it from the picture, or to grade or blur only the rest of
+a copy of the clip on the lane above). One undo step, then a bake as
+`remove-background` does.
+
+```bash
+chukcut-cli select-object reel.chukcut 0:0 --at 2.5 --point 0.42,0.55
+chukcut-cli select-object reel.chukcut 1:0 --at 1 --point 0.5,0.5 --exclude 0.5,0.2 --invert
 ```
 
 #### `blend PROJECT CLIP [MODE] [--opacity N]`
@@ -1429,20 +1454,35 @@ compositor, so it shows the same pixels as the export.
 
 #### `ml ACTION [ITEM]`
 
-Not tied to a project. `status` (with `--probe`, starts the ML worker and
-lists the execution providers that work, and says what to install for the
-GPU), `models`, `runtimes`, `install ITEM`, `remove ITEM`, `bench MODEL
-[--size WxH] [--iterations N]`. An ITEM is a model (`yunet`, `vittrack`,
-`rvm`) or a runtime pack (`runtime:cpu`, `runtime:cuda12`, `runtime:cuda13`,
-`runtime:cudnn9-cu12`). `CHUKCUT_CUDA_LIB_DIRS` (colon-separated) names
-directories with CUDA libraries the system does not have; `CHUKCUT_ORT_DYLIB`
-names another ONNX Runtime build (an OpenVINO one for Intel GPUs). Also an
-MCP tool, `ml`.
+Not tied to a project. `status` says what runs models ("CUDA 13 on the GPU
+with chukcut's CUDA libraries", "the CPU (CUDA: …)"), which GPU and NVIDIA
+driver the machine has, which GPU bundle fits it and what the baked mattes
+take on disk; with `--probe` it starts the ML worker to find out what really
+loads (it lists the CUDA libraries the worker opened, by path). `models`,
+`runtimes` and `bundles` list what can be installed, with sizes and
+licences. `install ITEM`, `remove ITEM`, `bench MODEL [--size WxH]
+[--iterations N]`.
+
+An ITEM is a model (`yunet`, `vittrack`, `rvm`, `birefnet-lite`,
+`mobilesam`), a runtime pack (`runtime:cpu`, `runtime:cuda13`,
+`runtime:cudnn9-cu12`, …) or a **GPU bundle**: `gpu` installs the one for
+this machine's NVIDIA driver, `gpu:nvidia-cu13` (driver 580 or newer,
+1.3 GB) or `gpu:nvidia-cu12` (driver 525 or newer, 1.9 GB) a named one. A
+bundle is ONNX Runtime's CUDA build plus every CUDA library its provider
+needs (the CUDA runtime, cuBLAS, cuRAND, NVRTC and cuDNN 9), from NVIDIA's
+own wheels on PyPI, pinned by SHA-256; the worker loads them by path, so
+nothing has to be on `LD_LIBRARY_PATH` and an old system CUDA does not get in
+the way. `CHUKCUT_ML_RUNTIME` (`cpu`, `cuda12`, `cuda13`) forces one
+installed build; `CHUKCUT_CUDA_LIB_DIRS` (colon-separated) names directories
+with CUDA libraries to prefer over the bundle's; `CHUKCUT_ORT_DYLIB` names
+another ONNX Runtime build (an OpenVINO one for Intel GPUs). Also an MCP
+tool, `ml`.
 
 ```bash
 chukcut-cli ml status --probe
-chukcut-cli ml install runtime:cuda13
+chukcut-cli ml install gpu
 chukcut-cli ml bench rvm --size 540x960
+chukcut-cli ml bench mobilesam --size 960x540
 ```
 
 ### Undo and redo
@@ -1487,7 +1527,7 @@ The operation names are the MCP tool names: `info`, `validate`, `configure`,
 `trim`, `clip_set`, `grade`, `effect_add`, `effect_set`, `effect_remove`,
 `animate`, `animate_text`, `zoom`, `keyframe`, `title_add`, `title_set`,
 `transition_add`, `transition_remove`, `track`, `track_set`, `mask`, `chroma_key`,
-`remove_background`, `blend`, `captions_transcribe`,
+`remove_background`, `select_object`, `blend`, `captions_transcribe`,
 `captions_import`, `captions_export`, `captions_style`, `captions_list`,
 `silence_detect`, `silence_remove`, `normalize`, `denoise`, `loudness`,
 `marker_add`, `marker_set`, `marker_remove`, `marker_list`, `crop`, `curve`,
@@ -1556,7 +1596,9 @@ Read-only tools have `readOnlyHint`: `info`, `template_list`,
 Tools that send data to a service outside this machine have
 `openWorldHint`: `captions_transcribe`, `translate_captions`, `tts`,
 `stock_kinds`, `stock_search`, `stock_download`, `sound`, `fal`, `sticker`,
-`music`, `sfx`, `title_font`, `catalog` (the library and `voices` kinds).
+`music`, `sfx`, `title_font`, `catalog` (the library and `voices` kinds),
+and `ml`, `remove_background` and `select_object`, which download a model
+or ONNX Runtime on first use (they send nothing about the project).
 
 ### Resources
 

@@ -124,3 +124,53 @@ from the CPU's by 1.3/255 on average.
 - A model that `ort` cannot run but candle can (a transformer with custom
   ops): it would get a second worker binary on the same protocol, not a
   path inside the editor.
+
+## Amended 2026-10-04 (agent/ml2): CUDA out of the box, three matting models, the matte cache
+
+- **CUDA comes as a bundle, not from the system.** An NVIDIA *bundle*
+  (`registry::BUNDLES`) is an ONNX Runtime CUDA build plus every library its
+  provider opens — the CUDA runtime, cuBLAS (with cuBLASLt), cuRAND, NVRTC
+  and cuDNN 9 — each from NVIDIA's own wheel on PyPI, pinned by URL and
+  SHA-256 like the cuDNN pack before. `nvidia-cu13` (driver ≥ 580, 1.33 GB
+  download) or `nvidia-cu12` (driver ≥ 525, 1.9 GB); `ml install gpu` and
+  Settings › AI acceleration pick by the driver version in
+  `/sys/module/nvidia/version`. The worker preloads a bundle's libraries by
+  path (`registry::library_packs_for`: same CUDA major as the loaded
+  runtime), so `CHUKCUT_CUDA_LIB_DIRS` and `LD_LIBRARY_PATH` are no longer
+  needed and Ubuntu's too-old CUDA 12.0 `libcudart.so.12` is never opened.
+  Which runtime loads: a complete bundle the driver can run first, then a
+  GPU build with system libraries, then the CPU build
+  (`registry::choose_runtime`; `CHUKCUT_ML_RUNTIME` forces one). The probe
+  counts CUDA only when cuDNN opens too, so a half-installed bundle ends on
+  the CPU, not in a failed job, and it reports the CUDA libraries it loaded
+  by path; `ml status` turns that into one sentence ("CUDA 13 on the GPU
+  with chukcut's CUDA libraries").
+- **Models per task, chosen in the inspector.** People: RVM (recurrent,
+  stable). Objects: BiRefNet lite (MIT, per frame, 1024² fixed input) —
+  `ModelSpec::cpu_ok` is false for it, because on the CPU one frame takes
+  12–25 s and 6–11 GB, so it refuses there in words (`ErrorKind::NeedsGpu`)
+  instead of hanging. Select object: MobileSAM (Apache-2.0) from clicks,
+  propagated over the clip by VitTrack + a box prompt per frame
+  (`matting/object.rs`); SAM 2's video predictor has no ONNX export of its
+  memory path that runs on ORT CPU and CUDA, so it was not used. A model can
+  have a `companion` (SAM's decoder), downloaded and loaded with it.
+  Protocol version 3.
+- **The matte cache is keyed by provider and prompt.** A directory per
+  (media digest, model, version, prompt hash, provider, size); a bake fills
+  its provider's directory; the compositor draws a clip from the directory
+  with the most frames, never a mix, so the ~1/255 CUDA-vs-CPU difference
+  cannot flicker inside one clip. Mattes count towards the cache limit and
+  are cleared with the cache; the open project's are protected from a trim
+  like its thumbnails. The ML directory itself (models, runtime packs) is
+  outside the limit and outside "Clear cache"; Settings › AI acceleration
+  removes it explicitly.
+- **Missing frames bake on their own.** After any edit the app asks
+  `matting_queue_missing`, which starts a background bake for every clip
+  whose matte lacks frames (trimmed longer, a speed change, an undo, a
+  trimmed cache).
+
+What it costs: a bundle is 1.3–2 GB on disk per CUDA major; two NVIDIA
+bundles side by side are possible and wasteful (Settings shows both with
+their size). A "Select object" bake on the CPU runs MobileSAM's encoder per
+frame (~0.7 s at 960×540 on four threads), so a 10 s clip takes minutes
+there; on CUDA it is a few seconds.

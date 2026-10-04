@@ -116,8 +116,10 @@ enum Command {
     Mask(On<MaskArgs>),
     /// Key a colour out of a clip (green screen).
     ChromaKey(On<ChromaKeyArgs>),
-    /// Remove the background behind the people in a video clip (ML).
+    /// Remove a video clip's background: people or the main object (ML).
     RemoveBackground(On<RemoveBackgroundArgs>),
+    /// Keep (or cut out) the object you point at, on every frame (ML).
+    SelectObject(On<SelectObjectArgs>),
     /// Set how a clip blends with the lanes beneath it, and its opacity.
     Blend(On<BlendArgs>),
     /// Give a clip an In, Out or Combo animation preset.
@@ -572,6 +574,7 @@ fn dispatch(command: Command, dry: bool, ctx: &Ctx) -> CliResult<(&'static str, 
         Command::Mask(o) => on(o, dry, ctx),
         Command::ChromaKey(o) => on(o, dry, ctx),
         Command::RemoveBackground(o) => on(o, dry, ctx),
+        Command::SelectObject(o) => on(o, dry, ctx),
         Command::Blend(o) => on(o, dry, ctx),
         Command::Effect(EffectCommand::Add(o)) => on(o, dry, ctx),
         Command::Effect(EffectCommand::Set(o)) => on(o, dry, ctx),

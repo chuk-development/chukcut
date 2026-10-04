@@ -31,7 +31,7 @@ use chukcut_ml_worker::protocol::{
 };
 use chukcut_ml_worker::registry::{self, ModelSpec, Task};
 use chukcut_ml_worker::runtime::{Failure, Runtime};
-use chukcut_ml_worker::{rvm, vittrack, yunet};
+use chukcut_ml_worker::{birefnet, rvm, sam, vittrack, yunet};
 use ort::value::Tensor;
 
 type Out = Arc<Mutex<BufWriter<std::io::Stdout>>>;
@@ -117,6 +117,7 @@ fn main() {
         runtime: None,
         tracks: HashMap::new(),
         mattes: HashMap::new(),
+        embedding: None,
         cancelled,
         reply_payload: Vec::new(),
     };
@@ -181,11 +182,33 @@ struct MatteSession {
     states: [rvm::State; 4],
 }
 
+/// The last frame's SAM embedding, so more clicks on it skip the encoder.
+struct Embedding {
+    model: &'static str,
+    /// A hash of the frame's bytes and size.
+    frame: u64,
+    data: Vec<f32>,
+}
+
+/// FNV-1a over a frame: cheap next to the encoder (2 MB in ~2 ms), and a
+/// collision only costs a wrong mask on a frame the user is looking at.
+fn frame_hash(rgba: &[u8], w: usize, h: usize) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325 ^ ((w as u64) << 32 | h as u64);
+    for chunk in rgba.chunks(8) {
+        let mut word = [0u8; 8];
+        word[..chunk.len()].copy_from_slice(chunk);
+        hash ^= u64::from_le_bytes(word);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
 struct Worker {
     root: PathBuf,
     runtime: Option<Runtime>,
     tracks: HashMap<u64, Track>,
     mattes: HashMap<u64, MatteSession>,
+    embedding: Option<Embedding>,
     cancelled: Arc<Mutex<HashSet<u64>>>,
     /// What the request being answered sends back beside its header (a
     /// matte); taken and cleared when the reply goes out.
@@ -268,6 +291,9 @@ impl Worker {
                 progress(0.0, "loading the runtime");
                 let runtime = self.runtime()?;
                 progress(0.3, "creating the session");
+                if let Some(companion) = spec.companion.and_then(registry::model) {
+                    runtime.session(companion)?;
+                }
                 let loaded = runtime.session(spec)?;
                 let provider = loaded.provider.to_string();
                 Ok(Outcome::Loaded {
@@ -347,11 +373,18 @@ impl Worker {
                 session,
                 width,
                 height,
+                allow_cpu,
             } => {
                 let (w, h) = frame(payload, width, height)?;
-                let spec = model(&name, Task::Matte)?;
+                let spec = registry::model(&name)
+                    .filter(|m| matches!(m.task, Task::Matte | Task::MatteImage))
+                    .ok_or_else(|| bad(format!("{name} is not a matting model")))?;
                 let started = Instant::now();
-                let (alpha, provider) = self.matte(spec, session, payload, w, h)?;
+                let (alpha, provider) = if spec.task == Task::MatteImage {
+                    self.matte_image(spec, payload, w, h, allow_cpu)?
+                } else {
+                    self.matte(spec, session, payload, w, h)?
+                };
                 self.reply_payload = alpha;
                 Ok(Outcome::Matte {
                     width,
@@ -363,6 +396,37 @@ impl Worker {
             RequestBody::MatteEnd { session } => {
                 self.mattes.remove(&session);
                 Ok(Outcome::Ok)
+            }
+            RequestBody::Segment {
+                model: name,
+                width,
+                height,
+                points,
+                bbox,
+            } => {
+                let (w, h) = frame(payload, width, height)?;
+                let spec = model(&name, Task::SegmentEncoder)?;
+                if !points.iter().any(|p| p.keep) && bbox.is_none() {
+                    return Err(bad("a selection needs a point on the object or a box"));
+                }
+                let clicks: Vec<sam::Click> = points
+                    .iter()
+                    .map(|p| sam::Click {
+                        x: p.x,
+                        y: p.y,
+                        keep: p.keep,
+                    })
+                    .collect();
+                let started = Instant::now();
+                let (mask, score, provider) = self.segment(spec, payload, w, h, &clicks, bbox)?;
+                self.reply_payload = mask;
+                Ok(Outcome::Segment {
+                    width,
+                    height,
+                    score,
+                    millis: millis(started),
+                    provider,
+                })
             }
             RequestBody::Benchmark {
                 model: name,
@@ -478,6 +542,131 @@ impl Worker {
             },
         );
         Ok((rvm::alpha_bytes(&pha.data), provider))
+    }
+
+    /// A per-frame matte (BiRefNet) and the provider it ran on.
+    fn matte_image(
+        &mut self,
+        spec: &'static ModelSpec,
+        rgba: &[u8],
+        w: usize,
+        h: usize,
+        allow_cpu: bool,
+    ) -> Result<(Vec<u8>, String), Failure> {
+        let loaded = self.runtime()?.session(spec)?;
+        let provider = loaded.provider.to_string();
+        if provider == "CPU" && !spec.cpu_ok && !allow_cpu {
+            return Err((
+                ErrorKind::NeedsGpu,
+                format!(
+                    "{} needs a GPU: on the CPU one frame takes 12–25 s and 6–11 GB of memory",
+                    spec.name
+                ),
+            ));
+        }
+        let size = birefnet::SIZE as i64;
+        let input = Tensor::from_array(([1i64, 3, size, size], birefnet::input(rgba, w, h)))
+            .map_err(inference)?;
+        let outputs = loaded
+            .session
+            .run(ort::inputs!["input_image" => input])
+            .map_err(inference)?;
+        let value = outputs
+            .get("output_image")
+            .ok_or_else(|| inference("the model has no output output_image"))?;
+        let (_, logits) = value.try_extract_tensor::<f32>().map_err(inference)?;
+        if logits.len() != birefnet::SIZE * birefnet::SIZE {
+            return Err(inference(format!(
+                "the matte is {} values, not {}²",
+                logits.len(),
+                birefnet::SIZE
+            )));
+        }
+        Ok((birefnet::matte(logits, w, h), provider))
+    }
+
+    /// The SAM mask of `clicks` (and `bbox`) in this frame: the mask bytes,
+    /// the model's quality estimate and the provider. The encoder runs only
+    /// when the frame differs from the last one.
+    fn segment(
+        &mut self,
+        spec: &'static ModelSpec,
+        rgba: &[u8],
+        w: usize,
+        h: usize,
+        clicks: &[sam::Click],
+        bbox: Option<[f32; 4]>,
+    ) -> Result<(Vec<u8>, f32, String), Failure> {
+        let decoder_id = spec
+            .companion
+            .ok_or_else(|| bad(format!("{} has no decoder", spec.id)))?;
+        let decoder = model(decoder_id, Task::SegmentDecoder)?;
+        let hash = frame_hash(rgba, w, h);
+        let cached = self
+            .embedding
+            .as_ref()
+            .is_some_and(|e| e.model == spec.id && e.frame == hash);
+        if !cached {
+            let loaded = self.runtime()?.session(spec)?;
+            let (input, rh, rw) = sam::encoder_input(rgba, w, h);
+            let input =
+                Tensor::from_array(([rh as i64, rw as i64, 3], input)).map_err(inference)?;
+            let outputs = loaded
+                .session
+                .run(ort::inputs!["input_image" => input])
+                .map_err(inference)?;
+            let value = outputs
+                .get("image_embeddings")
+                .ok_or_else(|| inference("the encoder has no output image_embeddings"))?;
+            let data = value
+                .try_extract_tensor::<f32>()
+                .map_err(inference)?
+                .1
+                .to_vec();
+            drop(outputs);
+            self.embedding = Some(Embedding {
+                model: spec.id,
+                frame: hash,
+                data,
+            });
+        }
+        let embedding = self
+            .embedding
+            .as_ref()
+            .map(|e| e.data.clone())
+            .expect("set above");
+        let loaded = self.runtime()?.session(decoder)?;
+        let provider = loaded.provider.to_string();
+        let (coords, labels, n) = sam::prompt(clicks, bbox, w, h);
+        let n = n as i64;
+        let outputs = loaded
+            .session
+            .run(ort::inputs![
+                "image_embeddings" => Tensor::from_array(([1i64, 256, 64, 64], embedding)).map_err(inference)?,
+                "point_coords" => Tensor::from_array(([1i64, n, 2], coords)).map_err(inference)?,
+                "point_labels" => Tensor::from_array(([1i64, n], labels)).map_err(inference)?,
+                "mask_input" => Tensor::from_array(([1i64, 1, 256, 256], vec![0.0f32; 256 * 256])).map_err(inference)?,
+                "has_mask_input" => Tensor::from_array(([1i64], vec![0.0f32])).map_err(inference)?,
+                "orig_im_size" => Tensor::from_array(([2i64], vec![h as f32, w as f32])).map_err(inference)?,
+            ])
+            .map_err(inference)?;
+        let masks = outputs
+            .get("masks")
+            .ok_or_else(|| inference("the decoder has no output masks"))?;
+        let (_, logits) = masks.try_extract_tensor::<f32>().map_err(inference)?;
+        if logits.len() != w * h {
+            return Err(inference(format!(
+                "the mask is {} values for a {w}x{h} frame",
+                logits.len()
+            )));
+        }
+        let mask = sam::mask_bytes(logits);
+        let score = outputs
+            .get("iou_predictions")
+            .and_then(|v| v.try_extract_tensor::<f32>().ok())
+            .and_then(|(_, d)| d.first().copied())
+            .unwrap_or(0.0);
+        Ok((mask, score, provider))
     }
 
     /// One VitTrack run: `template` against `search`, the three output maps.
@@ -613,6 +802,24 @@ impl Worker {
                     worker.track(session, &rgba, w, h, false).map(|_| ())
                 }
                 Task::Matte => worker.matte(spec, session, &rgba, w, h).map(|_| ()),
+                Task::MatteImage => worker.matte_image(spec, &rgba, w, h, true).map(|_| ()),
+                Task::SegmentEncoder => {
+                    // A new frame per run, so the encoder is timed and not
+                    // the embedding cache.
+                    worker.embedding = None;
+                    let click = sam::Click {
+                        x: (w / 2) as f32,
+                        y: (h / 2) as f32,
+                        keep: true,
+                    };
+                    worker
+                        .segment(spec, &rgba, w, h, &[click], None)
+                        .map(|_| ())
+                }
+                Task::SegmentDecoder => Err(bad(format!(
+                    "{} runs with its encoder; benchmark that",
+                    spec.id
+                ))),
             }
         };
         // One untimed run: the first run on a GPU provider allocates and

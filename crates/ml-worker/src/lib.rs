@@ -9,9 +9,11 @@
 //!
 //! Design: `docs/decisions/0025-ml-worker-process.md`.
 
+pub mod birefnet;
 pub mod protocol;
 pub mod registry;
 pub mod rvm;
+pub mod sam;
 pub mod vittrack;
 pub mod yunet;
 

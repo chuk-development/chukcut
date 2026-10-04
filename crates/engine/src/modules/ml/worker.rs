@@ -252,7 +252,9 @@ impl Client {
                         ErrorKind::RuntimeMissing => MlError::RuntimeMissing(message),
                         ErrorKind::ModelMissing => MlError::ModelMissing(message),
                         ErrorKind::Cancelled => MlError::Cancelled,
-                        ErrorKind::BadRequest | ErrorKind::Inference => MlError::Failed(message),
+                        ErrorKind::BadRequest | ErrorKind::Inference | ErrorKind::NeedsGpu => {
+                            MlError::Failed(message)
+                        }
                     })
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => {

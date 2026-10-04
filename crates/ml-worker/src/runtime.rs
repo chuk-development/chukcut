@@ -55,27 +55,55 @@ pub fn library(root: &Path) -> Option<PathBuf> {
 }
 
 /// Directories to look in for CUDA and cuDNN libraries, beyond the system's
-/// loader path: `CHUKCUT_CUDA_LIB_DIRS` (colon-separated), the cuDNN pack
-/// (`registry::CUDNN_PACK`) when it is installed and the CUDA 12 runtime is
-/// the one loading, and the runtime pack's own `lib/`.
+/// loader path, first match wins: `CHUKCUT_CUDA_LIB_DIRS` (colon-separated),
+/// then the installed library packs of the same CUDA major version as the
+/// runtime being loaded (`registry::library_packs_for`: the CUDA runtime,
+/// cuBLAS, cuRAND, NVRTC and cuDNN from NVIDIA's wheels), then the runtime
+/// pack's own `lib/`. A CUDA 13 provider never meets a CUDA 12 library this
+/// way, and the system's own CUDA (Ubuntu's 12.0 is too old for ORT 1.28)
+/// is used only for what no pack has.
 fn cuda_dirs(root: &Path, lib: &Path) -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = std::env::var_os("CHUKCUT_CUDA_LIB_DIRS")
         .map(|v| std::env::split_paths(&v).collect())
         .unwrap_or_default();
-    // The cuDNN pack is built for CUDA 12; only the CUDA 12 runtime pack
-    // may take it, or a CUDA 13 provider would meet a cuDNN for 12.
-    let cuda12 = registry::runtime_pack("cuda12").map(|p| registry::runtime_dir(root, p));
-    if cuda12.is_some_and(|dir| lib.starts_with(dir)) {
-        if let Some(pack) = registry::runtime_pack(registry::CUDNN_PACK) {
-            if registry::runtime_present(root, pack) {
-                dirs.push(registry::runtime_dir(root, pack).join("lib"));
-            }
+    let ort = registry::RUNTIME_PACKS.iter().find(|p| {
+        p.kind == registry::PackKind::OnnxRuntime && lib.starts_with(registry::runtime_dir(root, p))
+    });
+    if let Some(ort) = ort {
+        for pack in registry::library_packs_for(root, ort) {
+            dirs.push(registry::runtime_dir(root, pack).join("lib"));
         }
     }
     if let Some(parent) = lib.parent() {
         dirs.push(parent.to_path_buf());
     }
     dirs
+}
+
+/// The CUDA, cuBLAS and cuDNN libraries this process has loaded, by path,
+/// from `/proc/self/maps`: what `ml status --probe` shows as the libraries
+/// actually in use, which is the one honest answer to "which CUDA runs".
+fn loaded_cuda_libraries() -> Vec<String> {
+    let Ok(maps) = std::fs::read_to_string("/proc/self/maps") else {
+        return Vec::new();
+    };
+    let mut found: Vec<String> = Vec::new();
+    for line in maps.lines() {
+        let Some(path) = line.split_whitespace().nth(5) else {
+            continue;
+        };
+        let name = path.rsplit('/').next().unwrap_or("");
+        let wanted = [
+            "libcudart.so",
+            "libcublas.so",
+            "libcudnn.so",
+            "libonnxruntime_providers_cuda.so",
+        ];
+        if wanted.iter().any(|w| name.starts_with(w)) && !found.iter().any(|f| f == path) {
+            found.push(path.to_string());
+        }
+    }
+    found
 }
 
 /// The CUDA and cuDNN libraries the CUDA provider opens, by file-name
@@ -88,6 +116,7 @@ const CUDA_PRELOAD: &[&str] = &[
     "libcublasLt.so.",
     "libcublas.so.",
     "libnvrtc.so.",
+    "libnvrtc-builtins.so.",
     "libcurand.so.",
     "libcufft.so.",
     "libcudnn.so.",
@@ -131,6 +160,12 @@ fn preload_cuda(dirs: &[PathBuf]) {
             }
         }
     }
+}
+
+/// Whether cuDNN 9 can be opened: preloaded from a pack (found by its
+/// soname then), or on the system's loader path.
+fn cudnn_present() -> bool {
+    ort::util::preload_dylib("libcudnn.so.9").is_ok()
 }
 
 impl Runtime {
@@ -204,6 +239,14 @@ impl Runtime {
             match Session::builder()
                 .and_then(|b| b.with_execution_providers([provider]).map_err(Into::into))
             {
+                // The CUDA provider registers without cuDNN and fails on the
+                // first convolution ("cuDNN is unavailable"), which a half
+                // installed bundle would turn into a failed job instead of
+                // a CPU session. Its absence is a reason, here.
+                Ok(_) if name == "CUDA" && !cudnn_present() => probe.unavailable.push((
+                    name.to_string(),
+                    "with error: cuDNN 9 (libcudnn.so.9) not found; install the GPU bundle".into(),
+                )),
                 Ok(_) => {
                     probe.providers.push(name.to_string());
                     order.push(name);
@@ -213,6 +256,7 @@ impl Runtime {
         }
         probe.providers.push("CPU".to_string());
         order.push("CPU");
+        probe.libraries = loaded_cuda_libraries();
         Ok(Runtime {
             probe,
             sessions: HashMap::new(),

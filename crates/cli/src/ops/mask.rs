@@ -46,7 +46,10 @@ pub fn describe(m: &CompositingMaterial) -> Value {
         })),
         "blend": m.blend.name(),
         "background": m.background.as_ref().map(|b| json!({
-            "model": b.model, "version": b.version,
+            "model": b.model, "version": b.version, "invert": b.invert,
+            "points": b.prompt.as_ref().map(|p| p.points.iter().map(|q| json!({
+                "x": q.x, "y": q.y, "keep": q.keep,
+            })).collect::<Vec<_>>()),
         })),
     })
 }
@@ -408,10 +411,13 @@ impl Operation for ChromaKeyArgs {
 // Remove background
 // ---------------------------------------------------------------------------
 
-/// Remove the background behind the people in a video clip (Robust Video
-/// Matting in the ML worker; the model and ONNX Runtime download on first
-/// use). Bakes the clip's matte into the cache before it returns, so a
-/// following export or render shows it. `off` keeps the background again.
+/// Remove the background of a video clip, made by a model on this machine
+/// (the ML worker; the model and ONNX Runtime download on first use).
+/// `--model people` (Robust Video Matting, the default) keeps people;
+/// `--model objects` (BiRefNet lite, needs a GPU) keeps the main object of
+/// the picture. Bakes the clip's matte into the cache before it returns, so
+/// a following export or render shows it. `--invert` cuts the subject out
+/// and keeps the rest; `off` keeps the background again.
 #[derive(Debug, Clone, Default, Args, Deserialize, JsonSchema)]
 pub struct RemoveBackgroundArgs {
     /// The clip: id, id prefix or `lane:index`.
@@ -420,6 +426,79 @@ pub struct RemoveBackgroundArgs {
     #[arg(long)]
     #[serde(default)]
     pub off: bool,
+    /// people or objects.
+    #[arg(long)]
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Cut the subject out instead of keeping only it.
+    #[arg(long)]
+    #[serde(default)]
+    pub invert: bool,
+    /// Keep the subject again after --invert.
+    #[arg(long, conflicts_with = "invert")]
+    #[serde(default)]
+    pub no_invert: bool,
+}
+
+fn mode_named(name: &str) -> CliResult<matting::BackgroundMode> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "people" | "person" | "rvm" => Ok(matting::BackgroundMode::People),
+        "objects" | "object" | "birefnet" | "birefnet-lite" => Ok(matting::BackgroundMode::Objects),
+        other => Err(CliError::usage(format!(
+            "{other:?} is not a background model; choose people or objects (or select_object to click one)"
+        ))),
+    }
+}
+
+/// Wait for bake `job`, with progress, and say what it did.
+fn wait_for_bake(
+    session: &Session,
+    ctx: &Ctx,
+    segment_id: &str,
+    job: Option<u64>,
+    what: &str,
+) -> CliResult<Outcome> {
+    let Some(job) = job else {
+        return Ok(outcome(
+            session,
+            segment_id,
+            format!("{what} (already baked)"),
+        ));
+    };
+    let finished = loop {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let Some(status) = matting::matting_status(job) else {
+            return Err(CliError::refused("the background removal job vanished"));
+        };
+        if let Some(finished) = status.finished {
+            matting::matting_forget(job);
+            break finished;
+        }
+        let p = &status.progress;
+        if p.total > 0 {
+            ctx.progress(
+                &format!("Removing the background: frame {} of {}", p.done, p.total),
+                Some(p.done as f32 / p.total as f32),
+            );
+        }
+    };
+    match finished {
+        Ok(done) => Ok(outcome(
+            session,
+            segment_id,
+            format!(
+                "{what}: {} frames in {:.1} s on {}",
+                done.written,
+                done.seconds,
+                done.provider.as_deref().unwrap_or("the CPU")
+            ),
+        )),
+        // The setting stays on (an undo takes it off); the export bakes
+        // what is missing or says why it cannot.
+        Err(error) => Err(CliError::refused(format!(
+            "Remove background is on, but its matte could not be made: {error}"
+        ))),
+    }
 }
 
 impl Operation for RemoveBackgroundArgs {
@@ -427,58 +506,121 @@ impl Operation for RemoveBackgroundArgs {
     fn run(self, session: &mut Session, ctx: &Ctx) -> CliResult<Outcome> {
         let segment_id = session.with(|p| select::clip(p, &self.clip))?;
         let state = session.state.clone();
-        let already = material(session, &segment_id).background.is_some();
-        // Asking again on a clip that has it bakes what is missing (after a
-        // trim, or a cleared cache) instead of failing as "nothing changed".
-        let job = if already && !self.off {
-            matting::matting_bake(&state, segment_id.clone())?
-        } else {
-            matting::matting_remove_background(&state, segment_id.clone(), !self.off)?.job
-        };
         if self.off {
+            matting::matting_remove_background_with(&state, segment_id.clone(), None)?;
             return Ok(outcome(session, &segment_id, "kept the background".into()));
         }
-        let Some(job) = job else {
-            return Ok(outcome(
-                session,
-                &segment_id,
-                "removed the background (already baked)".into(),
-            ));
+        let current = material(session, &segment_id).background;
+        let mode = match self.model.as_deref() {
+            Some(name) => Some(mode_named(name)?),
+            None => None,
         };
-        let finished = loop {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            let Some(status) = matting::matting_status(job) else {
-                return Err(CliError::refused("the background removal job vanished"));
-            };
-            if let Some(finished) = status.finished {
-                matting::matting_forget(job);
-                break finished;
-            }
-            let p = &status.progress;
-            if p.total > 0 {
-                ctx.progress(
-                    &format!("Removing the background: frame {} of {}", p.done, p.total),
-                    Some(p.done as f32 / p.total as f32),
-                );
-            }
+        // Asking again on a clip that has the same model bakes what is
+        // missing (after a trim, or a cleared cache) instead of failing as
+        // "nothing changed".
+        let same = match (&current, mode) {
+            (Some(_), None) => true,
+            (Some(setting), Some(mode)) => setting.model == mode.model(),
+            (None, _) => false,
         };
-        match finished {
-            Ok(done) => Ok(outcome(
-                session,
-                &segment_id,
-                format!(
-                    "removed the background: {} frames in {:.1} s on {}",
-                    done.written,
-                    done.seconds,
-                    done.provider.as_deref().unwrap_or("the CPU")
-                ),
-            )),
-            // The setting stays on (an undo takes it off); the export bakes
-            // what is missing or says why it cannot.
-            Err(error) => Err(CliError::refused(format!(
-                "Remove background is on, but its matte could not be made: {error}"
-            ))),
+        let mut job = if same {
+            matting::matting_bake(&state, segment_id.clone())?
+        } else {
+            matting::matting_remove_background_with(
+                &state,
+                segment_id.clone(),
+                Some(mode.unwrap_or_default()),
+            )?
+            .job
+        };
+        if self.invert || self.no_invert {
+            matting::matting_set_invert(&state, segment_id.clone(), self.invert)?;
+            job = job.or(matting::matting_bake(&state, segment_id.clone())?);
         }
+        let what = if self.invert {
+            "cut the subject out"
+        } else {
+            "removed the background"
+        };
+        wait_for_bake(session, ctx, &segment_id, job, what)
+    }
+}
+
+/// Keep the object you point at and remove the rest, on every frame of a
+/// video clip ("Select object": MobileSAM on the frame at `--at`, carried
+/// over the clip with the VitTrack tracker; both download on first use).
+/// Points are canvas fractions, x,y with 0,0 the top-left corner, as a
+/// rendered frame shows them: `--point` on the object (repeat it for a
+/// large one), `--exclude` on a part to leave out. `--invert` cuts the
+/// object out and keeps the rest instead. Bakes before it returns.
+#[derive(Debug, Clone, Default, Args, Deserialize, JsonSchema)]
+pub struct SelectObjectArgs {
+    /// The clip: id, id prefix or `lane:index`.
+    pub clip: String,
+    /// The timeline time of the frame the points are on.
+    #[arg(long)]
+    pub at: Time,
+    /// A point on the object: x,y as canvas fractions. Repeatable.
+    #[arg(long = "point")]
+    #[serde(default)]
+    pub points: Vec<String>,
+    /// A point on a part to leave out: x,y as canvas fractions. Repeatable.
+    #[arg(long = "exclude")]
+    #[serde(default)]
+    pub exclude: Vec<String>,
+    /// Cut the object out instead of keeping only it.
+    #[arg(long)]
+    #[serde(default)]
+    pub invert: bool,
+}
+
+fn point(raw: &str, keep: bool) -> CliResult<matting::CanvasPoint> {
+    let parts: Vec<f32> = raw
+        .split(',')
+        .map(|v| v.trim().parse::<f32>())
+        .collect::<Result<_, _>>()
+        .map_err(|_| CliError::usage(format!("{raw:?} is not a point; write x,y like 0.5,0.4")))?;
+    match parts.as_slice() {
+        [x, y] if (0.0..=1.0).contains(x) && (0.0..=1.0).contains(y) => {
+            Ok(matting::CanvasPoint { x: *x, y: *y, keep })
+        }
+        _ => Err(CliError::usage(format!(
+            "{raw:?} is not a point inside the canvas; write x,y between 0 and 1"
+        ))),
+    }
+}
+
+impl Operation for SelectObjectArgs {
+    const NAME: &'static str = "select_object";
+    fn run(self, session: &mut Session, ctx: &Ctx) -> CliResult<Outcome> {
+        let segment_id = session.with(|p| select::clip(p, &self.clip))?;
+        if self.points.is_empty() {
+            return Err(CliError::usage("give at least one --point on the object"));
+        }
+        let mut points = Vec::new();
+        for raw in &self.points {
+            points.push(point(raw, true)?);
+        }
+        for raw in &self.exclude {
+            points.push(point(raw, false)?);
+        }
+        let fps = session.with(|p| p.fps);
+        let at = self.at.resolve(fps);
+        let state = session.state.clone();
+        let job = matting::matting_select_object(
+            &state,
+            segment_id.clone(),
+            at,
+            points,
+            Some(self.invert),
+        )?
+        .job;
+        let what = if self.invert {
+            "cut the object out"
+        } else {
+            "kept the selected object"
+        };
+        wait_for_bake(session, ctx, &segment_id, job, what)
     }
 }
 
