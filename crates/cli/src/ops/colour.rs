@@ -109,9 +109,10 @@ impl Operation for ColourMatchArgs {
                 amount: amount(self.amount)?,
             },
         )?;
+        let name = session.with(|p| summary::clip_name(p, &reference));
         Ok(Outcome::changed(
             format!(
-                "matched to {reference}: L*a*b* distance {:.1} -> {:.1}{}",
+                "matched to {name}: L*a*b* distance {:.1} -> {:.1}{}",
                 done.distance_before,
                 done.distance_after,
                 if done.curves {
