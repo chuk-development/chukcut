@@ -9,6 +9,8 @@
 //!   UI builds: apply a preset, set custom points, remove the curve. Each one
 //!   also changes the clip's length and moves what follows it, as one undo
 //!   step.
+//! - [`blend`] — frame blending: a slow clip mixes its two neighbouring
+//!   source frames instead of holding one.
 //! - [`commands`] — the shell-facing surface.
 //!
 //! ## Sound
@@ -19,5 +21,6 @@
 //! inline; the preview plays the cached render and stays silent on the clip
 //! until that has landed, usually well under a second. Decision 0021.
 
+pub mod blend;
 pub mod commands;
 pub mod edit;

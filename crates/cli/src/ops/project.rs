@@ -407,7 +407,7 @@ impl CatalogArgs {
                 Some(result) => result?,
                 None => {
                     return Err(CliError::usage(format!(
-                        "there is no catalog called {other:?}; choose effects, audio, transitions, animations, grade, presets, hardware, models, luts, fonts, title_styles, title_templates, layouts, speed_presets, accounts, masks, blend, looks, emoji, icons, music, sfx, font_catalogue, fonts_installed, fonts_system, library_settings, providers, fal_actions, voices, machine, settings, cache or recent"
+                        "there is no catalog called {other:?}; choose effects, audio, transitions, animations, grade, presets, hardware, models, luts, fonts, title_styles, title_templates, layouts, speed_presets, accounts, masks, blend, looks, emoji, animated_emoji, icons, music, sfx, font_catalogue, fonts_installed, fonts_system, library_settings, providers, fal_actions, voices, machine, settings, cache or recent"
                     )))
                 }
             },

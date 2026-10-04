@@ -29,6 +29,7 @@
 //!
 //! [`Licence`]: crate::modules::cloud::provenance::Licence
 
+pub mod animated_emoji;
 pub mod commands;
 pub mod fonts;
 pub mod licence;

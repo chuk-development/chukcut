@@ -116,8 +116,55 @@ impl Editor {
                 .into_any_element()
         };
         let film = || placeholder(icons::MEDIA.into(), PANEL_RAISED, TEXT_MUTED);
+        let lottie = item.kind == Kind::Image
+            && chukcut_engine::modules::animated::Format::of(std::path::Path::new(&item.path))
+                == Some(chukcut_engine::modules::animated::Format::Lottie);
         match item.kind {
+            // A Lottie has no pixels for `img`: its tile is a small GIF our
+            // renderer draws, which GPUI plays. GIF and WebP stickers play
+            // as they are.
+            Kind::Image if lottie => match self.assets.thumbs.get(&item.id) {
+                Some(Thumb::Ready(path)) => img(path.clone())
+                    .id(SharedString::from(format!("media-pic-{}", item.id)))
+                    .size_full()
+                    .object_fit(ObjectFit::Contain)
+                    .into_any_element(),
+                Some(Thumb::Failed) | Some(Thumb::Loading) => film(),
+                None => {
+                    self.assets.thumbs.insert(item.id.clone(), Thumb::Loading);
+                    let (id, path) = (item.id.clone(), item.path.clone());
+                    let out = chukcut_engine::modules::library::thumbs_dir()
+                        .join("animated")
+                        .join(format!("media-{id}.gif"));
+                    cx.spawn(async move |this, cx| {
+                        let preview = cx
+                            .background_executor()
+                            .spawn(async move {
+                                chukcut_engine::modules::animated::commands::animated_preview(
+                                    std::path::Path::new(&path),
+                                    144,
+                                    &out,
+                                )
+                            })
+                            .await;
+                        let thumb = match preview {
+                            Ok(path) => Thumb::Ready(path),
+                            Err(error) => {
+                                tracing::warn!(%error, "no preview for an animated sticker");
+                                Thumb::Failed
+                            }
+                        };
+                        let _ = this.update(cx, |editor, cx| {
+                            editor.assets.thumbs.insert(id, thumb);
+                            cx.notify();
+                        });
+                    })
+                    .detach();
+                    film()
+                }
+            },
             Kind::Image => img(PathBuf::from(&item.path))
+                .id(SharedString::from(format!("media-pic-{}", item.id)))
                 .size_full()
                 .object_fit(ObjectFit::Cover)
                 .into_any_element(),

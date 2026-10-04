@@ -255,6 +255,7 @@ impl Editor {
         let mut sections = vec![transform];
         sections.extend(self.easing_section(segment, cx));
         sections.push(blend);
+        sections.extend(self.sticker_playback_section(segment, cx));
         // Footage tools; a title has no footage to stabilise or denoise.
         let footage_tools: &[&str] = if kind == ClipKind::Text {
             &[]
@@ -274,6 +275,52 @@ impl Editor {
             .flex_col()
             .children(sections)
             .into_any_element()
+    }
+
+    /// "Sticker" for an animated image clip (Lottie, GIF, WebP): loop it, or
+    /// play it once and hold the last frame. `None` for anything else.
+    fn sticker_playback_section(
+        &mut self,
+        segment: &Segment,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        use chukcut_engine::modules::animated::{self, playback};
+        let image = self.project.materials.image(&segment.material_id)?;
+        let animation = animated::animation(std::path::Path::new(&image.path))?;
+        let once =
+            playback::playback_of(&self.project.materials, segment) == playback::Playback::Once;
+        let id = segment.id.clone();
+        let entity = cx.entity().downgrade();
+        let switch =
+            Switch::new("sticker-play-once")
+                .checked(once)
+                .on_click(move |checked, _, cx| {
+                    let mode = if *checked {
+                        playback::Playback::Once
+                    } else {
+                        playback::Playback::Loop
+                    };
+                    let id = id.clone();
+                    let _ = entity.update(cx, |this, cx| {
+                        let result =
+                            animated::commands::animated_set_playback(&this.state, id, mode)
+                                .map(|_| ());
+                        this.refresh(cx);
+                        this.report(result, cx);
+                    });
+                });
+        let length = animation.duration() as f64 / 1_000_000.0;
+        let rows = vec![
+            label_row("Play once", switch),
+            div()
+                .text_size(px(TEXT_CAPTION))
+                .text_color(rgb(TEXT_MUTED))
+                .child(format!(
+                    "One pass is {length:.2} s. Off, it loops for as long as the clip lasts."
+                ))
+                .into_any_element(),
+        ];
+        Some(Section::new("Sticker").render(self.collapsed("Sticker"), rows, cx))
     }
 
     fn align_buttons(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -518,6 +565,7 @@ impl Editor {
             );
 
         let pitch = self.pitch_switch(cx);
+        let blend = self.frame_blend_switch(segment, cx);
 
         let curved = self.project.materials.speed_curve_of(segment).is_some();
         div()
@@ -537,7 +585,63 @@ impl Editor {
             .child(speed_row)
             .child(duration_row)
             .child(pitch)
+            .children(blend)
             .into_any_element()
+    }
+
+    /// "Frame blending" for a video clip: a slowed clip mixes the two source
+    /// frames around each instant instead of holding one
+    /// (`speed::blend`). `None` for a clip without frames.
+    fn frame_blend_switch(
+        &mut self,
+        segment: &Segment,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        use chukcut_engine::modules::speed::blend::{frame_blend_of, FrameBlend};
+        if self.project.materials.kind_of(&segment.material_id)
+            != Some(chukcut_engine::modules::project::MaterialKind::Video)
+        {
+            return None;
+        }
+        let on = frame_blend_of(&self.project.materials, segment) == FrameBlend::Blend;
+        let id = segment.id.clone();
+        let entity = cx.entity().downgrade();
+        let switch =
+            Switch::new("speed-frame-blend")
+                .checked(on)
+                .on_click(move |checked, _, cx| {
+                    let mode = if *checked {
+                        FrameBlend::Blend
+                    } else {
+                        FrameBlend::None
+                    };
+                    let id = id.clone();
+                    let _ = entity.update(cx, |this, cx| {
+                        let result =
+                            chukcut_engine::modules::speed::commands::speed_set_frame_blend(
+                                &this.state,
+                                id,
+                                mode,
+                            )
+                            .map(|_| ());
+                        this.refresh(cx);
+                        this.report(result, cx);
+                    });
+                });
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(4.0))
+                .child(label_row("Frame blending", switch))
+                .child(
+                    div()
+                        .text_size(px(TEXT_CAPTION))
+                        .text_color(rgb(TEXT_MUTED))
+                        .child("Smooths slow motion: each frame mixes the two source frames around it."),
+                )
+                .into_any_element(),
+        )
     }
 
     fn speed_footer(&self, segment: &Segment, cx: &mut Context<Self>) -> AnyElement {

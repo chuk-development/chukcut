@@ -184,6 +184,9 @@ pub const ZOOM_BLUR: &str = "zoom_blur";
 pub const GLOW: &str = "glow";
 pub const LIGHT_SWEEP: &str = "light_sweep";
 pub const SHAKE: &str = "shake";
+/// Not a shader pass: the compositor draws the clip several times along its
+/// own movement within one frame and averages them. See `fx::motion_blur`.
+pub const MOTION_BLUR: &str = "motion_blur";
 pub const RGB_SPLIT: &str = "rgb_split";
 pub const GLITCH: &str = "glitch";
 pub const VHS: &str = "vhs";
@@ -264,6 +267,16 @@ static EFFECTS: &[EffectDescriptor] = &[
             number("frequency", "Frequency", 1.0, 30.0, 10.0, "Hz"),
             slider("rotation", "Rotation", 20.0),
             slider("zoom", "Zoom", 10.0),
+        ],
+    },
+    EffectDescriptor {
+        id: MOTION_BLUR,
+        label: "Motion blur",
+        category: Category::Motion,
+        description: "Fast moves smear along their path, like a camera shutter left open.",
+        params: &[
+            number("shutter", "Shutter angle", 0.0, 360.0, 180.0, "°"),
+            number("samples", "Samples", 2.0, 32.0, 8.0, ""),
         ],
     },
     EffectDescriptor {
