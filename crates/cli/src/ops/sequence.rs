@@ -33,6 +33,27 @@ fn info_json(index: usize, s: &SequenceInfo) -> Value {
     })
 }
 
+/// One row of `timeline list`: index, short id, name, length, lanes, clips,
+/// how many compound clips use it, and a `*` on the open one.
+fn list_line(row: &Value) -> String {
+    let id = row["id"].as_str().unwrap_or_default();
+    format!(
+        "  {}{:<3} {:<8}  {:<20} {:>8.3} s  {} lane(s)  {} clip(s)  used {}x",
+        if row["active"].as_bool() == Some(true) {
+            "*"
+        } else {
+            " "
+        },
+        row["index"].as_u64().unwrap_or_default(),
+        &id[..id.len().min(8)],
+        row["name"].as_str().unwrap_or_default(),
+        row["duration"].as_f64().unwrap_or_default(),
+        row["lanes"],
+        row["clips"],
+        row["uses"],
+    )
+}
+
 /// The timeline `reference` names: its id, a unique id prefix of four or more
 /// characters, its exact name, or its index among the timelines.
 fn timeline(project: &Project, reference: &str) -> CliResult<String> {
@@ -103,17 +124,26 @@ impl Operation for TimelineListArgs {
             .enumerate()
             .map(|(i, s)| info_json(i, s))
             .collect();
+        let mut message = format!(
+            "{} timeline(s), {} compound clip sequence(s)",
+            timelines.len(),
+            compounds.len()
+        );
+        // The table the docs promise: one line per sequence, the open one
+        // marked, as `marker list` prints its markers.
+        for (heading, rows) in [("timelines", &timelines), ("compound clips", &compounds)] {
+            if rows.is_empty() {
+                continue;
+            }
+            message.push_str(&format!("\n{heading}:"));
+            for row in rows {
+                message.push_str(&format!("\n{}", list_line(row)));
+            }
+        }
         let mut data = where_now(session);
         data["timelines"] = json!(timelines);
         data["compounds"] = json!(compounds);
-        Ok(Outcome::read(
-            format!(
-                "{} timeline(s), {} compound clip sequence(s)",
-                timelines.len(),
-                compounds.len()
-            ),
-            data,
-        ))
+        Ok(Outcome::read(message, data))
     }
 }
 
