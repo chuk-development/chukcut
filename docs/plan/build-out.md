@@ -69,10 +69,11 @@ column current.
 | 7 | mlworker | finish VitTrack (T2), person segmentation / background removal through the ML worker | running (agent/mlworker) |
 | 7 | demo | release build, showcase project via CLI (`scripts/demo.sh`), `docs/demo.md` feature tour | merged — showcase in `_scratch/demo` of the demo worktree; CLI gaps in docs/QA.md "Showcase pass" |
 | 7 | compound | compound clips, nested sequences, several timelines per project (backlog 5) | merged — no nested-render cache, prefetch ignores compound clips, compound volume/speed keys not in audio, analysis/captions only see the open sequence |
-| 7 | templates | project templates + shortcut editor (backlog 9, 10) | running (agent/templates) |
-| 7 | upkeep | full CLI/MCP coverage, Dependabot bumps, `effects/graph.rs:735` alpha check, GPU tests on both adapters (backlog 13) | running (agent/upkeep) |
+| 7 | templates | project templates + shortcut editor (backlog 9, 10) | merged — 11 built-in templates, keymap registry (66 actions, 3 presets); open: user-template media by absolute path, split slot keeps marker, no "Replace media" in clip menu |
+| 7 | upkeep | full CLI/MCP coverage, Dependabot bumps, `effects/graph.rs:735` alpha check, GPU tests on both adapters (backlog 13) | merged — reachability test with allowlist; ffmpeg-next 9 + rust-minor bumps; graph.rs alpha fixed; `scripts/gpu-tests.sh`; open: play/pause tooltip, off-grid snapping low |
 | 8 | motion2 | frame blending + motion blur, animated stickers (Lottie, animated emoji, GIF/WebP) (backlog 6, 8) | running (agent/motion2) |
 | 8 | compound2 | compound clip gaps: nested-render cache, prefetch, audio of compound volume/speed, flatten at speed, timeline prune, real filmstrips | running (agent/compound2) |
+| 8 | polish2 | template follow-ups (relocatable media, split slot marker, Replace media menu, hide placeholders) + QA lows (play/pause tooltip, snapping, track path, scene button) | running (agent/polish2) |
 
 ## Backlog for the next waves (lead picks from the top)
 
@@ -98,6 +99,6 @@ column current.
 - **ML worker** (backlog 3): partial, uncommitted work in `/mnt/data/git/chukcut-mlworker` (branch agent/mlworker) — review it, commit or redo.
 - **Release build is stale:** rebuild `cargo build --release -p chukcut`; the running binary predates the alpha fixes (d9d86dd, agent/alpha merge).
 - **CI:** green after the font fix (runs 37142894595, 37144217430 passed on 2026-10-03).
-- **Dependabot PRs** (rust-minor group, ffmpeg-next 9.0) are unreviewed; ffmpeg-next 9 needs a build + full test run before merging.
+- **Dependabot PRs:** #26 (rust-minor) and #27 (ffmpeg-next 9) are applied on master (7823f49, f283efe) and can be closed; #5, #7, #8, #9, #16, #24, #25 target the removed web/Tauri code and can be closed; #28 (skrifa 0.47) is unreviewed. Closing PRs needs the owner (the session may not write to GitHub).
 - **Owner decisions pending:** (1) a project identity (URL + project e-mail, not the owner's) for Wikimedia/Musopen User-Agent — until then those sources stay off; (2) delete the fork `chukfinley/filmcraft` (needs `gh auth refresh -h github.com -s delete_repo`).
 - **Follow-up:** check `effects/graph.rs:735` (data-driven blend state) for the NVIDIA alpha rounding.

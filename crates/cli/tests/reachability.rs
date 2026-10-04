@@ -129,6 +129,18 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ("compositing::pick_from", "the eyedropper's pick on any source provider, for tests; chroma_key --pick uses compositing_pick_key_color"),
     ("project::import_material", "the pure half of project_import_media, which import calls"),
     ("speech::transcribe_chunked", "the chunking inside speech_transcribe, which captions transcribe calls"),
+    ("template::template_build_project", "the build half of template_new_project, which template apply calls"),
+    ("template::template_open_project", "the open half of template_new_project, which template apply calls"),
+    ("template::template_info", "one entry of template_list, which template list prints whole"),
+    ("template::template_thumbnail", "the app gallery's preview tile; render_frame renders any frame of an applied template"),
+    // Keyboard shortcuts belong to the app window; a CLI has no keys to bind.
+    ("keymap::keymap_get", "the app's keyboard shortcuts"),
+    ("keymap::keymap_bindings", "the app's keyboard shortcuts"),
+    ("keymap::keymap_conflicts", "the app's keyboard shortcuts"),
+    ("keymap::keymap_set", "the app's keyboard shortcuts"),
+    ("keymap::keymap_reset", "the app's keyboard shortcuts"),
+    ("keymap::keymap_reset_all", "the app's keyboard shortcuts"),
+    ("keymap::keymap_set_preset", "the app's keyboard shortcuts"),
     ("effects::effects_describe", "describes a CapCut effect package the user points at; the package runtime is not a product feature yet (build-out plan: not a priority)"),
 ];
 

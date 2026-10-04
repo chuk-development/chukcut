@@ -2280,6 +2280,57 @@ a transition window and with motion blur; masks and key are not carried by
 but not a motion reveal (wipe-in animations); mask and key cost not
 measured.
 
+## Project templates and the shortcut editor (2026-10-04)
+
+**Templates** (`modules/template`, decision 0022). A template is a project
+whose picture clips carry a `template_slot` marker in `materials.extras`; on
+disk a directory `<data>/templates/user/<id>/` with `template.json` (manifest
+around an ordinary project) and `media/`. Eleven built-ins are built in code
+from our own styles, animations, effects, transitions, looks, drawn
+placeholders (`<data>/templates/placeholders/`) and synthesised music beds
+(`<data>/templates/music/`, `template/music.rs`). Commands:
+`template_list`, `template_build_project` / `template_new_project`,
+`template_open_project`, `template_slots`, `template_replace_media` (one
+undo step), `template_save`, `template_delete`, `template_thumbnail`. CLI and
+MCP: `template list|apply|slots|replace|save|delete` (`docs/cli.md`). App:
+a Templates section on the start screen, a Templates tab in the asset panel
+(by category, "My templates", and "This project" with slots and "Save as
+template"), the fill dialog and the slots dialog (`editor/templates.rs`,
+`editor/assets/templates.rs`). Tests: `template::*` unit tests (fill time
+math, crop, slot order, save), `tests/templates.rs` (real files, slowed
+fill, missing media, replace + undo, save then apply, a tile for every
+built-in), `crates/cli/tests/templates.rs`.
+
+- **Fill rule:** longer clips are trimmed from their start (or `--from`),
+  shorter ones slowed to span the slot (refused below 0.01×), other shapes
+  centre-cropped to the slot's aspect. A slot's own sound plays at the slot
+  volume; the built-ins set 0 under music.
+- **Trap:** two threads drawing the same missing placeholder raced on one
+  `.part` file and one rename failed ("cannot write …"). `assets::
+  write_atomically` names the partial file per write.
+- **Trap: a portal file dialog from a test instance opens on the owner's
+  desktop.** On Xvfb, run the app with `CHUKCUT_FILE_DIALOG=builtin` and
+  `DBUS_SESSION_BUS_ADDRESS` unset; otherwise "Choose…" asks the real
+  session's xdg-desktop-portal.
+- Rough: the media library lists the placeholder PNGs and the music bed like
+  any import; a template project references a user template's `media/` by
+  absolute path (deleting the template takes those files offline); splitting
+  a slot gives both halves the same marker.
+
+**Shortcuts** (`modules/keymap`). Every bindable action is in one registry
+(`keymap/registry.rs`) with its keys in three presets (chukcut, CapCut-like,
+Premiere-like); the user's changes are per-action overrides in
+`<config>/shortcuts.json`. The app binds only from it (`editor/keymap.rs`
+rebuilds the keymap and keeps GPUI Component's own bindings), the shortcuts
+sheet reads it, and Settings → Keyboard shortcuts → "Edit shortcuts…" opens a
+searchable editor: change, add, remove, reset per action or all, preset
+switch, conflict list. A new key is captured through
+`App::intercept_keystrokes`, so Ctrl+S is recorded rather than saving; a key
+another action has is offered with "Take it". **A new action needs a
+registry entry and a line in `editor/keymap.rs`'s `bindings!` list**; a
+test fails when the two disagree. Plain keys and `typing_off` actions are
+bound with `!Input` so typing in a field never runs them.
+
 ## Not built yet
 
 Both keyframe editing and audio waveforms landed overnight and this line was

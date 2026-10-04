@@ -33,6 +33,7 @@ use crate::error::{CliError, CliResult};
 use crate::ops::ml::MlArgs;
 use crate::ops::project::{CatalogArgs, NewArgs};
 use crate::ops::render::render_png;
+use crate::ops::template::{TemplateApplyArgs, TemplateDeleteArgs, TemplateListArgs};
 use crate::ops::{self, summary, Ctx, Outcome};
 use crate::session::{absolute, Session};
 use crate::values::Time;
@@ -53,6 +54,8 @@ Times are seconds as numbers, or strings like \"2.5s\", \"250ms\", \"1:02.5\", \
 /// The tools whose operation only reads: MCP's `readOnlyHint`.
 const READ_ONLY: &[&str] = &[
     "info",
+    "template_list",
+    "template_slots",
     "validate",
     "captions_list",
     "silence_detect",
@@ -287,8 +290,26 @@ impl Server {
                 serde_json::from_value(args.clone()).map_err(|e| CliError::usage(e.to_string()))?;
             return args.run().map(ToolOutput::text);
         }
+        // Templates that are not about one project file.
+        match name {
+            "template_list" => return TemplateListArgs::default().run().map(ToolOutput::text),
+            "template_delete" => {
+                let args: TemplateDeleteArgs = serde_json::from_value(args.clone())
+                    .map_err(|e| CliError::usage(e.to_string()))?;
+                return args.run().map(ToolOutput::text);
+            }
+            _ => {}
+        }
         let project = take_project(args)?;
         match name {
+            "template_apply" => {
+                let args: TemplateApplyArgs = serde_json::from_value(args.clone())
+                    .map_err(|e| CliError::usage(e.to_string()))?;
+                let (mut session, outcome) = args.create(&project)?;
+                session.save()?;
+                self.sessions.insert(session.path.clone(), session);
+                Ok(ToolOutput::text(outcome))
+            }
             "new_project" => {
                 let args: NewArgs = serde_json::from_value(args.clone())
                     .map_err(|e| CliError::usage(e.to_string()))?;
@@ -556,6 +577,21 @@ fn tools() -> Vec<Value> {
             "required": ["ops"],
         })),
     ));
+    let apply = ops::tool_spec::<TemplateApplyArgs>("template_apply");
+    out.push(tool_json(
+        apply.name,
+        &format!(
+            "{} \"project\" is the new project file to write.",
+            apply.description
+        ),
+        with_project(apply.schema),
+    ));
+    for spec in [
+        ops::tool_spec::<TemplateListArgs>("template_list"),
+        ops::tool_spec::<TemplateDeleteArgs>("template_delete"),
+    ] {
+        out.push(tool_json(spec.name, &spec.description, spec.schema));
+    }
     let catalog = ops::tool_spec::<CatalogArgs>("catalog");
     out.push(tool_json(
         catalog.name,
@@ -569,7 +605,16 @@ fn tools() -> Vec<Value> {
 
 fn tool_names() -> Vec<&'static str> {
     let mut names = ops::names();
-    names.extend(["new_project", "view_frame", "batch", "catalog", "ml"]);
+    names.extend([
+        "new_project",
+        "view_frame",
+        "batch",
+        "catalog",
+        "ml",
+        "template_apply",
+        "template_list",
+        "template_delete",
+    ]);
     names
 }
 
@@ -664,7 +709,7 @@ mod tests {
                 !tool["description"].as_str().unwrap_or("").is_empty(),
                 "{name} has no description"
             );
-            if name != "catalog" && name != "ml" {
+            if !matches!(name, "catalog" | "ml" | "template_list" | "template_delete") {
                 assert_eq!(tool["inputSchema"]["required"][0], "project", "{name}");
             }
         }
@@ -684,6 +729,12 @@ mod tests {
             "title_template",
             "title_position",
             "title_duplicate",
+            "template_apply",
+            "template_save",
+            "template_replace",
+            "template_slots",
+            "template_list",
+            "template_delete",
             "scenes_detect",
             "scenes_split",
             "scenes_clear",

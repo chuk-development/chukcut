@@ -482,6 +482,63 @@ The MCP tools are `timeline_list`, `timeline_new`, `timeline_rename`,
 `timeline_delete`, `timeline_duplicate`, `timeline_switch`, `compound_create`,
 `compound_open`, `compound_close` and `compound_flatten`.
 
+### Templates
+
+A template is a project whose picture clips are **slots** your media fills,
+with its titles, animations, effects, transitions, looks and music already in
+place. chukcut ships eleven of its own (`template list`); `template save`
+adds yours under `<data>/templates/user/`. Decision 0022.
+
+#### `template list`
+
+Lists the templates, the built-ins first: id, name, category, canvas, length
+and each slot's length, shape and what it accepts. Needs no project.
+
+#### `template apply PROJECT TEMPLATE [FILE...] [--name NAME] [--force]`
+
+Writes a new project from a template, the files filling its slots in order.
+A longer clip is trimmed to its slot (from its start), a shorter one is
+slowed down until it spans the slot, and a picture of another shape is
+cropped, centred, to the slot's shape; the slot keeps its place, length,
+animation and look. Fewer files than slots leave the rest showing a numbered
+placeholder. More files than slots, a file that does not read, sound only,
+or a video in a photo-only slot is refused by name. The result lists each
+filled slot (`slowed_to` when it plays slowed) and the empty ones.
+
+#### `template slots PROJECT`
+
+Lists a project's slots: number, clip, start, length, shape, and the file in
+it or `(empty)`.
+
+#### `template replace PROJECT --clip CLIP --media FILE [--from TIME]`
+
+Puts a file into a slot (`--clip slot:3`) or into any video or photo clip,
+with the same trimming, slowing and cropping. `--from` is where a longer clip
+starts. One undo step.
+
+#### `template save PROJECT --name NAME [--slot CLIP...] [--label TEXT...]`
+
+Saves the project as a template of your own. The `--slot` clips become its
+slots, in that order, `--label` naming them; without `--slot`, the slots the
+project already has stay slots. Media the template still uses is copied into
+it. `--description` and `--category` are optional. The project file is not
+changed.
+
+#### `template delete TEMPLATE`
+
+Deletes one of your own templates. A built-in cannot be deleted.
+
+```bash
+chukcut-cli template apply trip.chukcut travel-diary a.mp4 b.mp4 c.jpg d.mp4
+chukcut-cli template slots trip.chukcut
+chukcut-cli template replace trip.chukcut --clip slot:2 --media better.mp4 --from 3
+chukcut-cli template save trip.chukcut --name "My trip look"
+```
+
+The MCP tools are `template_list` and `template_delete` (no `project`),
+`template_apply` (`project` is the file to write), `template_slots`,
+`template_replace` and `template_save`.
+
 ### Look
 
 #### `grade PROJECT CLIP`
@@ -1429,7 +1486,8 @@ the same command: the program `chukcut-cli` with the argument `mcp`.
 Each operation above is a tool with the same name and a JSON Schema made from
 the same argument struct that the CLI parses. A tool schema cannot be
 different from what the tool accepts. Each tool (except `catalog`) also takes
-`project`, the absolute path of the `.chukcut` file.
+`project`, the absolute path of the `.chukcut` file; `template_list` and
+`template_delete` do not.
 
 The server adds four tools:
 
@@ -1445,7 +1503,8 @@ on 2025-06-18 or later, the same object is also in `structuredContent`. A
 refused edit is a tool result with `isError: true` and the engine's message;
 an unknown tool or a malformed request is a JSON-RPC error.
 
-Read-only tools have `readOnlyHint`: `info`, `validate`, `captions_list`,
+Read-only tools have `readOnlyHint`: `info`, `template_list`,
+`template_slots`, `validate`, `captions_list`,
 `silence_detect`, `loudness`, `catalog`, `view_frame`, `marker_list`,
 `analysis`, `stock_kinds`, `stock_search`, `presets`, `estimate`.
 

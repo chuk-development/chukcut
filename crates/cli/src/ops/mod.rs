@@ -26,6 +26,7 @@ pub mod project;
 pub mod render;
 pub mod sequence;
 pub mod summary;
+pub mod template;
 pub mod text;
 pub mod timeline;
 
@@ -254,6 +255,9 @@ operations!(
     cloud::StockDownloadArgs,
     render::ExportArgs,
     render::RenderFrameArgs,
+    template::TemplateSaveArgs,
+    template::TemplateReplaceArgs,
+    template::TemplateSlotsArgs,
     caption_edit::CaptionsAddArgs,
     caption_edit::CaptionsTextArgs,
     caption_edit::CaptionsSplitArgs,

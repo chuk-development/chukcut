@@ -12,7 +12,6 @@
 use std::time::{Duration, Instant};
 
 use chukcut_engine::modules::preview::clock::frame_time;
-use gpui::KeyBinding;
 
 use super::*;
 
@@ -37,22 +36,6 @@ const SCRUB_SOUND: Duration = Duration::from_millis(90);
 
 /// The fastest shuttle speed, either way.
 const MAX_RATE: i32 = 8;
-
-pub(crate) fn key_bindings() -> Vec<KeyBinding> {
-    // Plain keys stay out of text fields, like the editor's own.
-    const TYPING_OFF: Option<&str> = Some("!Input");
-    vec![
-        KeyBinding::new("l", ShuttleForward, TYPING_OFF),
-        KeyBinding::new("j", ShuttleBack, TYPING_OFF),
-        KeyBinding::new("k", ShuttleStop, TYPING_OFF),
-        KeyBinding::new("i", MarkIn, TYPING_OFF),
-        KeyBinding::new("o", MarkOut, TYPING_OFF),
-        KeyBinding::new("alt-x", ClearInOut, TYPING_OFF),
-        KeyBinding::new("ctrl-l", ToggleLoop, None),
-        KeyBinding::new("shift-left", StepBack10, TYPING_OFF),
-        KeyBinding::new("shift-right", StepForward10, TYPING_OFF),
-    ]
-}
 
 #[derive(Debug, Default)]
 pub(crate) struct PlaybackState {

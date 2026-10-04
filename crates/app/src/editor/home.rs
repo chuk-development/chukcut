@@ -32,6 +32,8 @@ pub(crate) enum HomeEvent {
         canvas_chosen: bool,
     },
     Open(PathBuf),
+    /// A new project from a template.
+    FromTemplate(super::templates::FillRequest),
     /// Open the file dialog for a project.
     Browse,
     Restore,
@@ -59,6 +61,9 @@ pub(crate) struct Home {
     pub(crate) recovery: Option<RecoveryInfo>,
     /// The last thing that went wrong, e.g. a project that would not open.
     pub(crate) notice: Option<SharedString>,
+    /// Project templates, shown under "Start creating".
+    templates: Entity<super::templates::Gallery>,
+    _template_chosen: gpui::Subscription,
 }
 
 impl EventEmitter<HomeEvent> for Home {}
@@ -75,6 +80,19 @@ impl Home {
             .position(|(_, w, h)| (*w, *h) == settings.default_canvas)
             .unwrap_or(0);
         let name = cx.new(|cx| InputState::new(window, cx).placeholder("Untitled"));
+        let templates = cx.new(super::templates::Gallery::new);
+        let template_chosen = cx.subscribe_in(&templates, window, |_, _, event, window, cx| {
+            let super::templates::GalleryEvent::Chosen(info) = event;
+            let home = cx.entity().downgrade();
+            super::templates::open_fill(
+                info.clone(),
+                move |request, _, cx| {
+                    let _ = home.update(cx, |_, cx| cx.emit(HomeEvent::FromTemplate(request)));
+                },
+                window,
+                cx,
+            );
+        });
         let mut home = Self {
             focus: cx.focus_handle(),
             recent: None,
@@ -85,6 +103,8 @@ impl Home {
             name,
             recovery,
             notice: None,
+            templates,
+            _template_chosen: template_chosen,
         };
         home.reload(cx);
         home
@@ -602,6 +622,9 @@ impl Render for Home {
         let recovery = self.render_recovery(cx);
         let create = self.render_create(cx);
         let projects = self.render_projects(cx);
+        let templates = self.templates.update(cx, |gallery, cx| {
+            gallery.tiles(&super::templates::Show::All, None, 150.0, cx)
+        });
         div()
             .track_focus(&self.focus)
             .key_context("Home")
@@ -646,6 +669,37 @@ impl Render for Home {
                             .text_sm()
                             .child(notice)
                     }))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_baseline()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .text_lg()
+                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .child("Templates"),
+                                    )
+                                    .child(div().text_sm().text_color(rgb(TEXT_DIM)).child(
+                                        "Pick one, choose your clips, and it is cut to the beat.",
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .flex_wrap()
+                                    .gap_x_4()
+                                    .gap_y_5()
+                                    .children(templates),
+                            ),
+                    )
                     .child(
                         div()
                             .flex()
