@@ -152,7 +152,8 @@ All four below were fixed by the polish pass; kept for the record.
   eyes, the key eyedropper, the file browser's hidden-files switch, an export
   queue row's stop/skip) carry the state in their element id, so a click makes
   a new element whose tooltip starts closed. The player's play/pause button
-  (`preview.rs`) still has the old behaviour.
+  (`preview.rs`) still has the old behaviour. Built, and the app's tests
+  pass; not yet looked at on screen.
 - ~~Menu has no New project shortcut hint although Ctrl+N works.~~
 - Projects whose clips were placed before the frame snapping keep their
   off-grid edges, and a drop that snaps to such an edge stays off the grid.
