@@ -31,7 +31,7 @@ use std::time::Instant;
 use chukcut_ml_worker::accel::{Acceleration, Precision};
 use chukcut_ml_worker::protocol::{
     read_frame, write_frame, ErrorKind, Message, Outcome, Quality, Reply, Request, RequestBody,
-    PROTOCOL_VERSION,
+    PROTOCOL_VERSION, PSNR_IDENTICAL,
 };
 use chukcut_ml_worker::registry::{self, ModelSpec, Task};
 use chukcut_ml_worker::runtime::{self, Failure, Loaded, Runtime};
@@ -311,7 +311,11 @@ impl Worker {
     /// (`Runtime::session_for`): TensorRT where the model's fast plan and
     /// the mode say so. A failure on TensorRT moves the model to CUDA for
     /// the rest of the worker's life and runs `f` again there, so a
-    /// TensorRT problem never fails a job. Answers `f`'s value, the
+    /// TensorRT problem never fails a job. A failure to get GPU memory
+    /// drops the other models' sessions and tries again: a worker that has
+    /// run every heavy model in Fast mode holds a CUDA and a TensorRT
+    /// session of each, which filled the 12 GB of an RTX 3060 (HTDemucs then
+    /// failed in an InstanceNormalization). Answers `f`'s value, the
     /// provider and the precision.
     fn with_session<T>(
         &mut self,
@@ -321,26 +325,43 @@ impl Worker {
     ) -> Result<(T, &'static str, Precision), Failure> {
         let standard = self.standard_only;
         let runtime = self.runtime()?;
-        for attempt in 0..2 {
+        let mut evicted = false;
+        let mut last = None;
+        for _ in 0..3 {
             let loaded = if standard {
-                runtime.session(spec)?
+                runtime.session(spec)
             } else {
-                runtime.session_for(spec, shapes)?
+                runtime.session_for(spec, shapes)
             };
-            let (provider, precision) = (loaded.provider, loaded.precision);
-            match f(loaded) {
-                Ok(value) => return Ok((value, provider, precision)),
-                Err((kind, message)) if provider == "TensorRT" && attempt == 0 => {
-                    eprintln!(
-                        "chukcut-ml-worker: {} on TensorRT: {kind:?}: {message}",
-                        spec.id
-                    );
-                    runtime.demote(spec);
+            // The provider the failure happened on; none when the session
+            // could not be made.
+            let attempt: Result<_, (Failure, Option<&'static str>)> = match loaded {
+                Ok(loaded) => {
+                    let (provider, precision) = (loaded.provider, loaded.precision);
+                    f(loaded)
+                        .map(|value| (value, provider, precision))
+                        .map_err(|e| (e, Some(provider)))
                 }
-                Err(e) => return Err(e),
+                Err(e) => Err((e, None)),
+            };
+            let ((kind, message), provider) = match attempt {
+                Ok(done) => return Ok(done),
+                Err(e) => e,
+            };
+            if runtime::out_of_memory(&message) && !evicted && runtime.evict_others(spec) {
+                evicted = true;
+            } else if provider == Some("TensorRT") {
+                eprintln!(
+                    "chukcut-ml-worker: {} on TensorRT: {kind:?}: {message}",
+                    spec.id
+                );
+                runtime.demote(spec);
+            } else {
+                return Err((kind, message));
             }
+            last = Some((kind, message));
         }
-        unreachable!("the second attempt never runs on TensorRT")
+        Err(last.expect("three attempts failed"))
     }
 
     fn handle(
@@ -916,10 +937,11 @@ impl Worker {
     /// model's scale, and the provider it ran on. Checks for a cancel
     /// between tiles.
     ///
-    /// The GPU and the CPU work side by side: while the network makes one
-    /// tile, a second thread writes the previous tile's floats into the
-    /// picture (`esrgan::place_tile`, 4x the pixels of the tile). At 1080p
-    /// that writing was as long as the network on TensorRT.
+    /// Each tile's floats are written into the picture straight from ONNX
+    /// Runtime's output (`esrgan::place_tile`, on four threads). Handing a
+    /// copy to a second thread so the next tile could run meanwhile was
+    /// slower: copying 74 MB a tile into fresh memory cost more than the
+    /// writing it hid (1080p on TensorRT: 643 ms against 417).
     fn upscale(
         &mut self,
         id: u64,
@@ -930,66 +952,50 @@ impl Worker {
         progress: &dyn Fn(f32, &str),
     ) -> Result<(Vec<u8>, String), Failure> {
         let scale = esrgan::SCALE;
+        let mut big = vec![0u8; w * scale * h * scale * 4];
         let (xs, ys) = (esrgan::spans(w), esrgan::spans(h));
         let total = xs.len() * ys.len();
-        let tiles: Vec<(esrgan::Span, esrgan::Span)> = ys
-            .iter()
-            .flat_map(|&y| xs.iter().map(move |&x| (x, y)))
-            .collect();
         let mut provider = String::new();
-        std::thread::scope(|scope| -> Result<(Vec<u8>, String), Failure> {
-            // One tile in flight to the placer at a time: memory stays at
-            // two tiles' floats.
-            let (tx, rx) = mpsc::sync_channel::<(Vec<f32>, esrgan::Span, esrgan::Span)>(1);
-            let placer = scope.spawn(move || {
-                let mut big = vec![0u8; w * scale * h * scale * 4];
-                for (data, x, y) in rx {
-                    esrgan::place_tile(&mut big, w, &data, x, y);
-                }
-                big
-            });
-            for (n, &(x, y)) in tiles.iter().enumerate() {
-                if self.is_cancelled(id) {
-                    return Err((ErrorKind::Cancelled, "cancelled".into()));
-                }
-                let input = esrgan::tile_input(rgba, w, h, x, y);
-                let shape = [1i64, 3, y.read_len as i64, x.read_len as i64];
-                let (data, used, _) =
-                    self.with_session(spec, &[("input", shape.to_vec())], |loaded| {
-                        let input = TensorRef::from_array_view((shape, input.as_slice()))
-                            .map_err(inference)?;
-                        let outputs = loaded
-                            .session
-                            .run(ort::inputs!["input" => input])
-                            .map_err(inference)?;
-                        let value = outputs
-                            .get("output")
-                            .ok_or_else(|| inference("the model has no output output"))?;
-                        let (_, data) = value.try_extract_tensor::<f32>().map_err(inference)?;
-                        if data.len() != 3 * x.read_len * scale * y.read_len * scale {
-                            return Err(inference(format!(
-                                "a {}x{} tile came back as {} values",
-                                x.read_len,
-                                y.read_len,
-                                data.len()
-                            )));
-                        }
-                        Ok(data.to_vec())
-                    })?;
-                provider = used.to_string();
-                if tx.send((data, x, y)).is_err() {
-                    return Err(inference("the tile placer stopped"));
-                }
-                if total > 1 {
-                    progress((n + 1) as f32 / total as f32, "upscaling");
-                }
+        for (n, (&y, &x)) in ys
+            .iter()
+            .flat_map(|y| xs.iter().map(move |x| (y, x)))
+            .enumerate()
+        {
+            if self.is_cancelled(id) {
+                return Err((ErrorKind::Cancelled, "cancelled".into()));
             }
-            drop(tx);
-            let big = placer
-                .join()
-                .map_err(|_| inference("the tile placer panicked"))?;
-            Ok((big, provider))
-        })
+            let input = esrgan::tile_input(rgba, w, h, x, y);
+            let shape = [1i64, 3, y.read_len as i64, x.read_len as i64];
+            let big_ref = std::cell::RefCell::new(&mut big);
+            let ((), used, _) =
+                self.with_session(spec, &[("input", shape.to_vec())], |loaded| {
+                    let input =
+                        TensorRef::from_array_view((shape, input.as_slice())).map_err(inference)?;
+                    let outputs = loaded
+                        .session
+                        .run(ort::inputs!["input" => input])
+                        .map_err(inference)?;
+                    let value = outputs
+                        .get("output")
+                        .ok_or_else(|| inference("the model has no output output"))?;
+                    let (_, data) = value.try_extract_tensor::<f32>().map_err(inference)?;
+                    if data.len() != 3 * x.read_len * scale * y.read_len * scale {
+                        return Err(inference(format!(
+                            "a {}x{} tile came back as {} values",
+                            x.read_len,
+                            y.read_len,
+                            data.len()
+                        )));
+                    }
+                    esrgan::place_tile(&mut big_ref.borrow_mut(), w, data, x, y);
+                    Ok(())
+                })?;
+            provider = used.to_string();
+            if total > 1 {
+                progress((n + 1) as f32 / total as f32, "upscaling");
+            }
+        }
+        Ok((big, provider))
     }
 
     /// The SAM mask of `clicks` (and `bbox`) in this frame: the mask bytes,
@@ -1171,26 +1177,28 @@ impl Worker {
         input: Vec<f32>,
         frames: usize,
     ) -> Result<(Vec<u8>, String), Failure> {
-        let loaded = self.runtime()?.session(spec)?;
-        let provider = loaded.provider.to_string();
-        let tensor = Tensor::from_array(([1i64, 2, registry::SEPARATION_SEGMENT as i64], input))
-            .map_err(inference)?;
-        let outputs = loaded
-            .session
-            .run(ort::inputs!["mix" => tensor])
-            .map_err(inference)?;
-        let value = outputs
-            .get("stems")
-            .ok_or_else(|| inference("the model has no output stems"))?;
-        let (_, data) = value.try_extract_tensor::<f32>().map_err(inference)?;
-        let bytes = demucs::vocals_bytes(data, frames).ok_or_else(|| {
-            inference(format!(
-                "the stems are {} values, not {}",
-                data.len(),
-                demucs::STEMS * 2 * registry::SEPARATION_SEGMENT
-            ))
-        })?;
-        Ok((bytes, provider))
+        let shape = [1i64, 2, registry::SEPARATION_SEGMENT as i64];
+        let (bytes, provider, _) =
+            self.with_session(spec, &[("mix", shape.to_vec())], |loaded| {
+                let tensor =
+                    TensorRef::from_array_view((shape, input.as_slice())).map_err(inference)?;
+                let outputs = loaded
+                    .session
+                    .run(ort::inputs!["mix" => tensor])
+                    .map_err(inference)?;
+                let value = outputs
+                    .get("stems")
+                    .ok_or_else(|| inference("the model has no output stems"))?;
+                let (_, data) = value.try_extract_tensor::<f32>().map_err(inference)?;
+                demucs::vocals_bytes(data, frames).ok_or_else(|| {
+                    inference(format!(
+                        "the stems are {} values, not {}",
+                        data.len(),
+                        demucs::STEMS * 2 * registry::SEPARATION_SEGMENT
+                    ))
+                })
+            })?;
+        Ok((bytes, provider.to_string()))
     }
 
     /// Face mesh landmarks in one frame: on the regions `hints` names, or on
@@ -1464,9 +1472,9 @@ fn benchmark_frame(w: usize, h: usize) -> Vec<u8> {
                     0.0
                 }
             };
-            let r = 0.5 + 0.35 * wave + 0.1 * noise;
-            let g = 0.6 * block + 0.3 * ring + 0.1 * noise;
-            let b = 0.3 + 0.4 * fx * ring + 0.2 * (1.0 - fy) + 0.1 * noise;
+            let r = 0.5 + 0.35 * wave + 0.03 * noise;
+            let g = 0.6 * block + 0.3 * ring + 0.03 * noise;
+            let b = 0.3 + 0.4 * fx * ring + 0.2 * (1.0 - fy) + 0.03 * noise;
             out.extend_from_slice(&[
                 chukcut_ml_worker::pixels::unit_byte(r),
                 chukcut_ml_worker::pixels::unit_byte(g),
@@ -1502,9 +1510,9 @@ fn quality(task: Task, reference: &[u8], output: &[u8]) -> Option<Quality> {
             .fold(0.0f32, f32::max);
         return Some(Quality {
             psnr_db: if mse > 0.0 {
-                10.0 * (1.0 / mse).log10()
+                (10.0 * (1.0 / mse).log10()).min(PSNR_IDENTICAL)
             } else {
-                f32::INFINITY
+                PSNR_IDENTICAL
             },
             max_diff: max * 32768.0,
             iou: None,

@@ -141,9 +141,9 @@ pub fn compare(reference: &[u8], output: &[u8], mask: bool) -> crate::protocol::
     let mse = sum as f64 / n as f64;
     crate::protocol::Quality {
         psnr_db: if mse > 0.0 {
-            (10.0 * (255.0f64 * 255.0 / mse).log10()) as f32
+            ((10.0 * (255.0f64 * 255.0 / mse).log10()) as f32).min(crate::protocol::PSNR_IDENTICAL)
         } else {
-            f32::INFINITY
+            crate::protocol::PSNR_IDENTICAL
         },
         max_diff: f32::from(max),
         iou: mask.then(|| {
@@ -190,7 +190,7 @@ mod tests {
     fn compare_measures_psnr_and_iou() {
         let a = [0u8, 255, 200, 10];
         let same = compare(&a, &a, true);
-        assert!(same.psnr_db.is_infinite());
+        assert_eq!(same.psnr_db, crate::protocol::PSNR_IDENTICAL);
         assert_eq!(same.iou, Some(1.0));
         let b = [0u8, 255, 100, 10];
         let q = compare(&a, &b, true);

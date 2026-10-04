@@ -327,7 +327,20 @@ fn active_sentence(root: &std::path::Path, status: &MlStatus) -> String {
             None => "Nothing yet; ONNX Runtime downloads on first use".into(),
         };
     };
-    let gpu = probe.providers.iter().find(|p| *p != "CPU");
+    // TensorRT is never a model's only provider: it is named after the one
+    // every session has.
+    let gpu = probe
+        .providers
+        .iter()
+        .find(|p| *p != "CPU" && *p != "TensorRT");
+    let tensorrt = if probe.providers.iter().any(|p| p == "TensorRT") {
+        format!(
+            ", and TensorRT {} for the Fast models",
+            registry::TENSORRT_VERSION
+        )
+    } else {
+        String::new()
+    };
     match gpu {
         Some(provider) => {
             let cudart = probe.libraries.iter().find(|l| {
@@ -348,7 +361,7 @@ fn active_sentence(root: &std::path::Path, status: &MlStatus) -> String {
                 "cuda13" => " 13",
                 _ => "",
             };
-            format!("{provider}{version} on the GPU{from}")
+            format!("{provider}{version} on the GPU{from}{tensorrt}")
         }
         None => {
             let why = probe

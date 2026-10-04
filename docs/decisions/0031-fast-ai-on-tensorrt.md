@@ -17,10 +17,10 @@ NVIDIA"):
 
 | Model | Plan | Speed-up | Against fp32 on CUDA |
 |---|---|---|---|
-| RIFE v4 | TensorRT fp32 (TF32) | 1.3–1.9x | 66–81 dB |
-| Real-ESRGAN x4v3 | TensorRT fp16 | 2.3x | 57.7 dB, max 6 |
+| RIFE v4 | TensorRT fp32 (TF32) | 1.5–1.7x | 66–81 dB on footage |
+| Real-ESRGAN x4v3 | TensorRT fp16 | 2.5–2.6x | 57.7–58.9 dB, max 6 |
 | LaMa | TensorRT fp16 | 2.1x | identical outside the hole; 38.6 dB inside it |
-| BiRefNet lite | TensorRT fp32 | 2.65x | IoU 0.9998 |
+| BiRefNet lite | TensorRT fp32 | 2.65x | IoU 0.9998 on footage |
 | RVM, MobileSAM, VitTrack, YuNet, face mesh, HTDemucs | none | — | — |
 
 RIFE is in fp32 on purpose: in fp16 it was 2.5x faster, but its warping
@@ -79,15 +79,23 @@ export computes shapes through ~700 ScatterND/Expand/Range chains on a
 fixed input; ONNX Runtime's constant folding turned them into gigabytes of
 constants while creating the session: the worker peaked at 6.8 GB on CUDA
 and 8.5 GB on the CPU. Without folding: 1.5 GB and 2.5 GB, the same speed
-(270 ms a segment on CUDA), output within 8e-6. Smaller segments were not
+(258 ms a segment on CUDA), output within 8e-6; the worker's peak over a
+whole benchmark is 1.4 GB on CUDA and 2.0 GB on the CPU. Smaller segments were not
 an option: the export's input length is fixed.
 
 **Copies and conversions.** RIFE's two frames are converted to the
 network's input once per request instead of once per phase, and handed to
 ONNX Runtime as a view; RGBA↔planar conversions run on four threads with a
 rounding that needs no libm call (`pixels.rs`), which took RIFE's 1080p
-pre- and post-processing from ~50 to ~25 ms; Real-ESRGAN writes one tile's
-4x picture on a second thread while the network makes the next.
+pre- and post-processing from ~50 to ~25 ms; Real-ESRGAN writes its 4x
+picture straight from ONNX Runtime's output (557 → ~80 ms at 1080p).
+Binding outputs to CUDA pinned memory gained nothing, and batching tiles
+was not tried (each 1080p tile fills the card).
+
+**Room on the card.** In Fast mode a worker holds a CUDA and a TensorRT
+session per model; after every heavy model had run, the 12 GB card was
+full. A failed allocation, and any TensorRT build failure, drops the other
+models' sessions and tries again (`Runtime::evict_others`).
 
 ## Why
 

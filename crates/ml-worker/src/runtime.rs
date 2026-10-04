@@ -388,7 +388,15 @@ impl Runtime {
             let mut last_error = String::new();
             let mut loaded = None;
             for provider in self.order.clone() {
-                match build(provider, &path, accel::tuning(spec.id)) {
+                let mut built = build(provider, &path, accel::tuning(spec.id));
+                // Out of GPU memory: make room before falling to the CPU.
+                if built.as_ref().is_err_and(|e| out_of_memory(e))
+                    && provider != "CPU"
+                    && self.evict_others(spec)
+                {
+                    built = build(provider, &path, accel::tuning(spec.id));
+                }
+                match built {
                     Ok(session) => {
                         loaded = Some(Loaded {
                             session,
@@ -441,6 +449,11 @@ impl Runtime {
             let dir = accel::engine_dir(&self.root, spec.id, spec.version, &target, &shape_key);
             let cached = accel::engine_present(&dir);
             if !cached {
+                // Building takes GPU memory for its tactics (BiRefNet: a few
+                // GB). With the sessions of earlier jobs still on the card,
+                // BiRefNet's build failed and the model stayed on CUDA (a
+                // `ml bench` of every heavy model in one worker).
+                self.evict_others(spec);
                 build_notice(
                     &format!(
                         "Preparing TensorRT for {} at this size (first time only, up to a few minutes)",
@@ -450,7 +463,17 @@ impl Runtime {
                 );
             }
             let started = Instant::now();
-            match build_tensorrt(&path, &dir, plan.precision, shapes, accel::tuning(spec.id)) {
+            let tuning = accel::tuning(spec.id);
+            let mut built = build_tensorrt(&path, &dir, plan.precision, shapes, tuning);
+            // Even a cached engine needs room on the card to load: BiRefNet's
+            // execution context wants 1.9 GB, and after a worker had run four
+            // other models it failed with "could not build execution
+            // context" (TensorRT says "OutOfMemory" only in its log). Any
+            // failure is retried once with the card cleared.
+            if built.is_err() && self.evict_others(spec) {
+                built = build_tensorrt(&path, &dir, plan.precision, shapes, tuning);
+            }
+            match built {
                 Ok(session) => {
                     let millis = started.elapsed().as_secs_f32() * 1000.0;
                     if !cached && accel::engine_present(&dir) {
@@ -509,6 +532,26 @@ impl Runtime {
         self.sessions.retain(|k, _| !k.starts_with(&prefix));
     }
 
+    /// Drop the sessions of every model but `spec` (and its companion),
+    /// freeing their GPU memory. They come back from their files and
+    /// cached engines in a second or two when next used. Answers whether
+    /// anything was dropped.
+    pub fn evict_others(&mut self, spec: &ModelSpec) -> bool {
+        let before = self.sessions.len();
+        let own = format!("{}@", spec.id);
+        let companion = spec.companion.unwrap_or("");
+        self.sessions
+            .retain(|k, _| k.as_str() == spec.id || k.starts_with(&own) || k.as_str() == companion);
+        let dropped = before - self.sessions.len();
+        if dropped > 0 {
+            eprintln!(
+                "chukcut-ml-worker: dropped {dropped} other sessions to make room for {}",
+                spec.id
+            );
+        }
+        dropped > 0
+    }
+
     /// The fast plan `spec` runs by in this worker: `Some` when TensorRT
     /// works here, the model has a plan and TensorRT has not failed on it.
     pub fn fast_plan_for(&self, spec: &ModelSpec) -> Option<accel::FastPlan> {
@@ -537,6 +580,14 @@ impl Runtime {
         list.sort_by(|a, b| (&a.model, &a.shapes).cmp(&(&b.model, &b.shapes)));
         list
     }
+}
+
+/// Whether an ONNX Runtime error says memory ran out (the CUDA arena,
+/// cuDNN or cuBLAS).
+pub fn out_of_memory(message: &str) -> bool {
+    ["allocate", "out of memory", "ALLOC_FAILED", "OUT_OF_MEMORY"]
+        .iter()
+        .any(|m| message.contains(m))
 }
 
 /// A TensorRT session for `model` at exactly `shapes`, its engine cached in

@@ -186,7 +186,8 @@ release worker and CLI, load 8–9 from other agents' builds).
   HTDemucs-ft vocals (MIT, 316 MB) on 7.8 s segments with a quarter
   overlap. 60 s of speech over music: 10.6 s on CUDA (0.23 s per segment),
   35.8 s on the CPU (2.6 s per segment), start-up included; the worker's
-  resident memory peaked at 6.8 GB (CUDA) and 8.0 GB (CPU). On the
+  resident memory peaked at 6.8 GB (CUDA) and 8.0 GB (CPU) (1.5 and 2.5 GB
+  since agent/mlspeed: constant folding off). On the
   synthetic test (flite speech over a chord and a beat) the speech's SDR
   went from 4.3 dB in the mix to 20.7 dB; "keep background" took the music
   from −4.3 to 16.5 dB. The clip plays as it was until the render is
@@ -194,8 +195,8 @@ release worker and CLI, load 8–9 from other agents' builds).
 - **Not done:** body landmarks (RTMPose): the research found the models
   (`docs/research/ml-features.md` §3.13) but a top-down pose model needs a
   person box per frame and the files come zipped, which the downloader does
-  not unpack yet. The worker's memory for HTDemucs is high; ORT's arena
-  settings were not tuned.
+  not unpack yet. The worker's memory for HTDemucs was high (6.8 GB);
+  fixed by agent/mlspeed (1.5 GB, "Faster AI on NVIDIA").
 
 ## QA pass 2 (2026-10-04, agent/qa2)
 
@@ -3894,7 +3895,8 @@ release worker, load 9–11 from other agents' builds).
   checkerboard only on its half and leaves the other within 2 % of its
   variance; no seam darker than 90 at the matte edge.
 - **Rough:** RIFE at 1080p is ~6 fps on a 3060 in fp32 with the CUDA
-  provider (TensorRT or fp16 would be the next step); the in-between frames
+  provider (11 fps with "Fast" on TensorRT since agent/mlspeed, below);
+  the in-between frames
   come from the software decoder's RGB, NVDEC-decoded neighbours may differ
   by a code value; inside compound clips frames are baked on the preview's
   grid only and an outer speed change falls back to the blend; the nested
@@ -3985,12 +3987,97 @@ release worker and release CLI, load 6–7 from other agents' builds).
 - **Rough:** a static mask never sees behind itself, so a logo is always
   LaMa's invention (steady in a still shot, shimmering in a moving one); a
   moving camera gets no memory, plate or smoothing; LaMa runs fp32 on the
-  CUDA provider (TensorRT or fp16 next); a remade clip with optical flow on
+  CUDA provider (TensorRT fp16 with "Fast" since agent/mlspeed, below); a
+  remade clip with optical flow on
   blends instead; the inspector's progress sits below the two sections and
   needs a scroll on a short window; a project opened with its frames
   cleared from the cache bakes them at the first edit or the export, as
   mattes and optical-flow frames do (opening does not queue bakes).
   Settings › AI acceleration shows the remade frames' size with Clear.
+
+### Faster AI on NVIDIA: TensorRT, fp16, memory (2026-10-04, agent/mlspeed)
+
+Decision 0031. RTX 3060, driver 610.57, CUDA 13 bundle, ORT 1.28.3,
+TensorRT 10.16.1.11, release worker and CLI, load 4–9 from other agents.
+
+- **"Fast (fp16/TensorRT)"** (Settings › AI acceleration, on by default;
+  `chukcut-cli ml acceleration fast|standard`; `CHUKCUT_ML_ACCELERATION`)
+  runs four models on TensorRT once the TensorRT add-on is installed
+  (`ml install tensorrt` or Install in the settings: 3.7 GB download for
+  CUDA 13, 4.3 GB for CUDA 12, 2.5 GB on disk, ~10 min here). Without the
+  add-on, or in Standard mode, nothing changes. `ml status` and the settings
+  page show each model's provider, precision and engine build times.
+- **Through the worker** (`chukcut-cli ml bench`, the heavy models at the
+  sizes the features use; "vs fp32" is the Fast output against the CUDA fp32
+  output of the same input):
+
+  | Model | Size | CUDA fp32 | Fast | Speed-up | vs fp32 |
+  |---|---|---|---|---|---|
+  | RIFE | 1280×720 | 63.9 ms | 37.6 ms TensorRT fp32 | 1.70x | 67.8 dB |
+  | RIFE | 1920×1080 | 144.8 ms | 96.3 ms TensorRT fp32 | 1.50x | 45.8 dB* |
+  | Real-ESRGAN | 640×360 | 101.3 ms | 38.7 ms TensorRT fp16 | 2.62x | 58.8 dB, max 3 |
+  | Real-ESRGAN | 1920×1080 | 1050 ms | 424 ms TensorRT fp16 | 2.48x | 58.9 dB, max 4 |
+  | LaMa | 512² | 161.9 ms | 77.4 ms TensorRT fp16 | 2.09x | 52.6 dB, max 11 |
+  | BiRefNet lite | 960×540 | 415.5 ms | 157.2 ms TensorRT fp32 | 2.64x | IoU 0.994* |
+  | RVM | 540×960 | 12.9 ms | (CUDA) | — | TensorRT cannot parse it |
+  | HTDemucs | 7.8 s | 258 ms | (CUDA) | — | |
+
+  \* On the benchmark's synthetic input (`benchmark_frame`: waves, blocks,
+  a ring, noise), where flow and "the object" are ambiguous. On generated
+  footage (a mandelbrot zoom under testsrc2, `_scratch` probe against ORT
+  directly) RIFE's TensorRT fp32 output was 66 dB from fp32 CUDA at 1080p
+  and BiRefNet's IoU 0.9998.
+  Before this work RIFE was 173 ms at 1080p and Real-ESRGAN 121 ms at
+  640×360 and 1.23–1.55 s at 1080p: part of the gain is on the CUDA path
+  too (below).
+- **First use builds an engine** per model and input size: Real-ESRGAN
+  25–60 s, RIFE 1–3 min, LaMa ~2 min, BiRefNet ~5.5 min (5 GB of memory
+  while it builds). It is cached in `~/.cache/chukcut/ml/tensorrt/` by
+  model, GPU, driver, TensorRT version, precision and shape; a cached
+  engine loads in under a second. The slow-motion and Enhance progress
+  lines show "Preparing TensorRT for … (first time only …): m:ss so far"
+  while it builds, and the request's deadline is extended by the worker's
+  `hold_secs` (protocol 7). The ML directory is outside the cache limit.
+- **Rejected, with numbers:** RIFE in fp16 (2.5x, but 35.5 dB: its warp
+  grid does not fit fp16 at 1080p); BiRefNet in fp16 (5.2x, IoU 0.9982,
+  16 min and 6.9 GB to build); RVM on TensorRT (the parser refuses its
+  Resize); the public fp16 files of RVM (slower) and BiRefNet (9 %);
+  converting the others to fp16 (fails on RIFE and LaMa, 18 % on
+  Real-ESRGAN); the CUDA provider's NHWC layout (slower everywhere); IO
+  binding to pinned memory (no gain on Real-ESRGAN's 440 MB of output a
+  frame).
+- **Copies and conversions:** RGBA ↔ planar on four threads with a
+  rounding that needs no libm call (`ml-worker/src/pixels.rs`): RIFE's
+  1080p pre- and post-processing 50 → 25 ms. RIFE converts a pair once per
+  request, not per phase, and hands it to ONNX Runtime as a view.
+  Real-ESRGAN writes each tile's 4x picture straight from ONNX Runtime's
+  output (no copy): its 1080p writing went 557 → ~80 ms. Handing a copy to
+  a second thread to overlap the next tile was slower (643 against 424 ms:
+  copying 74 MB a tile into fresh memory cost more than it hid).
+- **HTDemucs memory: 6.8 → 1.4 GB (CUDA), 8.5 → 2.0 GB (CPU)** (the
+  worker's peak RSS through a whole benchmark), same speed (258 ms a
+  segment on CUDA, 2.6–3.6 s on the CPU), output within 8e-6: ONNX
+  Runtime's constant folding turned the export's shape arithmetic into
+  gigabytes of constants while the session was created. It is off for
+  this model (`accel::tuning`). Arena and memory patterns off as well:
+  1.7 GB on the CPU but 50 % slower, not taken.
+- **GPU memory:** a worker that has run every heavy model in Fast mode
+  holds a CUDA and a TensorRT session of each and filled the 12 GB card:
+  HTDemucs then failed to allocate and BiRefNet's cached engine could not
+  get its 1.9 GB execution context. A failure to get memory (and any
+  TensorRT build failure) now drops the other models' sessions and tries
+  again; they come back in a second when next used.
+- **Traps:** `Probe.psnr_db` was `inf` for identical outputs, which JSON
+  writes as `null`, which the engine could not read: it dropped the
+  worker's stream ("the worker exited"). PSNR is capped at 100 dB now. A
+  TensorRT build with every earlier job's sessions still on the card
+  failed for BiRefNet and left it on CUDA; the worker now drops other
+  models' sessions before it builds. TensorRT's ORT provider must sit next
+  to `libonnxruntime.so` (a symlink), and only TensorRT 10 loads.
+- **Rough:** one engine per input size, so a project with many clip sizes
+  builds many; Fast mode holds a CUDA and a TensorRT session per model (GPU
+  memory); a model whose TensorRT build fails stays on CUDA until the
+  worker restarts; Intel and AMD are unaffected (TensorRT is NVIDIA-only).
 
 ## The research
 

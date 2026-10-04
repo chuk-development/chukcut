@@ -643,6 +643,30 @@ estimate above: TensorRT and fp16 are the open speed-ups. Frames are baked
 per (source frame, phase in 64ths) as JPEG into the cache and drawn in place
 of the plain blend.
 
+**TensorRT and fp16, measured (2026-10-04, agent/mlspeed, decision 0031).**
+Same card, ORT 1.28.3, TensorRT 10.16.1.11, release builds; ms per frame,
+the second figure against the CUDA provider's fp32 output on generated
+footage (a mandelbrot zoom under testsrc2):
+
+| Provider | 640×360 | 1280×720 | 1920×1080 | 1080p vs fp32 |
+|---|---|---|---|---|
+| CUDA fp32 | 19.1 | 76.3 | 178 | — |
+| CUDA, NHWC layout | 23.4 | 87.7 | 205 | 76 dB |
+| TensorRT fp32 (TF32) | 10.0 | 41.7 | 94–136 | 66 dB, max 72 |
+| TensorRT fp16 | 7.0 | 29.3 | 72.6 | **35.5 dB**, 3 % of values off by > 8 |
+
+The fp16 engine is the fastest and was rejected: RIFE warps by a grid
+whose coordinates fp16 cannot hold to a pixel at 1080p (11 bits of
+mantissa over 1920 px), and the in-between frames came out visibly
+different where the flow is ambiguous. "Fast" runs RIFE on TensorRT in
+fp32: through the worker 63.9 → 37.6 ms at 720p (1.70x, 67.8 dB) and
+144.8 → 96.3 ms at 1080p. The ~46 fps fp16 estimate above was right about
+speed and silent about quality. Engine builds: 1–3 min per frame size
+(fp32 59–117 s, fp16 130–190 s). No fp16 RIFE export with a licence was
+found (`yuvraj108c/rife-onnx` states none); converting the fp32 file with
+onnxconverter-common gave a graph ORT refuses (a Cast typed wrong) and, with
+shape ops kept in fp32, did not finish in ten minutes.
+
 ### 3.12 Upscaling and "optimise quality"
 
 **CapCut:** "Qualität optimieren" (Pro, 3 uses per day for free users);
@@ -675,6 +699,31 @@ compact model was the one built: x4plus would be several times slower. The
 `--outscale` does. Frames are baked per source frame (JPEG) and drawn in
 place of the decoded ones, in the preview and the export. fp16 and
 TensorRT are the open speed-ups.
+
+**TensorRT and fp16, measured (2026-10-04, agent/mlspeed, decision 0031).**
+Whole frames through the worker's tiling, ms (the 1080p rows after the
+conversion work below, the others before it):
+
+| Provider | 320×180 | 640×360 | 1280×720 | 1920×1080 | vs fp32 |
+|---|---|---|---|---|---|
+| CUDA fp32 | 31 | 149 | 662 | 1040 | — |
+| CUDA fp32, file converted to fp16 | 25 | 132 | 593 | 1270* | 61 dB |
+| TensorRT fp32 (TF32) | 23 | 113 | 464 | — | 63–95 dB |
+| **TensorRT fp16** | 14 | 68 | 297 | **417** | **57.7 dB, max 6** |
+
+\* with the old, single-threaded output conversion. Through the worker
+(`ml bench`): 640×360 101.3 → 38.7 ms (2.62x, 58.8 dB), 1080p 1050 →
+424 ms (2.48x, 58.9 dB). The network is 34
+convolutions, which is what TensorRT's fp16 kernels are for; "Fast" uses
+fp16. Of a 1080p frame's 417 ms on TensorRT, ~80 ms is writing the 4x
+picture (33 M pixels) on the CPU, straight from ONNX Runtime's output;
+overlapping it with the next tile on a second thread needed a copy of the
+tile and was slower (643 against 424 ms through the worker). Binding the output to
+CUDA pinned memory (IO binding, ORT allocating it) gained nothing (1042 →
+1055 ms, 422 → 420 ms): the copy from the card is not the cost. Binding a
+tensor we allocated in pinned memory fails in ORT 1.28 ("dst_data !=
+src_data": pinned memory now counts as a GPU device). Batching tiles was not
+tried: a 1080p frame is six tiles of 672×572, each of which fills the card.
 
 ### 3.13 Face and body landmarks
 
@@ -784,6 +833,16 @@ block-quantized `DequantizeLinear` nodes are refused by ORT 1.28's CUDA
 provider. Measured on the RTX 3060: 160 ms per crop on CUDA, 1.96 s on four
 CPU threads. The mask is a selected object (MobileSAM + VitTrack, the
 "Select object" machinery), painted strokes and boxes.
+
+**TensorRT and fp16, measured (2026-10-04, agent/mlspeed, decision 0031).**
+Per 512² crop: CUDA fp32 163.5 ms; CUDA with the NHWC layout 357 ms
+(slower); TensorRT fp32 114.3 ms (68.9 dB); **TensorRT fp16 76.8 ms**
+(2.1x). The fp16 output is identical outside the hole (LaMa copies it
+through) and differs inside by 2 code values on average (38.6 dB, at most
+33), an invented fill against an invented fill that side by side looks the
+same; "Fast" uses fp16. Through the worker: 161.9 → 77.4 ms. The fp16
+engine takes ~2 min to build (fp32 ~1 min) and 3.4 GB of memory while it
+does.
 
 ### 3.17 Generative features (note only, out of scope)
 
@@ -926,6 +985,51 @@ needed. The CUDA 13 wheels put every library in `nvidia/cu13/lib/`, the
 CUDA 12 ones in `nvidia/<library>/lib/`. Ubuntu's CUDA 12.0 cudart is too
 old for ORT 1.28 (`cudaLibraryGetKernel` is 12.1+); preloading the wheel's
 cudart by path keeps it out. Driver 580+ runs CUDA 13, 525+ CUDA 12.
+
+**TensorRT, measured (2026-10-04, agent/mlspeed, decision 0031).** The
+TensorRT provider is in Microsoft's GPU archives
+(`libonnxruntime_providers_tensorrt.so`, 0.9 MB) and links
+`libnvinfer.so.10` and `libnvonnxparser.so.10`: TensorRT 10, not 11. NVIDIA
+publishes TensorRT 10.16.1.11 as `tensorrt-cu13-libs` / `tensorrt-cu12-libs`
+wheels on pypi.nvidia.com (PyPI holds only a stub that downloads from
+there): 3.73 GB / 4.30 GB. Of the CUDA 13 wheel the worker needs libnvinfer
+(663 MB), the plugins (45 MB), the ONNX parser (5 MB) and one builder
+resource per GPU architecture (116–454 MB each; the Windows copies are
+skipped): 2.5 GB on disk. libnvinfer finds its builder resource by RPATH
+`$ORIGIN`, so only the three libraries are preloaded. ORT opens a provider
+only from its own directory, so the add-on is symlinked there. Installing
+took ~10 min here (the download). Per model (RTX 3060, ms per frame):
+
+| Model | CUDA fp32 | TensorRT fp32 | TensorRT fp16 | Chosen | Build (chosen) |
+|---|---|---|---|---|---|
+| RIFE, 1080p | 178 | 94–136 (66 dB) | 72.6 (35.5 dB) | fp32 | ~2 min |
+| Real-ESRGAN, 1080p | 1040 | — | 417 (57.7 dB) | fp16 | 25–60 s |
+| LaMa, 512² | 163.5 | 114.3 (68.9 dB) | 76.8 (49.4 dB) | fp16 | ~2 min |
+| BiRefNet lite, 960×540 | 419 | 157.5 (IoU 0.9998) | 80.6 (IoU 0.9982) | fp32 | 5.5 min, 5 GB |
+| RVM, 540×960 | 14.7 | parser fails | — | CUDA | — |
+
+BiRefNet's fp16 engine is 5.2x but took 16 min and 6.9 GB to build and
+moves edges by up to 78 code values; the public `model_fp16.onnx` on CUDA
+was 383 ms (9 %) with the same IoU. RVM's Resize takes its scale from the
+`downsample_ratio` input, which TensorRT's parser refuses ("Assertion
+!isInFlight"); its public fp16 file was slower on CUDA (16.6 ms) and less
+exact (IoU 0.97). The CUDA provider's NHWC layout (`prefer_nhwc`) was
+slower on every model (RIFE +15 %, LaMa +118 %). Engines are cached per
+model, GPU, driver, TensorRT version, precision and input shape; each
+session is built for exactly one shape, because a dynamic profile rebuilt
+the engine whenever the size changed.
+
+**HTDemucs memory.** The worker peaked at 6.8 GB (CUDA) and 8.5 GB (CPU)
+while it *created* the session: the export computes shapes through ~700
+ScatterND/Expand/Range chains, which constant folding turned into
+gigabytes of constants. Disabling only `ConstantFolding` (the session
+option `optimization.disable_specified_optimizers`): 1.5 GB on CUDA,
+2.5 GB on the CPU in a bare session (the worker's peak RSS over a whole
+benchmark: 1.4 GB and 2.0 GB), the same speed (~258 ms per 7.8 s segment
+on CUDA, 2.6–3.6 s on the CPU), output within 8e-6. Turning off the CPU arena and memory
+patterns as well brought the CPU to 1.7 GB but cost 50 % speed, so they
+stay on. Smaller segments are not possible with this export (its input is
+fixed at 343 980 samples).
 
 ### 5.4 Model registry and downloader
 

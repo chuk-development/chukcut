@@ -376,12 +376,17 @@ pub struct FaceMesh {
     pub points: Vec<[f32; 3]>,
 }
 
+/// The PSNR reported for identical outputs, and the most ever reported.
+pub const PSNR_IDENTICAL: f32 = 100.0;
+
 /// How far one output is from a reference output of the same model and
 /// input: pictures by PSNR, mattes and masks also by IoU at half
 /// opacity.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Quality {
-    /// Peak signal-to-noise ratio over all bytes, in dB; `inf` when equal.
+    /// Peak signal-to-noise ratio over all bytes, in dB, at most
+    /// [`PSNR_IDENTICAL`] (which also means "equal": JSON has no infinity,
+    /// and a `null` here once made the engine drop the worker's stream).
     pub psnr_db: f32,
     /// The largest difference of one byte (or, for sound, of one sample in
     /// 1/32768ths).
