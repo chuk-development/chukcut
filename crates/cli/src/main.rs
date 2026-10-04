@@ -505,14 +505,23 @@ fn main() -> ExitCode {
         Err(error) => return usage_error(error),
     };
     init_engine(cli.verbose);
+    // From here on the engine may have threads in the GPU driver, so the
+    // process leaves through `lifecycle::exit` rather than a return from
+    // `main`: it waits for the exports and the ML worker, then ends without
+    // running the driver's library destructors under those threads.
+    chukcut_engine::lifecycle::exit(run(cli))
+}
+
+/// The command, after the engine is up; returns the exit code.
+fn run(cli: Cli) -> u8 {
     let printer = output::Printer::new(cli.json);
 
     if let Command::Mcp = cli.command {
         return match mcp::serve() {
-            Ok(()) => ExitCode::SUCCESS,
+            Ok(()) => 0,
             Err(error) => {
                 eprintln!("chukcut-cli mcp: {error}");
-                ExitCode::from(1)
+                1
             }
         };
     }
@@ -521,11 +530,11 @@ fn main() -> ExitCode {
     match dispatch(cli.command, cli.dry_run, &ctx) {
         Ok((name, outcome, saved)) => {
             printer.success(name, &outcome, saved);
-            ExitCode::SUCCESS
+            0
         }
         Err(error) => {
             printer.failure(&error);
-            ExitCode::from(error.kind.exit_code())
+            error.kind.exit_code()
         }
     }
 }

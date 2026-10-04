@@ -64,4 +64,8 @@ fn main() {
             .expect("open the editor window");
             cx.activate(true);
         });
+    // The window is gone. Leave without running the GPU driver's library
+    // destructors under the threads that may still be in it (the player, a
+    // bake, the decoders); see `chukcut_engine::lifecycle`.
+    chukcut_engine::lifecycle::exit(0)
 }

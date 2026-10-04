@@ -5,6 +5,7 @@
 //! `modules/*/commands.rs` is the shell-facing API; [`shell`] supplies the two
 //! primitives it needs (a blocking-task spawner and an event channel).
 
+pub mod lifecycle;
 pub mod modules;
 pub mod shell;
 pub mod state;
