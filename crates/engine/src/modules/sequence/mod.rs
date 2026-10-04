@@ -31,6 +31,7 @@ pub mod build;
 pub mod commands;
 pub mod digest;
 pub mod edit;
+pub mod retime;
 #[cfg(test)]
 mod tests;
 
