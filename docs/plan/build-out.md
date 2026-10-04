@@ -70,7 +70,7 @@ column current.
 | 7 | demo | release build, showcase project via CLI (`scripts/demo.sh`), `docs/demo.md` feature tour | merged — showcase in `_scratch/demo` of the demo worktree; CLI gaps in docs/QA.md "Showcase pass" |
 | 7 | compound | compound clips, nested sequences, several timelines per project (backlog 5) | merged — no nested-render cache, prefetch ignores compound clips, compound volume/speed keys not in audio, analysis/captions only see the open sequence |
 | 7 | templates | project templates + shortcut editor (backlog 9, 10) | running (agent/templates) |
-| 7 | upkeep | full CLI/MCP coverage, Dependabot bumps, `effects/graph.rs:735` alpha check, GPU tests on both adapters (backlog 13) | running (agent/upkeep) |
+| 7 | upkeep | full CLI/MCP coverage, Dependabot bumps, `effects/graph.rs:735` alpha check, GPU tests on both adapters (backlog 13) | merged — reachability test with allowlist; ffmpeg-next 9 + rust-minor bumps; graph.rs alpha fixed; `scripts/gpu-tests.sh`; open: play/pause tooltip, off-grid snapping low |
 | 8 | motion2 | frame blending + motion blur, animated stickers (Lottie, animated emoji, GIF/WebP) (backlog 6, 8) | running (agent/motion2) |
 | 8 | compound2 | compound clip gaps: nested-render cache, prefetch, audio of compound volume/speed, flatten at speed, timeline prune, real filmstrips | running (agent/compound2) |
 
