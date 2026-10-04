@@ -5,6 +5,7 @@ use std::collections::HashSet;
 
 use chukcut_engine::modules::media::thumbnail_strip;
 use chukcut_engine::modules::project::{new_id, Segment, TimeRange, Transform};
+use chukcut_engine::modules::template::assets as template_assets;
 use gpui::{img, ObjectFit};
 
 use super::*;
@@ -49,8 +50,16 @@ struct Item {
 }
 
 impl Editor {
-    /// Every material in the pool of the given kinds, in import order.
+    /// Every material in the pool of the given kinds, in import order —
+    /// leaving out a template's drawn slot placeholders and synthesised
+    /// music beds, which are not media the user chose (decision 0022).
     fn library(&self, kinds: &[Kind]) -> Vec<Item> {
+        let mut items = self.pool_items(kinds);
+        items.retain(|item| !template_assets::is_template_asset(&item.path));
+        items
+    }
+
+    fn pool_items(&self, kinds: &[Kind]) -> Vec<Item> {
         let pool = &self.project.materials;
         let mut items = Vec::new();
         if kinds.contains(&Kind::Video) {
