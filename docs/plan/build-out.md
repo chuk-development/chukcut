@@ -92,10 +92,11 @@ column current.
 | 11 | qa3 | end-to-end QA of waves 10–11, installed layout, showcase extension | merged — all wave 10–11 features pass render/undo/reopen/export checks, installed layout finds the worker, 6 bugs fixed (MCP/batch argument check, landmark frame count), showcase 27.7 s |
 | 11 | release | manual-only `release.yml`: .deb, AppImage x86_64 + aarch64, macOS universal .dmg, Windows .exe zip + installer; Linux jobs must work, macOS/Windows best effort (`continue-on-error`) | merged — `release.yml` (workflow_dispatch only, per-target checkboxes, optional draft release), .deb tested in ubuntu:24.04, x86_64 AppImage tested in Debian/Fedora without FFmpeg, aarch64 type-checked only; macOS/Windows jobs experimental (blocked by ~20 Linux-only engine files, decision 0033) |
 | 11 | shutdown | rare segfault at CLI exit after export, unreadable project path message, global slot numbers, short clip ids, D-Bus helper cleanup | merged — export thread drops its job before `Done`; `lifecycle::exit` (export shutdown, worker shutdown, flush, `_exit`) in CLI and app; 0 failures in 180 loaded runs (was 5 segfaults + 1 hang in 90); five QA lows fixed |
-| 12 | research-gaps | gap analysis against CapCut, Resolve, Premiere, Kdenlive, Shotcut → `docs/research/gap-analysis-2026-10.md` with proposed waves | running (agent/research-gaps) |
+| 12 | research-gaps | gap analysis against CapCut, Resolve, Premiere, Kdenlive, Shotcut → `docs/research/gap-analysis-2026-10.md` with proposed waves | merged — top gaps: HDR input, BT.601 export without colour tags, no on-player transform handles, animated/rich captions, text-based editing, reverse, long-to-shorts, local TTS/translation, multicam; waves 12–14 proposed in the report |
 | 12 | research-audit | code health, robustness, UX and performance audit → `docs/research/quality-audit-2026-10.md` with work packages | running (agent/research-audit) |
 | 12 | crop2 | crop keyframes, temporal denoise | running (agent/crop2) |
 | 12 | gaps2 | matte masks inside transitions and accumulation, flow under remove object/enhance, TensorRT dynamic shapes, temporal consistency for remove object on a moving camera | running (agent/gaps2) |
+| 12 | colourio | export matrix + colour tags (correctness), HLG/PQ tone mapping to BT.709, 10-bit decode and HEVC main10 export | running (agent/colourio) |
 
 ## Backlog for the next waves (lead picks from the top)
 
