@@ -92,6 +92,10 @@ column current.
 | 11 | qa3 | end-to-end QA of waves 10–11, installed layout, showcase extension | merged — all wave 10–11 features pass render/undo/reopen/export checks, installed layout finds the worker, 6 bugs fixed (MCP/batch argument check, landmark frame count), showcase 27.7 s |
 | 11 | release | manual-only `release.yml`: .deb, AppImage x86_64 + aarch64, macOS universal .dmg, Windows .exe zip + installer; Linux jobs must work, macOS/Windows best effort (`continue-on-error`) | merged — `release.yml` (workflow_dispatch only, per-target checkboxes, optional draft release), .deb tested in ubuntu:24.04, x86_64 AppImage tested in Debian/Fedora without FFmpeg, aarch64 type-checked only; macOS/Windows jobs experimental (blocked by ~20 Linux-only engine files, decision 0033) |
 | 11 | shutdown | rare segfault at CLI exit after export, unreadable project path message, global slot numbers, short clip ids, D-Bus helper cleanup | merged — export thread drops its job before `Done`; `lifecycle::exit` (export shutdown, worker shutdown, flush, `_exit`) in CLI and app; 0 failures in 180 loaded runs (was 5 segfaults + 1 hang in 90); five QA lows fixed |
+| 12 | research-gaps | gap analysis against CapCut, Resolve, Premiere, Kdenlive, Shotcut → `docs/research/gap-analysis-2026-10.md` with proposed waves | running (agent/research-gaps) |
+| 12 | research-audit | code health, robustness, UX and performance audit → `docs/research/quality-audit-2026-10.md` with work packages | running (agent/research-audit) |
+| 12 | crop2 | crop keyframes, temporal denoise | running (agent/crop2) |
+| 12 | gaps2 | matte masks inside transitions and accumulation, flow under remove object/enhance, TensorRT dynamic shapes, temporal consistency for remove object on a moving camera | running (agent/gaps2) |
 
 ## Backlog for the next waves (lead picks from the top)
 
@@ -116,7 +120,7 @@ column current.
 - **Machine:** the repository, its worktrees, `~/.cargo` and `~/.rustup` live on `/mnt/data` (1.8 TB); the old paths are symlinks. Worktrees go to `/mnt/data/git/chukcut-<name>`; the lead removes each after its merge. Check `df -h /mnt/data` before launching.
 - **Resource budget:** every Claude process runs in `claude.slice` (`~/.config/systemd/user/claude.slice`: 70% CPU, RAM throttled above 70%, hard cap 80%, swap 4 GB). Builds at `-j 3`, at most 4 agents at once. Before this, parallel builds pushed the user session into memory pressure and systemd-oomd killed terminals with the session in them.
 - **Merge routine:** merge one branch at a time, then `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -j 3 -- -D warnings`, rebuild `chukcut-ml-worker`, `cargo test --workspace -j 3 --no-fail-fast`; push only when all pass. Conflicts so far were in shared tables (Cargo.toml patch table, worker protocol version, settings fields, decision numbers) — keep both sides.
-- **Waves 7–11 are merged** (incl. qa3, shutdown, release). No agent runs. CI on master is green again since 55fa145.
+- **Waves 7–11 are merged** (incl. qa3, shutdown, release). CI on master is green again since 55fa145. Wave 12 running (two research agents, two gap agents).
 - **Showcase:** `/mnt/data/git/chukcut-qa3/_scratch/demo/showcase.chukcut` (built by `scripts/demo.sh`; the qa3 worktree is kept for it). The owner's display shows it in the release build.
 - **CI:** clippy is fatal; CLI, ML worker and engine GPU tests (lavapipe) run in CI. Check `gh run list` after each push.
 - **Dependabot PRs:** #26 (rust-minor) and #27 (ffmpeg-next 9) are applied on master (7823f49, f283efe) and can be closed; #5, #7, #8, #9, #16, #24, #25 target the removed web/Tauri code and can be closed; #28 (skrifa 0.47) is unreviewed. Closing PRs needs the owner (the session may not write to GitHub).
