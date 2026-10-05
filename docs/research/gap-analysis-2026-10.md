@@ -191,10 +191,10 @@ Each was checked in the code.
 
 | Area | Gap | Evidence | Effort |
 |---|---|---|---|
-| Export colour | BT.601 matrix, no colour tags. Players assume BT.709 for HD and shift the hues. | `export/encoder.rs` module doc "## Colour"; `yuv.wgsl` is BT.601 limited | S |
-| HDR input | No HLG/PQ transfer, no BT.2020 to BT.709 gamut map. Phone HDR looks grey. | no transfer handling in `media/` or `render/` | M |
-| 10-bit decode | VAAPI P010 surfaces are not in the import format table; NVDEC P010 falls back to the software path. | `hardware-decode.md` "10-bit and HDR"; `decoder.rs` `seek_and_download_nv12` doc | M |
-| 10-bit / HDR export | Only ProRes is 10-bit. No HEVC Main10, no AV1 10-bit, no HLG/PQ output. Kdenlive 25.08 and Shotcut 26.4/26.6 have these. | `VideoCodec`, `encoder.rs` `upload_format` | M (after HDR input) |
+| Export colour | **Done 2026-10-05** (decision 0034): BT.709/BT.601 by size, converted and tagged on every encoder. Was: BT.601 matrix, no colour tags. | `export/colour.rs` | S |
+| HDR input | **Done 2026-10-05** (decision 0034): PQ/HLG and BT.2020 tone-mapped to SDR in the source shader on every decode path. Was: phone HDR looked grey. | `yuv.wgsl` `yuv_to_linear`, `media/hdr.rs` | M |
+| 10-bit decode | **Done 2026-10-05** except a VAAPI test: P010 as 16-bit planes from software, NVDEC and (untested) VAAPI. | `hardware-decode.md` "10-bit and HDR" | M |
+| 10-bit / HDR export | HEVC Main 10 and 10-bit AV1 **done 2026-10-05**. No HLG/PQ output: the compositor target is 8-bit SDR (decision 0034). Kdenlive 25.08 and Shotcut 26.4/26.6 have HDR output. | `export/colour.rs`, `encoder.rs` `upload_format` | M (needs a float compositor target) |
 | Alpha export | No ProRes 4444, no VP9 alpha, no PNG sequence. CapCut offers "RLE (alpha)". Needed for overlays and lower thirds made in chukcut. | no `yuva`, `qtrle`, `4444` in `crates/` | S–M |
 | DNxHR export | Not offered. Resolve users on Linux transcode to DNxHR; a DNxHR master is the cleanest hand-over. | `dnxhd` appears only in `proxy/decision.rs` and `proxy/generate.rs` notes | S |
 | VP9 / WebM, Opus, MKV | In the engine and CLI, not in the dialog. | `export/settings.rs`: "VP9 is not offered in the dialog" | S |

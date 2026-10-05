@@ -90,7 +90,7 @@ pub use readback::{BgraFrame, BgraReadback, ReadbackStats};
 pub use shared_frame::{SharedBuffer, SharedFrame, SharedFrames};
 pub use source::{
     EmptySourceProvider, FrameGuard, SolidColorProvider, SolidSource, SourceFrame, SourceProvider,
-    SourceRequest, YuvMatrix, YuvRange,
+    SourceRequest, YuvEncoding, YuvMatrix, YuvPrimaries, YuvRange, YuvTransfer,
 };
 pub use texture_pool::{PoolStats, PooledTexture, TextureKey, TexturePool};
 

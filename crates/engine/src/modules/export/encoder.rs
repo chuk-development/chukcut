@@ -30,13 +30,14 @@
 //!
 //! ## Colour
 //!
-//! The compositor hands over sRGB-encoded RGBA and swscale converts it with its
-//! default BT.601 coefficients. For an HD output tagged as unspecified, most
-//! players assume BT.709 and the result is a small hue shift in saturated
-//! colours. Fixing it properly means driving `sws_setColorspaceDetails` and
-//! tagging the stream, neither of which `ffmpeg-next` 6.1 wraps. The range *is*
-//! tagged, because that one is wrapped and getting it wrong is visible as
-//! crushed blacks rather than a subtle shift.
+//! The compositor hands over sRGB-encoded RGBA, and what it becomes is decided
+//! by [`super::colour::OutputColour`]: BT.709 for HD, BT.601 for SD, limited
+//! range, unless the user said otherwise. Both conversions honour it — swscale
+//! through `sws_setColorspaceDetails` (without which it is BT.601 whatever the
+//! context is for; the same trap `media::decoder` documents from the decode
+//! side) and the GPU's NV12 pass through `YuvEncoding` — and the stream is
+//! tagged with primaries, transfer, matrix and range before the encoder opens,
+//! so the bitstream's VUI and the container both say what the samples are.
 //!
 //! ## The hardware path
 //!
@@ -68,6 +69,7 @@ use ffmpeg::util::frame;
 use ffmpeg::{codec, format, ChannelLayout, Dictionary, Packet, Rational};
 use ffmpeg_next as ffmpeg;
 
+use super::colour::OutputColour;
 use super::hwaccel::{self, HwAccel, RateControl};
 use super::hwframes::{self, HwDeviceContext, HwFramesContext};
 use super::presets::{Fps, Quality};
@@ -100,6 +102,9 @@ pub struct VideoStreamSpec {
     /// Extra private options, applied last so a caller can override anything
     /// this file decides.
     pub options: Vec<(String, String)>,
+    /// The matrix, range and bit depth the frames are converted into, and
+    /// what the stream is tagged as.
+    pub colour: OutputColour,
 }
 
 impl VideoStreamSpec {
@@ -129,8 +134,23 @@ impl VideoStreamSpec {
         }
         // Every consumer decoder wants 4:2:0 8-bit; x265 in particular will
         // happily default to a 10-bit profile that half the world cannot play.
+        // Main 10 only when the user asked for 10-bit, and then for every HEVC
+        // encoder: NVENC and QSV otherwise open Main and refuse P010.
         if self.encoder_name == "libx265" {
-            options.push(("profile".into(), "main".into()));
+            let profile = if self.colour.ten_bit {
+                "main10"
+            } else {
+                "main"
+            };
+            options.push(("profile".into(), profile.into()));
+        }
+        if self.colour.ten_bit
+            && matches!(
+                self.encoder_name.as_str(),
+                "hevc_nvenc" | "hevc_qsv" | "hevc_vaapi"
+            )
+        {
+            options.push(("profile".into(), "main10".into()));
         }
         // ProRes 422 HQ: what "a ProRes master" means to every application
         // that will open the file. Profile 3 in prores_ks's numbering.
@@ -163,8 +183,21 @@ impl VideoStreamSpec {
             // prores_ks takes 10-bit 4:2:2 and nothing 8-bit.
             "prores_ks" => format::Pixel::YUV422P10LE,
             "gif" => format::Pixel::PAL8,
-            _ => self.accel.upload_format(),
+            _ => match (self.accel.upload_format(), self.colour.ten_bit) {
+                (format, false) => format,
+                // The 10-bit twin of each 8-bit layout: P010 is NV12 with
+                // sixteen bits a sample, the top ten used, and it is what
+                // NVENC, VAAPI and QSV take for Main 10.
+                (format::Pixel::NV12, true) => format::Pixel::P010LE,
+                (_, true) => format::Pixel::YUV420P10LE,
+            },
         }
+    }
+
+    /// Whether the stream gets colour tags. A GIF is RGB with a palette and
+    /// has nowhere to put them.
+    fn is_tagged(&self) -> bool {
+        self.encoder_name != "gif"
     }
 
     /// Intra-only codecs without a quality knob: no CRF, no bitrate, no
@@ -770,9 +803,19 @@ fn open_video_encoder(
         // clamps this to zero inside `avcodec_open2` and logs it, rather than
         // failing, so it is safe to ask for on both paths.
         encoder.set_max_b_frames(if spec.has_no_rate_control() { 0 } else { 2 });
-        // swscale writes limited-range YUV by default; tagging it full range
-        // would make every player stretch the levels and crush the blacks.
-        encoder.set_color_range(ffmpeg::color::Range::MPEG);
+        // What the samples are. Set before the open, because that is when
+        // libx264, libx265, NVENC, VAAPI and QSV copy them into the
+        // bitstream's VUI; `set_parameters` later copies them onto the stream
+        // for the muxer's `colr` atom. A stream with no tags is read as BT.709
+        // by every player for HD and as BT.601 for SD — which is the rule
+        // `OutputColour` follows — but a tag is an answer and a convention is
+        // a guess.
+        if spec.is_tagged() {
+            encoder.set_colorspace(spec.colour.space());
+            encoder.set_color_primaries(spec.colour.primaries());
+            encoder.set_color_transfer_characteristic(spec.colour.transfer());
+            encoder.set_color_range(spec.colour.range());
+        }
 
         if rate_control.bit_rate > 0 {
             encoder.set_bit_rate(rate_control.bit_rate as usize);
@@ -906,7 +949,11 @@ fn add_video(
                 // BILINEAR is simply the cheapest thing to ask for.
                 scaling::Flags::BILINEAR,
             )
-            .map_err(ExportError::ffmpeg("preparing the colour converter"))?,
+            .map_err(ExportError::ffmpeg("preparing the colour converter"))
+            .and_then(|mut scaler| {
+                set_output_colour(&mut scaler, &spec.colour)?;
+                Ok(scaler)
+            })?,
         )
     };
 
@@ -922,6 +969,44 @@ fn add_video(
         height: spec.height,
         frames: 0,
     })
+}
+
+/// Tell swscale which matrix and range to write.
+///
+/// **`sws_getContext` ignores what the codec context says** and initialises
+/// with BT.601 into limited range, whatever the stream will be tagged as. This
+/// is the call that makes the samples agree with the tags. The source side of
+/// it is RGBA, full range by definition, and its table is ignored for an RGB
+/// input; the destination table and range are what matter.
+fn set_output_colour(scaler: &mut scaling::Context, colour: &OutputColour) -> Result<()> {
+    let destination_full =
+        i32::from(colour.encoding.range == crate::modules::render::YuvRange::Full);
+    // SAFETY: `scaler` is a live `SwsContext` this call only reconfigures;
+    // `sws_getCoefficients` returns a pointer into libswscale's static table,
+    // valid for the process, and the call copies from it. The last three are
+    // libswscale's spelling of "no brightness, contrast or saturation change".
+    let code = unsafe {
+        let table = ffmpeg::ffi::sws_getCoefficients(colour.sws_coefficients());
+        ffmpeg::ffi::sws_setColorspaceDetails(
+            scaler.as_mut_ptr(),
+            table,
+            1,
+            table,
+            destination_full,
+            0,
+            1 << 16,
+            1 << 16,
+        )
+    };
+    if code < 0 {
+        // Refusing is right: the stream is about to be tagged with a matrix
+        // the samples would not be in, which is the bug this replaced.
+        return Err(ExportError::Settings(format!(
+            "the colour converter would not take {}",
+            colour.label()
+        )));
+    }
+    Ok(())
 }
 
 /// Open `encoder_name`, encode one frame with it, and flush.
@@ -946,6 +1031,7 @@ pub fn trial_encode(encoder_name: &str, accel: HwAccel) -> Result<()> {
         accel,
         quality: Quality::Crf(28),
         options: Vec::new(),
+        colour: OutputColour::default(),
     };
     let codec = ffmpeg::encoder::find_by_name(encoder_name)
         .ok_or_else(|| ExportError::NoEncoder(encoder_name.to_string()))?;
@@ -1430,6 +1516,7 @@ mod tests {
             accel: HwAccel::Software,
             quality: Quality::Crf(20),
             options: Vec::new(),
+            colour: crate::modules::export::OutputColour::default(),
         };
         let options = spec.dictionary();
         assert!(options.contains(&("preset".into(), "medium".into())));
@@ -1448,6 +1535,7 @@ mod tests {
             accel: HwAccel::Software,
             quality: Quality::Crf(23),
             options: vec![("preset".into(), "veryfast".into())],
+            colour: crate::modules::export::OutputColour::default(),
         };
         let options = spec.dictionary();
         let last_preset = options
@@ -1469,6 +1557,7 @@ mod tests {
             accel: HwAccel::Software,
             quality: Quality::Bitrate(12_000_000),
             options: Vec::new(),
+            colour: crate::modules::export::OutputColour::default(),
         };
         assert!(!spec.dictionary().iter().any(|(k, _)| k == "crf"));
     }
@@ -1482,6 +1571,7 @@ mod tests {
             accel,
             quality,
             options: Vec::new(),
+            colour: crate::modules::export::OutputColour::default(),
         }
     }
 
@@ -1544,6 +1634,51 @@ mod tests {
         assert_eq!(ladder.len(), 1);
         assert_eq!(ladder[0].bit_rate, 12_000_000);
         assert!(spec.dictionary_for(&ladder[0]).is_empty());
+    }
+
+    /// 10-bit is P010 for every hardware encoder (VAAPI and QSV surfaces,
+    /// NVENC's system-memory input) and yuv420p10le for the software ones,
+    /// with Main 10 asked of every HEVC encoder. VAAPI is checked here rather
+    /// than end to end because the machine this was written on has none.
+    #[test]
+    fn ten_bit_uploads_p010_on_hardware_and_asks_for_main10() {
+        for (accel, name, upload) in [
+            (HwAccel::Vaapi, "hevc_vaapi", format::Pixel::P010LE),
+            (HwAccel::Qsv, "hevc_qsv", format::Pixel::P010LE),
+            (HwAccel::Nvenc, "hevc_nvenc", format::Pixel::P010LE),
+            (HwAccel::Software, "libx265", format::Pixel::YUV420P10LE),
+            (HwAccel::Software, "libsvtav1", format::Pixel::YUV420P10LE),
+        ] {
+            let mut ten = spec(accel, name, Quality::Crf(22));
+            ten.colour = OutputColour::resolve(
+                super::super::colour::ColorMatrix::Auto,
+                super::super::colour::ColorRange::Limited,
+                true,
+                (1920, 1080),
+            );
+            assert_eq!(ten.upload_format(), upload, "{name}");
+            if name.starts_with("hevc") || name == "libx265" {
+                assert!(
+                    ten.dictionary()
+                        .contains(&("profile".into(), "main10".into())),
+                    "{name}: {:?}",
+                    ten.dictionary()
+                );
+            }
+            // And 8-bit stays what it was.
+            let eight = spec(accel, name, Quality::Crf(22));
+            assert_ne!(eight.upload_format(), upload, "{name}");
+            assert!(!eight
+                .dictionary()
+                .contains(&("profile".into(), "main10".into())));
+        }
+    }
+
+    #[test]
+    fn every_stream_but_a_gif_is_tagged() {
+        assert!(spec(HwAccel::Vaapi, "h264_vaapi", Quality::Crf(22)).is_tagged());
+        assert!(spec(HwAccel::Software, "prores_ks", Quality::Crf(22)).is_tagged());
+        assert!(!spec(HwAccel::Software, "gif", Quality::Crf(22)).is_tagged());
     }
 
     #[test]

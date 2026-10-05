@@ -34,6 +34,10 @@ works on the code.
 - **Hardware:** VAAPI decode zero-copy, NVDEC via NV12 textures, NVENC /
   VAAPI / QSV export (trial-encoded first); preview frames shared with GPUI
   as GPU memory (decision 0027), readback as fallback.
+- **Colour:** exports are converted and tagged BT.709 (BT.601 for SD), 8- or
+  10-bit; HDR (PQ, HLG) and 10-bit sources are tone-mapped to SDR in the
+  source shader, the same on every decode path (decision 0034). No HDR
+  export.
 - **CLI and MCP:** every command-layer function is reachable
   (`crates/cli/tests/reachability.rs`).
 
@@ -51,13 +55,13 @@ denoiser.
 **Before you change code:** read "Traps that have already cost time" and
 the CLAUDE.md non-negotiables. Judge performance from a release build only.
 
-**Newest sections first:** Crop keyframes and temporal denoise, Release builds, The crash after the export, QA pass 3, UX gaps, Body landmarks, Polish pass 3, CI, Colour AI, QA pass 2, Flaky
+**Newest sections first:** Colour in and out, Crop keyframes and temporal denoise, Release builds, The crash after the export, QA pass 3, UX gaps, Body landmarks, Polish pass 3, CI, Colour AI, QA pass 2, Flaky
 tests, Frame blending, Timelines and compound clips. The ML sections are at
 the end of the file ("The ML worker" and its sub-sections).
 
 ## Update history
 
-Last updated: 2026-10-05 (crop keyframes and a temporal mode for Reduce noise — see "Crop keyframes and temporal denoise" below). Previously 2026-10-04 (release builds: a manual Release workflow with a .deb, AppImages that bundle FFmpeg, and experimental macOS and Windows jobs — see "Release builds" below). Previously 2026-10-04 (the CLI's crash after an export found and fixed, and the shells leave through `lifecycle::exit` — see "The crash after the export" below). Previously 2026-10-04 (QA pass 3 over waves 10–11: five fixes, the showcase extended — see "QA pass 3" below). Previously 2026-10-04 (crop, speed effects, denoise, Performance settings, a persisted export queue with a quit guard, and the ML worker and CLI in the tarball — see "UX gaps" below). Previously 2026-10-04 (body landmarks, follow a body part, reframe on a body, zipped models, faces and voices in the preparation — see "Body landmarks" below). Previously 2026-10-04 (the "At a glance" block above, after polish pass 3). Previously 2026-10-04 (QA pass 2 over the wave 7–9 features and a showcase that shows them — see "QA pass 2" below). Previously 2026-10-04 (CI: clippy is fatal, the engine tests run on lavapipe with ffmpeg, the CLI and ML worker tests run too — see "CI" below). Previously 2026-10-04 (preview frames no longer leave the GPU: shared with GPUI through a patched GPUI, readback as the fallback — see "Preview frames shared with GPUI" under Perf). Previously 2026-10-04 (ML worker: VitTrack re-finding, Remove background, CUDA — see "The ML worker" below). Previously 2026-10-02 (**the UI is native now** — decision 0011. The Tauri
+Last updated: 2026-10-05 (colour in and out: exports converted and tagged as BT.709 or BT.601, 10-bit HEVC/AV1 export, HDR and 10-bit sources tone-mapped to SDR on every decode path — see "Colour in and out" below). Previously 2026-10-05 (crop keyframes and a temporal mode for Reduce noise — see "Crop keyframes and temporal denoise" below). Previously 2026-10-04 (release builds: a manual Release workflow with a .deb, AppImages that bundle FFmpeg, and experimental macOS and Windows jobs — see "Release builds" below). Previously 2026-10-04 (the CLI's crash after an export found and fixed, and the shells leave through `lifecycle::exit` — see "The crash after the export" below). Previously 2026-10-04 (QA pass 3 over waves 10–11: five fixes, the showcase extended — see "QA pass 3" below). Previously 2026-10-04 (crop, speed effects, denoise, Performance settings, a persisted export queue with a quit guard, and the ML worker and CLI in the tarball — see "UX gaps" below). Previously 2026-10-04 (body landmarks, follow a body part, reframe on a body, zipped models, faces and voices in the preparation — see "Body landmarks" below). Previously 2026-10-04 (the "At a glance" block above, after polish pass 3). Previously 2026-10-04 (QA pass 2 over the wave 7–9 features and a showcase that shows them — see "QA pass 2" below). Previously 2026-10-04 (CI: clippy is fatal, the engine tests run on lavapipe with ffmpeg, the CLI and ML worker tests run too — see "CI" below). Previously 2026-10-04 (preview frames no longer leave the GPU: shared with GPUI through a patched GPUI, readback as the fallback — see "Preview frames shared with GPUI" under Perf). Previously 2026-10-04 (ML worker: VitTrack re-finding, Remove background, CUDA — see "The ML worker" below). Previously 2026-10-02 (**the UI is native now** — decision 0011. The Tauri
 shell and the React frontend are gone; the engine is `crates/engine`
 (`chukcut-engine`, no UI dependency) and the app is a GPUI window in
 `crates/app`. What the native app does today: import (dialog or command line),
@@ -156,6 +160,94 @@ so old effect stacks read unchanged). Decision 0026's amendment and
   is an Enhance-sized bake, not a cheap add (`docs/research/video-denoise.md`).
 - **Unchecked:** VAAPI. A temporal clip holds two neighbour surfaces plus
   the cached pair during a render, inside `EXTRA_HW_FRAMES` (6) on paper.
+
+## Colour in and out (2026-10-05, `agent/colourio`)
+
+Gap-analysis items 1 and 2 (`docs/research/gap-analysis-2026-10.md`), and the
+10-bit part of the format gaps. Decision 0034 has the reasons.
+
+**Export colour.** `export::colour::OutputColour` picks the matrix (BT.709
+above SD — long side over 1024 or short side over 576 — BT.601 at or below;
+`--color-matrix` overrides) and range (limited; `--color-range full`). Both
+conversion tiers use it: `encoder.rs::set_output_colour` on swscale, a
+`YuvEncoding` uniform in `nv12.wgsl` for the GPU NV12 and zero-copy tiers
+(`Compositor::render_nv12_encoded`, `render_nv12_into_encoded`; the old
+`render_nv12`/`render_nv12_into` stay BT.601 limited because the tests' CPU
+references are written in it). Every stream but a GIF is tagged on the codec
+context before it opens (matrix, range, primaries BT.709, transfer BT.709),
+which x264, x265, NVENC, VAAPI and QSV write into the VUI and the muxer into
+`colr`/`Colour`. Checked with ffprobe: MP4 (H.264, HEVC, HEVC Main 10, AV1
+10-bit), MKV, WebM (VP9), MOV (ProRes; ProRes has no range field, so ffprobe
+prints `unknown` there).
+
+Measured on colour bars, 1920x1080, CRF 12, decoded as a player decodes an
+untagged HD file (as BT.709), against the source decoded the same way:
+
+| | worst | mean |
+|---|---|---|
+| before, libx264 (BT.601 samples, no tags) | 39 code values (pure green) | 6.83 |
+| before, NVENC (GPU NV12 pass, BT.601) | 39 | 6.90 |
+| after, libx264 | 2 | 0.04 |
+| after, NVENC | 0 | 0.00 |
+
+`tests/colour.rs` checks every encoder this machine has (libx264, libx265,
+libx265 Main 10, h264_nvenc, hevc_nvenc, hevc_nvenc Main 10) through two
+decoders (ours, and ffmpeg's, which reads the tags): the export's Y'CbCr is
+within 1 code value of the source's (0.5 for 10-bit, 0 for NVENC), the RGB
+within 2. SD (BT.601, `smpte170m` tag) and full range (`pc`) round-trip within
+2 too. VAAPI and QSV encode were not run (no device here); their tags come
+from the same codec context, and their 10-bit upload is `P010` through the same
+`upload_format` as NVENC's.
+
+**10-bit export.** `ten_bit` (CLI `--ten-bit`, dialog "Bit depth" for HEVC and
+AV1): `yuv420p10le` for libx265/libsvtav1, `P010` for the hardware encoders,
+profile `main10` for every HEVC encoder. It takes the swscale tier (the GPU
+NV12 tiers are 8-bit). The composite is still 8-bit sRGB, so this removes the
+YUV rounding, not the composite's banding. Refused in prose for H.264, VP9,
+GIF. No HDR export (decision 0034).
+
+**HDR and 10-bit sources.** The decoder reads transfer and primaries
+(`frame_light`). PQ, HLG and BT.2020 sources, and deep YUV sources that are
+4:2:0, reach the compositor as planes on every path (deep 4:2:2 and 4:4:4 SDR
+stay on the RGBA path, so their chroma is not halved): software through `VideoDecoder::wants_planar` and
+`seek_and_convert_planar` (swscale to P010, or NV12 without 16-bit textures),
+NVDEC's P010 download as it is, VAAPI P010 layers (`R16 `/`GR32`) imported as
+`R16Unorm`/`Rg16Unorm`. `TEXTURE_FORMAT_16BIT_NORM` is requested in
+`render::context` (RTX 3060 and lavapipe both have it); without it
+`Nv12Planes::to_eight_bit` keeps the top bytes. `yuv.wgsl::yuv_to_linear` does
+the rest: matrix, EOTF (HLG via the BT.2100 OOTF at 1000 nits), 203 nits as SDR
+1.0, BT.2020→BT.709, BT.2390 EETF on max(R,G,B) with source peak 1000 nits.
+The transfer, primaries and depth ride in the quad uniform's `matrix` slot
+(`SourceFrame::colour_word`), so `QuadUniform` did not change. The RGBA decode
+path (thumbnails, proxies, analysis) tone-maps on the CPU with the same
+constants (`media::hdr`, tables over 16-bit R'G'B').
+
+Measured (`tests/colour.rs`, fixtures generated from the PQ/HLG/BT.2020
+formulas in the test, not by the shader's inverse, lossless 10-bit HEVC):
+against a CPU reference of the tone map, **worst 0.46 code values** for PQ and
+HLG, software decode and NVDEC, RTX 3060 and lavapipe; greys below the knee
+come back **exactly** as the SDR values they were made from; SDR white lands at
+229 (0.79 linear), the 1000-nit peak at 255. Preview against export of an HLG
+clip: within 2. The decoder's RGBA (CPU twin) against the shader: within 1
+(swscale's YUV→RGB48 runs about one code value dark). 16-bit planes render
+like the 8-bit ones they widen, to the code value. Awkward deep sources
+against ffmpeg's decode of `testsrc`: odd 1001x777 4:4:4, ProRes 4:2:2 and a
+rotated 8-bit clip exact (RGBA path); 10-bit 4:2:0 32.5 dB and a rotated High
+10 clip 34.3 dB (planar path, bilinear chroma on hard edges, the same
+difference NVDEC frames have).
+
+**Not re-run after the merge with master (c569abb):** the NVIDIA driver hung
+machine-wide during the final gate run, so `cargo test -p chukcut-cli` (its
+`delivery` test was in the hung export), and the real-GPU runs of
+`tests/colour.rs`, `every_card`, `export` and `export_presets`, still need a
+pass on the merged tree after a reboot. Lavapipe passed the engine lib,
+`compositor`, `every_card` and `colour` suites on the merged tree; every
+suite passed on the RTX 3060 on the tree just before the merge.
+
+**Open:** the source peak is fixed at 1000 nits (mastering metadata and MaxCLL
+are not read); VAAPI P010 import is untested (no VAAPI device here);
+`tests/every_card.rs` has no HDR fixture; the app shows no colour-space line
+for a clip in the Details tab.
 
 ## Release builds (2026-10-04, `agent/release`)
 
@@ -3813,7 +3905,13 @@ nothing else in the system would say so.
   enough to read as rounding. Fixed in `decoder.rs::apply_colour`; the full story
   is under "Hardware decode through the compositor" above. Assume any new
   swscale context has the same defect until it calls
-  `sws_setColorspaceDetails`.
+  `sws_setColorspaceDetails`. **The encode direction had it too**, for a year:
+  the export's RGBA→YUV context and `yuv.wgsl`'s forward matrix were BT.601,
+  untagged, so players read HD exports as BT.709 and shifted saturated colours
+  by up to 39 code values (`encoder.rs::set_output_colour`, "Colour in and out"
+  above). And `sws_getCoefficients` takes `SWS_CS_*` numbers, not
+  `AVColorSpace` ones: SMPTE 170M's 6 is not one and silently falls back to the
+  default (`export::colour::sws_coefficients`).
 - **The Khronos validation layer segfaults this driver on a DMA-BUF image
   import.** `vkBindImageMemory` through `VkLayer_khronos_validation` into
   `libvulkan_intel`, on the first hardware-decoded frame the compositor imports —

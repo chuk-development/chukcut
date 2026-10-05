@@ -203,6 +203,11 @@ pub struct VideoDecoder {
     /// Reusable destination for `av_hwframe_transfer_data`, so downloading a
     /// 1080p surface does not allocate three megabytes per frame.
     download: Option<frame::Video>,
+    /// swscale from whatever the decoder produced to NV12 or P010, at the
+    /// scaled size: the software path for deep and HDR sources, which keeps
+    /// their samples as YUV for the shader rather than flattening them into
+    /// 8-bit RGBA here. Rebuilt like `scaler` when the input changes.
+    planar_scaler: Option<scaling::Context>,
 
     /// Timestamp of the last frame handed out, or `None` before the first
     /// decode and immediately after a seek.
@@ -383,6 +388,7 @@ impl VideoDecoder {
             hardware,
             hardware_frames: false,
             download: None,
+            planar_scaler: None,
             position: None,
             pending: None,
             last: None,
@@ -482,12 +488,15 @@ impl VideoDecoder {
         let (_, frame) = self.last.take().expect("locate leaves a frame in hand");
         let mapped = if hwdecode::is_vaapi_frame(&frame) {
             let (color_space, color_range) = self.frame_colour(&frame);
+            let (color_transfer, color_primaries) = self.frame_light(&frame);
             DmabufFrame::map(&frame).map(|dmabuf| MappedFrame {
                 dmabuf,
                 pts,
                 rotation: self.rotation,
                 color_space,
                 color_range,
+                color_transfer,
+                color_primaries,
             })
         } else if hwdecode::is_hardware_frame(&frame) {
             Err(MediaError::NoHardware(format!(
@@ -512,9 +521,13 @@ impl VideoDecoder {
     /// are skips the swscale pass to RGBA, which was most of what made a
     /// downloaded hardware frame slower than a software one.
     ///
+    /// 10-bit content downloads as P010 and comes back as it is, with
+    /// [`Nv12Planes::deep`] set: the compositor samples it as 16-bit planes,
+    /// so a 10-bit clip is not truncated to 8 bits before the shader.
+    ///
     /// Errors, leaving the frame in hand for [`Self::seek_and_decode`], when
-    /// the frame is not a hardware frame or does not download as 8-bit NV12
-    /// (10-bit content comes back as P010).
+    /// the frame is not a hardware frame or downloads as something other than
+    /// NV12, P010 or P016.
     pub fn seek_and_download_nv12(&mut self, micros: Micros) -> Result<Nv12Planes> {
         let pts = self.locate(micros)?;
         let (_, frame) = self.last.take().expect("locate leaves a frame in hand");
@@ -540,39 +553,241 @@ impl VideoDecoder {
         };
         let downloaded = hwdecode::transfer_to_software(frame, &mut scratch);
         let planes = downloaded.and_then(|()| {
-            if scratch.format() != ffmpeg::format::Pixel::NV12 {
-                return Err(MediaError::NoHardware(format!(
-                    "{} downloads as {:?}, not 8-bit NV12",
-                    self.path.display(),
-                    scratch.format()
-                )));
-            }
-            let (width, height) = (scratch.width(), scratch.height());
-            let chroma_height = height.div_ceil(2);
-            // Chroma rows hold interleaved U and V for every second luma
-            // column, so a row is the luma width rounded up to even.
-            let chroma_row = (width as usize).div_ceil(2) * 2;
-            let luma = tight_rows(scratch.data(0), scratch.stride(0), width as usize, height);
-            let chroma = tight_rows(
-                scratch.data(1),
-                scratch.stride(1),
-                chroma_row,
-                chroma_height,
-            );
-            let (color_space, color_range) = self.frame_colour(frame);
-            Ok(Nv12Planes {
-                width,
-                height,
-                luma,
-                chroma,
-                pts,
-                rotation: self.rotation,
-                color_space,
-                color_range,
-            })
+            let deep = match scratch.format() {
+                ffmpeg::format::Pixel::NV12 => false,
+                ffmpeg::format::Pixel::P010LE | ffmpeg::format::Pixel::P016LE => true,
+                other => {
+                    return Err(MediaError::NoHardware(format!(
+                        "{} downloads as {other:?}, not NV12 or P010",
+                        self.path.display(),
+                    )))
+                }
+            };
+            Ok(self.planes_from(&scratch, frame, deep, pts))
         });
         self.download = Some(scratch);
         planes
+    }
+
+    /// Pack a two-plane frame (NV12, P010 or P016) into tight rows, with the
+    /// colour of `source` — the frame as decoded, whose tags a download or a
+    /// conversion may not have carried over.
+    fn planes_from(
+        &self,
+        planes: &frame::Video,
+        source: &frame::Video,
+        deep: bool,
+        pts: Micros,
+    ) -> Nv12Planes {
+        let (width, height) = (planes.width(), planes.height());
+        let chroma_height = height.div_ceil(2);
+        let sample = if deep { 2 } else { 1 };
+        // Chroma rows hold interleaved U and V for every second luma column,
+        // so a row is the luma width rounded up to even.
+        let chroma_row = (width as usize).div_ceil(2) * 2 * sample;
+        let luma = tight_rows(
+            planes.data(0),
+            planes.stride(0),
+            width as usize * sample,
+            height,
+        );
+        let chroma = tight_rows(planes.data(1), planes.stride(1), chroma_row, chroma_height);
+        let (color_space, color_range) = self.frame_colour(source);
+        let (color_transfer, color_primaries) = self.frame_light(source);
+        Nv12Planes {
+            width,
+            height,
+            luma,
+            chroma,
+            deep,
+            pts,
+            rotation: self.rotation,
+            color_space,
+            color_range,
+            color_transfer,
+            color_primaries,
+        }
+    }
+
+    /// Whether the frame in hand should reach the compositor as YUV planes
+    /// rather than as RGBA: it is HDR, wide-gamut, or deeper than 8 bits.
+    ///
+    /// Those are the sources the RGBA path damages. swscale would flatten a
+    /// PQ or HLG signal into sRGB-tagged bytes the shader cannot tone-map,
+    /// and quantise a 10-bit gradient to 8 bits before any of the
+    /// compositor's float arithmetic. Everything else keeps the RGBA path it
+    /// has always had. Only YUV sources qualify: a deep RGB format (`gbrp10`)
+    /// converts to RGBA without a matrix and gains nothing from the detour.
+    pub fn wants_planar(&mut self, micros: Micros) -> Result<bool> {
+        self.locate(micros)?;
+        let Some((_, frame)) = self.last.as_ref() else {
+            return Ok(false);
+        };
+        // A hardware frame that reaches this question already failed to map
+        // or download as planes; it goes the RGBA way, as it always did.
+        if hwdecode::is_hardware_frame(frame) {
+            return Ok(false);
+        }
+        let format = frame.format();
+        let (transfer, primaries) = self.frame_light(frame);
+        let light = matches!(
+            transfer,
+            ffmpeg::color::TransferCharacteristic::SMPTE2084
+                | ffmpeg::color::TransferCharacteristic::ARIB_STD_B67
+        ) || primaries == ffmpeg::color::Primaries::BT2020;
+        // A deep SDR source goes planar only when it is 4:2:0 already: the
+        // planes are 4:2:0, and halving a 4:2:2 or 4:4:4 source's chroma to
+        // gain two bits of depth costs more than it buys (sharp colour edges
+        // measured 29 dB against ffmpeg's decode). An HDR source goes planar
+        // whatever its chroma, because only the shader can tone-map it at
+        // playback speed.
+        Ok(is_yuv(format) && (light || (depth_of(format) > 8 && is_420(format))))
+    }
+
+    /// The frame visible at `micros`, converted to NV12 — or to P010 when
+    /// `deep` and the source has more than 8 bits — at this decoder's scaled
+    /// size, rotation *not* applied.
+    ///
+    /// The software counterpart of [`Self::seek_and_download_nv12`], for the
+    /// sources [`Self::wants_planar`] picks. The conversion keeps the source's
+    /// matrix and range (it changes the layout and the size, not the colour),
+    /// and the planes carry the file's transfer and primaries so the shader
+    /// can take an HDR source to SDR the same way for every decode path.
+    pub fn seek_and_convert_planar(&mut self, micros: Micros, deep: bool) -> Result<Nv12Planes> {
+        let pts = self.locate(micros)?;
+        let (_, frame) = self.last.take().expect("locate leaves a frame in hand");
+        let result = self.convert_planar(&frame, deep, pts);
+        self.last = Some((pts, frame));
+        result
+    }
+
+    fn convert_planar(
+        &mut self,
+        decoded: &frame::Video,
+        deep: bool,
+        pts: Micros,
+    ) -> Result<Nv12Planes> {
+        let deep = deep && depth_of(decoded.format()) > 8;
+        let output = if deep {
+            ffmpeg::format::Pixel::P010LE
+        } else {
+            ffmpeg::format::Pixel::NV12
+        };
+        // The scaled size comes from the RGBA scaler's bookkeeping, which
+        // `ensure_scaler` keeps; build it here too so both agree.
+        self.src_width = decoded.width().max(1);
+        self.src_height = decoded.height().max(1);
+        let (scaled_width, scaled_height) = scaled_dimensions(
+            self.src_width,
+            self.src_height,
+            self.rotation,
+            self.target_display_height,
+        );
+        self.scaled_width = scaled_width;
+        self.scaled_height = scaled_height;
+
+        let matches = self.planar_scaler.as_ref().is_some_and(|scaler| {
+            let (input, out) = (scaler.input(), scaler.output());
+            input.format == decoded.format()
+                && input.width == decoded.width()
+                && input.height == decoded.height()
+                && out.format == output
+                && out.width == scaled_width
+                && out.height == scaled_height
+        });
+        if !matches {
+            let mut scaler = scaling::Context::get(
+                decoded.format(),
+                self.src_width,
+                self.src_height,
+                output,
+                scaled_width,
+                scaled_height,
+                scaling::Flags::BILINEAR,
+            )
+            .map_err(|source| MediaError::Decode {
+                path: self.path.clone(),
+                source,
+            })?;
+            self.keep_colour(&mut scaler, decoded);
+            self.planar_scaler = Some(scaler);
+        }
+        let scaler = self
+            .planar_scaler
+            .as_mut()
+            .expect("the planar scaler was just built");
+        let mut planes = frame::Video::empty();
+        scaler
+            .run(decoded, &mut planes)
+            .map_err(|source| MediaError::Decode {
+                path: self.path.clone(),
+                source,
+            })?;
+        Ok(self.planes_from(&planes, decoded, deep, pts))
+    }
+
+    /// Tell a YUV-to-YUV swscale pass to leave the colour alone.
+    ///
+    /// Left to itself swscale would expand a full-range (`yuvj`) source to
+    /// limited on the way to NV12, and the shader — told the file's range —
+    /// would then expand it a second time. Same matrix and same range on both
+    /// sides makes the pass a pure layout and size change.
+    fn keep_colour(&self, scaler: &mut scaling::Context, decoded: &frame::Video) {
+        let (space, range) = self.frame_colour(decoded);
+        let id = ffmpeg::ffi::AVColorSpace::from(space) as i32;
+        let full = i32::from(range == ffmpeg::color::Range::JPEG);
+        // SAFETY: as in `apply_colour`: a live context, reconfigured, from
+        // libswscale's static table.
+        unsafe {
+            let table = ffmpeg::ffi::sws_getCoefficients(id);
+            ffmpeg::ffi::sws_setColorspaceDetails(
+                scaler.as_mut_ptr(),
+                table,
+                full,
+                table,
+                full,
+                0,
+                1 << 16,
+                1 << 16,
+            );
+        }
+    }
+
+    /// Whether this frame needs the CPU tone map on the RGBA path, and which.
+    fn light_of(&self, frame: &frame::Video) -> Option<super::hdr::Light> {
+        let (transfer, primaries) = self.frame_light(frame);
+        super::hdr::Light::of(transfer, primaries)
+    }
+
+    /// The transfer and primaries this frame's light is in: the frame's tags,
+    /// then the codec context's, then BT.709. Unlike the matrix there is no
+    /// guess from the size — an untagged file is SDR, and calling it HDR on a
+    /// hunch would tone-map ordinary footage.
+    fn frame_light(
+        &self,
+        frame: &frame::Video,
+    ) -> (
+        ffmpeg::color::TransferCharacteristic,
+        ffmpeg::color::Primaries,
+    ) {
+        use ffmpeg::color::{Primaries, TransferCharacteristic};
+        let mut transfer = frame.color_transfer_characteristic();
+        if matches!(
+            transfer,
+            TransferCharacteristic::Unspecified
+                | TransferCharacteristic::Reserved
+                | TransferCharacteristic::Reserved0
+        ) {
+            transfer = self.decoder.color_transfer_characteristic();
+        }
+        let mut primaries = frame.color_primaries();
+        if matches!(
+            primaries,
+            Primaries::Unspecified | Primaries::Reserved | Primaries::Reserved0
+        ) {
+            primaries = self.decoder.color_primaries();
+        }
+        (transfer, primaries)
     }
 
     /// What matrix and range this frame's chroma is expressed in.
@@ -859,11 +1074,19 @@ impl VideoDecoder {
 
     /// Configure swscale for the frame we actually got.
     fn ensure_scaler(&mut self, decoded: &frame::Video) -> Result<()> {
+        // An HDR or wide-gamut frame is converted to 16-bit R'G'B' and tone-
+        // mapped on the CPU (`hdr`); everything else straight to RGBA.
+        let output = if self.light_of(decoded).is_some() {
+            ffmpeg::format::Pixel::RGB48LE
+        } else {
+            ffmpeg::format::Pixel::RGBA
+        };
         let matches = self.scaler.as_ref().is_some_and(|scaler| {
             let input = scaler.input();
             input.format == decoded.format()
                 && input.width == decoded.width()
                 && input.height == decoded.height()
+                && scaler.output().format == output
         });
         if matches {
             return Ok(());
@@ -884,7 +1107,7 @@ impl VideoDecoder {
             decoded.format(),
             self.src_width,
             self.src_height,
-            ffmpeg::format::Pixel::RGBA,
+            output,
             scaled_width,
             scaled_height,
             // Bilinear is the right trade here: the preview is transient, and
@@ -1010,12 +1233,17 @@ impl VideoDecoder {
         // tight buffer, so copy row by row rather than handing out the padding.
         let stride = rgba.stride(0);
         let plane = rgba.data(0);
-        let row_bytes = width as usize * 4;
-        let mut tight = Vec::with_capacity(row_bytes * height as usize);
-        for row in 0..height as usize {
-            let start = row * stride;
-            tight.extend_from_slice(&plane[start..start + row_bytes]);
-        }
+        let tight = if let Some(light) = self.light_of(decoded) {
+            super::hdr::tone_map_rgb48(light, plane, stride, width, height)
+        } else {
+            let row_bytes = width as usize * 4;
+            let mut tight = Vec::with_capacity(row_bytes * height as usize);
+            for row in 0..height as usize {
+                let start = row * stride;
+                tight.extend_from_slice(&plane[start..start + row_bytes]);
+            }
+            tight
+        };
 
         let (data, width, height) = rotate_rgba(tight, width, height, self.rotation);
         Ok(DecodedFrame {
@@ -1027,20 +1255,93 @@ impl VideoDecoder {
     }
 }
 
-/// A downloaded hardware frame as two NV12 planes, rows packed tight.
+/// A frame as two planes, rows packed tight: NV12, or P010 when [`Self::deep`].
+///
+/// What an NVDEC download produces, and what the software path converts deep
+/// and HDR sources into.
 pub struct Nv12Planes {
     pub width: u32,
     pub height: u32,
-    /// `width * height` bytes of luma.
+    /// `width * height` samples of luma.
     pub luma: Vec<u8>,
     /// `height.div_ceil(2)` rows of interleaved U and V, each row
-    /// `width.div_ceil(2) * 2` bytes.
+    /// `width.div_ceil(2) * 2` samples.
     pub chroma: Vec<u8>,
+    /// Samples are 16-bit little-endian with the significant bits at the top
+    /// (P010), rather than bytes.
+    pub deep: bool,
     pub pts: Micros,
     /// Display rotation in degrees clockwise, **not** applied.
     pub rotation: i32,
     pub color_space: ffmpeg::color::Space,
     pub color_range: ffmpeg::color::Range,
+    /// The file's transfer and primaries: PQ or HLG and BT.2020 for HDR.
+    pub color_transfer: ffmpeg::color::TransferCharacteristic,
+    pub color_primaries: ffmpeg::color::Primaries,
+}
+
+impl Nv12Planes {
+    /// The same picture with 8-bit samples: the top byte of each 16-bit one.
+    ///
+    /// For a device that cannot sample 16-bit textures. Taking the top byte
+    /// is the same truncation swscale's 10-to-8-bit path does without
+    /// dithering, and it is only ever the fallback.
+    pub fn to_eight_bit(&self) -> Nv12Planes {
+        let top = |plane: &[u8]| {
+            plane
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| pair[1])
+                .collect::<Vec<u8>>()
+        };
+        Nv12Planes {
+            width: self.width,
+            height: self.height,
+            luma: if self.deep {
+                top(&self.luma)
+            } else {
+                self.luma.clone()
+            },
+            chroma: if self.deep {
+                top(&self.chroma)
+            } else {
+                self.chroma.clone()
+            },
+            deep: false,
+            pts: self.pts,
+            rotation: self.rotation,
+            color_space: self.color_space,
+            color_range: self.color_range,
+            color_transfer: self.color_transfer,
+            color_primaries: self.color_primaries,
+        }
+    }
+}
+
+/// Whether `format` is a YUV format with chroma, as opposed to RGB or grey.
+fn is_yuv(format: ffmpeg::format::Pixel) -> bool {
+    format.descriptor().is_some_and(|descriptor| {
+        // SAFETY: `descriptor` points at libavutil's static table entry.
+        let flags = unsafe { (*descriptor.as_ptr()).flags };
+        descriptor.nb_components() >= 3 && flags & ffmpeg::ffi::AV_PIX_FMT_FLAG_RGB as u64 == 0
+    })
+}
+
+/// Whether `format`'s chroma is half size in both directions.
+fn is_420(format: ffmpeg::format::Pixel) -> bool {
+    format
+        .descriptor()
+        .is_some_and(|d| d.log2_chroma_w() == 1 && d.log2_chroma_h() == 1)
+}
+
+/// Bits per luma sample of `format`; 8 when libavutil does not know it.
+fn depth_of(format: ffmpeg::format::Pixel) -> u32 {
+    format.descriptor().map_or(8, |descriptor| {
+        // SAFETY: as above; `comp[0]` exists for every format with a
+        // descriptor.
+        unsafe { (*descriptor.as_ptr()).comp[0].depth as u32 }
+    })
 }
 
 /// Copy `rows` rows of `row_bytes` out of a plane with padding between rows.
@@ -1078,6 +1379,9 @@ pub struct MappedFrame {
     pub color_space: ffmpeg::color::Space,
     /// Whether luma runs 16..235 or 0..255.
     pub color_range: ffmpeg::color::Range,
+    /// The file's transfer and primaries: PQ or HLG and BT.2020 for HDR.
+    pub color_transfer: ffmpeg::color::TransferCharacteristic,
+    pub color_primaries: ffmpeg::color::Primaries,
 }
 
 impl MappedFrame {

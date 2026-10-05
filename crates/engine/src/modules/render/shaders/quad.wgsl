@@ -19,7 +19,7 @@
 //   touches pixels, so the angle arrives here and is folded into the texture
 //   coordinate — free, because the lookup was happening anyway.
 //
-// `yuv.wgsl` is prepended to this file and supplies `yuv_to_rgb` and
+// `yuv.wgsl` is prepended to this file and supplies `yuv_to_linear` and
 // `srgb_to_linear`.
 
 struct QuadUniform {
@@ -42,7 +42,8 @@ struct QuadUniform {
     // 0: `source_texture` is RGBA and is sampled directly.
     // 1: `source_texture` is luma and `chroma_texture` is interleaved CbCr.
     planar: u32,
-    // `render::source::YuvMatrix` and `YuvRange`, as their discriminants.
+    // `render::source::SourceFrame::colour_word` — the `YuvMatrix` in the low
+    // byte, transfer, primaries and sample depth above it — and `YuvRange`.
     // Ignored when `planar` is 0.
     matrix: u32,
     range: u32,
@@ -359,7 +360,7 @@ fn source_linear(uv: vec2<f32>) -> vec3<f32> {
     if (quad.planar == 1u) {
         let y = textureSampleLevel(source_texture, source_sampler, uv, 0.0).r;
         let cbcr = textureSampleLevel(chroma_texture, source_sampler, uv, 0.0).rg;
-        return srgb_to_linear(yuv_to_rgb(y, cbcr, quad.matrix, quad.range));
+        return yuv_to_linear(y, cbcr, quad.matrix, quad.range);
     }
     return textureSampleLevel(source_texture, source_sampler, uv, 0.0).rgb;
 }
@@ -655,12 +656,12 @@ fn shade(in: VertexOutput) -> vec4<f32> {
         // interpolates the same centred way we do, and matching the reference
         // implementation matters more here than matching the specification.
         let cbcr = textureSample(chroma_texture, source_sampler, in.uv).rg;
-        let rgb = yuv_to_rgb(y, cbcr, quad.matrix, quad.range);
         // The RGBA path's texture is `Rgba8UnormSrgb`, so its sampler
         // linearises before the blend. This path's planes are `R8Unorm` and
-        // `Rg8Unorm`, which linearise nothing, so it is done here — otherwise
-        // the two paths composite the same frame at two brightnesses.
-        texel = vec4<f32>(srgb_to_linear(rgb), 1.0);
+        // `Rg8Unorm` (or their 16-bit twins), which linearise nothing, so it
+        // is done here — otherwise the two paths composite the same frame at
+        // two brightnesses. An HDR source is tone-mapped on the same line.
+        texel = vec4<f32>(yuv_to_linear(y, cbcr, quad.matrix, quad.range), 1.0);
     } else {
         texel = textureSample(source_texture, source_sampler, in.uv);
         // A nested render is premultiplied; everything below wants straight

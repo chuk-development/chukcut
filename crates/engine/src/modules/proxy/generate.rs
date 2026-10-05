@@ -198,6 +198,7 @@ impl ProxySpec {
             accel,
             quality: self.quality,
             options: Self::options(encoder_name),
+            colour: crate::modules::export::OutputColour::default(),
         }
     }
 }

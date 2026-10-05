@@ -735,6 +735,32 @@ impl MediaSourceProvider {
             }
         }
 
+        // Deep and HDR sources decoded in software: planes, like NVDEC's, so
+        // the shader sees their samples and their transfer rather than 8-bit
+        // RGBA swscale has already flattened. `wants_planar` decodes the
+        // frame it asks about, so the call below finds it in hand.
+        if decoder.wants_planar(source_time)? {
+            let started = std::time::Instant::now();
+            let planes =
+                decoder.seek_and_convert_planar(source_time, ctx.supports_deep_planes())?;
+            let decode_micros = started.elapsed().as_micros();
+            let upload_started = std::time::Instant::now();
+            let frame = upload_nv12(ctx, &planes);
+            tracing::debug!(
+                file = %file_name(path),
+                at_ms = source_time / 1000,
+                decoded = format_args!("{}x{}", planes.width, planes.height),
+                deep = planes.deep,
+                transfer = ?planes.color_transfer,
+                decode_ms = decode_micros as f64 / 1000.0,
+                upload_ms = upload_started.elapsed().as_micros() as f64 / 1000.0,
+                "converted source frame to planes",
+            );
+            drop(decoder);
+            self.store_video(material_id, source_time, &frame);
+            return Ok(frame);
+        }
+
         let started = std::time::Instant::now();
         let decoded = decoder.seek_and_decode(source_time)?;
         let decode_micros = started.elapsed().as_micros();
@@ -1182,15 +1208,20 @@ fn import_mapped(ctx: &RenderContext, mapped: MappedFrame) -> Option<SourceFrame
     let turns = mapped.rotation.rem_euclid(360) / 90;
     let matrix = yuv_matrix(mapped.color_space);
     let range = yuv_range(mapped.color_range);
+    let transfer = yuv_transfer(mapped.color_transfer);
+    let primaries = yuv_primaries(mapped.color_primaries);
 
-    Some(SourceFrame::from_planes(
-        Arc::new(luma),
-        Arc::new(chroma),
-        matrix,
-        range,
-        turns as u32,
-        Some(Arc::new(PinnedSurface(mapped)) as render::FrameGuard),
-    ))
+    Some(
+        SourceFrame::from_planes(
+            Arc::new(luma),
+            Arc::new(chroma),
+            matrix,
+            range,
+            turns as u32,
+            Some(Arc::new(PinnedSurface(mapped)) as render::FrameGuard),
+        )
+        .with_light(transfer, primaries),
+    )
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -1220,6 +1251,26 @@ fn yuv_matrix(space: ffmpeg::color::Space) -> render::YuvMatrix {
     }
 }
 
+/// FFmpeg's transfer characteristic to the three the shader handles. Only
+/// PQ and HLG are HDR; every other curve (BT.709, BT.601, sRGB, BT.2020's
+/// 10- and 12-bit, which are BT.709's) is decoded as SDR.
+fn yuv_transfer(transfer: ffmpeg::color::TransferCharacteristic) -> render::YuvTransfer {
+    use ffmpeg::color::TransferCharacteristic;
+    match transfer {
+        TransferCharacteristic::SMPTE2084 => render::YuvTransfer::Pq,
+        TransferCharacteristic::ARIB_STD_B67 => render::YuvTransfer::Hlg,
+        _ => render::YuvTransfer::Sdr,
+    }
+}
+
+/// FFmpeg's primaries to the two the shader handles.
+fn yuv_primaries(primaries: ffmpeg::color::Primaries) -> render::YuvPrimaries {
+    match primaries {
+        ffmpeg::color::Primaries::BT2020 => render::YuvPrimaries::Bt2020,
+        _ => render::YuvPrimaries::Bt709,
+    }
+}
+
 fn yuv_range(range: ffmpeg::color::Range) -> render::YuvRange {
     match range {
         ffmpeg::color::Range::JPEG => render::YuvRange::Full,
@@ -1237,8 +1288,12 @@ fn yuv_range(range: ffmpeg::color::Range) -> render::YuvRange {
 /// cross-fades.
 /// Upload NV12 planes as the two textures the compositor's YUV path samples:
 /// `R8Unorm` luma and `Rg8Unorm` interleaved chroma at half resolution — the
-/// same layout an imported VA surface has.
+/// same layout an imported VA surface has. P010 planes go up as `R16Unorm` and
+/// `Rg16Unorm` when the device has them, and as their top bytes when not.
 fn upload_nv12(ctx: &RenderContext, planes: &crate::modules::media::Nv12Planes) -> SourceFrame {
+    if planes.deep && !ctx.supports_deep_planes() {
+        return upload_nv12(ctx, &planes.to_eight_bit());
+    }
     let plane = |format, width: u32, height: u32, bytes_per_texel: u32, data: &[u8]| {
         let texture = ctx.device().create_texture(&wgpu::TextureDescriptor {
             label: Some("media source nv12 plane"),
@@ -1277,12 +1332,25 @@ fn upload_nv12(ctx: &RenderContext, planes: &crate::modules::media::Nv12Planes) 
     };
 
     let (width, height) = (planes.width, planes.height);
-    let luma = plane(wgpu::TextureFormat::R8Unorm, width, height, 1, &planes.luma);
+    let (luma_format, chroma_format, sample) = if planes.deep {
+        (
+            wgpu::TextureFormat::R16Unorm,
+            wgpu::TextureFormat::Rg16Unorm,
+            2,
+        )
+    } else {
+        (
+            wgpu::TextureFormat::R8Unorm,
+            wgpu::TextureFormat::Rg8Unorm,
+            1,
+        )
+    };
+    let luma = plane(luma_format, width, height, sample, &planes.luma);
     let chroma = plane(
-        wgpu::TextureFormat::Rg8Unorm,
+        chroma_format,
         width.div_ceil(2),
         height.div_ceil(2),
-        2,
+        2 * sample,
         &planes.chroma,
     );
     let turns = planes.rotation.rem_euclid(360) / 90;
@@ -1293,6 +1361,10 @@ fn upload_nv12(ctx: &RenderContext, planes: &crate::modules::media::Nv12Planes) 
         yuv_range(planes.color_range),
         turns as u32,
         None,
+    )
+    .with_light(
+        yuv_transfer(planes.color_transfer),
+        yuv_primaries(planes.color_primaries),
     )
 }
 

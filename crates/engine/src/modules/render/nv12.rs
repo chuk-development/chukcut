@@ -41,7 +41,7 @@ use parking_lot::Mutex;
 
 use super::context::RenderContext;
 use super::error::{RenderError, Result};
-use super::source::YuvRange;
+use super::source::{YuvEncoding, YuvRange};
 use super::texture_pool::PooledTexture;
 
 /// The format the compute pass reads. A view in this format over the sRGB
@@ -168,7 +168,8 @@ struct Params {
     uv_offset_words: u32,
     uv_stride_words: u32,
     range: u32,
-    _pad: [u32; 2],
+    matrix: u32,
+    _pad: u32,
 }
 
 // `#[repr(C)]`, eight `u32`s, no padding of its own — plain old data. Hand
@@ -274,13 +275,16 @@ impl Nv12Converter {
         }
     }
 
-    /// Convert `target` and read the planes back, in limited range.
+    /// Convert `target` and read the planes back, as BT.601 in limited range.
+    ///
+    /// The encoding the tests' CPU references are written in. The export says
+    /// what it wants with [`Self::convert_encoded`].
     ///
     /// `target` must have been created viewable as [`READ_FORMAT`]; a texture
     /// that was not is refused rather than silently converted through the sRGB
     /// view, which would produce a washed-out picture that still encodes.
     pub fn convert(&self, ctx: &RenderContext, target: &PooledTexture) -> Result<Nv12Frame> {
-        self.convert_range(ctx, target, YuvRange::Limited)
+        self.convert_encoded(ctx, target, YuvEncoding::BT601_LIMITED)
     }
 
     /// [`Self::convert`], saying which range the samples are wanted in.
@@ -294,6 +298,17 @@ impl Nv12Converter {
         target: &PooledTexture,
         range: YuvRange,
     ) -> Result<Nv12Frame> {
+        self.convert_encoded(ctx, target, YuvEncoding::bt601(range))
+    }
+
+    /// [`Self::convert`] in the matrix and range the encoder will tag its
+    /// stream with. The export's entry point.
+    pub fn convert_encoded(
+        &self,
+        ctx: &RenderContext,
+        target: &PooledTexture,
+        encoding: YuvEncoding,
+    ) -> Result<Nv12Frame> {
         let layout = Nv12Layout::for_size(target.width(), target.height());
         let total = layout.total_bytes() as u64;
 
@@ -306,7 +321,7 @@ impl Nv12Converter {
 
         // Convert, then copy into something mappable in the same submission —
         // one round trip to the GPU rather than two.
-        self.dispatch(ctx, target, &storage, layout, range, |encoder| {
+        self.dispatch(ctx, target, &storage, layout, encoding, |encoder| {
             encoder.copy_buffer_to_buffer(&storage, 0, &staging, 0, total);
         })?;
 
@@ -361,7 +376,7 @@ impl Nv12Converter {
         target: &PooledTexture,
         destination: &wgpu::Buffer,
     ) -> Result<Nv12Layout> {
-        self.convert_into_range(ctx, target, destination, YuvRange::Limited)
+        self.convert_into_encoded(ctx, target, destination, YuvEncoding::BT601_LIMITED)
     }
 
     /// [`Self::convert_into`], saying which range the samples are wanted in.
@@ -374,6 +389,18 @@ impl Nv12Converter {
         destination: &wgpu::Buffer,
         range: YuvRange,
     ) -> Result<Nv12Layout> {
+        self.convert_into_encoded(ctx, target, destination, YuvEncoding::bt601(range))
+    }
+
+    /// [`Self::convert_into`] in the matrix and range the encoder will tag its
+    /// stream with. The zero-copy export's entry point.
+    pub fn convert_into_encoded(
+        &self,
+        ctx: &RenderContext,
+        target: &PooledTexture,
+        destination: &wgpu::Buffer,
+        encoding: YuvEncoding,
+    ) -> Result<Nv12Layout> {
         let layout = Nv12Layout::for_size(target.width(), target.height());
         if destination.size() < layout.total_bytes() as u64 {
             return Err(RenderError::Readback(format!(
@@ -385,7 +412,7 @@ impl Nv12Converter {
             )));
         }
 
-        self.dispatch(ctx, target, destination, layout, range, |_| {})?;
+        self.dispatch(ctx, target, destination, layout, encoding, |_| {})?;
 
         let waited = std::time::Instant::now();
         ctx.device()
@@ -409,7 +436,7 @@ impl Nv12Converter {
         target: &PooledTexture,
         destination: &wgpu::Buffer,
         layout: Nv12Layout,
-        range: YuvRange,
+        encoding: YuvEncoding,
         also: impl FnOnce(&mut wgpu::CommandEncoder),
     ) -> Result<()> {
         let (width, height) = (target.width(), target.height());
@@ -434,8 +461,9 @@ impl Nv12Converter {
             y_stride_words: (layout.y_stride / 4) as u32,
             uv_offset_words: (layout.uv_offset() / 4) as u32,
             uv_stride_words: (layout.uv_stride / 4) as u32,
-            range: range as u32,
-            _pad: [0; 2],
+            range: encoding.range as u32,
+            matrix: encoding.matrix as u32,
+            _pad: 0,
         };
         ctx.queue()
             .write_buffer(&params_buffer, 0, bytemuck::bytes_of(&params));
@@ -534,7 +562,8 @@ struct PlaneParams {
     width: u32,
     height: u32,
     range: u32,
-    _pad: u32,
+    /// BT.601 always: the JPEG encoder is the only caller, and JFIF is BT.601.
+    matrix: u32,
 }
 
 unsafe impl bytemuck::Zeroable for PlaneParams {}
@@ -704,7 +733,7 @@ impl Nv12PlaneWriter {
                 width,
                 height,
                 range: range as u32,
-                _pad: 0,
+                matrix: super::source::YuvMatrix::Bt601 as u32,
             }),
         );
 
@@ -876,6 +905,15 @@ mod tests {
         height: u32,
         range: YuvRange,
     ) -> Option<Nv12Frame> {
+        convert_solid_encoded(colour, width, height, YuvEncoding::bt601(range))
+    }
+
+    fn convert_solid_encoded(
+        colour: [u8; 4],
+        width: u32,
+        height: u32,
+        encoding: YuvEncoding,
+    ) -> Option<Nv12Frame> {
         let ctx = crate::modules::render::test_context()?;
         let pool = TexturePool::default();
         let target = pool.acquire(
@@ -917,9 +955,46 @@ mod tests {
         let converter = Nv12Converter::new(&ctx);
         Some(
             converter
-                .convert_range(&ctx, &target, range)
+                .convert_encoded(&ctx, &target, encoding)
                 .expect("convert"),
         )
+    }
+
+    /// The export's matrix: an HD export is BT.709, and a pass that ignored
+    /// the matrix and wrote BT.601 — what this did until the export started
+    /// tagging its streams — is off by ten code values and more in saturated
+    /// colours. Checked against the coefficients BT.709 prints, not against
+    /// `luma_weights`.
+    #[test]
+    fn the_export_matrix_is_bt709_when_asked_for() {
+        for colour in [
+            [255, 0, 0, 255],
+            [0, 255, 0, 255],
+            [0, 0, 255, 255],
+            [191, 191, 0, 255],
+            [128, 128, 128, 255],
+        ] {
+            let Some(frame) = convert_solid_encoded(colour, 16, 8, YuvEncoding::BT709_LIMITED)
+            else {
+                eprintln!("skipping: no GPU adapter");
+                return;
+            };
+            let [r, g, b] = [colour[0], colour[1], colour[2]].map(|v| v as f32 / 255.0);
+            let y = 16.0 + 219.0 * (0.2126 * r + 0.7152 * g + 0.0722 * b);
+            let cb = 128.0 + 224.0 * (-0.114_572 * r - 0.385_428 * g + 0.5 * b);
+            let cr = 128.0 + 224.0 * (0.5 * r - 0.454_153 * g - 0.045_847 * b);
+            let got = (frame.luma(5, 3) as f32, frame.chroma(5, 3));
+            assert!(
+                (got.0 - y).abs() <= 1.0,
+                "{colour:?}: luma {} want {y}",
+                got.0
+            );
+            assert!(
+                (got.1 .0 as f32 - cb).abs() <= 1.0 && (got.1 .1 as f32 - cr).abs() <= 1.0,
+                "{colour:?}: chroma {:?} want ({cb}, {cr})",
+                got.1
+            );
+        }
     }
 
     fn assert_matches_reference(frame: &Nv12Frame, colour: [u8; 4]) {

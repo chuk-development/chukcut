@@ -53,6 +53,28 @@ Other switches for diagnosis:
 - `CHUKCUT_PREVIEW_JPEG=software` and `CHUKCUT_PROXY_ENCODER=software` keep
   the preview encoder and the proxy encoder off the GPU.
 
+## Colours look different in another player
+
+chukcut writes the colour space into every export (Rec. 709 for 720p and
+larger, Rec. 601 for 480p). Exports made before October 2026 had no colour
+tag and a different matrix: in other players their reds and greens were a
+little off. Export them again.
+
+If a file still looks different, check the player: some players ignore the
+tags of full-range files. Use limited range (the default).
+
+## HDR clips look wrong
+
+chukcut converts HDR clips (HLG and PQ, for example from an iPhone) to SDR.
+The player and the export show the same result.
+
+- **Highlights look flat.** chukcut assumes that the clip was mastered for
+  1000 nits. Brighter highlights are clipped.
+- **The thumbnail strip** uses the same conversion.
+- **A clip looks grey and flat.** The file probably has no HDR tag. Check it
+  with `ffprobe -show_streams FILE`: `color_transfer` must be `smpte2084`
+  (PQ) or `arib-std-b67` (HLG).
+
 ## The export does not offer a GPU encoder
 
 The export dialog offers a hardware encoder only after a test encode works.

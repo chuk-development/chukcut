@@ -1626,6 +1626,9 @@ complete and shows progress on stderr.
 | `--no-loudness` | keep the mix as edited, also when the preset has a target |
 | `--from TIME`, `--to TIME` | export only this range |
 | `--sidecar srt\|vtt` | also write the captions next to the video |
+| `--color-matrix auto\|bt709\|bt601` | the YUV matrix the picture is converted with and tagged as. `auto` (the default) is BT.709 when the long side is over 1024 or the short side over 576, else BT.601 |
+| `--color-range limited\|full` | limited (16–235, the default) or full (0–255) range, tagged |
+| `--ten-bit` | 10 bits a sample: HEVC Main 10 with `--codec h265`, 10-bit AV1 with `--codec av1`; refused for the other codecs. Works on the hardware encoders too (`nvenc_h265`, `vaapi_h265`, …) |
 
 The built-in presets:
 
@@ -1656,6 +1659,10 @@ id `vertical_1080x1920` still works and means `tiktok`.
 The software encoder is the default. A hardware encoder is a choice, because
 the engine trial-encodes each one before it uses it. ProRes, GIF and sound
 only always use the software encoder.
+
+Every video export is SDR, tagged with its matrix, its range and BT.709
+primaries and transfer (decision 0034). HDR sources are tone-mapped to SDR
+on the way in; there is no HDR export.
 
 The result gives the path, the size in bytes, the frame count, the time it
 took, the encode speed, the output size, the loudness target and the

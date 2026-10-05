@@ -8,10 +8,11 @@ use std::path::{Path, PathBuf};
 
 use chukcut_engine::modules::export::hwaccel::HwEncoder;
 use chukcut_engine::modules::export::{
-    AudioCodec, Container, ExportMemory, ExportOverrides, ExportPreset, ExportRequest, Quality,
-    VideoCodec,
+    AudioCodec, Container, ExportMemory, ExportOverrides, ExportPreset, ExportRequest,
+    OutputColour, Quality, VideoCodec,
 };
 use chukcut_engine::modules::project::{Micros, Project};
+use chukcut_engine::modules::render::YuvMatrix;
 
 /// The output's short side. The long side follows the canvas's aspect ratio,
 /// so "1080p" of a 9:16 project is 1080×1920 and of a 16:9 one 1920×1080.
@@ -154,6 +155,11 @@ impl Codec {
     }
 
     /// ProRes has no quality knob: its data rate follows from the profile.
+    /// Whether the codec has a 10-bit profile the export offers.
+    pub(crate) fn has_ten_bit(self) -> bool {
+        matches!(self, Codec::Hevc | Codec::Av1)
+    }
+
     pub(crate) fn has_quality(self) -> bool {
         self != Codec::ProRes
     }
@@ -311,6 +317,9 @@ pub(crate) struct ExportChoices {
     pub range: Option<(Micros, Micros)>,
     /// Use a GPU encoder when one works for the codec.
     pub use_hardware: bool,
+    /// Ten bits a sample (HEVC Main 10, 10-bit AV1). Ignored for the other
+    /// codecs, which the dialog does not offer it for.
+    pub ten_bit: bool,
 }
 
 impl ExportChoices {
@@ -339,6 +348,7 @@ impl ExportChoices {
             preset: None,
             range: None,
             use_hardware: true,
+            ten_bit: false,
         }
     }
 
@@ -516,6 +526,7 @@ impl ExportChoices {
             self.audio_bitrate = bits;
         }
         self.loudness_target = o.loudness_target;
+        self.ten_bit = o.ten_bit;
         self.audio = memory.include_audio;
         self.preset = None;
         // A remembered rate that this kind of file does not offer (an old
@@ -627,6 +638,7 @@ impl ExportChoices {
                     } else {
                         self.format.container()
                     }),
+                    ten_bit: self.ten_bit && self.codec.has_ten_bit(),
                     ..base
                 }
             }
@@ -662,6 +674,20 @@ pub(crate) fn pick_hardware(encoders: &[HwEncoder], codec: Codec) -> Option<&HwE
     encoders
         .iter()
         .find(|encoder| encoder.usable && encoder.codec == codec.video_codec())
+}
+
+/// What the export writes, for the dialog's "Colour space" row: the matrix
+/// the engine picks for this size (`export::colour`), the depth, the size.
+pub(crate) fn colour_space_label(prores: bool, ten_bit: bool, width: u32, height: u32) -> String {
+    if prores {
+        return format!("Rec. 709 · 10-bit 4:2:2 · {width}×{height}");
+    }
+    let matrix = match OutputColour::for_size(width, height).encoding.matrix {
+        YuvMatrix::Bt601 => "Rec. 601",
+        _ => "Rec. 709",
+    };
+    let depth = if ten_bit { "10-bit" } else { "8-bit" };
+    format!("{matrix} SDR · {depth} · {width}×{height}")
 }
 
 /// "about 220 MB".
@@ -919,6 +945,8 @@ mod tests {
         choices.format = Format::Mov;
         choices.loudness_target = Some(-16.0);
         choices.audio_bitrate = 320_000;
+        choices.ten_bit = true;
+        assert!(choices.request(&p, None).overrides.unwrap().ten_bit);
         let memory = choices.memory(&p);
         let restored = ExportChoices::opening(&p, PathBuf::from("/elsewhere"), Some(&memory));
         assert_eq!(restored.resolution, Resolution::P720);
@@ -928,7 +956,13 @@ mod tests {
         assert_eq!(restored.format, Format::Mov);
         assert_eq!(restored.loudness_target, Some(-16.0));
         assert_eq!(restored.audio_bitrate, 320_000);
+        assert!(restored.ten_bit);
         assert!(restored.preset.is_none());
+
+        // 10-bit is an HEVC and AV1 choice; H.264 never asks for it.
+        let mut h264 = restored.clone();
+        h264.codec = Codec::H264;
+        assert!(!h264.request(&p, None).overrides.unwrap().ten_bit);
 
         // A remembered preset comes back as the preset.
         let mut choices = ExportChoices::for_project(&p, PathBuf::from("/out"));
@@ -936,6 +970,23 @@ mod tests {
         let restored = ExportChoices::opening(&p, PathBuf::from("/out"), Some(&choices.memory(&p)));
         assert_eq!(restored.preset.as_deref(), Some("youtube_shorts"));
         assert_eq!(restored.loudness_target, Some(-14.0));
+    }
+
+    #[test]
+    fn the_colour_space_row_says_what_the_export_writes() {
+        assert_eq!(
+            colour_space_label(false, false, 1920, 1080),
+            "Rec. 709 SDR · 8-bit · 1920×1080"
+        );
+        assert_eq!(
+            colour_space_label(false, true, 1080, 1920),
+            "Rec. 709 SDR · 10-bit · 1080×1920"
+        );
+        // 480p is standard definition, which the export writes as BT.601.
+        assert_eq!(
+            colour_space_label(false, false, 854, 480),
+            "Rec. 601 SDR · 8-bit · 854×480"
+        );
     }
 
     #[test]
