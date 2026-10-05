@@ -632,10 +632,12 @@ fn fs_premultiplied(in: VertexOutput) -> @location(0) vec4<f32> {
 
 fn shade(in: VertexOutput) -> vec4<f32> {
     // An effects mask's layer (`render::matte_mix`): the subject's weight
-    // where the clip is, nothing where it is not.
+    // where the clip is, nothing where it is not. The opacity is the draw's
+    // share when several are summed (a blended or motion-blurred clip) and 1
+    // otherwise; the mix reads the weight as colour times alpha.
     if ((quad.matte_flags.x & M_MATTE_OUT) != 0u) {
         let m = textureSample(background_texture, source_sampler, in.display).r;
-        return vec4<f32>(m, m, m, 1.0);
+        return vec4<f32>(m, m, m, quad.opacity);
     }
     var texel: vec4<f32>;
     if (quad.planar == 1u) {
