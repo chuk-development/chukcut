@@ -83,7 +83,7 @@ it. The software encoders (x264, x265) always work.
   Click **Finish**.
 - **The first slow-motion, enhance or remove-object job waits for minutes**
   with "Preparing TensorRT for …": Fast mode prepares each model once for
-  each frame size. The next jobs at that size start at once. To skip it,
+  each range of frame sizes. The next jobs in that range start at once. To skip it,
   switch off **Fast (fp16/TensorRT)** in Settings › **AI acceleration**.
 - **Intel GPUs**: the models run on the CPU. An OpenVINO build of ONNX
   Runtime can run them on the GPU: set `CHUKCUT_ORT_DYLIB` to its

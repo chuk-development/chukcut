@@ -143,3 +143,44 @@ no sooner, while the preview of the just-opened project waits behind them.
 What would change our minds: a second worker per GPU (0025), or a project
 whose missing frames take long enough that the user wants the clip under the
 playhead first — then order the queue by distance from the playhead.
+
+## Amendment, 2026-10-05 (agent/gaps2): optical flow on remade frames, a removal that follows the camera
+
+**Optical flow on a remade clip.** "Optical flow falls back to that blend
+on a remade clip" is replaced: RIFE makes the clip's in-between frames from
+its remade frames. Their directory key is the flow key with the chain
+appended (`<digest>-rife-<version>+<ops>.<signature>`, no dash, so a plain
+clip's listing never picks them up), at the remade frame's size fitted to
+1920 px. The flow bake (`speed::flow::bake`) first waits for a running
+bake of the same remade frames (`enhance::jobs::busy`), then makes any
+still missing itself, one frame past the clip's range included (the last
+in-between frames are made towards it), then reads remade JPEGs instead of
+decoding. So the edit queue, the open-project preparation and the export
+need no ordering between the two kinds. Cost: the in-between frames are
+made from JPEG q95 frames rather than decoded ones, and a change of the
+mask or the scale re-makes them too.
+
+**Following the camera.** Step 4's "still" now includes a camera that
+moves by a shift: `removal::camera_move` finds the shift between the
+previous and the current frame on a luma pyramid outside both masks
+(within 96 px a frame, refined to a fraction of a pixel by a parabola);
+when the change left after the shift is below `FOLLOWED` (8 code values),
+the memory, its ages and the previous fill are moved by whole pixels (the
+fraction carried to the next frame, so the memory is never resampled) and
+steps 1 and 4 work as in a still shot. Behind a static logo on a pan the
+background slides past, so the memory knows it a logo's width of frames
+later, and what LaMa still invents is mixed with the moved previous fill.
+Measured with `examples/removal_flicker` (1280×720, a 220×90 logo, 120
+frames, LaMa on TensorRT; flicker is the mean change in the hole from one
+frame to the next after the pan is taken out, error the mean difference
+from the footage without the logo, both in code values):
+
+| Pan | Flicker before → after (footage itself) | Error before → after | LaMa runs |
+|---|---|---|---|
+| 3 px a frame | 4.62 → 0.65 (2.54) | 17.9 → 8.3 | 120 → 80 |
+| 8 px a frame | 2.19 → 0.42 (0.00) | 9.7 → 3.5 | 120 → 30 |
+
+A zoom, a rotation or parallax is not a shift and still drops the memory
+(per-frame LaMa, as before); the clean plate stays for still stretches
+only. Removed frames have a new signature (`REMOVAL_REVISION`); enhanced-
+only clips keep theirs.

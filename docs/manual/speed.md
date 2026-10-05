@@ -79,6 +79,8 @@ slowed already) and turns on **Optical flow (AI)**. It is one undo step.
   again on its own.
 - An export bakes the missing frames first. If it cannot, it stops and
   says why.
+- On a clip with Remove object or Enhance quality, the new frames are made
+  from the remade frames, which are made first.
 
 ### Cost
 
@@ -91,8 +93,10 @@ Measured on an RTX 3060 with the CUDA bundle:
 | 1920×1080 | 145 ms | 96 ms | much slower |
 
 Fast mode needs the TensorRT add-on (see
-[Settings](settings.md#ai-acceleration)). Its first job at a new frame size
-prepares the model once, 1 to 3 minutes for RIFE. Hero moment on a 6 s
+[Settings](settings.md#ai-acceleration)). Its first job in a new range of
+frame sizes prepares the model once: about 2 minutes for frames up to
+1280×720, about 4.5 minutes for frames up to 1920×1080 (wide and tall
+frames each have their own). Hero moment on a 6 s
 1080×1920 clip (264 new frames) took 113 s, with that preparation.
 
 A 3 s 720p clip at 0.25x needs 267 new frames: 25 s on the GPU. On the CPU,
