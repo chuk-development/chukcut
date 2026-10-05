@@ -73,3 +73,17 @@ keyframes.
 - The player's provider was rebuilt only when video and image files changed,
   so a title added after start-up drew as missing media. Titles are now part
   of `player::material_key`.
+
+## Amendment, 2026-10-05: the crop takes keyframes
+
+The crop is keyframed, not a parameter preset. A crop that moves ("start
+wide, end on the face") is a hand-placed rectangle at hand-picked instants,
+which is what keyframes are for; nothing here is measured from the clip's
+ends. It reuses the keyframe model whole: four new `AnimatableProperty`
+variants, one per edge, appended last so the canonical track order of every
+existing file stays. The edit commands always key the four edges together,
+so the crop animates as one rectangle, and the easing menu and graph work on
+it unchanged. `Segment::crop_at` samples it; `follow::resolve` folds it into
+the render copy before stabilisation reads it. What would change this: a
+"crop to the subject" preset that follows a track — that is a parameter (the
+track), like follow, and would sit on top of the keyframed crop.

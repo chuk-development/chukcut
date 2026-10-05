@@ -487,7 +487,9 @@ pub fn resolve<'a>(project: &Project, segment: Cow<'a, Segment>, time: Micros) -
         .materials
         .time_map(&segment)
         .clamped_source_time(time);
-    let base = segment.crop.unwrap_or_default();
+    // The crop shown at this instant: a keyframed crop moves the window's
+    // frame with it.
+    let base = segment.crop_at(time).unwrap_or_default();
     let (window, scale, roll) = applied.window(base, source);
     let mut transform = animated_transform(&segment, time);
     transform.scale[0] *= scale;

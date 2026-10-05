@@ -630,6 +630,8 @@ pub fn split_command(
         let composite = replace_segment(project, id, "Arrange", |s| {
             s.transform = transform;
             s.crop = crop;
+            // The cell's crop is the one meant; crop keyframes would hide it.
+            s.keyframes.retain(|t| !t.property.is_crop());
             Ok(())
         })?;
         if let EditCommand::Composite {

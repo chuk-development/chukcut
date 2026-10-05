@@ -97,10 +97,21 @@ pub fn animated_transform(segment: &Segment, time: Micros) -> Transform {
             // Audio. The compositor has no opinion about it; the mixer reads
             // the same track.
             AnimatableProperty::Volume => {}
+            // Not part of the transform: `animated_crop` reads these.
+            AnimatableProperty::CropLeft
+            | AnimatableProperty::CropTop
+            | AnimatableProperty::CropRight
+            | AnimatableProperty::CropBottom => {}
         }
     }
 
     transform
+}
+
+/// The segment's crop at `time` (timeline time), with its crop keyframes
+/// sampled. The static crop when it has none. See [`Segment::crop_at`].
+pub fn animated_crop(segment: &Segment, time: Micros) -> Option<Crop> {
+    segment.crop_at(time)
 }
 
 /// Build the quad for one segment, or `None` when it would draw nothing.
