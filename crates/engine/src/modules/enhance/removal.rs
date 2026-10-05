@@ -175,16 +175,22 @@ impl Plane {
     }
 
     /// The integer shift within `centre ± radius` with the lowest cost.
+    /// The shifts are tried in parallel (the bake runs on a thread of its
+    /// own and holds no lock while it does).
     fn search(&self, now: &Plane, centre: (i32, i32), radius: i32, step: usize) -> (i32, i32, f32) {
+        use rayon::prelude::*;
+        let shifts: Vec<(i32, i32)> = (centre.1 - radius..=centre.1 + radius)
+            .flat_map(|dy| (centre.0 - radius..=centre.0 + radius).map(move |dx| (dx, dy)))
+            .collect();
+        let costs: Vec<f32> = shifts
+            .par_iter()
+            .map(|&(dx, dy)| self.cost(now, dx, dy, step))
+            .collect();
         let mut best = (centre.0, centre.1, f32::MAX);
-        for dy in centre.1 - radius..=centre.1 + radius {
-            for dx in centre.0 - radius..=centre.0 + radius {
-                let c = self.cost(now, dx, dy, step);
-                // Ties go to the smaller move.
-                if c < best.2 || (c == best.2 && dx.abs() + dy.abs() < best.0.abs() + best.1.abs())
-                {
-                    best = (dx, dy, c);
-                }
+        for (&(dx, dy), &c) in shifts.iter().zip(&costs) {
+            // Ties go to the smaller move.
+            if c < best.2 || (c == best.2 && dx.abs() + dy.abs() < best.0.abs() + best.1.abs()) {
+                best = (dx, dy, c);
             }
         }
         best
@@ -235,8 +241,8 @@ pub fn camera_move(
     let mut cost = f32::MAX;
     for (level, (b, n)) in pyramid.iter().enumerate().rev() {
         let coarsest = level as i32 == levels - 1;
-        // Every pixel at the small levels, every second at full size.
-        let step = if level == 0 { 2 } else { 1 };
+        // Every pixel at the small levels, every third at full size.
+        let step = if level == 0 { 3 } else { 1 };
         let found = if coarsest {
             b.search(n, (0, 0), radius, step)
         } else {

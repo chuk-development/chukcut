@@ -164,10 +164,12 @@ fn main() {
         .collect();
     if std::env::args().any(|a| a == "--moves") {
         for (k, pair) in input.windows(2).enumerate() {
+            let started = std::time::Instant::now();
             let m = chukcut_engine::modules::enhance::removal::camera_move(
                 W, H, &pair[0], &mask, &pair[1], &mask,
             );
-            println!("{k}: {m:?}");
+            let ms = started.elapsed().as_secs_f64() * 1000.0;
+            println!("{k}: {m:?} in {ms:.1} ms");
         }
         return;
     }
