@@ -5,7 +5,7 @@
 #
 #   scripts/loop-test.sh target/debug/deps/export-<hash> 40 _scratch/loop.txt
 set -u
-bin=$1; n=$2; out=$3
+bin=$(realpath "$1"); n=$2; out=$(realpath "$3")
 : > "$out"
 for i in $(seq 1 "$n"); do
   (cd crates/engine && timeout 300 "$bin") > "$out.last" 2>&1
