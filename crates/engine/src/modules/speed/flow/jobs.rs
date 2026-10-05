@@ -66,11 +66,22 @@ pub fn job_at(
     if !super::is_on(&project.materials, segment) {
         return Err("the clip does not have optical flow on".into());
     }
+    // A remade clip flows between its remade frames (`flow/mod.rs`): every
+    // one of its range, and the one after it, which the last in-between
+    // frames are made towards.
+    let remade = crate::modules::enhance::Chain::of(&project.materials, segment)
+        .map(|_| crate::modules::enhance::jobs::job_for(project, segment))
+        .transpose()?
+        .map(|mut job| {
+            job.range.1 = (job.range.1 + job.period()).min((video.duration - 1).max(job.range.0));
+            job
+        });
     Ok(FlowJob {
         path: video.path.clone(),
         fps: video.fps,
         source_size: (video.width, video.height),
         samples: super::samples_at(&project.materials, segment, times),
+        remade,
     })
 }
 

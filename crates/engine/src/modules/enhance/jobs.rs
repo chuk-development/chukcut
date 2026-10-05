@@ -161,6 +161,15 @@ pub(crate) fn start(job: EnhanceJob, segment_id: String) -> Result<Option<u64>, 
     Ok(Some(id))
 }
 
+/// Whether a bake of `key`'s frames (`EnhanceJob::key`) is running: an
+/// optical-flow bake of a remade clip waits for it rather than making the
+/// same frames twice.
+pub fn busy(key: &str) -> bool {
+    jobs().lock().values().any(|j| {
+        j.key == key && j.status.lock().finished.is_none() && !j.cancel.load(Ordering::Relaxed)
+    })
+}
+
 pub fn status(job: u64) -> Option<EnhanceStatus> {
     jobs().lock().get(&job).map(|j| j.status.lock().clone())
 }

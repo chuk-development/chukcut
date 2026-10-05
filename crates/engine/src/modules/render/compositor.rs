@@ -1924,18 +1924,16 @@ impl Compositor {
                 .flatten();
             // Optical flow draws the frame RIFE made for this instant, once
             // it is baked; until then the clip takes the frame blend above.
-            // RIFE's frames are made from the decoded ones, so a clip whose
-            // frames are remade (an object removed) blends its remade
-            // frames instead.
+            // A clip whose frames are remade (an object removed) has its
+            // own in-between frames, made from the remade ones.
             let flowed = blend
                 .filter(|_| crate::modules::speed::flow::is_on(&project.materials, segment))
-                .filter(|_| {
-                    crate::modules::enhance::Chain::of(&project.materials, segment).is_none()
-                })
                 .and_then(|b| crate::modules::speed::flow::FlowSample::of(&b))
                 .and_then(|sample| {
                     let video = project.materials.video(&segment.material_id)?;
-                    self.flows.get(&self.ctx, &video.path, sample)
+                    let remade = crate::modules::enhance::Chain::of(&project.materials, segment);
+                    self.flows
+                        .get(&self.ctx, &video.path, remade.as_ref(), sample)
                 });
             let quad = self.quad(
                 canvas,

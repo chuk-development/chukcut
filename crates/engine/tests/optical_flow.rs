@@ -126,7 +126,7 @@ fn at(n: i64) -> Micros {
 /// Remove every directory of `path`'s frames, then fill one with solid red
 /// frames for `samples`.
 fn fake_bake(path: &std::path::Path, samples: impl IntoIterator<Item = FlowSample>) -> PathBuf {
-    let key = flow::key_for(path).unwrap();
+    let key = flow::key_for(path, None).unwrap();
     for dir in flow::dirs_of(&key) {
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -298,7 +298,7 @@ fn rife_puts_the_square_half_way_where_the_blend_shows_two() {
         eprintln!("skipping: ffmpeg could not generate the fixture");
         return;
     };
-    let key = flow::key_for(&path).unwrap();
+    let key = flow::key_for(&path, None).unwrap();
     for dir in flow::dirs_of(&key) {
         let _ = std::fs::remove_dir_all(&dir);
     }

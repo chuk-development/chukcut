@@ -30,6 +30,15 @@
 //!   on the long side; a 4K clip's in-between frames are made at 1080p and
 //!   drawn scaled, which RIFE's own authors recommend for 4K anyway.
 //!
+//! - **Remade clips.** A clip whose frames are remade ("Remove object",
+//!   "Enhance quality", `modules::enhance`) flows between its *remade*
+//!   frames: RIFE made from the decoded ones would bring the removed object
+//!   back between them. Their directory's key carries the remade chain's
+//!   operations and signature (`<digest>-rife-<version>+<ops>.<signature>`),
+//!   so a change to the mask or the scale is a different set of in-between
+//!   frames, and their long side is the remade frame's, at most
+//!   [`MAX_LONG_SIDE`]. The bake makes the remade frames it needs first.
+//!
 //! Baking ([`bake`]) decodes each pair once and asks for all of its phases
 //! in one request. Frames count towards the cache limit and are deleted with
 //! the cache; the open project's are kept by a trim (`workspace::trim`).
@@ -45,6 +54,7 @@ use crate::modules::project::MaterialPool;
 use crate::modules::proxy::cache::SourceKey;
 
 use super::blend::{self, BlendSample, FrameBlend};
+use crate::modules::enhance::Chain;
 
 /// Phases are rounded to this many steps between two source frames.
 pub const STEPS: u32 = 64;
@@ -101,11 +111,19 @@ pub fn root() -> PathBuf {
 /// The part of a directory name that says what made the frames, without
 /// the provider and the size: `<digest>-<model>-<version>`. Reads the media
 /// file's head and tail; callers keep the answer.
-pub fn key_for(media: &Path) -> Result<String, String> {
+///
+/// `remade` is the clip's remade-frame chain when it has one: the frames are
+/// then made between remade frames and keyed by the chain too
+/// (`+<ops>.<signature>`, with no `-`, so a plain key never lists a remade
+/// clip's directories as its own).
+pub fn key_for(media: &Path, remade: Option<&Chain>) -> Result<String, String> {
     let key = SourceKey::of(media).map_err(|e| format!("cannot read {}: {e}", media.display()))?;
     let model = crate::modules::ml::interpolate::MODEL;
     let version = crate::modules::ml::interpolate::model_version();
-    Ok(format!("{}-{model}-{version}", key.digest()))
+    let chained = remade.map_or_else(String::new, |chain| {
+        format!("+{}.{}", chain.ops(), chain.signature())
+    });
+    Ok(format!("{}-{model}-{version}{chained}", key.digest()))
 }
 
 /// The prefix of every flow directory of `media`: what a trim protects for
@@ -117,6 +135,17 @@ pub fn media_prefix(media: &Path) -> Result<String, String> {
 /// The long side frames of a `width × height` source are made at.
 pub fn long_side(width: u32, height: u32) -> u32 {
     width.max(height).clamp(16, MAX_LONG_SIDE)
+}
+
+/// The size in-between frames of a `width × height` source are made at,
+/// between the frames `remade` makes when it is given: the source's (or
+/// the remade frame's) own size, at most [`MAX_LONG_SIDE`] on the long side.
+pub fn frame_size(width: u32, height: u32, remade: Option<&Chain>) -> (u32, u32) {
+    let (w, h) = match remade {
+        Some(chain) => chain.out_size(width, height),
+        None => (width, height),
+    };
+    crate::modules::enhance::fit(w.max(1), h.max(1), MAX_LONG_SIDE)
 }
 
 /// The directory `provider` bakes `key`'s frames into, at `long` pixels.

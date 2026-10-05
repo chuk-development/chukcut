@@ -21,6 +21,7 @@ use parking_lot::Mutex;
 
 use super::source::SourceFrame;
 use super::RenderContext;
+use crate::modules::enhance::Chain;
 use crate::modules::speed::flow::{self, FlowSample};
 
 /// How long a directory listing is trusted when a frame is not in it: a
@@ -41,17 +42,25 @@ struct Listing {
 /// Lookups and uploads, shared by every render of one compositor.
 #[derive(Default)]
 pub struct FlowFrames {
-    /// By media path.
-    listings: Mutex<HashMap<String, Listing>>,
+    /// By media path and the remade chain's signature (empty for a clip
+    /// whose frames are not remade).
+    listings: Mutex<HashMap<(String, String), Listing>>,
     uploaded: Mutex<Vec<((PathBuf, FlowSample), SourceFrame)>>,
 }
 
 impl FlowFrames {
     /// The baked frame of `media` for `sample`, or one a step either side
     /// (a render at a time a few microseconds off the bake's grid rounds
-    /// the other way), or `None` when none is baked.
-    pub fn get(&self, ctx: &RenderContext, media: &str, sample: FlowSample) -> Option<SourceFrame> {
-        let (dir, sample) = self.locate(media, sample)?;
+    /// the other way), or `None` when none is baked. `remade` is the clip's
+    /// remade-frame chain, whose in-between frames are their own.
+    pub fn get(
+        &self,
+        ctx: &RenderContext,
+        media: &str,
+        remade: Option<&Chain>,
+        sample: FlowSample,
+    ) -> Option<SourceFrame> {
+        let (dir, sample) = self.locate(media, remade, sample)?;
         let key = (dir, sample);
         if let Some((_, hit)) = self.uploaded.lock().iter().find(|(k, _)| *k == key) {
             return Some(hit.clone());
@@ -72,7 +81,12 @@ impl FlowFrames {
         Some(frame)
     }
 
-    fn locate(&self, media: &str, sample: FlowSample) -> Option<(PathBuf, FlowSample)> {
+    fn locate(
+        &self,
+        media: &str,
+        remade: Option<&Chain>,
+        sample: FlowSample,
+    ) -> Option<(PathBuf, FlowSample)> {
         let find = |listing: &Listing| -> Option<(PathBuf, FlowSample)> {
             let dir = listing.dir.clone()?;
             [0i64, -1, 1].into_iter().find_map(|d| {
@@ -88,16 +102,19 @@ impl FlowFrames {
             })
         };
         let mut listings = self.listings.lock();
-        let listing = listings.entry(media.to_string()).or_insert_with(|| {
-            let key = flow::key_for(media.as_ref()).ok();
-            let best = key.as_deref().and_then(flow::best);
-            Listing {
-                key,
-                dir: best.as_ref().map(|(dir, _)| dir.clone()),
-                frames: best.map(|(_, frames)| frames).unwrap_or_default(),
-                listed: Instant::now(),
-            }
-        });
+        let signature = remade.map(Chain::signature).unwrap_or_default();
+        let listing = listings
+            .entry((media.to_string(), signature))
+            .or_insert_with(|| {
+                let key = flow::key_for(media.as_ref(), remade).ok();
+                let best = key.as_deref().and_then(flow::best);
+                Listing {
+                    key,
+                    dir: best.as_ref().map(|(dir, _)| dir.clone()),
+                    frames: best.map(|(_, frames)| frames).unwrap_or_default(),
+                    listed: Instant::now(),
+                }
+            });
         if let Some(hit) = find(listing) {
             return Some(hit);
         }
