@@ -635,7 +635,13 @@ impl VideoDecoder {
             ffmpeg::color::TransferCharacteristic::SMPTE2084
                 | ffmpeg::color::TransferCharacteristic::ARIB_STD_B67
         ) || primaries == ffmpeg::color::Primaries::BT2020;
-        Ok(is_yuv(format) && (light || depth_of(format) > 8))
+        // A deep SDR source goes planar only when it is 4:2:0 already: the
+        // planes are 4:2:0, and halving a 4:2:2 or 4:4:4 source's chroma to
+        // gain two bits of depth costs more than it buys (sharp colour edges
+        // measured 29 dB against ffmpeg's decode). An HDR source goes planar
+        // whatever its chroma, because only the shader can tone-map it at
+        // playback speed.
+        Ok(is_yuv(format) && (light || (depth_of(format) > 8 && is_420(format))))
     }
 
     /// The frame visible at `micros`, converted to NV12 — or to P010 when
@@ -1320,6 +1326,13 @@ fn is_yuv(format: ffmpeg::format::Pixel) -> bool {
         let flags = unsafe { (*descriptor.as_ptr()).flags };
         descriptor.nb_components() >= 3 && flags & ffmpeg::ffi::AV_PIX_FMT_FLAG_RGB as u64 == 0
     })
+}
+
+/// Whether `format`'s chroma is half size in both directions.
+fn is_420(format: ffmpeg::format::Pixel) -> bool {
+    format
+        .descriptor()
+        .is_some_and(|d| d.log2_chroma_w() == 1 && d.log2_chroma_h() == 1)
 }
 
 /// Bits per luma sample of `format`; 8 when libavutil does not know it.

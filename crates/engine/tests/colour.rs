@@ -1131,3 +1131,192 @@ fn sixteen_bit_planes_render_like_the_eight_bit_ones_they_widen() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Deep sources of awkward shapes
+// ---------------------------------------------------------------------------
+
+/// A 10-bit source made by ffmpeg from `testsrc` (RGB, so odd sizes stay
+/// odd), tagged BT.709.
+fn deep_clip(name: &str, size: &str, codec_args: &[&str]) -> Option<PathBuf> {
+    if !has_tool("ffmpeg") {
+        return None;
+    }
+    let path = scratch(name);
+    if path.exists() {
+        return Some(path);
+    }
+    let source = format!("testsrc=size={size}:rate=30:duration=0.4");
+    let mut args = vec!["-f", "lavfi", "-i", source.as_str()];
+    args.extend_from_slice(codec_args);
+    args.extend_from_slice(&[
+        "-color_primaries",
+        "bt709",
+        "-color_trc",
+        "bt709",
+        "-colorspace",
+        "bt709",
+        "-color_range",
+        "tv",
+        path.to_str().expect("utf-8 path"),
+    ]);
+    ffmpeg_with_input(&args, &[]).expect("make the deep clip");
+    Some(path)
+}
+
+/// The same file with a 90° display rotation in its container: what a phone
+/// held upright writes. Remuxed, because an encode does not take the flag.
+fn rotated(clip: Option<PathBuf>) -> Option<PathBuf> {
+    let clip = clip?;
+    let path = clip.with_file_name(
+        clip.file_name()
+            .expect("a file name")
+            .to_string_lossy()
+            .replace("_plain", ""),
+    );
+    if !path.exists() {
+        ffmpeg_with_input(
+            &[
+                "-display_rotation",
+                "90",
+                "-i",
+                clip.to_str().expect("utf-8 path"),
+                "-c",
+                "copy",
+                path.to_str().expect("utf-8 path"),
+            ],
+            &[],
+        )
+        .expect("remux with a rotation");
+    }
+    Some(path)
+}
+
+/// 10-bit 4:2:0 sources now reach the compositor as P010 planes; 4:2:2 and
+/// 4:4:4 ones stay on the RGBA path so their chroma is not halved. Odd sizes,
+/// every chroma layout and a rotation flag must each render as ffmpeg decodes
+/// the file.
+#[test]
+fn deep_sources_of_awkward_shapes_render_as_ffmpeg_decodes_them() {
+    let ctx = require_gpu!();
+    let cases: Vec<(&str, Option<PathBuf>, u32, u32)> = vec![
+        (
+            "odd 1001x777 4:4:4 FFV1",
+            deep_clip(
+                "odd444.mkv",
+                "1001x777",
+                &["-c:v", "ffv1", "-pix_fmt", "yuv444p10le"],
+            ),
+            1001,
+            777,
+        ),
+        (
+            "4:2:2 ProRes",
+            deep_clip(
+                "prores.mov",
+                "640x360",
+                &[
+                    "-c:v",
+                    "prores_ks",
+                    "-profile:v",
+                    "3",
+                    "-pix_fmt",
+                    "yuv422p10le",
+                ],
+            ),
+            640,
+            360,
+        ),
+        (
+            "4:2:0 FFV1",
+            deep_clip(
+                "420.mkv",
+                "640x360",
+                &["-c:v", "ffv1", "-pix_fmt", "yuv420p10le"],
+            ),
+            640,
+            360,
+        ),
+        (
+            "8-bit 4:2:0 FFV1, the RGBA path, for comparison",
+            deep_clip(
+                "420_8bit.mkv",
+                "640x360",
+                &["-c:v", "ffv1", "-pix_fmt", "yuv420p"],
+            ),
+            640,
+            360,
+        ),
+        (
+            "rotated H.264 8-bit, the RGBA path",
+            rotated(deep_clip(
+                "rotated8_plain.mp4",
+                "640x360",
+                &["-c:v", "libx264", "-qp", "0", "-pix_fmt", "yuv420p"],
+            )),
+            360,
+            640,
+        ),
+        (
+            "rotated H.264 High 10",
+            rotated(deep_clip(
+                "rotated_plain.mp4",
+                "640x360",
+                &["-c:v", "libx264", "-qp", "0", "-pix_fmt", "yuv420p10le"],
+            )),
+            360,
+            640,
+        ),
+    ];
+    let compositor = Compositor::new(ctx);
+    for (label, clip, width, height) in cases {
+        let Some(clip) = clip else {
+            eprintln!("skipping: ffmpeg is not on PATH");
+            return;
+        };
+        let project = project_of(&clip, width, height);
+        let sources =
+            MediaSourceProvider::from_project_with(&project, Some(Acceleration::Software));
+        let frame = compositor
+            .render(&project, 0, (width, height), &sources)
+            .expect("render the deep clip");
+        // ffmpeg applies the rotation flag itself (autorotate).
+        let reference = decode_ffmpeg(&clip, width, height);
+        let mut sum = 0.0f64;
+        let mut squares = 0.0f64;
+        let mut n = 0.0f64;
+        for (a, b) in frame
+            .data
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(reference.as_chunks::<4>().0)
+        {
+            for c in 0..3 {
+                let d = a[c] as f64 - b[c] as f64;
+                sum += d.abs();
+                squares += d * d;
+                n += 1.0;
+            }
+        }
+        let mean = sum / n;
+        let psnr = 10.0 * (255.0f64 * 255.0 / (squares / n).max(1e-9)).log10();
+        eprintln!("{label}: mean difference {mean:.2}, {psnr:.1} dB");
+        // The 4:2:0 deep sources are drawn from planes, and the shader's
+        // bilinear chroma differs from swscale's at hard colour edges —
+        // testsrc is nothing but hard colour edges. That is the same
+        // difference NVDEC and VAAPI frames have always had (about 1.3 mean
+        // on real footage, `STATUS.md` "Hardware decode through the
+        // compositor"). Everything else is the RGBA path, which is swscale's
+        // own conversion and agrees exactly.
+        let planar = label.contains("High 10") || label == "4:2:0 FFV1";
+        if planar {
+            assert!(
+                mean < 1.5 && psnr > 30.0,
+                "{label}: {mean:.2} mean, {psnr:.1} dB"
+            );
+        } else {
+            assert!(psnr > 60.0, "{label}: {mean:.2} mean, {psnr:.1} dB");
+        }
+    }
+}

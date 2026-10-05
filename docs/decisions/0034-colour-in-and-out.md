@@ -37,12 +37,17 @@ Date: 2026-10-05. Status: accepted (colour-io agent).
 - **The decoder reads transfer and primaries** from the frame, then the codec
   context; an untagged file is SDR (no guess from the size, unlike the
   matrix, because calling footage HDR on a hunch tone-maps it).
-- **HDR, wide-gamut and deeper-than-8-bit YUV sources reach the compositor
-  as planes**, on every decode path: VAAPI (P010 surfaces import as
-  `R16Unorm`/`Rg16Unorm`), NVDEC (the P010 download is uploaded as it is) and
-  software (`VideoDecoder::wants_planar` → swscale to P010 or NV12 at the
+- **HDR, wide-gamut and deeper-than-8-bit 4:2:0 YUV sources reach the
+  compositor as planes**, on every decode path: VAAPI (P010 surfaces import
+  as `R16Unorm`/`Rg16Unorm`), NVDEC (the P010 download is uploaded as it is)
+  and software (`VideoDecoder::wants_planar` → swscale to P010 or NV12 at the
   scaled size, matrix and range left alone). 8-bit SDR sources keep the RGBA
-  path they always had.
+  path they always had, and so do deep SDR sources in 4:2:2 or 4:4:4
+  (ProRes, FFV1): the planes are 4:2:0, and halving their chroma for two bits
+  of depth measured 29 dB against ffmpeg's decode on hard colour edges. An
+  HDR source goes planar whatever its chroma, because only the shader can
+  tone-map at playback speed; a 4:2:2 HDR source (iPhone ProRes HLG) loses
+  half its horizontal chroma resolution.
 - **16-bit planes when the device has them.** `TEXTURE_FORMAT_16BIT_NORM` is
   requested, never required. Without it the planes are cut to their top byte
   (`Nv12Planes::to_eight_bit`) and the shader still tone-maps them.
@@ -94,6 +99,11 @@ Date: 2026-10-05. Status: accepted (colour-io agent).
   `seek_and_decode`'s RGBA path, where swscale flattens a PQ signal into
   sRGB-tagged bytes: thumbnails of HDR clips look grey, and a proxy of an HDR
   clip is a grey SDR file.
+- **The planar path's chroma is the shader's.** Bilinear, centred, like the
+  NVDEC and VAAPI frames have always been: against ffmpeg's decode of
+  `testsrc` (nothing but hard colour edges) a 10-bit 4:2:0 source measures
+  32.5 dB and 1.17 mean, where the RGBA path is exact. On real footage the
+  hardware path measured 1.28 mean.
 - **10-bit export carries 8-bit pictures.** The render target is 8-bit sRGB;
   10-bit output removes the YUV rounding and gives the encoder finer steps,
   not more precision than the composite has.

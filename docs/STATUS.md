@@ -136,8 +136,9 @@ YUV rounding, not the composite's banding. Refused in prose for H.264, VP9,
 GIF. No HDR export (decision 0034).
 
 **HDR and 10-bit sources.** The decoder reads transfer and primaries
-(`frame_light`). PQ, HLG, BT.2020 and deep YUV sources reach the compositor as
-planes on every path: software through `VideoDecoder::wants_planar` and
+(`frame_light`). PQ, HLG and BT.2020 sources, and deep YUV sources that are
+4:2:0, reach the compositor as planes on every path (deep 4:2:2 and 4:4:4 SDR
+stay on the RGBA path, so their chroma is not halved): software through `VideoDecoder::wants_planar` and
 `seek_and_convert_planar` (swscale to P010, or NV12 without 16-bit textures),
 NVDEC's P010 download as it is, VAAPI P010 layers (`R16 `/`GR32`) imported as
 `R16Unorm`/`Rg16Unorm`. `TEXTURE_FORMAT_16BIT_NORM` is requested in
@@ -158,7 +159,11 @@ come back **exactly** as the SDR values they were made from; SDR white lands at
 229 (0.79 linear), the 1000-nit peak at 255. Preview against export of an HLG
 clip: within 2. The decoder's RGBA (CPU twin) against the shader: within 1
 (swscale's YUV→RGB48 runs about one code value dark). 16-bit planes render
-like the 8-bit ones they widen, to the code value.
+like the 8-bit ones they widen, to the code value. Awkward deep sources
+against ffmpeg's decode of `testsrc`: odd 1001x777 4:4:4, ProRes 4:2:2 and a
+rotated 8-bit clip exact (RGBA path); 10-bit 4:2:0 32.5 dB and a rotated High
+10 clip 34.3 dB (planar path, bilinear chroma on hard edges, the same
+difference NVDEC frames have).
 
 **Open:** the source peak is fixed at 1000 nits (mastering metadata and MaxCLL
 are not read); VAAPI P010 import is untested (no VAAPI device here);
