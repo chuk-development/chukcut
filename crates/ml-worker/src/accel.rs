@@ -29,6 +29,17 @@
 //! ([`EngineBuild`]), which `ml status` and the settings page show. A new
 //! driver or GPU gets a new directory and builds again; nothing stale is
 //! ever loaded.
+//!
+//! **Profiles.** An engine is built for a range of input shapes, its
+//! optimisation profile (min, opt, max). A model whose inputs vary with the
+//! footage (RIFE: the frame; Real-ESRGAN: the tile) has a few fixed ranges
+//! ([`profile_for`]), so a project with clips of many sizes builds one
+//! engine per range instead of one per size; the directory is named by the
+//! range ([`profile_key`]), never by the size that happened to come first.
+//! A shape outside every range, and a model with fixed inputs (LaMa,
+//! BiRefNet), gets an exact profile (min = opt = max), named by its shapes
+//! as before. `CHUKCUT_TRT_PROFILES=exact` builds exact profiles for every
+//! shape (the measurement baseline).
 
 use std::path::{Path, PathBuf};
 
@@ -134,6 +145,178 @@ pub fn tuning(id: &str) -> Tuning {
 pub fn profile_entry(name: &str, shape: &[i64]) -> String {
     let dims: Vec<String> = shape.iter().map(i64::to_string).collect();
     format!("{name}:{}", dims.join("x"))
+}
+
+/// One input's TensorRT optimisation profile: the smallest, the tuned-for
+/// and the largest shape an engine accepts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputProfile {
+    pub name: String,
+    pub min: Vec<i64>,
+    pub opt: Vec<i64>,
+    pub max: Vec<i64>,
+}
+
+impl InputProfile {
+    fn exact(name: &str, shape: &[i64]) -> Self {
+        Self {
+            name: name.to_string(),
+            min: shape.to_vec(),
+            opt: shape.to_vec(),
+            max: shape.to_vec(),
+        }
+    }
+
+    pub fn is_exact(&self) -> bool {
+        self.min == self.max
+    }
+
+    /// Whether `shape` lies inside the profile.
+    pub fn covers(&self, shape: &[i64]) -> bool {
+        shape.len() == self.min.len()
+            && shape
+                .iter()
+                .zip(self.min.iter().zip(&self.max))
+                .all(|(v, (lo, hi))| lo <= v && v <= hi)
+    }
+}
+
+/// A range of `[1, channels, height, width]` an engine is built for.
+struct Range {
+    input: &'static str,
+    channels: i64,
+    /// The smallest side accepted.
+    min: i64,
+    /// `(height, width)` tuned for and at most.
+    opt: (i64, i64),
+    max: (i64, i64),
+}
+
+/// The ranges of the models whose input sizes follow the footage, in the
+/// order they are tried (smallest first, so a small input gets the engine
+/// that is quicker to build). Measured on an RTX 3060 (`docs/STATUS.md`,
+/// "Gaps closed"); a change here is a change to a measured claim.
+fn ranges(id: &str) -> &'static [Range] {
+    match id {
+        // RIFE gets a frame of the clip, at most 1920 on its long side. The
+        // graph pads to a multiple of 32 and crops back, so any size runs.
+        // Two sizes of range per orientation. Inside a range a frame costs
+        // what it costs on an engine built for exactly its size (within the
+        // measurement's noise, ±3 %), but a range takes longer to build the
+        // larger it is: 2 min for the 720p range, 4.5 min for the 1080p one
+        // (an exact 1080p engine: 1.5–2.5 min). A project of small clips
+        // only pays for the small range.
+        "rife" => &[
+            Range {
+                input: "input",
+                channels: 6,
+                min: 32,
+                opt: (720, 1280),
+                max: (736, 1280),
+            },
+            Range {
+                input: "input",
+                channels: 6,
+                min: 32,
+                opt: (1280, 720),
+                max: (1280, 736),
+            },
+            Range {
+                input: "input",
+                channels: 6,
+                min: 32,
+                opt: (1080, 1920),
+                max: (1088, 1920),
+            },
+            Range {
+                input: "input",
+                channels: 6,
+                min: 32,
+                opt: (1920, 1080),
+                max: (1920, 1088),
+            },
+        ],
+        // Real-ESRGAN gets tiles of at most `esrgan::TILE` + 2 × `PAD`
+        // (800) on a side, or the whole frame when it is smaller: one range.
+        "realesr-general-x4v3" => &[Range {
+            input: "input",
+            channels: 3,
+            min: 16,
+            opt: (576, 672),
+            max: (800, 800),
+        }],
+        _ => &[],
+    }
+}
+
+/// Whether engines are built for exact shapes only
+/// (`CHUKCUT_TRT_PROFILES=exact`).
+fn exact_only() -> bool {
+    std::env::var("CHUKCUT_TRT_PROFILES").is_ok_and(|v| v == "exact")
+}
+
+/// The profile model `id`'s engine for inputs `shapes` (every input with
+/// dimensions, by name) is built with: the model's range that covers the
+/// shapes, or exactly the shapes.
+pub fn profile_for(id: &str, shapes: &[(&str, Vec<i64>)]) -> Vec<InputProfile> {
+    let exact = || {
+        shapes
+            .iter()
+            .filter(|(_, s)| !s.is_empty())
+            .map(|(name, s)| InputProfile::exact(name, s))
+            .collect()
+    };
+    if exact_only() {
+        return exact();
+    }
+    let [(name, shape)] = shapes else {
+        return exact();
+    };
+    let range = ranges(id).iter().find(|r| {
+        *name == r.input
+            && matches!(shape.as_slice(), &[1, c, h, w]
+                if c == r.channels && h >= r.min && w >= r.min && h <= r.max.0 && w <= r.max.1)
+    });
+    match range {
+        Some(r) => vec![InputProfile {
+            name: r.input.to_string(),
+            min: vec![1, r.channels, r.min, r.min],
+            opt: vec![1, r.channels, r.opt.0, r.opt.1],
+            max: vec![1, r.channels, r.max.0, r.max.1],
+        }],
+        None => exact(),
+    }
+}
+
+/// The directory name of an engine built with `profiles`: the shapes, as
+/// [`shape_key`] writes them, for an exact profile (so engines built before
+/// profiles had ranges are still found), else
+/// `input-1x6x32x32-to-1x6x1088x1920-at-1x6x1080x1920`.
+pub fn profile_key(profiles: &[InputProfile]) -> String {
+    let dims = |shape: &[i64]| {
+        shape
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join("x")
+    };
+    profiles
+        .iter()
+        .map(|p| {
+            if p.is_exact() {
+                format!("{}-{}", slug(&p.name), dims(&p.min))
+            } else {
+                format!(
+                    "{}-{}-to-{}-at-{}",
+                    slug(&p.name),
+                    dims(&p.min),
+                    dims(&p.max),
+                    dims(&p.opt)
+                )
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("_")
 }
 
 /// A directory name for a set of input shapes: `input-1x6x360x640`.
@@ -306,6 +489,49 @@ mod tests {
             dir
         );
         assert_eq!(profile_entry("mask", &[1, 1, 512, 512]), "mask:1x1x512x512");
+    }
+
+    #[test]
+    fn sizes_inside_a_range_share_one_engine_and_the_rest_get_their_own() {
+        let rife =
+            |h: i64, w: i64| profile_key(&profile_for("rife", &[("input", vec![1, 6, h, w])]));
+        // Every landscape frame up to 1080p shares an engine; 720p and
+        // smaller have their own, tuned for them.
+        assert_eq!(rife(1080, 1920), rife(800, 1920));
+        assert_eq!(rife(1080, 1920), rife(1080, 1440));
+        assert_eq!(rife(720, 1280), rife(360, 640));
+        assert_ne!(rife(720, 1280), rife(1080, 1920));
+        assert_eq!(
+            rife(1080, 1920),
+            "input-1x6x32x32-to-1x6x1088x1920-at-1x6x1080x1920"
+        );
+        // Portrait frames have their own ranges.
+        assert_eq!(rife(1920, 1080), rife(1350, 1080));
+        assert_ne!(rife(1920, 1080), rife(1080, 1920));
+        // Outside every range: exactly its shape, named as before.
+        assert_eq!(rife(1920, 1920), "input-1x6x1920x1920");
+        let p = &profile_for("rife", &[("input", vec![1, 6, 540, 960])])[0];
+        assert!(p.covers(&[1, 6, 540, 960]) && !p.covers(&[1, 6, 1080, 1920]));
+
+        // Real-ESRGAN: every tile of every frame in one engine.
+        let esr = |h: i64, w: i64| {
+            profile_key(&profile_for(
+                "realesr-general-x4v3",
+                &[("input", vec![1, 3, h, w])],
+            ))
+        };
+        assert_eq!(esr(572, 672), esr(180, 320));
+        assert_eq!(esr(800, 800), esr(720, 672));
+        // Fixed inputs keep their exact engines (and their old directories).
+        let lama = profile_for(
+            "lama",
+            &[
+                ("image", vec![1, 3, 512, 512]),
+                ("mask", vec![1, 1, 512, 512]),
+            ],
+        );
+        assert!(lama.iter().all(InputProfile::is_exact));
+        assert_eq!(profile_key(&lama), "image-1x3x512x512_mask-1x1x512x512");
     }
 
     #[test]
