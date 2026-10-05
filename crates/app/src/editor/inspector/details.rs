@@ -146,7 +146,7 @@ impl Editor {
             .child(row("Colour space", "Rec.709 SDR".into()))
             .child(row(
                 "Imported media",
-                format!("Kept in place ({imported} files)"),
+                format!("Kept in place ({})", files_label(imported)),
             ))
             .child(row(
                 "Proxy",
@@ -420,4 +420,25 @@ fn preset_chip(
         .hover(|style| style.bg(rgb(OVERLAY)).text_color(rgb(TEXT)))
         .on_click(on_click)
         .child(label.into())
+}
+
+/// "1 file", "3 files": the Details row said "(1 files)".
+fn files_label(count: usize) -> String {
+    if count == 1 {
+        "1 file".into()
+    } else {
+        format!("{count} files")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::files_label;
+
+    #[test]
+    fn one_file_is_singular() {
+        assert_eq!(files_label(0), "0 files");
+        assert_eq!(files_label(1), "1 file");
+        assert_eq!(files_label(3), "3 files");
+    }
 }
