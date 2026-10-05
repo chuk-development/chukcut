@@ -431,9 +431,14 @@ Not built, in rough order of what it is worth:
    strip. It becomes worth doing only via a VPP downscale, which is route B
    above and is a separate piece of work.
 3. **10-bit and HDR.** Every measurement here is 8-bit 4:2:0. A `P010` surface
-   exports as `R16`/`GR32` layers and the import needs `R16Unorm`/`Rg16Unorm`;
-   `dmabuf.rs::plane_size` already handles the sizing, the format table does
-   not.
+   exports as `R16`/`GR32` layers; since 2026-10-05 the import table maps them
+   to `R16Unorm`/`Rg16Unorm` when the device has `TEXTURE_FORMAT_16BIT_NORM`
+   (decision 0034), and NVDEC's P010 download is uploaded as those formats too.
+   The NVDEC half is measured (`tests/colour.rs`: PQ and HLG fixtures within
+   0.46 code values of the reference tone map); the VAAPI half is not, for want
+   of a VAAPI device on the machine it was written on. Whether iHD exports
+   P010 with `SEPARATE_LAYERS` as two layers (as it does NV12) is the first
+   thing to check on Intel.
 
 ## Unverified, stated as unknown
 

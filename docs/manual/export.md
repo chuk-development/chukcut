@@ -42,7 +42,12 @@ The left side shows the cover: the frame at the playhead.
   (NVIDIA NVENC)" or "Software · libx264". You cannot choose it here.
   chukcut uses a GPU encoder when one passed its test encode. Settings ›
   **Hardware** shows why an encoder was refused.
-- **Colour space**.
+- **Bit depth** (HEVC and AV1 only): **8-bit** or **10-bit**. 10-bit gives
+  smoother gradients in skies and dark scenes. Some old phones and TVs cannot
+  play 10-bit HEVC.
+- **Colour space** shows what the file gets: "Rec. 709 SDR" for 720p and
+  larger, "Rec. 601 SDR" for 480p. The file is tagged with it, so every player
+  shows the colours you saw in the player here.
 
 ### GIF
 
@@ -94,6 +99,23 @@ you **Clear finished**. The queue file is
   credits file next to the video.
 - Captions: see [Text and captions](text-and-captions.md#import-and-export)
   to burn them in or to write an `.srt` next to the video.
+
+## Colour
+
+chukcut writes standard dynamic range (SDR) video:
+
+- **720p and larger**: Rec. 709. **480p and smaller**: Rec. 601. That is
+  what players assume when a file says nothing, and chukcut also writes it
+  into the file.
+- **Limited range** (16–235). This is what every platform expects.
+- **HDR clips** (iPhone, Android, GoPro, HLG or PQ) are converted to SDR
+  when you edit them. The midtones stay as they were; very bright
+  highlights are compressed. The export shows what the player shows.
+- chukcut does not export HDR.
+
+From the command line you can choose the matrix (`--color-matrix`), the range
+(`--color-range full`) and 10-bit (`--ten-bit`). See
+[`docs/cli.md`](../cli.md).
 
 ## Hardware encoding
 
