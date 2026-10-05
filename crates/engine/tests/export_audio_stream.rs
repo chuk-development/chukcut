@@ -258,6 +258,7 @@ fn a_short_range_of_a_three_hour_timeline_stays_small() {
                 .collect()
                 .expect("mix")
         });
+        eprintln!("2 s at {start} µs of 3 h: peak {} KB", peak >> 10);
         assert_eq!(mixed.len(), frames_for(length, 48_000) * 2);
         assert!(
             mixed.iter().any(|s| s.abs() > 0.1),
@@ -289,6 +290,7 @@ fn a_short_range_of_a_three_hour_timeline_stays_small() {
         assert_eq!(frames, range.frames);
         assert!(heard);
     });
+    eprintln!("all 3 h streamed: peak {} KB", peak >> 10);
     assert!(
         peak < BOUND,
         "streaming 3 h allocated {} MB at its peak",
