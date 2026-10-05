@@ -34,8 +34,8 @@
 //! pool.
 
 use crate::modules::project::document::{
-    new_id, source_duration_for, ColorAdjustMaterial, Crop, LutRef, Micros, Project, Segment,
-    TimeRange, TrackKind, Transform,
+    new_id, source_duration_for, AnimatableProperty, ColorAdjustMaterial, Crop, Easing, Keyframe,
+    LutRef, Micros, Project, Segment, TimeRange, TrackKind, Transform,
 };
 use crate::modules::project::grade::{CurveChannel, Grade, Wheel, WheelKind};
 use crate::modules::timeline::ops::EditCommand;
@@ -106,12 +106,166 @@ pub fn set_crop_command(
     let (_, current) = project
         .segment(segment_id)
         .ok_or_else(|| format!("unknown segment {segment_id}"))?;
+    if current.has_crop_keyframes() {
+        // A static crop under keyframed edges would change nothing on screen,
+        // so a set without a time is refused rather than silently lost.
+        // Clearing is the panel's Reset: the crop and its keyframes go
+        // together, one undo step.
+        if crop.is_some() {
+            return Err(
+                "the crop has keyframes: set it at a time (a keyframe), or remove the crop first"
+                    .into(),
+            );
+        }
+        return replace_segment(project, segment_id, "Reset crop", |segment| {
+            segment.crop = None;
+            segment.keyframes.retain(|t| !t.property.is_crop());
+        });
+    }
     if crop_key(&current.crop) == crop_key(&crop) {
         return Err("the clip is already cropped exactly like that".into());
     }
 
     replace_segment(project, segment_id, "Crop clip", |segment| {
         segment.crop = crop;
+    })
+}
+
+/// Half a frame at the project's rate: a keyframe this close to a time is
+/// "at" it, as the inspector's diamonds judge it.
+fn keyframe_tolerance(project: &Project) -> Micros {
+    (500_000.0 / project.fps.max(1.0)) as Micros
+}
+
+/// The four edges of `crop` (or the full frame) beside their properties.
+fn crop_edges(crop: Option<Crop>) -> [(AnimatableProperty, f32); 4] {
+    let c = crop.unwrap_or_default();
+    let [l, t, r, b] = AnimatableProperty::CROP;
+    [(l, c.left), (t, c.top), (r, c.right), (b, c.bottom)]
+}
+
+/// The segment and `time` (timeline) as a time relative to its start, or an
+/// error when the time is outside the clip.
+fn crop_time(
+    project: &Project,
+    segment_id: &str,
+    time: Micros,
+) -> Result<(Segment, Micros), String> {
+    let (_, segment) = project
+        .segment(segment_id)
+        .ok_or_else(|| format!("unknown segment {segment_id}"))?;
+    let relative = time - segment.target_range.start;
+    if !(0..=segment.target_range.duration).contains(&relative) {
+        return Err("that time is outside the clip".into());
+    }
+    Ok((segment.clone(), relative))
+}
+
+/// The edit that makes the clip show `crop` at the timeline instant `time`,
+/// as keyframes on all four crop edges: the keyframe already there (within
+/// half a frame) takes the new value, otherwise one is added. `None` is the
+/// whole picture at that instant. One undo step.
+///
+/// All four edges are keyed together so a crop always animates as one
+/// rectangle; the easing of each is the default until the user changes it.
+pub fn crop_keyframe_command(
+    project: &Project,
+    segment_id: &str,
+    crop: Option<Crop>,
+    time: Micros,
+) -> Result<EditCommand, String> {
+    let crop = normalize_crop(crop)?;
+    let (segment, relative) = crop_time(project, segment_id, time)?;
+    let tolerance = keyframe_tolerance(project);
+    let mut commands = Vec::new();
+    for (property, value) in crop_edges(crop) {
+        let existing = segment
+            .keyframes
+            .iter()
+            .find(|t| t.property == property)
+            .and_then(|t| {
+                t.keyframes
+                    .iter()
+                    .find(|k| (k.time - relative).abs() <= tolerance)
+            })
+            .copied();
+        match existing {
+            Some(k) if k.value.to_bits() == value.to_bits() => {}
+            Some(k) => commands.push(EditCommand::MoveKeyframe {
+                segment_id: segment.id.clone(),
+                property,
+                from_time: k.time,
+                to_time: k.time,
+                before_value: k.value,
+                after_value: value,
+            }),
+            None => commands.push(EditCommand::AddKeyframe {
+                segment_id: segment.id.clone(),
+                property,
+                keyframe: Keyframe {
+                    time: relative,
+                    value,
+                    easing: Easing::default(),
+                },
+            }),
+        }
+    }
+    if commands.is_empty() {
+        return Err("the crop is already exactly that there".into());
+    }
+    Ok(EditCommand::Composite {
+        label: "Crop keyframe".into(),
+        commands,
+    })
+}
+
+/// The crop's keyframe diamond at the timeline instant `time`: removes the
+/// crop keyframes there (within half a frame), or adds one on every edge
+/// holding the crop shown there, so adding one changes nothing on screen.
+pub fn toggle_crop_keyframe_command(
+    project: &Project,
+    segment_id: &str,
+    time: Micros,
+) -> Result<EditCommand, String> {
+    let (segment, relative) = crop_time(project, segment_id, time)?;
+    let tolerance = keyframe_tolerance(project);
+    let present: Vec<EditCommand> = segment
+        .keyframes
+        .iter()
+        .filter(|t| t.property.is_crop())
+        .flat_map(|t| {
+            t.keyframes
+                .iter()
+                .filter(|k| (k.time - relative).abs() <= tolerance)
+                .map(|&keyframe| EditCommand::RemoveKeyframe {
+                    segment_id: segment.id.clone(),
+                    property: t.property,
+                    keyframe,
+                })
+        })
+        .collect();
+    if !present.is_empty() {
+        return Ok(EditCommand::Composite {
+            label: "Delete keyframe".into(),
+            commands: present,
+        });
+    }
+    let shown = segment.crop_at(time);
+    let commands = crop_edges(shown)
+        .into_iter()
+        .map(|(property, value)| EditCommand::AddKeyframe {
+            segment_id: segment.id.clone(),
+            property,
+            keyframe: Keyframe {
+                time: relative,
+                value,
+                easing: Easing::default(),
+            },
+        })
+        .collect();
+    Ok(EditCommand::Composite {
+        label: "Add keyframe".into(),
+        commands,
     })
 }
 
@@ -669,6 +823,9 @@ pub fn paste_attributes_command(
                 );
                 segment.volume = attributes.volume.clamp(0.0, 4.0);
                 segment.crop = crop;
+                // The pasted crop is the one meant; keyframes on the target's
+                // own crop would hide it.
+                segment.keyframes.retain(|t| !t.property.is_crop());
                 segment
                     .extras
                     .retain(|id| materials.color_adjust(id).is_none());

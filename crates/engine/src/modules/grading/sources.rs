@@ -76,7 +76,8 @@ pub fn plan(project: &Project, segment_id: &str, at: Option<Micros>) -> Result<P
     };
     Ok(Plan {
         source,
-        crop: segment.crop,
+        // A keyframed crop is measured as the clip starts.
+        crop: segment.crop_at(segment.target_range.start),
         grade,
     })
 }

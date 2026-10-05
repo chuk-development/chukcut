@@ -103,7 +103,7 @@ fn segment_matrix(project: &Project, segment: &Segment, time: Micros) -> Option<
         canvas,
         (video.width, video.height),
         &transform,
-        segment.crop,
+        segment.crop_at(time),
     )?;
     let crop = placement.crop;
     // The unit quad is ±0.5 with v = 0 at y = +0.5; fold the crop rectangle
@@ -274,19 +274,31 @@ fn relative(mode: FollowMode, now: &Pose, reference: &Pose) -> (f32, f32) {
 /// whose transform is the followed one and whose transform keyframes are
 /// gone (they are already inside it). Borrowed in the common case, so a
 /// project without tracking pays one lookup per clip and no allocation.
+///
+/// This is the first step of every draw's chain (follow → stabilise →
+/// keyframes → motion), so it also folds the crop keyframes into the copy's
+/// crop at `time` (`Segment::fold_crop_at`): stabilisation, the follow
+/// matrix and the quad placement downstream all read one static crop.
 pub fn resolve<'a>(project: &Project, segment: &'a Segment, time: Micros) -> Cow<'a, Segment> {
+    let segment: Cow<'a, Segment> = if segment.has_crop_keyframes() {
+        let mut copy = segment.clone();
+        copy.fold_crop_at(time);
+        Cow::Owned(copy)
+    } else {
+        Cow::Borrowed(segment)
+    };
     if project.materials.follows.is_empty() {
-        return Cow::Borrowed(segment);
+        return segment;
     }
-    match followed_transform(project, segment, time) {
+    match followed_transform(project, &segment, time) {
         Some(transform) => {
-            let mut copy = segment.clone();
+            let mut copy = segment.into_owned();
             copy.transform = transform;
             copy.keyframes
                 .retain(|t| t.property == AnimatableProperty::Volume);
             Cow::Owned(copy)
         }
-        None => Cow::Borrowed(segment),
+        None => segment,
     }
 }
 

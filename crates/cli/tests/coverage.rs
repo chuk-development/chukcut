@@ -221,6 +221,71 @@ fn crop_curve_freeze_and_speed_curve_change_the_clip() {
 }
 
 #[test]
+fn crop_keyframes_are_set_at_a_time_changed_and_removed() {
+    require_ffmpeg!();
+    let (dir, project, _, _) = with_card("cropkeys");
+    let p = project.to_str().unwrap();
+    let info = ok(&dir, &["info", p]);
+    let id = lane_clips(&info, 0)[0]["id"].as_str().unwrap().to_string();
+    let crop_keys = |doc: &Value, edge: &str| -> Vec<(i64, f64)> {
+        segment(doc, &id)["keyframes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|t| t["property"] == edge)
+            .flat_map(|t| t["keyframes"].as_array().unwrap().clone())
+            .map(|k| (k["time"].as_i64().unwrap(), k["value"].as_f64().unwrap()))
+            .collect()
+    };
+
+    // A keyframe at the start with the full picture, one at 1 s with the
+    // right half gone: all four edges are keyed at both.
+    ok(&dir, &["crop", p, "0:0", "--at", "0", "--right", "1"]);
+    ok(&dir, &["crop", p, "0:0", "--at", "1s", "--right", "0.5"]);
+    let doc = document(&project);
+    assert_eq!(
+        crop_keys(&doc, "crop_right"),
+        vec![(0, 1.0), (1_000_000, 0.5)]
+    );
+    assert_eq!(crop_keys(&doc, "crop_left").len(), 2);
+
+    // Without a time an animated crop is refused, not silently lost.
+    let refused = run(&dir, &["crop", p, "0:0", "--left", "0.2"]);
+    assert_ne!(refused.code, 0);
+
+    // One edge through the generic keyframe command, by its name.
+    ok(
+        &dir,
+        &[
+            "keyframe",
+            p,
+            "0:0",
+            "--property",
+            "crop_left",
+            "--at",
+            "1s",
+            "--value",
+            "0.1",
+        ],
+    );
+    assert_eq!(
+        crop_keys(&document(&project), "crop_left"),
+        vec![(0, 0.0), (1_000_000, 0.1)]
+    );
+
+    ok(&dir, &["crop", p, "0:0", "--at", "1s", "--remove"]);
+    let doc = document(&project);
+    assert_eq!(crop_keys(&doc, "crop_right"), vec![(0, 1.0)]);
+    let missing = run(&dir, &["crop", p, "0:0", "--at", "1s", "--remove"]);
+    assert_ne!(missing.code, 0, "no keyframe there any more");
+
+    ok(&dir, &["crop", p, "0:0", "--clear"]);
+    let doc = document(&project);
+    assert!(crop_keys(&doc, "crop_right").is_empty());
+    assert!(segment(&doc, &id)["crop"].is_null());
+}
+
+#[test]
 fn layouts_make_a_picture_in_picture_and_a_split_screen() {
     require_ffmpeg!();
     let (dir, project, _, bars) = with_card("layout");

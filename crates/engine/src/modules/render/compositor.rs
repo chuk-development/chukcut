@@ -1204,7 +1204,12 @@ impl Compositor {
                     blend_layers.push(None);
                     layer_targets.extend(sides);
                 }
-                Draw::Effected { quad, chain, mask } => {
+                Draw::Effected {
+                    quad,
+                    chain,
+                    mask,
+                    neighbours,
+                } => {
                     let frame = fx_frame.as_mut().expect("opened for an effected clip");
                     let layer = self.pool.acquire(device, self.target_key(size));
                     self.draw_layer(
@@ -1214,13 +1219,25 @@ impl Compositor {
                         Some(quad),
                         layer.view(),
                     );
-                    let out = frame.apply(
+                    let around = self.neighbour_layers(
+                        &mut encoder,
+                        &uniform_group,
+                        &source_groups,
+                        neighbours,
+                        size,
+                    );
+                    let out = frame.apply_with_neighbours(
                         &mut encoder,
                         layer.view(),
                         size,
                         chain,
                         self.target_key(size),
+                        [
+                            around[0].as_ref().map(PooledTexture::view),
+                            around[1].as_ref().map(PooledTexture::view),
+                        ],
                     );
+                    layer_targets.extend(around.into_iter().flatten());
                     let out = self.masked(
                         &mut encoder,
                         &uniform_group,
@@ -1242,7 +1259,11 @@ impl Compositor {
                     layer_targets.push(out);
                 }
                 Draw::Blended {
-                    quad, chain, mask, ..
+                    quad,
+                    chain,
+                    mask,
+                    neighbours,
+                    ..
                 } => {
                     let frame = fx_frame.as_mut().expect("opened for a blended clip");
                     let layer = self.pool.acquire(device, self.target_key(size));
@@ -1256,13 +1277,25 @@ impl Compositor {
                     let layer = if chain.is_empty() {
                         layer
                     } else {
-                        let out = frame.apply(
+                        let around = self.neighbour_layers(
+                            &mut encoder,
+                            &uniform_group,
+                            &source_groups,
+                            neighbours,
+                            size,
+                        );
+                        let out = frame.apply_with_neighbours(
                             &mut encoder,
                             layer.view(),
                             size,
                             chain,
                             self.target_key(size),
+                            [
+                                around[0].as_ref().map(PooledTexture::view),
+                                around[1].as_ref().map(PooledTexture::view),
+                            ],
                         );
+                        layer_targets.extend(around.into_iter().flatten());
                         let out = self.masked(
                             &mut encoder,
                             &uniform_group,
@@ -1548,6 +1581,31 @@ impl Compositor {
                     ),
                 },
             ],
+        })
+    }
+
+    /// A temporal denoise's neighbour quads, each drawn into a layer of its
+    /// own the way the clip's is. `None` where there is no neighbour.
+    fn neighbour_layers(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        uniform_group: &wgpu::BindGroup,
+        source_groups: &[Option<wgpu::BindGroup>],
+        neighbours: &Neighbours,
+        size: (u32, u32),
+    ) -> [Option<PooledTexture>; 2] {
+        neighbours.each_ref().map(|quad| {
+            quad.as_ref().map(|quad| {
+                let layer = self.pool.acquire(self.ctx.device(), self.target_key(size));
+                self.draw_layer(
+                    encoder,
+                    uniform_group,
+                    source_groups,
+                    Some(quad),
+                    layer.view(),
+                );
+                layer
+            })
         })
     }
 
@@ -1896,6 +1954,26 @@ impl Compositor {
                     let video = project.materials.video(&segment.material_id)?;
                     self.flows.get(&self.ctx, &video.path, sample)
                 });
+            // Reduce noise in its Temporal mode mixes in the source frames
+            // either side of this one (`fx::temporal`). The frame before is
+            // asked for before this one and the frame after once it is in,
+            // so the provider's two-frame cache answers the first two and
+            // the decoder only ever moves forwards.
+            let temporal = kind == MaterialKind::Video
+                && blend.is_none()
+                && fx::temporal::is_on(&project.materials, segment, source_time)
+                && fx::motion_blur::motion_blur_of(&project.materials, segment, source_time)
+                    .is_none();
+            let around = project
+                .materials
+                .video(&segment.material_id)
+                .filter(|_| temporal)
+                .map(|video| {
+                    fx::temporal::neighbours(source_time, fx::temporal::period(video.fps))
+                });
+            let before = around.and_then(|(before, _)| before).and_then(|at| {
+                self.neighbour_frame(&project.materials, sources, segment, at, size)
+            });
             let quad = self.quad(
                 canvas,
                 &project.materials,
@@ -1907,6 +1985,9 @@ impl Compositor {
                 time,
                 &mut draws,
             )?;
+            let after = around.filter(|_| quad.is_some()).and_then(|(_, after)| {
+                self.neighbour_frame(&project.materials, sources, segment, after, size)
+            });
             // The decoded frame placed the clip; the made frame, the same
             // picture's aspect, is what it shows.
             let (quad, blend) = match (quad, flowed) {
@@ -1953,6 +2034,22 @@ impl Compositor {
                 } else {
                     fx_mask(&project.materials, segment, &quad, &mut draws)
                 };
+                // The neighbours drawn like the clip, each with a slot of
+                // its own; only when the chain still has the temporal pass.
+                let neighbours: Neighbours =
+                    if accumulated.is_none() && chain.iter().any(FxInstance::is_temporal_denoise) {
+                        [before, after].map(|frame| {
+                            frame.map(|frame| {
+                                let mut draw = quad.clone();
+                                draw.frame = frame;
+                                draw.slot = draws.slots as u32;
+                                draws.slots += 1;
+                                draw
+                            })
+                        })
+                    } else {
+                        [None, None]
+                    };
                 draws.items.push(match (accumulated, mode) {
                     (Some(quads), mode) => Draw::Accumulated {
                         quads,
@@ -1965,8 +2062,9 @@ impl Compositor {
                         chain,
                         mode,
                         mask,
+                        neighbours,
                     },
-                    (None, None) => blurred(project, segment, time, quad, chain, mask),
+                    (None, None) => blurred(project, segment, time, quad, chain, mask, neighbours),
                 });
             }
         }
@@ -2090,6 +2188,41 @@ impl Compositor {
         // Every placement missed the canvas: the quad's own slot is still
         // reserved, and drawing nothing is the honest picture.
         Some(quads)
+    }
+
+    /// The source frame of `segment`'s video at `source_time` for a temporal
+    /// denoise: the remade one when the clip's frames are remade, as for the
+    /// frame itself. `None` when there is none; a missing neighbour leaves
+    /// the average to the frames that are there, it is not an error.
+    fn neighbour_frame(
+        &self,
+        materials: &MaterialPool,
+        sources: &dyn SourceProvider,
+        segment: &Segment,
+        source_time: Micros,
+        size: (u32, u32),
+    ) -> Option<SourceFrame> {
+        if let Some((frame, _)) = self.enhanced_frame(materials, segment, source_time, size) {
+            return Some(frame);
+        }
+        let request = SourceRequest {
+            material_id: &segment.material_id,
+            kind: MaterialKind::Video,
+            source_time,
+            segment_id: &segment.id,
+            max_size: size,
+        };
+        match sources.frame(&self.ctx, &request) {
+            Ok(frame) => frame,
+            Err(error) => {
+                tracing::debug!(
+                    segment = %segment.id,
+                    %error,
+                    "temporal denoise: a neighbouring frame is unavailable"
+                );
+                None
+            }
+        }
     }
 
     /// The remade frame of a video clip with "Remove object" or "Enhance
@@ -2528,7 +2661,8 @@ fn place(
     // without one, which then takes exactly the path it always took.
     let motion = motion::clip_motion(materials, segment, time, keyed);
     let transform = motion.map_or(keyed, |m| m.transform);
-    let placement = layout::place_quad(canvas, frame_size, &transform, segment.crop)?;
+    let crop = layout::animated_crop(segment, time);
+    let placement = layout::place_quad(canvas, frame_size, &transform, crop)?;
     match motion {
         Some(m) if m.reveal != [0.0, 0.0, 1.0, 1.0] => layout::reveal(placement, m.reveal),
         _ => Some(placement),
@@ -2541,6 +2675,7 @@ fn place(
 /// Through the transition pipeline rather than a blur in the quad shader, so
 /// the blur is frame-space (a small clip blurs as much as a full-frame one)
 /// and the quad pipeline, which the colour grade owns, is untouched.
+#[allow(clippy::too_many_arguments)]
 fn blurred(
     project: &Project,
     segment: &Segment,
@@ -2548,14 +2683,22 @@ fn blurred(
     quad: QuadDraw,
     chain: Vec<FxInstance>,
     mask: Option<FxMask>,
+    neighbours: Neighbours,
 ) -> Draw {
     // Without a blur animation the clip is an ordinary quad, or an effected
-    // one when it carries built-in effects (`modules/fx`).
+    // one when it carries built-in effects (`modules/fx`). A running blur
+    // animation draws the clip as a transition side, where a temporal
+    // denoise falls back to its spatial pass.
     let plain = |quad: QuadDraw, chain: Vec<FxInstance>, mask: Option<FxMask>| {
         if chain.is_empty() {
             Draw::Quad(quad)
         } else {
-            Draw::Effected { quad, chain, mask }
+            Draw::Effected {
+                quad,
+                chain,
+                mask,
+                neighbours,
+            }
         }
     };
     let keyed = layout::animated_transform(segment, time);
@@ -2668,6 +2811,9 @@ enum Draw {
         chain: Vec<FxInstance>,
         /// The effects apply only to the matte's subject or the rest.
         mask: Option<FxMask>,
+        /// The clip drawn from the source frames before and after this one,
+        /// for a temporal denoise in `chain` (`fx::temporal`).
+        neighbours: Neighbours,
     },
     /// An effect clip: its effects run over everything composited so far.
     Adjust {
@@ -2681,6 +2827,7 @@ enum Draw {
         chain: Vec<FxInstance>,
         mode: u32,
         mask: Option<FxMask>,
+        neighbours: Neighbours,
     },
     /// One clip drawn several times and averaged: two source frames mixed
     /// (frame blending) and/or the clip placed along its movement (motion
@@ -2694,6 +2841,10 @@ enum Draw {
         mask: Option<FxMask>,
     },
 }
+
+/// The clip as the source frames before and after the one drawn show it,
+/// placed like it; empty unless a temporal denoise asks (`fx::temporal`).
+type Neighbours = [Option<QuadDraw>; 2];
 
 /// A clip's effects limited by its matte (`BackgroundRemoval::effects`): the
 /// matte drawn as weights over the clip's quad (`M_MATTE_OUT`), and which
@@ -2720,11 +2871,21 @@ impl DrawList {
         self.items.iter().flat_map(|item| -> Vec<&QuadDraw> {
             match item {
                 Draw::Quad(quad) => vec![quad],
-                Draw::Effected { quad, mask, .. } | Draw::Blended { quad, mask, .. } => {
-                    std::iter::once(quad)
-                        .chain(mask.as_ref().map(|m| &m.quad))
-                        .collect()
+                Draw::Effected {
+                    quad,
+                    mask,
+                    neighbours,
+                    ..
                 }
+                | Draw::Blended {
+                    quad,
+                    mask,
+                    neighbours,
+                    ..
+                } => std::iter::once(quad)
+                    .chain(mask.as_ref().map(|m| &m.quad))
+                    .chain(neighbours.iter().flatten())
+                    .collect(),
                 Draw::Transition { from, to, .. } => {
                     from.as_ref().into_iter().chain(to.as_ref()).collect()
                 }

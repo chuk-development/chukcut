@@ -316,7 +316,7 @@ impl Editor {
     }
 
     /// The keyframe slot of a property that can be animated.
-    fn keyframe_slot(
+    pub(crate) fn keyframe_slot(
         &self,
         prop: Prop,
         segment: &Segment,

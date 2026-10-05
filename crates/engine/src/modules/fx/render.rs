@@ -128,6 +128,11 @@ impl FxInstance {
         self.time as f32 / 1_000_000.0
     }
 
+    /// Whether this is Reduce noise in its Temporal mode.
+    pub fn is_temporal_denoise(&self) -> bool {
+        self.desc.id == catalog::DENOISE && self.get("mode") >= 0.5
+    }
+
     /// Whether this instance would change no pixel.
     pub fn at_rest(&self) -> bool {
         use catalog::*;
@@ -409,6 +414,9 @@ impl FxRenderer {
             entries: &[
                 texture(0),
                 texture(1),
+                // Input 2: only the temporal denoise reads it (the frame
+                // after); every other pass gets the placeholder.
+                texture(3),
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -526,6 +534,7 @@ impl FxRenderer {
             capacity: 0,
             next: 0,
             temps: Vec::new(),
+            temporal_done: false,
         };
         frame.grow(64);
         frame
@@ -536,6 +545,7 @@ impl FxRenderer {
         device: &wgpu::Device,
         a: &wgpu::TextureView,
         b: Option<&wgpu::TextureView>,
+        c: Option<&wgpu::TextureView>,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("chukcut fx inputs"),
@@ -552,6 +562,10 @@ impl FxRenderer {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(c.unwrap_or(&self.placeholder)),
                 },
             ],
         })
@@ -606,6 +620,9 @@ pub struct FxFrame<'a> {
     next: u32,
     /// Intermediate textures, given back to the pool by [`Self::finish`].
     temps: Vec<PooledTexture>,
+    /// Whether the chain being recorded had its temporal denoise pass run
+    /// already (`apply_with_neighbours`).
+    temporal_done: bool,
 }
 
 impl<'a> FxFrame<'a> {
@@ -682,6 +699,34 @@ impl<'a> FxFrame<'a> {
         frame: [f32; 4],
         p: [[f32; 4]; 6],
     ) {
+        self.pass3(
+            encoder,
+            entry,
+            [Some(input), second, None],
+            input_size,
+            target,
+            target_format,
+            target_size,
+            frame,
+            p,
+        );
+    }
+
+    /// [`Self::pass`] with a third input. `inputs[0]` is required.
+    #[allow(clippy::too_many_arguments)]
+    fn pass3(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        entry: &'static str,
+        inputs: [Option<&wgpu::TextureView>; 3],
+        input_size: (u32, u32),
+        target: &wgpu::TextureView,
+        target_format: wgpu::TextureFormat,
+        target_size: (u32, u32),
+        frame: [f32; 4],
+        p: [[f32; 4]; 6],
+    ) {
+        let input = inputs[0].expect("a pass has a first input");
         let device = self.ctx.device();
         let pipeline = self
             .fx
@@ -703,7 +748,7 @@ impl<'a> FxFrame<'a> {
             frame,
             p,
         });
-        let inputs = self.fx.bind_inputs(device, input, second);
+        let inputs = self.fx.bind_inputs(device, input, inputs[1], inputs[2]);
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some(entry),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -766,23 +811,65 @@ impl<'a> FxFrame<'a> {
         chain: &[FxInstance],
         out_key: TextureKey,
     ) -> PooledTexture {
-        let imported = self.work(size);
-        self.pass(
-            encoder,
-            "fs_import",
-            input,
-            size,
-            None,
-            imported.view(),
-            WORK_FORMAT,
-            size,
-            [size.0 as f32, size.1 as f32, 0.0, 0.0],
-            [[0.0; 4]; 6],
-        );
+        self.apply_with_neighbours(encoder, input, size, chain, out_key, [None, None])
+    }
+
+    /// [`Self::apply`] for a clip whose stack has a temporal denoise:
+    /// `neighbours` are the clip's layers drawn from the source frames before
+    /// and after this one, with this frame's placement (`fx::temporal`).
+    /// The temporal pass runs on the clip as decoded, before the first
+    /// effect; the denoise's spatial pass runs where it sits in the stack.
+    /// Without neighbours, or without a temporal denoise, this is `apply`.
+    pub fn apply_with_neighbours(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        input: &wgpu::TextureView,
+        size: (u32, u32),
+        chain: &[FxInstance],
+        out_key: TextureKey,
+        neighbours: [Option<&wgpu::TextureView>; 2],
+    ) -> PooledTexture {
+        let imported = self.import(encoder, input, size);
         let mut current = Work { texture: imported };
+        let temporal = chain.iter().find(|fx| fx.is_temporal_denoise());
+        self.temporal_done = false;
+        if let Some(fx) = temporal.filter(|_| neighbours.iter().any(Option::is_some)) {
+            let [before, after] =
+                neighbours.map(|n| n.map(|view| self.import(encoder, view, size)));
+            let (sigma, weight) = super::temporal::params(fx.get("strength"), fx.get("detail"));
+            let mut p = [[0.0f32; 4]; 6];
+            p[0] = [
+                sigma,
+                weight,
+                if before.is_some() { 1.0 } else { 0.0 },
+                if after.is_some() { 1.0 } else { 0.0 },
+            ];
+            let out = self.work(size);
+            self.pass3(
+                encoder,
+                "fs_denoise_temporal",
+                [
+                    Some(current.texture.view()),
+                    before.as_ref().map(PooledTexture::view),
+                    after.as_ref().map(PooledTexture::view),
+                ],
+                size,
+                out.view(),
+                WORK_FORMAT,
+                size,
+                [size.0 as f32, size.1 as f32, 0.0, 0.0],
+                p,
+            );
+            self.temps.extend(before);
+            self.temps.extend(after);
+            self.retire(current);
+            current = Work { texture: out };
+            self.temporal_done = true;
+        }
         for instance in chain {
             current = self.record(encoder, instance, current, size);
         }
+        self.temporal_done = false;
         let out = self.pool.acquire(self.ctx.device(), out_key);
         self.pass(
             encoder,
@@ -800,6 +887,29 @@ impl<'a> FxFrame<'a> {
         out
     }
 
+    /// A layer (straight alpha) as a working texture: premultiplied, linear.
+    fn import(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        input: &wgpu::TextureView,
+        size: (u32, u32),
+    ) -> PooledTexture {
+        let imported = self.work(size);
+        self.pass(
+            encoder,
+            "fs_import",
+            input,
+            size,
+            None,
+            imported.view(),
+            WORK_FORMAT,
+            size,
+            [size.0 as f32, size.1 as f32, 0.0, 0.0],
+            [[0.0; 4]; 6],
+        );
+        imported
+    }
+
     /// The draw of a finished straight-alpha layer over whatever a pass the
     /// caller opens later has drawn so far. Prepared ahead because the bind
     /// groups have to exist before that pass begins.
@@ -815,7 +925,7 @@ impl<'a> FxFrame<'a> {
             frame: [size.0 as f32, size.1 as f32, 0.0, 0.0],
             ..Default::default()
         });
-        let inputs = self.fx.bind_inputs(device, layer, None);
+        let inputs = self.fx.bind_inputs(device, layer, None, None);
         OverDraw {
             pipeline,
             uniform_group,
@@ -884,6 +994,12 @@ impl<'a> FxFrame<'a> {
             DENOISE => {
                 let (stride, sigma, passes) =
                     denoise_params(fx.get("strength"), fx.get("detail"), short);
+                // After the temporal pass less noise is left to smooth.
+                let sigma = if self.temporal_done && fx.is_temporal_denoise() {
+                    sigma * super::temporal::SPATIAL_AFTER_TEMPORAL
+                } else {
+                    sigma
+                };
                 p[0] = [stride, sigma, 1.2, 0.0];
                 let mut current = input;
                 for _ in 0..passes {

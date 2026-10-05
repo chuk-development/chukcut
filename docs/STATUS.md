@@ -44,19 +44,20 @@ FFmpeg major (the AppImage bundles it; macOS and Windows do not build yet); AI o
 refuses it; RIFE ~10 fps at 1080p and BiRefNet ~6 fps on an RTX 3060 in
 Fast mode (TensorRT, one preparation per model and frame size); body
 keypoints have no fingers;
-cloud integrations are untested against live services; a crop has no
-keyframes and the denoise is spatial only.
+cloud integrations are untested against live services; the temporal
+denoise is motion-adaptive, not motion-compensated, and there is no ML
+denoiser.
 
 **Before you change code:** read "Traps that have already cost time" and
 the CLAUDE.md non-negotiables. Judge performance from a release build only.
 
-**Newest sections first:** Release builds, The crash after the export, QA pass 3, UX gaps, Body landmarks, Polish pass 3, CI, Colour AI, QA pass 2, Flaky
+**Newest sections first:** Crop keyframes and temporal denoise, Release builds, The crash after the export, QA pass 3, UX gaps, Body landmarks, Polish pass 3, CI, Colour AI, QA pass 2, Flaky
 tests, Frame blending, Timelines and compound clips. The ML sections are at
 the end of the file ("The ML worker" and its sub-sections).
 
 ## Update history
 
-Last updated: 2026-10-05 (robustness: the export streams its audio over its range, panics are logged and contained, damaged documents do not render, jobs commit only into their own project, `run_export` joins its thread. See "Robustness" below). Previously 2026-10-04 (release builds: a manual Release workflow with a .deb, AppImages that bundle FFmpeg, and experimental macOS and Windows jobs — see "Release builds" below). Previously 2026-10-04 (the CLI's crash after an export found and fixed, and the shells leave through `lifecycle::exit` — see "The crash after the export" below). Previously 2026-10-04 (QA pass 3 over waves 10–11: five fixes, the showcase extended — see "QA pass 3" below). Previously 2026-10-04 (crop, speed effects, denoise, Performance settings, a persisted export queue with a quit guard, and the ML worker and CLI in the tarball — see "UX gaps" below). Previously 2026-10-04 (body landmarks, follow a body part, reframe on a body, zipped models, faces and voices in the preparation — see "Body landmarks" below). Previously 2026-10-04 (the "At a glance" block above, after polish pass 3). Previously 2026-10-04 (QA pass 2 over the wave 7–9 features and a showcase that shows them — see "QA pass 2" below). Previously 2026-10-04 (CI: clippy is fatal, the engine tests run on lavapipe with ffmpeg, the CLI and ML worker tests run too — see "CI" below). Previously 2026-10-04 (preview frames no longer leave the GPU: shared with GPUI through a patched GPUI, readback as the fallback — see "Preview frames shared with GPUI" under Perf). Previously 2026-10-04 (ML worker: VitTrack re-finding, Remove background, CUDA — see "The ML worker" below). Previously 2026-10-02 (**the UI is native now** — decision 0011. The Tauri
+Last updated: 2026-10-05 (robustness: the export streams its audio over its range, panics are logged and contained, damaged documents do not render, jobs commit only into their own project, `run_export` joins its thread. See "Robustness" below). Previously 2026-10-05 (crop keyframes and a temporal mode for Reduce noise — see "Crop keyframes and temporal denoise" below). Previously 2026-10-04 (release builds: a manual Release workflow with a .deb, AppImages that bundle FFmpeg, and experimental macOS and Windows jobs — see "Release builds" below). Previously 2026-10-04 (the CLI's crash after an export found and fixed, and the shells leave through `lifecycle::exit` — see "The crash after the export" below). Previously 2026-10-04 (QA pass 3 over waves 10–11: five fixes, the showcase extended — see "QA pass 3" below). Previously 2026-10-04 (crop, speed effects, denoise, Performance settings, a persisted export queue with a quit guard, and the ML worker and CLI in the tarball — see "UX gaps" below). Previously 2026-10-04 (body landmarks, follow a body part, reframe on a body, zipped models, faces and voices in the preparation — see "Body landmarks" below). Previously 2026-10-04 (the "At a glance" block above, after polish pass 3). Previously 2026-10-04 (QA pass 2 over the wave 7–9 features and a showcase that shows them — see "QA pass 2" below). Previously 2026-10-04 (CI: clippy is fatal, the engine tests run on lavapipe with ffmpeg, the CLI and ML worker tests run too — see "CI" below). Previously 2026-10-04 (preview frames no longer leave the GPU: shared with GPUI through a patched GPUI, readback as the fallback — see "Preview frames shared with GPUI" under Perf). Previously 2026-10-04 (ML worker: VitTrack re-finding, Remove background, CUDA — see "The ML worker" below). Previously 2026-10-02 (**the UI is native now** — decision 0011. The Tauri
 shell and the React frontend are gone; the engine is `crates/engine`
 (`chukcut-engine`, no UI dependency) and the app is a GPUI window in
 `crates/app`. What the native app does today: import (dialog or command line),
@@ -160,6 +161,76 @@ This section covers findings 1, 2, 3, 8 and 10 of
   one test binary also share their `CARGO_TARGET_TMPDIR` scratch files and
   fail each other (exit 101). To reproduce an exit race, run **one** binary
   in a loop, one run after another, while other load runs next to it.
+
+## Crop keyframes and temporal denoise (2026-10-05, `agent/crop2`)
+
+A crop takes keyframes like the transform. The model, the decisions and the
+traps:
+
+- **Four properties, not a new track type.** `AnimatableProperty` gained
+  `CropLeft`, `CropTop`, `CropRight`, `CropBottom` (`crop_left` … in the
+  file), last in the enum so the canonical track order of old files does not
+  move. Old files have no such track and write back byte for byte
+  (`tests/crop_keyframes.rs`). Every keyframe command, the easing menu and
+  graph, split rebasing, the timeline diamonds and their drag work on them
+  unchanged. The edges are sampled independently; the commands always key
+  all four at one time, so a crop animates as one rectangle.
+- **One sampler, folded once.** `Segment::crop_at(time)` is the crop shown
+  at a timeline instant (the static `crop` when there are no crop tracks).
+  `follow::resolve`, the first step of every draw's chain, folds it into the
+  render copy's static crop (`Segment::fold_crop_at`), so stabilisation, the
+  follow matrix and `place_quad` read one rectangle. `compositor::place`
+  samples it too (idempotent). Freeze frame keeps the crop of its instant;
+  reframe, colour match and auto-reframe measure the crop at the clip start.
+- **Commands.** `inspector_set_crop_at` (keyframe at a time, all four
+  edges, the one within half a frame changes) and
+  `inspector_toggle_crop_keyframe` (the diamond: removes the crop keys there
+  or adds them holding the crop shown). `inspector_set_crop` on a keyed crop
+  refuses a rectangle and clears everything on `None` (Reset). Paste
+  attributes, layouts and template slots set a static crop and drop crop
+  keyframes, since those would hide it.
+- **App.** `Prop::Crop` animates the four edges, so the diamond, the arrows
+  and the easing graph (a Crop chip) come from the shared row code. Once a
+  crop has keyframes, the box and the ratio buttons write the keyframe at
+  the playhead. The crop tab's uncropped view strips the crop tracks too
+  (`uncropped`), or the box would be drawn over an already cropped picture.
+- **CLI.** `crop --at T` (edges not given keep the crop shown at T),
+  `crop --at T --remove`, `crop --clear` (all of it), and
+  `keyframe --property crop_left …`.
+
+Reduce noise has a **Mode** (Spatial, Temporal; a new last choice parameter,
+so old effect stacks read unchanged). Decision 0026's amendment and
+`docs/research/video-denoise.md` have the reasoning and the numbers.
+
+- **The window is centred** (frame before, frame shown, frame after), asked
+  in that order: the provider keeps two frames per video and the
+  decode-ahead brings the next one in before each render, so a backward
+  window ("the two before") would seek the decoder backwards every frame.
+  `want_video` decodes "before, now" for such a clip. The fx test provider
+  records the order (`temporal_denoise_removes_more_noise_…`).
+- **Layer space, before the stack.** The compositor clones the clip's quad
+  for each neighbour (own uniform slot, `Draw::Effected`/`Blended`
+  `neighbours`), draws them into layers, and
+  `FxFrame::apply_with_neighbours` imports them and runs
+  `fs_denoise_temporal` on the decoded clip before any effect; the
+  denoise's spatial pass still runs at its place in the stack, with 0.8 of
+  its range. The fx bind group has a third texture (binding 3, the
+  placeholder for every other pass).
+- **Motion-adaptive.** A neighbour's weight falls off with the distance of
+  its 3×3 mean from this frame's (√-linear), so a moving thing keeps its
+  own pixels and does not ghost (`temporal_denoise_does_not_ghost_what_moved`).
+  Frame blending, motion blur and a running blur animation take other draw
+  paths and fall back to the spatial pass.
+- **Measured** (generated noisy testsrc2, `tests/temporal_denoise.rs`):
+  detail left 11.1 → spatial 7.1 → temporal 5.0; export vs preview 1.51 per
+  8×8 block against a 1.46 baseline without the effect. Same on the RTX 3060
+  and lavapipe.
+- **Not done:** motion compensation (RIFE flow could warp the neighbours as
+  a bake) and an ML denoiser: FastDVDnet (MIT) and NAFNet (MIT) qualify by
+  licence but have no published ONNX and FastDVDnet needs five frames, so it
+  is an Enhance-sized bake, not a cheap add (`docs/research/video-denoise.md`).
+- **Unchecked:** VAAPI. A temporal clip holds two neighbour surfaces plus
+  the cached pair during a render, inside `EXTRA_HW_FRAMES` (6) on paper.
 
 ## Release builds (2026-10-04, `agent/release`)
 
@@ -315,7 +386,7 @@ Gaps the docs pass found, closed:
 - **Reduce image noise** in Video › Basic is the new `denoise` effect: a
   5×5 bilateral pass in √-linear units (`fs_denoise`), twice above strength
   60, stride scaled to the frame so preview and export match. Spatial only;
-  no temporal or ML denoise. "Enhance quality" and "Optical flow" in Basic
+  no temporal or ML denoise (Temporal mode since 2026-10-05, see above). "Enhance quality" and "Optical flow" in Basic
   are buttons that open their tabs.
 - **Settings › Performance.** "Video decoding" (`Settings::decode`,
   `media::provider::set_decode_preference`) and "AI runtime"

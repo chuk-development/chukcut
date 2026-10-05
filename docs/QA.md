@@ -614,3 +614,22 @@ not looked at on screen. The loop that should show the exit SIGSEGV of
 `tests/export.rs` gone was cut short when the NVIDIA driver hung (STATUS,
 "Robustness"). Run it again after the reboot, one binary at a time:
 `scripts/loop-test.sh target/debug/deps/export-<hash> 40 _scratch/loop.txt`.
+
+## Crop keyframes and temporal denoise, 2026-10-05 (`agent/crop2`)
+
+Checked in the debug app on Xvfb with lavapipe, generated media
+(testsrc2 1280×720 6 s; testsrc2 640×360 with ffmpeg temporal noise):
+
+- **Crop keyframes.** A project keyed from the CLI (`crop --at 0`, `crop
+  --at 4s`) shows the interpolated crop at 3 s. Video › Crop shows the box
+  at the interpolated crop over the whole picture, the Keyframe row with a
+  hollow diamond and the easing graph (a Crop chip, also in Basic). Dragging
+  the box at 3 s added a keyframe there (filled diamond, a third diamond on
+  the timeline, graph "3.00s → 4.00s"); Ctrl+Z took it back in one step.
+  The diamond added a keyframe holding the box where it was. Not checked on
+  screen: Reset on a keyed crop (covered by
+  `reset_removes_the_crop_and_its_keyframes_in_one_undo_step`).
+- **Temporal denoise.** Video › Basic › Reduce image noise shows Mode
+  (Spatial | Temporal). On the noisy clip the paused preview is visibly
+  cleaner in Temporal than in Spatial at the same strength. Playback speed
+  not measured on lavapipe.

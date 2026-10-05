@@ -91,3 +91,20 @@ crate.
   frames, and frame blending would move with it.
 - velato falling behind the Lottie files people bring: dotlottie-rs as a
   second renderer for the files velato cannot draw.
+
+## Amendment, 2026-10-05: temporal denoise shares the two-frame cache
+
+Reduce noise in its Temporal mode (`fx::temporal`) reads three source
+frames per output frame: the one before, the one shown, the one after. The
+window is centred, not "this one and the two before", because of the cache
+this decision added: the provider keeps two frames per video and the
+decode-ahead brings the next frame in before each render, so a backward
+window loses its oldest frame every time and seeks the decoder backwards.
+Asked in the order before, now, after, the centred window hits twice and
+decodes forwards once, in playback and export alike; the decode-ahead asks
+for before and now for such a clip. The neighbours are drawn with the
+clip's own placement into layers and mixed in before the clip's effects
+(motion-adaptive, not motion-compensated). A clip that blends frames or has
+motion blur keeps the spatial pass only. What would change this: a
+motion-compensated (flow-warped) denoiser, which would warp the neighbours
+with the optical flow of decision 0028 before the same mix.

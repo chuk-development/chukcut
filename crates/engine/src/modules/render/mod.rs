@@ -82,8 +82,8 @@ pub use compositor::{Compositor, CompositorConfig, Frame, RenderStats};
 pub use context::RenderContext;
 pub use error::{RenderError, Result};
 pub use layout::{
-    animated_transform, crop_uv, fit_size, place_quad, track_is_visible, visible_segments,
-    QuadPlacement,
+    animated_crop, animated_transform, crop_uv, fit_size, place_quad, track_is_visible,
+    visible_segments, QuadPlacement,
 };
 pub use nv12::{Nv12Converter, Nv12Frame, Nv12Layout, Nv12PlaneWriter};
 pub use readback::{BgraFrame, BgraReadback, ReadbackStats};

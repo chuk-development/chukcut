@@ -736,7 +736,8 @@ impl Operation for ZoomArgs {
 
 /// Put a keyframe on a clip property at a timeline time, change the one that
 /// is there, or remove it. Properties: position_x (or x), position_y (or y),
-/// scale_x, scale_y, rotation, opacity, volume.
+/// scale_x, scale_y, rotation, opacity, volume, crop_left, crop_top,
+/// crop_right, crop_bottom (one crop edge; `crop --at` keys all four).
 #[derive(Debug, Clone, Default, Args, Deserialize, JsonSchema)]
 pub struct KeyframeArgs {
     /// The clip: id, id prefix or `lane:index`.
@@ -748,7 +749,8 @@ pub struct KeyframeArgs {
     #[arg(long)]
     pub at: Time,
     /// The value there (canvas units for position, 1 = 100% for scale,
-    /// degrees for rotation, 0..1 for opacity, gain for volume).
+    /// degrees for rotation, 0..1 for opacity, gain for volume, 0..1 of the
+    /// source picture for a crop edge).
     #[arg(long, allow_hyphen_values = true, required_unless_present = "remove")]
     pub value: Option<f32>,
     /// hold, linear, ease_in, ease_out or ease_in_out.
@@ -781,6 +783,10 @@ impl Operation for KeyframeArgs {
                 "rotation",
                 "opacity",
                 "volume",
+                "crop_left",
+                "crop_top",
+                "crop_right",
+                "crop_bottom",
             ],
         )?;
         let easing: Option<Easing> = self

@@ -929,7 +929,8 @@ fn prefetch_requests(project: &Project, time: Micros) -> Vec<Prefetch<'_>> {
 }
 
 /// What the decode-ahead fetches for one video: its material, the source
-/// instant, and the next frame's when the clip blends frames.
+/// instant, and the next frame's when the clip blends frames (or the frame
+/// before and the instant, for a temporal denoise).
 type Prefetch<'a> = (&'a str, Micros, Option<Micros>);
 
 /// Video clip `segment` at timeline (or nested) time `time`, added to
@@ -956,6 +957,18 @@ fn want_video<'a>(
     }
     match crate::modules::speed::blend::blend_for(pool, segment, source_time) {
         Some(blend) => wanted.push((&segment.material_id, blend.first, Some(blend.second))),
+        // A temporal denoise also reads the frame before, which the render
+        // asks for first: decoded here in that order, the two-frame cache
+        // holds both, and the render decodes only the frame after.
+        None if crate::modules::fx::temporal::is_on(pool, segment, source_time) => {
+            let period = pool
+                .video(&segment.material_id)
+                .map_or(33_333, |v| crate::modules::fx::temporal::period(v.fps));
+            match crate::modules::fx::temporal::neighbours(source_time, period) {
+                (Some(before), _) => wanted.push((&segment.material_id, before, Some(source_time))),
+                (None, _) => wanted.push((&segment.material_id, source_time, None)),
+            }
+        }
         None => wanted.push((&segment.material_id, source_time, None)),
     }
 }

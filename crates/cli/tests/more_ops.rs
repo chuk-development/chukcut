@@ -119,6 +119,41 @@ fn names_links_pasted_attributes_and_looks() {
 }
 
 #[test]
+fn reduce_noise_takes_its_temporal_mode_by_name() {
+    require_ffmpeg!();
+    let (dir, project) = with_media("temporaldenoise");
+    let p = project.to_str().unwrap();
+    ok(
+        &dir,
+        &[
+            "effect",
+            "add",
+            p,
+            "denoise",
+            "--clip",
+            "0:0",
+            "--set",
+            "mode=temporal",
+            "--set",
+            "strength=70",
+        ],
+    );
+    let doc = document(&project);
+    let effect = doc["materials"]["effects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["kind"] == "denoise")
+        .expect("the effect is in the pool");
+    assert_eq!(effect["params"]["mode"], 1.0);
+    let bad = run(
+        &dir,
+        &["effect", "set", p, "0:0", "0", "--set", "mode=fast"],
+    );
+    assert_eq!(bad.code, 2, "an unknown mode is a usage error");
+}
+
+#[test]
 fn effect_stack_transitions_titles_and_mask_order() {
     require_ffmpeg!();
     let (dir, project) = with_media("stackops");

@@ -79,12 +79,22 @@ fn flat(w: u32, h: u32, c: [u8; 4]) -> Image {
 #[derive(Default)]
 struct Provider {
     images: HashMap<String, Image>,
+    /// Materials whose picture changes: one image per 30 fps frame, the
+    /// last held.
+    frames: HashMap<String, Vec<Image>>,
     cache: Mutex<HashMap<String, SourceFrame>>,
+    /// Every frame asked for, as `(material, frame index)`.
+    asked: Mutex<Vec<(String, usize)>>,
 }
 
 impl Provider {
     fn with(mut self, id: &str, image: Image) -> Self {
         self.images.insert(id.to_string(), image);
+        self
+    }
+
+    fn with_frames(mut self, id: &str, frames: Vec<Image>) -> Self {
+        self.frames.insert(id.to_string(), frames);
         self
     }
 }
@@ -95,12 +105,25 @@ impl SourceProvider for Provider {
         ctx: &RenderContext,
         request: &SourceRequest<'_>,
     ) -> anyhow::Result<Option<SourceFrame>> {
-        if let Some(hit) = self.cache.lock().get(request.material_id) {
+        let (key, image) = match self.frames.get(request.material_id) {
+            Some(frames) => {
+                let index = ((request.source_time as f64 / (1e6 / 30.0)).floor().max(0.0) as usize)
+                    .min(frames.len() - 1);
+                self.asked
+                    .lock()
+                    .push((request.material_id.to_string(), index));
+                (format!("{}#{index}", request.material_id), &frames[index])
+            }
+            None => {
+                let Some(image) = self.images.get(request.material_id) else {
+                    return Ok(None);
+                };
+                (request.material_id.to_string(), image)
+            }
+        };
+        if let Some(hit) = self.cache.lock().get(&key) {
             return Ok(Some(hit.clone()));
         }
-        let Some(image) = self.images.get(request.material_id) else {
-            return Ok(None);
-        };
         let texture = ctx.device().create_texture(&wgpu::TextureDescriptor {
             label: Some("fx test source"),
             size: wgpu::Extent3d {
@@ -136,9 +159,7 @@ impl SourceProvider for Provider {
             },
         );
         let frame = SourceFrame::from_texture(std::sync::Arc::new(texture));
-        self.cache
-            .lock()
-            .insert(request.material_id.to_string(), frame.clone());
+        self.cache.lock().insert(key, frame.clone());
         Ok(Some(frame))
     }
 }
@@ -1613,4 +1634,144 @@ fn denoise_smooths_noise_and_keeps_a_hard_edge() {
             "the edge blurred: {dark} | {light}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Reduce noise, temporal
+// ---------------------------------------------------------------------------
+
+/// Three frames of a flat grey with fresh noise in each, ±`amount`.
+fn noisy_frames(w: u32, h: u32, amount: i32) -> Vec<Image> {
+    (0..3u32)
+        .map(|f| {
+            Image::new(w, h, |x, y| {
+                let n = (pcg(x * 131 + y * 7919 + f * 104_729) % (2 * amount as u32 + 1)) as i32
+                    - amount;
+                let v = (128 + n).clamp(0, 255) as u8;
+                [v, v, v, 255]
+            })
+        })
+        .collect()
+}
+
+/// The spread of the green channel over the picture, away from its border.
+fn spread(frame: &Frame, w: u32, h: u32) -> f32 {
+    let values: Vec<f32> = (6..h - 6)
+        .flat_map(|y| (6..w - 6).map(move |x| (x, y)))
+        .map(|(x, y)| frame.pixel(x, y)[1] as f32)
+        .collect();
+    let mean = values.iter().sum::<f32>() / values.len() as f32;
+    (values.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / values.len() as f32).sqrt()
+}
+
+/// The middle frame of three, 1/30 s in.
+const MIDDLE: Micros = 33_333 + 10;
+
+#[test]
+fn temporal_denoise_removes_more_noise_than_the_spatial_pass_alone() {
+    let c = gpu!();
+    let (w, h) = (48u32, 40u32);
+    let provider = || Provider::default().with_frames("clip", noisy_frames(w, h, 12));
+    let with_mode = |mode: f32| {
+        let mut p = one_clip(w, h);
+        attach(
+            &mut p,
+            "s",
+            effect(
+                catalog::DENOISE,
+                &[("strength", 60.0), ("detail", 50.0), ("mode", mode)],
+                1,
+            ),
+        );
+        p
+    };
+    let plain = spread(&render(&c, &one_clip(w, h), MIDDLE, &provider()), w, h);
+    let spatial = spread(&render(&c, &with_mode(0.0), MIDDLE, &provider()), w, h);
+    let temporal_provider = provider();
+    let temporal = spread(
+        &render(&c, &with_mode(1.0), MIDDLE, &temporal_provider),
+        w,
+        h,
+    );
+    assert!(spatial < plain, "spatial {spatial:.2} of {plain:.2}");
+    assert!(
+        temporal < spatial * 0.8,
+        "temporal {temporal:.2}, spatial alone {spatial:.2}, none {plain:.2}"
+    );
+    // Asked in the order the provider's two-frame cache wants: before, the
+    // frame itself, after.
+    let asked: Vec<usize> = temporal_provider
+        .asked
+        .lock()
+        .iter()
+        .map(|(_, i)| *i)
+        .collect();
+    assert_eq!(asked, vec![0, 1, 2]);
+}
+
+#[test]
+fn temporal_denoise_does_not_ghost_what_moved() {
+    let c = gpu!();
+    let (w, h) = (64u32, 32u32);
+    // A white square moving right 16 px a frame over a dark grey.
+    let frames: Vec<Image> = [4u32, 24, 44]
+        .iter()
+        .map(|&left| {
+            Image::new(w, h, |x, y| {
+                let inside = (left..left + 14).contains(&x) && (9..23).contains(&y);
+                if inside {
+                    [255, 255, 255, 255]
+                } else {
+                    [40, 40, 40, 255]
+                }
+            })
+        })
+        .collect();
+    let provider = Provider::default().with_frames("clip", frames);
+    let mut p = one_clip(w, h);
+    attach(
+        &mut p,
+        "s",
+        effect(
+            catalog::DENOISE,
+            &[("strength", 100.0), ("detail", 0.0), ("mode", 1.0)],
+            1,
+        ),
+    );
+    let frame = render(&c, &p, MIDDLE, &provider);
+    // Where the square was and will be: background, no trace of it.
+    for x in [10, 50] {
+        let v = frame.pixel(x, 16)[1];
+        assert!(v < 50, "a ghost at x {x}: {v}");
+    }
+    // Where it is: white, not dimmed by the frames that did not have it.
+    let v = frame.pixel(30, 16)[1];
+    assert!(v > 245, "the square faded: {v}");
+}
+
+#[test]
+fn temporal_denoise_at_the_first_frame_uses_the_frame_after_only() {
+    let c = gpu!();
+    let (w, h) = (48u32, 40u32);
+    let provider = Provider::default().with_frames("clip", noisy_frames(w, h, 12));
+    let mut p = one_clip(w, h);
+    attach(
+        &mut p,
+        "s",
+        effect(catalog::DENOISE, &[("strength", 60.0), ("mode", 1.0)], 1),
+    );
+    let frame = render(&c, &p, 10, &provider);
+    let asked: Vec<usize> = provider.asked.lock().iter().map(|(_, i)| *i).collect();
+    assert_eq!(asked, vec![0, 1], "no frame before the first");
+    let plain = spread(
+        &render(
+            &c,
+            &one_clip(w, h),
+            10,
+            &Provider::default().with_frames("clip", noisy_frames(w, h, 12)),
+        ),
+        w,
+        h,
+    );
+    assert!(spread(&frame, w, h) < plain * 0.6);
 }

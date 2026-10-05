@@ -146,6 +146,7 @@ pub fn make_template(project: &Project, request: &SaveRequest) -> Result<Templat
         segment.source_range = TimeRange::new(0, length);
         segment.speed = 1.0;
         segment.crop = None;
+        segment.keyframes.retain(|t| !t.property.is_crop());
         segment.extras.retain(|id| !strip.contains(id));
         segment.extras.push(marker_id);
         if let Some(link) = link {

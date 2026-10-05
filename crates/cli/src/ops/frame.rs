@@ -33,7 +33,12 @@ fn clip_outcome(session: &Session, id: &str, message: String) -> Outcome {
 
 /// Crop a clip's picture. Edges are fractions of the source frame: left and
 /// top from 0, right and bottom up to 1. An edge that is not given keeps its
-/// current value. `clear` removes the crop.
+/// current value. `clear` removes the crop and its keyframes.
+///
+/// With `at`, the crop is a keyframe at that timeline time on all four edges
+/// (the one there changes); edges not given keep the crop shown there, and
+/// `remove` takes the crop keyframe there away. A crop that has keyframes is
+/// only changed with `at`.
 #[derive(Debug, Clone, Default, Args, Deserialize, JsonSchema)]
 pub struct CropArgs {
     /// The clip: id, id prefix or `lane:index`.
@@ -50,53 +55,120 @@ pub struct CropArgs {
     /// The bottom edge, 0..1 from the top of the frame.
     #[arg(long)]
     pub bottom: Option<f32>,
-    /// Remove the crop.
-    #[arg(long, conflicts_with_all = ["left", "top", "right", "bottom"])]
+    /// Remove the crop, keyframes included.
+    #[arg(long, conflicts_with_all = ["left", "top", "right", "bottom", "at", "remove"])]
     #[serde(default)]
     pub clear: bool,
+    /// Key the crop at this timeline time instead of setting the clip's one
+    /// rectangle.
+    #[arg(long)]
+    #[serde(default)]
+    pub at: Option<Time>,
+    /// With `at`: remove the crop keyframe at that time.
+    #[arg(long, requires = "at", conflicts_with_all = ["left", "top", "right", "bottom"])]
+    #[serde(default)]
+    pub remove: bool,
+}
+
+impl CropArgs {
+    fn edges_given(&self) -> bool {
+        self.left.is_some() || self.top.is_some() || self.right.is_some() || self.bottom.is_some()
+    }
+
+    /// `base` with the given edges written over it.
+    fn over(&self, base: Option<Crop>) -> CliResult<Crop> {
+        let mut crop = base.unwrap_or_default();
+        if let Some(v) = self.left {
+            crop.left = v;
+        }
+        if let Some(v) = self.top {
+            crop.top = v;
+        }
+        if let Some(v) = self.right {
+            crop.right = v;
+        }
+        if let Some(v) = self.bottom {
+            crop.bottom = v;
+        }
+        if let Some(field) = crop.non_finite_field() {
+            return Err(CliError::usage(format!("{field} must be a finite number")));
+        }
+        Ok(crop)
+    }
+
+    fn run_at(self, session: &mut Session, id: String, at: &Time) -> CliResult<Outcome> {
+        let time = at.resolve(session.fps());
+        if self.remove {
+            let keyed = session.with(|p| {
+                p.segment(&id).is_some_and(|(_, s)| {
+                    let relative = time - s.target_range.start;
+                    let tolerance = (500_000.0 / p.fps.max(1.0)) as Micros;
+                    s.keyframes
+                        .iter()
+                        .filter(|t| t.property.is_crop())
+                        .any(|t| {
+                            t.keyframes
+                                .iter()
+                                .any(|k| (k.time - relative).abs() <= tolerance)
+                        })
+                })
+            });
+            if !keyed {
+                return Err(CliError::refused("there is no crop keyframe at that time"));
+            }
+            inspector_commands::inspector_toggle_crop_keyframe(&session.state, id.clone(), time)?;
+            return Ok(clip_outcome(
+                session,
+                &id,
+                format!("crop keyframe at {:.3} s removed", seconds(time)),
+            ));
+        }
+        if !self.edges_given() {
+            return Err(CliError::usage(
+                "crop --at needs --left, --top, --right, --bottom or --remove",
+            ));
+        }
+        let shown = session.with(|p| p.segment(&id).and_then(|(_, s)| s.crop_at(time)));
+        let crop = self.over(shown)?;
+        inspector_commands::inspector_set_crop_at(&session.state, id.clone(), Some(crop), time)?;
+        Ok(clip_outcome(
+            session,
+            &id,
+            format!("crop keyframe at {:.3} s", seconds(time)),
+        ))
+    }
 }
 
 impl Operation for CropArgs {
     const NAME: &'static str = "crop";
     fn run(self, session: &mut Session, _: &Ctx) -> CliResult<Outcome> {
         let id = session.with(|p| select::clip(p, &self.clip))?;
-        let current = session.with(|p| p.segment(&id).and_then(|(_, s)| s.crop));
+        if let Some(at) = self.at {
+            return self.run_at(session, id, &at);
+        }
+        if self.remove {
+            return Err(CliError::usage("crop --remove needs --at"));
+        }
+        let (current, keyed) = session.with(|p| {
+            p.segment(&id)
+                .map_or((None, false), |(_, s)| (s.crop, s.has_crop_keyframes()))
+        });
         let crop = if self.clear {
             None
         } else {
-            if self.left.is_none()
-                && self.top.is_none()
-                && self.right.is_none()
-                && self.bottom.is_none()
-            {
+            if !self.edges_given() {
                 return Err(CliError::usage(
                     "crop needs --left, --top, --right, --bottom or --clear",
                 ));
             }
-            let mut crop = current.unwrap_or(Crop {
-                left: 0.0,
-                top: 0.0,
-                right: 1.0,
-                bottom: 1.0,
-            });
-            if let Some(v) = self.left {
-                crop.left = v;
+            if keyed {
+                return Err(CliError::refused(
+                    "the crop has keyframes; give --at to set it at a time, or --clear it first",
+                ));
             }
-            if let Some(v) = self.top {
-                crop.top = v;
-            }
-            if let Some(v) = self.right {
-                crop.right = v;
-            }
-            if let Some(v) = self.bottom {
-                crop.bottom = v;
-            }
-            if let Some(field) = crop.non_finite_field() {
-                return Err(CliError::usage(format!("{field} must be a finite number")));
-            }
-            Some(crop)
+            Some(self.over(current)?)
         };
-        if crop.is_none() && current.is_none() {
+        if crop.is_none() && current.is_none() && !keyed {
             return Ok(Outcome::read(
                 "the clip has no crop",
                 json!({"clip": session.with(|p| summary::clip_by_id(p, &id))}),

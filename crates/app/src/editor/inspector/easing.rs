@@ -54,11 +54,12 @@ struct HandleDrag {
 }
 
 /// The rows the graph can show, in panel order, with their chip label.
-const ROWS: [(Prop, &str); 4] = [
+const ROWS: [(Prop, &str); 5] = [
     (Prop::Scale, "Scale"),
     (Prop::PosX, "Position"),
     (Prop::Rotation, "Rotate"),
     (Prop::Opacity, "Opacity"),
+    (Prop::Crop, "Crop"),
 ];
 
 /// The document properties one row's easing applies to: a row that edits two
