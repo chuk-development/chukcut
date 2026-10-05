@@ -580,7 +580,9 @@ fn run_worker(inner: Arc<Inner>) {
             }
         };
 
-        run_one(&inner, job);
+        // Contained: a bug in one transcode loses that proxy (the clip
+        // previews from its original) instead of the proxy thread.
+        let _ = crate::lifecycle::contain("Making a proxy", || run_one(&inner, job));
 
         inner.state.lock().running = None;
     }

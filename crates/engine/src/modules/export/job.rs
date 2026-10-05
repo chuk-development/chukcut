@@ -175,6 +175,9 @@ pub fn export_options() -> ExportOptions {
 /// Turn a request plus the project into settings, or into prose explaining why
 /// it cannot be done.
 pub fn resolve_settings(project: &Project, request: &ExportRequest) -> Result<ExportSettings> {
+    // The same check for every caller — the app's dialog and queue, the CLI,
+    // the MCP server — before anything is sized by the document.
+    project.render_check().map_err(ExportError::Settings)?;
     let mut preset = match request.preset_id.as_deref() {
         None | Some(CUSTOM_PRESET_ID) => ExportPreset::custom_for(project),
         Some(id) => find_preset(id)
@@ -637,7 +640,86 @@ pub fn missing_media(project: &Project) -> Vec<String> {
     lines
 }
 
+/// Run `job` to the end, reporting through `sink`.
+///
+/// A panic anywhere inside — an effect, a decoder, the encoder — is contained
+/// here, so every caller (the export thread, the queue, the CLI) gets what an
+/// ordinary failure gives it: a `Failed` message for the dialog and an error.
+/// Without this the dialog stayed at its last percentage and the queue never
+/// ran again. The output is removed when this export created it; a file that
+/// was there before is left alone, since the panic may have come before the
+/// writer touched it.
+///
+/// The work runs on a thread of its own, which this joins — to the end of
+/// its thread-local destructors — before it returns, after closing every
+/// decoder the export opened on that thread. So when this returns, nothing
+/// of the export is left in a GPU driver: no hardware decoder or encoder,
+/// and no CUDA state of a thread that is still winding down. A caller that
+/// returns from `main` right after (a test binary, an embedder) used to race
+/// the driver's own destructors with that thread: SIGSEGV in
+/// `libnvidia-glcore`, or a hang in `libnvcuvid`'s, about once in ten runs
+/// under load (docs/STATUS.md, "The crash after the export").
 pub fn run_export(job: &ExportJob, sink: &dyn ProgressSink) -> Result<ExportOutcome> {
+    std::thread::scope(|scope| {
+        let worker = std::thread::Builder::new()
+            .name(format!("chukcut-export-{}", short_id(&job.job_id)))
+            .stack_size(8 << 20)
+            .spawn_scoped(scope, || {
+                let outcome = run_export_contained(job, sink);
+                // Closed here, on the thread that opened them: a hardware
+                // decoder destroyed by the caller would give the caller's
+                // thread driver state of its own.
+                job.sources.release();
+                outcome
+            })
+            .map_err(|error| {
+                ExportError::Settings(format!("could not start the export thread: {error}"))
+            })?;
+        // An explicit join is `pthread_join`: it returns once the thread has
+        // ended, thread-local destructors included. The scope's own wait
+        // only waits for the closure.
+        worker.join().unwrap_or_else(|payload| {
+            Err(ExportError::Internal(format!(
+                "The export stopped on an internal error: {}",
+                crate::lifecycle::panic_message(payload.as_ref())
+            )))
+        })
+    })
+}
+
+/// The first part of a job id, for a thread name (15 bytes on Linux).
+fn short_id(id: &str) -> &str {
+    let end = id
+        .char_indices()
+        .nth(8)
+        .map_or(id.len(), |(index, _)| index);
+    &id[..end]
+}
+
+/// [`run_export`]'s work, with a panic contained.
+fn run_export_contained(job: &ExportJob, sink: &dyn ProgressSink) -> Result<ExportOutcome> {
+    let existed = job.settings.output_path.exists();
+    match crate::lifecycle::contain("The export", || run_export_inner(job, sink)) {
+        Ok(result) => result,
+        Err(message) => {
+            if !existed {
+                let _ = std::fs::remove_file(&job.settings.output_path);
+            }
+            let tracker = ProgressTracker::new(
+                job.job_id.clone(),
+                job.settings.total_frames,
+                Instant::now(),
+            );
+            let mut failed = tracker.snapshot(ExportStage::Failed, 0, Instant::now());
+            failed.message = Some(message.clone());
+            sink.send(failed);
+            Err(ExportError::Internal(message))
+        }
+    }
+}
+
+fn run_export_inner(job: &ExportJob, sink: &dyn ProgressSink) -> Result<ExportOutcome> {
+    crate::faults::hit_keyed("export.run", &job.job_id);
     let settings = &job.settings;
     let mut tracker =
         ProgressTracker::new(job.job_id.clone(), settings.total_frames, Instant::now());
@@ -847,77 +929,160 @@ pub fn run_export(job: &ExportJob, sink: &dyn ProgressSink) -> Result<ExportOutc
     }
 }
 
-/// The finished stereo bed for this export: mixed, cut to the range and
-/// brought to the loudness target. Empty when the export has no sound.
-fn prepare_mix(
-    job: &ExportJob,
-    tracker: &mut ProgressTracker,
-    sink: &dyn ProgressSink,
-) -> Result<(Vec<f32>, usize)> {
-    // The whole mix up front. Interleaving decode with encode would bound the
-    // memory, but the mix is also what tells us the audio is decodable at all,
-    // and finding that out after ten minutes of video is worse than a second of
-    // waiting and a buffer.
-    let settings = &job.settings;
-    let mut mixed: Vec<f32> = Vec::new();
-    let mut channels = 0usize;
-    if let Some(spec) = &settings.audio {
-        sink.send(tracker.snapshot(ExportStage::MixingAudio, 0, Instant::now()));
-        channels = spec.channels.max(1) as usize;
-        // A clip's denoised sound is a cached render; a cleared cache is
-        // rebuilt here, with the settings the document records, rather than
-        // exporting the noisy original the user never heard.
-        crate::modules::voice::denoise::ensure_rendered(&job.project, &job.cancel)
-            .map_err(|error| ExportError::Audio(anyhow::anyhow!(error)))?;
-        mixed = audio::mix_timeline(
-            &job.project,
-            job.audio.as_ref(),
-            spec.sample_rate,
-            spec.channels,
-            &job.cancel,
-        )
-        // The mix runs before the block below, so a failure here would
-        // otherwise leave a log with no trace of the export at all.
-        .map_err(|error| {
-            if !error.is_cancellation() {
-                tracing::error!(%error, "the audio mix failed; no frame was encoded");
-            }
-            error
-        })?;
-        // The mix is always the whole project — the mixer's arithmetic places
-        // every segment at its absolute time — so a range export takes its
-        // slice of the finished bed. Mixing only the range instead would mean
-        // teaching every segment placement about an offset for a buffer that
-        // is cheap next to one second of encoding.
-        if settings.range_start > 0 || settings.duration < job.project.duration() {
-            mixed = audio::slice_range(
+/// The export's sound, handed to the writer as the frames advance.
+///
+/// Streamed block by block over the export range ([`audio::MixStream`]), so
+/// a two-second export of a three-hour timeline holds two seconds of audio at
+/// most, and a whole-project export holds one block. A loudness target is
+/// the exception: it measures the finished mix, limits it and measures again,
+/// so the range is mixed into one buffer first — the range, never the
+/// timeline.
+enum AudioFeed<'a> {
+    Silent,
+    Buffered {
+        mixed: Vec<f32>,
+        channels: usize,
+        /// Sample frames already written.
+        cursor: usize,
+    },
+    Streaming {
+        stream: Box<audio::MixStream<'a>>,
+        /// The block being written, and the output frame it starts at.
+        block: Vec<f32>,
+        block_start: usize,
+        /// Sample frames in the whole feed.
+        total: usize,
+        cursor: usize,
+    },
+}
+
+impl AudioFeed<'_> {
+    /// Hand the writer every sample frame before `until` (an output frame
+    /// count, clamped to the feed's length).
+    fn write_until(&mut self, writer: &mut MediaWriter, until: usize) -> Result<()> {
+        match self {
+            AudioFeed::Silent => Ok(()),
+            AudioFeed::Buffered {
                 mixed,
                 channels,
-                spec.sample_rate,
-                settings.range_start,
-                settings.duration,
-            );
-        }
-        if let Some(target) = settings.loudness_target {
-            let report = crate::modules::loudness::normalize_in_place(
-                &mut mixed,
-                channels,
-                spec.sample_rate,
-                target as f64,
-                crate::modules::loudness::TRUE_PEAK_CEILING,
-            )
-            .map_err(|error| ExportError::Audio(anyhow::anyhow!(error)))?;
-            tracing::info!(
-                target,
-                before = ?report.before.integrated,
-                after = ?report.after.integrated,
-                gain_db = report.gain_db,
-                "normalised the mix"
-            );
+                cursor,
+            } => {
+                let until = until.min(mixed.len() / *channels);
+                if until > *cursor {
+                    writer.write_audio(&mixed[*cursor * *channels..until * *channels])?;
+                    *cursor = until;
+                }
+                Ok(())
+            }
+            AudioFeed::Streaming {
+                stream,
+                block,
+                block_start,
+                total,
+                cursor,
+            } => {
+                let channels = stream.channels();
+                let until = until.min(*total);
+                while *cursor < until {
+                    let block_end = *block_start + block.len() / channels;
+                    if *cursor >= block_end {
+                        *block_start = block_end;
+                        if !stream.next_block(audio::BLOCK_FRAMES, block)? {
+                            break;
+                        }
+                        continue;
+                    }
+                    let to = until.min(block_end);
+                    writer.write_audio(
+                        &block[(*cursor - *block_start) * channels..(to - *block_start) * channels],
+                    )?;
+                    *cursor = to;
+                }
+                Ok(())
+            }
         }
     }
 
-    Ok((mixed, channels))
+    /// Everything not written yet: a mix is exactly as long as its range,
+    /// and the last frame starts before the range ends.
+    fn write_rest(&mut self, writer: &mut MediaWriter) -> Result<()> {
+        self.write_until(writer, usize::MAX)
+    }
+}
+
+/// The finished stereo bed for this export: mixed over the range and, with a
+/// loudness target, brought to it. Silent when the export has no sound.
+fn prepare_mix<'a>(
+    job: &'a ExportJob,
+    tracker: &mut ProgressTracker,
+    sink: &dyn ProgressSink,
+) -> Result<AudioFeed<'a>> {
+    let settings = &job.settings;
+    let Some(spec) = &settings.audio else {
+        return Ok(AudioFeed::Silent);
+    };
+    sink.send(tracker.snapshot(ExportStage::MixingAudio, 0, Instant::now()));
+    let channels = spec.channels.max(1) as usize;
+    // A clip's denoised sound is a cached render; a cleared cache is
+    // rebuilt here, with the settings the document records, rather than
+    // exporting the noisy original the user never heard.
+    crate::modules::voice::denoise::ensure_rendered(&job.project, &job.cancel)
+        .map_err(|error| ExportError::Audio(anyhow::anyhow!(error)))?;
+    // Only the export's own range is mixed; the mixer places every segment
+    // at its timeline frame and keeps the part inside the range.
+    let range = audio::MixRange::export(
+        &job.project,
+        spec.sample_rate,
+        settings.range_start,
+        settings.duration,
+    );
+    let stream = audio::MixStream::new(
+        &job.project,
+        job.audio.as_ref(),
+        spec.sample_rate,
+        spec.channels,
+        range,
+        &job.cancel,
+    )
+    // This runs before the first frame, so a failure here would otherwise
+    // leave a log with no trace of the export at all.
+    .map_err(|error| {
+        if !error.is_cancellation() {
+            tracing::error!(%error, "the audio mix failed; no frame was encoded");
+        }
+        error
+    })?;
+
+    let Some(target) = settings.loudness_target else {
+        return Ok(AudioFeed::Streaming {
+            stream: Box::new(stream),
+            block: Vec::new(),
+            block_start: 0,
+            total: range.frames,
+            cursor: 0,
+        });
+    };
+    let mut mixed = stream.collect()?;
+    let report = crate::modules::loudness::normalize_in_place(
+        &mut mixed,
+        channels,
+        spec.sample_rate,
+        target as f64,
+        crate::modules::loudness::TRUE_PEAK_CEILING,
+    )
+    .map_err(|error| ExportError::Audio(anyhow::anyhow!(error)))?;
+    tracing::info!(
+        target,
+        before = ?report.before.integrated,
+        after = ?report.after.integrated,
+        gain_db = report.gain_db,
+        "normalised the mix"
+    );
+    Ok(AudioFeed::Buffered {
+        mixed,
+        channels,
+        cursor: 0,
+    })
 }
 
 /// A sound-only export: the mix, written in steps of one frame of the
@@ -930,20 +1095,17 @@ fn encode_audio_only(
 ) -> Result<u64> {
     let settings = &job.settings;
     let fps = settings.fps();
-    let (mixed, channels) = prepare_mix(job, tracker, sink)?;
+    let mut feed = prepare_mix(job, tracker, sink)?;
     let rate = settings.audio.as_ref().map(|a| a.sample_rate).unwrap_or(0);
-    let mut cursor = 0usize;
     walk_frames(fps, settings.total_frames, &job.cancel, |index, _| {
-        on_frame_written(writer, &mixed, channels, rate, fps, index, &mut cursor)?;
+        on_frame_written(writer, &mut feed, rate, fps, index)?;
         let now = Instant::now();
         if tracker.should_emit(index, now) {
             sink.send(tracker.snapshot(ExportStage::Encoding, index + 1, now));
         }
         Ok(())
     })?;
-    if !mixed.is_empty() && cursor * channels < mixed.len() {
-        writer.write_audio(&mixed[cursor * channels..])?;
-    }
+    feed.write_rest(writer)?;
     tracing::info!(
         output = %settings.output_path.display(),
         seconds = settings.duration as f64 / 1e6,
@@ -962,9 +1124,8 @@ fn encode_all(
     let fps = settings.fps();
     let size = settings.size();
 
-    let (mixed, channels) = prepare_mix(job, tracker, sink)?;
+    let mut feed = prepare_mix(job, tracker, sink)?;
     let audio_rate = settings.audio.as_ref().map(|a| a.sample_rate).unwrap_or(0);
-    let mut audio_cursor = 0usize;
 
     // Which colour conversion the frames take. NV12 on the GPU is worth about a
     // third of a 1080p export frame — see `docs/research/zero-copy-encode.md` —
@@ -1016,6 +1177,7 @@ fn encode_all(
         // export to start at zero.
         // Sampled just inside the frame rather than on its first microsecond;
         // see `SAMPLE_SLACK` for the duplicated frame at a cut that prevents.
+        crate::faults::hit_keyed("export.frame", &job.job_id);
         let time = settings.range_start + time + crate::modules::project::SAMPLE_SLACK;
         // Every clip of this frame decoded at once, one thread per clip,
         // rather than one after another inside the compositor.
@@ -1024,15 +1186,7 @@ fn encode_all(
         if let Some(state) = zero_copy.as_mut() {
             match state.frame(job, writer, size, index, time) {
                 Ok(()) => {
-                    on_frame_written(
-                        writer,
-                        &mixed,
-                        channels,
-                        audio_rate,
-                        fps,
-                        index,
-                        &mut audio_cursor,
-                    )?;
+                    on_frame_written(writer, &mut feed, audio_rate, fps, index)?;
                     written = index + 1;
                     let now = Instant::now();
                     if tracker.should_emit(index, now) {
@@ -1106,15 +1260,7 @@ fn encode_all(
             writer.write_video_frame(&rgba, index)?;
         }
 
-        on_frame_written(
-            writer,
-            &mixed,
-            channels,
-            audio_rate,
-            fps,
-            index,
-            &mut audio_cursor,
-        )?;
+        on_frame_written(writer, &mut feed, audio_rate, fps, index)?;
 
         written = index + 1;
         let now = Instant::now();
@@ -1143,9 +1289,7 @@ fn encode_all(
 
     // Whatever the last frame boundary did not cover — a mix is exactly as long
     // as the project, and the last frame starts before the project ends.
-    if !mixed.is_empty() && audio_cursor * channels < mixed.len() {
-        writer.write_audio(&mixed[audio_cursor * channels..])?;
-    }
+    feed.write_rest(writer)?;
 
     Ok(settings.total_frames)
 }
@@ -1400,23 +1544,18 @@ fn bitrate(bits_per_second: u64) -> String {
 #[allow(clippy::too_many_arguments)]
 fn on_frame_written(
     writer: &mut MediaWriter,
-    mixed: &[f32],
-    channels: usize,
+    feed: &mut AudioFeed<'_>,
     audio_rate: u32,
     fps: Fps,
     index: u64,
-    audio_cursor: &mut usize,
 ) -> Result<()> {
-    if mixed.is_empty() {
+    if matches!(feed, AudioFeed::Silent) {
         return Ok(());
     }
-    let until =
-        audio::frames_for(fps.frame_time(index + 1), audio_rate).min(mixed.len() / channels);
-    if until > *audio_cursor {
-        writer.write_audio(&mixed[*audio_cursor * channels..until * channels])?;
-        *audio_cursor = until;
-    }
-    Ok(())
+    feed.write_until(
+        writer,
+        audio::frames_for(fps.frame_time(index + 1), audio_rate),
+    )
 }
 
 /// The zero-copy export path's state: a rotation of exported buffers and the

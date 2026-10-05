@@ -177,6 +177,9 @@ struct Shared {
     ready: Mutex<VecDeque<PlayerFrame>>,
     stop: AtomicBool,
     failure: Mutex<Option<String>>,
+    /// The render thread ended on a panic; [`FramePlayer::restart`] starts a
+    /// new one.
+    crashed: AtomicBool,
     stats: Mutex<PlayerStats>,
     /// Decode from proxies where they exist. See [`FramePlayer::use_proxies`].
     proxies: AtomicBool,
@@ -199,6 +202,7 @@ impl Shared {
 pub struct FramePlayer {
     shared: Arc<Shared>,
     thread: Option<JoinHandle<()>>,
+    ctx: Option<Arc<RenderContext>>,
 }
 
 impl FramePlayer {
@@ -215,20 +219,35 @@ impl FramePlayer {
 
     fn start(ctx: Option<Arc<RenderContext>>) -> Self {
         let shared = Arc::new(Shared::default());
-        let thread = {
-            let shared = Arc::clone(&shared);
-            std::thread::Builder::new()
-                .name("chukcut-player".into())
-                .spawn(move || match ctx {
-                    Some(ctx) => Renderer::new(ctx, shared).run(),
-                    None => *shared.failure.lock() = Some("No usable GPU adapter".into()),
-                })
-                .expect("spawn the player thread")
-        };
+        let thread = Some(spawn_renderer(ctx.clone(), Arc::clone(&shared)));
         Self {
             shared,
-            thread: Some(thread),
+            thread,
+            ctx,
         }
+    }
+
+    /// Whether the render thread stopped on a bug. [`Self::failure`] says
+    /// what it was; [`Self::restart`] tries again.
+    pub fn crashed(&self) -> bool {
+        self.shared.crashed.load(Ordering::Acquire)
+    }
+
+    /// Start a new render thread after a crash. It picks up the current
+    /// request at once, so the picture comes back without a new edit. Does
+    /// nothing while the thread is alive.
+    pub fn restart(&mut self) {
+        if !self.crashed() {
+            return;
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+        self.shared.ready.lock().clear();
+        *self.shared.failure.lock() = None;
+        self.shared.crashed.store(false, Ordering::Release);
+        self.thread = Some(spawn_renderer(self.ctx.clone(), Arc::clone(&self.shared)));
+        tracing::info!("the preview was restarted after a crash");
     }
 
     /// Say what should be on screen. Replaces the previous request.
@@ -362,6 +381,28 @@ impl Drop for FramePlayer {
 }
 
 // --- the render thread ------------------------------------------------------------
+
+/// The render thread, with a panic contained: the thread ends, the player
+/// says why ([`FramePlayer::failure`], "The preview stopped …") and can be
+/// [restarted](FramePlayer::restart). Before, the preview froze on its last
+/// frame with no message at all.
+fn spawn_renderer(ctx: Option<Arc<RenderContext>>, shared: Arc<Shared>) -> JoinHandle<()> {
+    std::thread::Builder::new()
+        .name("chukcut-player".into())
+        .spawn(move || match ctx {
+            Some(ctx) => {
+                let held = Arc::clone(&shared);
+                if let Err(message) =
+                    crate::lifecycle::contain("The preview", || Renderer::new(ctx, held).run())
+                {
+                    *shared.failure.lock() = Some(message);
+                    shared.crashed.store(true, Ordering::Release);
+                }
+            }
+            None => *shared.failure.lock() = Some("No usable GPU adapter".into()),
+        })
+        .expect("spawn the player thread")
+}
 
 /// What travels with a frame through the readback ring.
 struct Tag {
@@ -754,6 +795,7 @@ impl Renderer {
     /// Composite `time` and queue its readback. Collects the oldest frame
     /// first if the ring is full.
     fn render(&mut self, request: &PlayerRequest, time: Micros, provider: &MediaSourceProvider) {
+        crate::faults::hit_keyed("player.render", &request.project.id);
         let started = Instant::now();
         let target =
             match self
@@ -1059,6 +1101,35 @@ mod tests {
         let centre = ((45 * 160 + 80) * 4) as usize;
         assert_eq!(&bgra[centre..centre + 4], &[26, 26, 122, 255], "BGRA order");
         assert_eq!(player.sharing(), Sharing::Readback);
+    }
+
+    /// A bug in the render step stops the thread, not the app: the player
+    /// says the preview stopped and why, and a restart renders again.
+    #[test]
+    fn a_panic_in_the_render_thread_is_reported_and_restartable() {
+        let Some(ctx) = crate::modules::render::test_context() else {
+            return;
+        };
+        let mut player = FramePlayer::with_context(ctx);
+        let mut doc = (*project()).clone();
+        doc.id = format!("player-crash-{}", std::process::id());
+        let project = Arc::new(doc);
+        crate::faults::arm(&format!("player.render:{}", project.id));
+        player.request(request(&project, 1_000_000, false));
+        let until = Instant::now() + Duration::from_secs(10);
+        while !player.crashed() {
+            assert!(Instant::now() < until, "the render thread did not stop");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let failure = player.failure().expect("a reason");
+        assert!(failure.starts_with("The preview stopped"), "{failure}");
+        assert!(failure.contains("injected fault"), "{failure}");
+
+        player.restart();
+        assert!(!player.crashed());
+        assert!(player.failure().is_none());
+        let frame = wait_for(&player, 1_000_000).expect("a frame after the restart");
+        assert_eq!((frame.width, frame.height), (160, 90));
     }
 
     /// Copy a shared frame back out on the engine's device, tightly packed.

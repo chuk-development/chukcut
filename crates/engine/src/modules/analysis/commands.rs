@@ -150,12 +150,20 @@ fn picture_of(
 /// Put `entries` into the pool, then apply what `build` makes of the
 /// document, as one undo step. The entries come back out if the edit is
 /// refused, so a refusal leaves the document exactly as it was.
+///
+/// Only into the document of `generation`: a job's result for a project
+/// that was closed or replaced since it started is dropped
+/// (`AppState::with_project_of`).
 fn commit(
     state: &Arc<AppState>,
+    generation: u64,
     entries: Vec<NewEntry>,
     build: impl FnOnce(&Project) -> Result<EditCommand, String>,
 ) -> Result<(), String> {
     let mut guard = state.project.write();
+    if !state.is_current(generation) {
+        return Err(crate::state::STALE_JOB.into());
+    }
     let project = guard.as_mut().ok_or("no project is open")?;
     let ids: Vec<Id> = entries.iter().map(|(id, _)| id.clone()).collect();
     for (id, value) in entries {
@@ -180,7 +188,7 @@ fn edit(
     entries: Vec<NewEntry>,
     build: impl FnOnce(&Project) -> Result<EditCommand, String>,
 ) -> Result<EditResponse, String> {
-    commit(state, entries, build)?;
+    commit(state, state.generation(), entries, build)?;
     crate::modules::voice::commands::respond(state)
 }
 
@@ -214,6 +222,7 @@ pub fn analysis_detect_scenes(
 ) -> Result<u64, String> {
     let picture = state.with_project(|p| picture_of(p, &request.segment_id, None))??;
     let state = Arc::clone(state);
+    let generation = state.generation();
     let segment_id = request.segment_id.clone();
     jobs::spawn(JobKind::Scenes, segment_id.clone(), channel, move |ctx| {
         let walk = picture.walk(scenes::ANALYSIS_HEIGHT, None);
@@ -237,7 +246,7 @@ pub fn analysis_detect_scenes(
         } else {
             "Detect scenes"
         };
-        commit(&state, vec![entry], |project| {
+        commit(&state, generation, vec![entry], |project| {
             let swap = store::swap_entry(project, &segment_id, store::SCENES, Some(&id), label)?;
             if !split {
                 return Ok(swap);
@@ -311,6 +320,7 @@ pub fn analysis_stabilise(
     // time map, so a compound clip's speed and curve are followed.
     let picture = state.with_project(|p| picture_of(p, &segment_id, None))??;
     let state = Arc::clone(state);
+    let generation = state.generation();
     let id = segment_id.clone();
     jobs::spawn(
         JobKind::Stabilise,
@@ -333,7 +343,7 @@ pub fn analysis_stabilise(
             let applied = Applied::build(&settings, &camera);
             let entry = store::new_entry(&settings);
             let entry_id = entry.0.clone();
-            commit(&state, vec![motion, entry], |project| {
+            commit(&state, generation, vec![motion, entry], |project| {
                 store::swap_entry(project, &id, store::STABILISE, Some(&entry_id), "Stabilise")
             })?;
             Ok(format!(
@@ -441,6 +451,7 @@ pub fn analysis_detect_beats(
         ))
     })??;
     let state = Arc::clone(state);
+    let generation = state.generation();
     jobs::spawn(JobKind::Beats, sound_id.clone(), channel, move |ctx| {
         let mono = match &input {
             Sound::File(path) => {
@@ -490,7 +501,7 @@ pub fn analysis_detect_beats(
             bpm,
         });
         let id = entry.0.clone();
-        commit(&state, vec![entry], |p| {
+        commit(&state, generation, vec![entry], |p| {
             store::swap_entry(p, &sound_id, store::BEATS, Some(&id), "Detect beats")
         })?;
         Ok(format!("{bpm:.0} BPM · {}", plural(count, "beat", "beats")))
@@ -655,6 +666,7 @@ pub fn analysis_reframe(
         .cloned()
         .unwrap_or_else(|| "project".into());
     let state = Arc::clone(state);
+    let generation = state.generation();
     let switch = request.ratio.is_some();
     let cue = request.subject;
     jobs::spawn(JobKind::Reframe, owner, channel, move |ctx| {
@@ -767,6 +779,11 @@ pub fn analysis_reframe(
         }
         let count = paths.len();
         let mut guard = state.project.write();
+        // A reframe for a project that was closed meanwhile must not resize
+        // whatever is open now.
+        if !state.is_current(generation) {
+            return Err(crate::state::STALE_JOB.into());
+        }
         let project = guard.as_mut().ok_or("no project is open")?;
         let configure = ConfigureCommand::new(project, config.clone());
         // The keyframes are computed against the canvas they are for.
@@ -916,7 +933,7 @@ mod tests {
             crop: None,
         });
         let id = entry.0.clone();
-        commit(&state, vec![entry], |p| {
+        commit(&state, state.generation(), vec![entry], |p| {
             store::swap_entry(p, "a", store::STABILISE, Some(&id), "Stabilise")
         })
         .unwrap();
@@ -952,7 +969,7 @@ mod tests {
             bpm: 120.0,
         });
         let id = entry.0.clone();
-        assert!(commit(&state, vec![entry], |p| {
+        assert!(commit(&state, state.generation(), vec![entry], |p| {
             store::swap_entry(p, "missing", store::BEATS, Some(&id), "x")
         })
         .is_err());

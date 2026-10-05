@@ -117,6 +117,31 @@ pub fn init() {
     }
 }
 
+/// Append `text` to the log file directly, not through `tracing`.
+///
+/// For a panic report: it must reach the file whether or not a subscriber
+/// with a file layer is installed — the CLI logs to stderr only, and its
+/// panics belong in the same file the app's do. Opens the file on first use
+/// when [`init`] did not. One write, so a report is never interleaved with
+/// another thread's line. False when there is no file to write to.
+pub fn write_raw(text: &str) -> bool {
+    static FALLBACK: OnceLock<Option<Arc<DailyFile>>> = OnceLock::new();
+    let file = match CURRENT.get() {
+        Some(file) => file.clone(),
+        None => FALLBACK
+            .get_or_init(|| {
+                DailyFile::new(paths::logs_dir(), KEEP_FILES)
+                    .ok()
+                    .map(Arc::new)
+            })
+            .clone(),
+    };
+    let Some(file) = file else {
+        return false;
+    };
+    file.append(text.as_bytes()).is_ok()
+}
+
 /// The file this run is writing to, for the UI and for anyone about to ask a
 /// user to send it.
 pub fn log_file() -> Option<PathBuf> {

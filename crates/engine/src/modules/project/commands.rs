@@ -53,6 +53,10 @@ pub fn project_new(
     project.tracks.push(Track::new(TrackKind::Video, "Video 1"));
     project.tracks.push(Track::new(TrackKind::Audio, "Audio 1"));
 
+    // Raised before the new document is in place: a job that
+    // takes the lock after this sees a different generation and
+    // drops its result rather than writing into this document.
+    state.next_generation();
     *state.project.write() = Some(project.clone());
     *state.project_path.write() = None;
     state.history.write().clear();
@@ -95,10 +99,32 @@ pub fn project_open(state: &Arc<AppState>, path: String) -> Result<Project, Stri
     }
     let project = loaded.project;
 
+    // Checked on the way in, and opened anyway: a user locked out of their
+    // own file is worse than one told what is wrong with it. What is wrong
+    // is logged and kept for the app to show (`open_notes`); a render
+    // refuses a document with errors (`Project::render_check`).
+    let mut notes = loaded.warnings.clone();
+    for issue in project.validate() {
+        match issue.severity {
+            super::Severity::Error => {
+                tracing::error!(%path, subject = ?issue.subject_id, "{}", issue.message);
+                notes.push(issue.message);
+            }
+            super::Severity::Warning => {
+                tracing::warn!(%path, subject = ?issue.subject_id, "{}", issue.message)
+            }
+        }
+    }
+
     let path = PathBuf::from(path);
+    // Raised before the new document is in place: a job that
+    // takes the lock after this sees a different generation and
+    // drops its result rather than writing into this document.
+    state.next_generation();
     *state.project.write() = Some(project.clone());
     *state.project_path.write() = Some(path.clone());
     state.history.write().clear();
+    *state.open_notes.write() = notes;
     super::autosave::schedule(&project, Some(path));
     media_opened(&project);
     Ok(project)
@@ -146,6 +172,10 @@ pub struct ImportedMaterial {
     pub width: u32,
     pub height: u32,
     pub has_audio: bool,
+    /// Something the user should know about the import, in a sentence: the
+    /// clip's frame rate was not adopted, say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice: Option<String>,
 }
 
 /// Formats FFmpeg demuxes as a single-frame video stream but which are really
@@ -180,6 +210,72 @@ pub fn import_material(
     name: &str,
     info: &crate::modules::media::MediaInfo,
 ) -> Result<ImportedMaterial, String> {
+    let (imported, adoption) = import_material_planned(project, path, name, info)?;
+    if let Some(command) = adoption {
+        command.apply(project)?;
+    }
+    Ok(imported)
+}
+
+/// [`import_material`] without the canvas change: the material is in the
+/// pool, and the canvas and frame rate the first clip asks for come back as a
+/// [`super::ConfigureCommand`] for the caller to apply through the history,
+/// so Undo gives the old canvas back. `None` when nothing changes.
+pub fn import_material_planned(
+    project: &mut Project,
+    path: &str,
+    name: &str,
+    info: &crate::modules::media::MediaInfo,
+) -> Result<(ImportedMaterial, Option<super::ConfigureCommand>), String> {
+    let mut adoption = None;
+    let imported = import_into_pool(project, path, name, info, &mut adoption)?;
+    Ok((imported, adoption))
+}
+
+/// The common frame rates a project adopts from its first clip, as exact
+/// fractions: 23.976, 24, 25, 29.97, 30, 48, 50, 59.94, 60.
+const PROJECT_RATES: [f64; 9] = [
+    24_000.0 / 1_001.0,
+    24.0,
+    25.0,
+    30_000.0 / 1_001.0,
+    30.0,
+    48.0,
+    50.0,
+    60_000.0 / 1_001.0,
+    60.0,
+];
+
+/// The frame rate a project takes from a first clip running at `clip` fps,
+/// or `None` to keep its own. A common rate is taken as the clip has it; a
+/// phone's variable rate whose average is near one (29.87) takes that one; a
+/// screen recording at 1 fps, a time-lapse at 4 or a slow-motion file at 240
+/// is not a project rate — the clip plays fine on a 30 fps timeline, and a
+/// 1 fps project would make every later clip stutter.
+pub fn adopted_fps(clip: f64) -> Option<f64> {
+    if !clip.is_finite() || clip <= 0.0 {
+        return None;
+    }
+    let (nearest, off) = PROJECT_RATES
+        .iter()
+        .map(|rate| (*rate, (clip - rate).abs() / rate))
+        .min_by(|a, b| a.1.total_cmp(&b.1))?;
+    if off <= 0.001 {
+        Some(clip)
+    } else if off <= 0.015 {
+        Some(nearest)
+    } else {
+        None
+    }
+}
+
+fn import_into_pool(
+    project: &mut Project,
+    path: &str,
+    name: &str,
+    info: &crate::modules::media::MediaInfo,
+    adoption: &mut Option<super::ConfigureCommand>,
+) -> Result<ImportedMaterial, String> {
     // Already imported? Hand back what is there.
     if let Some(existing) = project.materials.videos.iter().find(|m| m.path == path) {
         return Ok(ImportedMaterial {
@@ -191,6 +287,7 @@ pub fn import_material(
             width: existing.width,
             height: existing.height,
             has_audio: existing.has_audio,
+            notice: None,
         });
     }
     if let Some(existing) = project.materials.images.iter().find(|m| m.path == path) {
@@ -203,6 +300,7 @@ pub fn import_material(
             width: existing.width,
             height: existing.height,
             has_audio: false,
+            notice: None,
         });
     }
     if let Some(existing) = project.materials.audios.iter().find(|m| m.path == path) {
@@ -215,6 +313,7 @@ pub fn import_material(
             width: 0,
             height: 0,
             has_audio: true,
+            notice: None,
         });
     }
 
@@ -245,10 +344,12 @@ pub fn import_material(
                 width: video.display_width,
                 height: video.display_height,
                 has_audio: false,
+                notice: None,
             })
         }
 
         (Some(video), _) => {
+            let mut notice = None;
             // Adopt the first clip's shape.
             //
             // A new project defaults to 1080x1920 because this editor is for
@@ -299,21 +400,48 @@ pub fn import_material(
                 let width = ((w as f32 * scale).round() as u32).max(2) & !1;
                 let height = ((h as f32 * scale).round() as u32).max(2) & !1;
 
-                if (project.canvas.width, project.canvas.height) != (width, height) {
+                // Match the timeline to the source frame rate too, so a 24 fps
+                // film is not resampled to 30 for no reason — when it is a
+                // rate a project should have (`adopted_fps`).
+                let fps = match adopted_fps(video.fps) {
+                    Some(fps) if (fps - project.fps).abs() > 0.01 => fps,
+                    Some(_) => project.fps,
+                    None => {
+                        if video.fps > 0.0 {
+                            notice = Some(format!(
+                                "{name} runs at {:.3} fps, which is not a project frame rate; \
+                                 the project stays at {:.3} fps",
+                                video.fps, project.fps
+                            ));
+                        }
+                        project.fps
+                    }
+                };
+                // Through a `ConfigureCommand`, applied by the caller: the
+                // canvas is document state, and Undo must give it back.
+                let command = super::ConfigureCommand::new(
+                    project,
+                    super::ProjectConfig {
+                        width,
+                        height,
+                        fps,
+                        ..super::ProjectConfig::of(project)
+                    },
+                );
+                if !command.is_noop() {
                     tracing::info!(
-                        from = format_args!("{}x{}", project.canvas.width, project.canvas.height),
-                        to = format_args!("{width}x{height}"),
-                        source = format_args!("{}x{}", video.display_width, video.display_height),
+                        from = format_args!(
+                            "{}x{} at {}",
+                            project.canvas.width, project.canvas.height, project.fps
+                        ),
+                        to = format_args!("{width}x{height} at {fps}"),
+                        source = format_args!(
+                            "{}x{} at {}",
+                            video.display_width, video.display_height, video.fps
+                        ),
                         "canvas adopted from the first imported clip"
                     );
-                    project.canvas.width = width;
-                    project.canvas.height = height;
-                }
-
-                // Match the timeline to the source frame rate too, so a 24 fps
-                // film is not resampled to 30 for no reason.
-                if video.fps > 0.0 && (video.fps - project.fps).abs() > 0.01 {
-                    project.fps = video.fps;
+                    *adoption = Some(command);
                 }
             }
 
@@ -338,6 +466,7 @@ pub fn import_material(
                 width: video.display_width,
                 height: video.display_height,
                 has_audio: info.has_audio,
+                notice,
             })
         }
 
@@ -358,6 +487,7 @@ pub fn import_material(
                 width: 0,
                 height: 0,
                 has_audio: true,
+                notice: None,
             })
         }
 
@@ -425,18 +555,7 @@ pub async fn project_import_media(
     // A file the cloud module wrote has its licence record beside it.
     let origin = crate::modules::cloud::provenance::read_sidecar(std::path::Path::new(&path));
 
-    let imported = {
-        let mut guard = state.project.write();
-        let project = guard.as_mut().ok_or("no project is open")?;
-        let imported = import_material(project, &path, &name, &info)?;
-        if let Some(origin) = origin {
-            project
-                .materials
-                .origins
-                .insert(imported.id.clone(), origin);
-        }
-        imported
-    };
+    let imported = import_into_state(state, &path, &name, &info, origin)?;
 
     // The material pool is document state like any other, and an import that a
     // restart forgets means relinking every clip that referenced it.
@@ -448,6 +567,31 @@ pub async fn project_import_media(
     // Only the new file: the rest of the pool was considered when it came in.
     if info.has_video {
         crate::modules::proxy::commands::proxy_request_media(vec![path]);
+    }
+    Ok(imported)
+}
+
+/// The pool half of [`project_import_media`], once the file is probed: the
+/// material goes in, and the canvas the first clip asks for is applied as an
+/// edit like any other, on the undo stack.
+fn import_into_state(
+    state: &Arc<AppState>,
+    path: &str,
+    name: &str,
+    info: &crate::modules::media::MediaInfo,
+    origin: Option<crate::modules::cloud::provenance::Origin>,
+) -> Result<ImportedMaterial, String> {
+    let mut guard = state.project.write();
+    let project = guard.as_mut().ok_or("no project is open")?;
+    let (imported, adoption) = import_material_planned(project, path, name, info)?;
+    if let Some(command) = adoption {
+        state.history.write().apply_configure(project, command)?;
+    }
+    if let Some(origin) = origin {
+        project
+            .materials
+            .origins
+            .insert(imported.id.clone(), origin);
     }
     Ok(imported)
 }
@@ -494,6 +638,7 @@ fn import_animated(
             width,
             height,
             has_audio: false,
+            notice: None,
         }
     };
     if let Some(project) = state.project.read().clone() {
@@ -546,6 +691,10 @@ fn restore_working_copy(state: &AppState) -> Option<Project> {
     );
 
     let project = restored.project;
+    // Raised before the new document is in place: a job that
+    // takes the lock after this sees a different generation and
+    // drops its result rather than writing into this document.
+    state.next_generation();
     *state.project.write() = Some(project.clone());
     *state.project_path.write() = restored.path;
     // The restored document is where the user was, not something they did.
@@ -616,6 +765,14 @@ pub fn project_configure(
 pub fn project_validate(state: &Arc<AppState>) -> Result<Vec<ValidationIssue>, String> {
     state.with_project(|project| project.validate())
 }
+
+/// What the last [`project_open`] found wrong with the file — repairs the
+/// migration made and errors `validate` reports — once: the notes are
+/// cleared by reading them, so the app shows them when the project opens
+/// and not again.
+pub fn project_open_notes(state: &Arc<AppState>) -> Vec<String> {
+    std::mem::take(&mut *state.open_notes.write())
+}
 pub fn project_path(state: &Arc<AppState>) -> Option<String> {
     state
         .project_path
@@ -639,9 +796,14 @@ pub fn project_close(state: &Arc<AppState>, exiting: bool) {
     // The document and its history go now; a still is kept only if a saved
     // project file still names it.
     crate::modules::timeline::freeze::sweep_unused(None, None);
+    // Raised before the new document is in place: a job that
+    // takes the lock after this sees a different generation and
+    // drops its result rather than writing into this document.
+    state.next_generation();
     *state.project.write() = None;
     *state.project_path.write() = None;
     state.history.write().clear();
+    crate::modules::jobs::cancel_all();
     super::recovery::close_at(&super::autosave::file(), exiting);
     crate::modules::workspace::commands::workspace_cache_in_use(Vec::new());
 }
@@ -673,6 +835,10 @@ pub fn project_recovery_restore(state: &Arc<AppState>) -> Result<Project, String
         tracing::warn!("restoring unsaved work: {warning}");
     }
     let project = restored.project;
+    // Raised before the new document is in place: a job that
+    // takes the lock after this sees a different generation and
+    // drops its result rather than writing into this document.
+    state.next_generation();
     *state.project.write() = Some(project.clone());
     *state.project_path.write() = restored.path.clone();
     state.history.write().clear();
@@ -727,6 +893,57 @@ mod tests {
         import_material(&mut project, "/media/wide.mp4", "wide.mp4", &landscape()).unwrap();
         assert_eq!((project.canvas.width, project.canvas.height), (1920, 1080));
         assert_eq!(project.fps, 25.0);
+    }
+
+    /// The first clip's canvas is an edit: Undo gives the old canvas and
+    /// frame rate back.
+    #[test]
+    fn the_canvas_a_first_clip_sets_is_undone_like_any_edit() {
+        let state = AppState::new();
+        *state.project.write() = Some(vertical(false));
+        import_into_state(&state, "/media/wide.mp4", "wide.mp4", &landscape(), None).unwrap();
+        let after = state
+            .with_project(|p| (p.canvas.width, p.canvas.height, p.fps))
+            .unwrap();
+        assert_eq!(after, (1920, 1080, 25.0));
+        crate::modules::timeline::commands::timeline_undo(&state).unwrap();
+        let undone = state
+            .with_project(|p| {
+                (
+                    p.canvas.width,
+                    p.canvas.height,
+                    p.fps,
+                    p.materials.videos.len(),
+                )
+            })
+            .unwrap();
+        // The material stays in the pool: importing is not an edit.
+        assert_eq!(undone, (1080, 1920, 30.0, 1));
+    }
+
+    /// A 1 fps screen recording takes the canvas's shape but not its rate,
+    /// and says so; a phone's 29.87 average becomes 29.97.
+    #[test]
+    fn an_odd_frame_rate_is_not_adopted_and_the_import_says_so() {
+        let mut slow = landscape();
+        slow.video.as_mut().unwrap().fps = 1.0;
+        let mut project = vertical(false);
+        let imported = import_material(&mut project, "/media/slow.mp4", "slow.mp4", &slow).unwrap();
+        assert_eq!((project.canvas.width, project.canvas.height), (1920, 1080));
+        assert_eq!(project.fps, 30.0);
+        let notice = imported.notice.expect("a notice");
+        assert!(
+            notice.contains("slow.mp4") && notice.contains("30"),
+            "{notice}"
+        );
+
+        assert_eq!(adopted_fps(25.0), Some(25.0));
+        assert_eq!(adopted_fps(30_000.0 / 1_001.0), Some(30_000.0 / 1_001.0));
+        assert_eq!(adopted_fps(29.87), Some(30_000.0 / 1_001.0));
+        assert_eq!(adopted_fps(1.0), None);
+        assert_eq!(adopted_fps(240.0), None);
+        assert_eq!(adopted_fps(12.0), None);
+        assert_eq!(adopted_fps(f64::NAN), None);
     }
 
     #[test]

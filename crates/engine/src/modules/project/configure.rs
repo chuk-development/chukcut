@@ -72,11 +72,18 @@ impl ProjectConfig {
                 self.width, self.height
             ));
         }
-        if self.width > 8192 || self.height > 8192 {
-            return Err("the canvas cannot be larger than 8192 pixels on an edge".to_string());
+        if self.width > super::MAX_CANVAS_EDGE || self.height > super::MAX_CANVAS_EDGE {
+            return Err(format!(
+                "the canvas cannot be larger than {} pixels on an edge",
+                super::MAX_CANVAS_EDGE
+            ));
         }
-        if !self.fps.is_finite() || self.fps < 1.0 || self.fps > 240.0 {
-            return Err("the frame rate must be between 1 and 240".to_string());
+        if !self.fps.is_finite() || self.fps < super::MIN_FPS || self.fps > super::MAX_FPS {
+            return Err(format!(
+                "the frame rate must be between {} and {}",
+                super::MIN_FPS,
+                super::MAX_FPS
+            ));
         }
         if self.name.trim().is_empty() {
             return Err("the project needs a name".to_string());

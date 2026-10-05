@@ -33,7 +33,7 @@ use std::sync::{Arc, OnceLock};
 use parking_lot::{Condvar, Mutex};
 
 use crate::modules::audio::decode::FileAudioSource;
-use crate::modules::audiofx::cache::write_wav_f32;
+use crate::modules::audiofx::cache::WavF32Writer;
 use crate::modules::audiofx::render::{CHANNELS, RATE};
 use crate::modules::project::{AudioMaterial, Micros, Project, Segment};
 use crate::modules::workspace::paths::cache_root;
@@ -94,22 +94,32 @@ pub fn render(project: &Project, id: &str, cancel: &AtomicBool) -> Result<PathBu
 }
 
 fn render_view(view: &Project, path: &std::path::Path, cancel: &AtomicBool) -> Result<(), String> {
+    use crate::modules::export::{MixRange, MixStream};
     crate::modules::voice::denoise::ensure_rendered(view, cancel)?;
-    let samples = crate::modules::export::mix_timeline_unclamped(
-        view,
-        &FileAudioSource,
-        RATE,
-        CHANNELS as u16,
-        cancel,
-    )
-    .map_err(|e| e.to_string())?;
+    let range = MixRange::whole(view, RATE);
+    // Streamed into the file block by block: a long sequence is never in
+    // memory whole.
+    let mut stream = MixStream::new(view, &FileAudioSource, RATE, CHANNELS as u16, range, cancel)
+        .map_err(|e| e.to_string())?
+        .unclamped();
     let dir = path.parent().ok_or("the cache has no directory")?;
     std::fs::create_dir_all(dir).map_err(|e| format!("cannot create the cache: {e}"))?;
     // A unique part name: the preview's worker and an export may mix the
     // same sequence at once, and the rename makes either one's result the
     // file.
     let part = path.with_extension(format!("{}.part", uuid::Uuid::new_v4().simple()));
-    match write_wav_f32(&part, &samples, RATE, CHANNELS as u16) {
+    let written = (|| {
+        let mut wav = WavF32Writer::create(&part, range.frames, RATE, CHANNELS as u16)?;
+        let mut block = Vec::new();
+        while stream
+            .next_block(crate::modules::export::audio::BLOCK_FRAMES, &mut block)
+            .map_err(|e| e.to_string())?
+        {
+            wav.write(&block)?;
+        }
+        wav.finish()
+    })();
+    match written {
         Ok(()) => std::fs::rename(&part, path)
             .map_err(|e| format!("cannot finish the compound clip's sound: {e}")),
         Err(error) => {
@@ -256,7 +266,9 @@ fn worker_loop(w: Arc<Worker>) {
                 w.wake.wait(&mut q);
             }
         };
-        let result = (|| -> Result<(), String> {
+        // Contained: a bug in one mix-down fails that one (it plays dry)
+        // instead of ending the thread every mix-down waits on.
+        let result = crate::lifecycle::contained("The compound mix-down", || {
             if let Some(view) = &job.view {
                 if !job.path.is_file() {
                     render_view(view, &job.path, &never)?;
@@ -272,7 +284,7 @@ fn worker_loop(w: Arc<Worker>) {
                 )?;
             }
             Ok(())
-        })();
+        });
         let mut q = w.queue.lock();
         q.busy.remove(&job.path);
         match result {

@@ -42,8 +42,11 @@ pub(crate) const CATEGORIES: &[&str] = &[
 /// A transcription running on its own thread.
 pub(crate) struct Job {
     progress: Arc<Mutex<SpeechProgress>>,
-    cancel: Arc<AtomicBool>,
+    pub(crate) cancel: Arc<AtomicBool>,
     result: Arc<Mutex<Option<Result<Transcript, String>>>>,
+    /// The document the captions are for (`AppState::generation`); a
+    /// transcript that lands after another project opened is dropped.
+    generation: u64,
 }
 
 /// The account form, open while adding or editing an account.
@@ -61,7 +64,7 @@ pub(crate) struct CaptionsPanel {
     form: Option<AccountForm>,
     test: Option<TestReport>,
     testing: bool,
-    job: Option<Job>,
+    pub(crate) job: Option<Job>,
     /// The caption whose words are in `text`.
     editing: Option<String>,
     /// What `text` was last filled with. A caption can change elsewhere (the
@@ -252,6 +255,7 @@ impl Editor {
             })),
             cancel: Arc::new(AtomicBool::new(false)),
             result: Arc::new(Mutex::new(None)),
+            generation: self.state.generation(),
         };
         let (progress, cancel, result) = (
             Arc::clone(&job.progress),
@@ -300,7 +304,12 @@ impl Editor {
         let Some(outcome) = job.result.lock().take() else {
             return true;
         };
+        let current = self.state.is_current(job.generation);
         self.captions.job = None;
+        if !current {
+            tracing::info!("a transcript for a project that is no longer open was dropped");
+            return false;
+        }
         let settings = &self.captions.settings;
         let result = outcome.and_then(|transcript| {
             let words_were_estimated = transcript.words.is_empty();

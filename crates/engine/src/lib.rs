@@ -5,6 +5,7 @@
 //! `modules/*/commands.rs` is the shell-facing API; [`shell`] supplies the two
 //! primitives it needs (a blocking-task spawner and an event channel).
 
+pub mod faults;
 pub mod lifecycle;
 pub mod modules;
 pub mod shell;
@@ -19,6 +20,7 @@ use modules::audio::FileAudioSource;
 /// exists), and the exporter's audio source.
 pub fn init() {
     modules::workspace::logging::init();
+    lifecycle::install_panic_hook();
 
     if let Err(error) =
         std::fs::remove_dir_all(modules::workspace::paths::cache_root().join("preview"))

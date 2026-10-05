@@ -451,8 +451,13 @@ pub(crate) fn start_job(job: BakeJob, segment_id: String) -> Result<Option<u64>,
     std::thread::Builder::new()
         .name("chukcut-matting".into())
         .spawn(move || {
-            let result = bake::run(&job, &handle.cancel, |p| {
-                handle.status.lock().progress = p.clone();
+            // Contained: a bug in a model run fails this bake, which is
+            // reported and retried like any other failure.
+            let result = crate::lifecycle::contained("The background removal", || {
+                crate::faults::hit_keyed("bake.matting", &handle.key);
+                bake::run(&job, &handle.cancel, |p| {
+                    handle.status.lock().progress = p.clone();
+                })
             });
             match &result {
                 Ok(outcome) => tracing::info!(

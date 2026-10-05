@@ -250,7 +250,13 @@ impl Client {
             .name("ml-worker-log".into())
             .spawn(move || {
                 for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                    tracing::info!("ML worker {pid}: {line}");
+                    // A worker panic arrives as marked lines with its
+                    // backtrace; they belong in the log as errors.
+                    if line.starts_with("panic:") {
+                        tracing::error!("ML worker {pid}: {line}");
+                    } else {
+                        tracing::info!("ML worker {pid}: {line}");
+                    }
                 }
             })
             .map_err(|e| MlError::Failed(e.to_string()))?;

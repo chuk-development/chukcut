@@ -112,6 +112,8 @@ pub fn tracking_start(
     request: StartTracking,
     channel: Option<Channel<TrackingEvent>>,
 ) -> Result<u64, String> {
+    // The document this job belongs to; its result goes nowhere else.
+    let generation = state.generation();
     let (job, existing) = state.with_project(|project| prepare(project, &request))??;
     let id = NEXT_JOB.fetch_add(1, Ordering::Relaxed);
     let handle = Arc::new(Job {
@@ -137,41 +139,53 @@ pub fn tracking_start(
                     job.tracker = TrackerKind::Klt;
                 }
             }
-            let result = job::run(&job, &handle.cancel, |progress| {
-                {
-                    let mut status = handle.status.lock();
-                    status.done = progress.done;
-                    status.total = progress.total;
-                    status.latest = progress.latest;
-                }
-                if let Some(channel) = &channel {
-                    let _ = channel.send(TrackingEvent {
-                        job: id,
-                        done: progress.done,
-                        total: progress.total,
-                        latest: progress.latest,
-                    });
-                }
-            });
-            let seconds = started.elapsed().as_secs_f64();
-            let finished = result.and_then(|outcome| {
-                let frames = outcome.samples.len();
-                tracing::info!(
-                    frames,
-                    seconds,
-                    fps = frames as f64 / seconds.max(1e-6),
-                    size = ?outcome.frame_size,
-                    cancelled = outcome.cancelled,
-                    "tracking finished"
-                );
-                let track_id = commit(&state, &request, &job, existing, outcome.samples)?;
-                Ok(JobOutcome {
-                    track_id,
-                    frames,
-                    cancelled: outcome.cancelled,
-                    seconds,
-                    tracker: job.tracker,
-                    note,
+            // Contained: a bug in the tracker fails this job, reported like
+            // any other failure, and the app goes on.
+            let finished = crate::lifecycle::contained("The tracking", || {
+                crate::faults::hit_keyed("tracking.run", &request.target_segment_id);
+                let result = job::run(&job, &handle.cancel, |progress| {
+                    {
+                        let mut status = handle.status.lock();
+                        status.done = progress.done;
+                        status.total = progress.total;
+                        status.latest = progress.latest;
+                    }
+                    if let Some(channel) = &channel {
+                        let _ = channel.send(TrackingEvent {
+                            job: id,
+                            done: progress.done,
+                            total: progress.total,
+                            latest: progress.latest,
+                        });
+                    }
+                });
+                let seconds = started.elapsed().as_secs_f64();
+                result.and_then(|outcome| {
+                    let frames = outcome.samples.len();
+                    tracing::info!(
+                        frames,
+                        seconds,
+                        fps = frames as f64 / seconds.max(1e-6),
+                        size = ?outcome.frame_size,
+                        cancelled = outcome.cancelled,
+                        "tracking finished"
+                    );
+                    let track_id = commit(
+                        &state,
+                        generation,
+                        &request,
+                        &job,
+                        existing,
+                        outcome.samples,
+                    )?;
+                    Ok(JobOutcome {
+                        track_id,
+                        frames,
+                        cancelled: outcome.cancelled,
+                        seconds,
+                        tracker: job.tracker,
+                        note,
+                    })
                 })
             });
             if let Err(error) = &finished {
@@ -258,6 +272,7 @@ fn prepare(
 /// Put a finished run into the document as one undo step.
 fn commit(
     state: &Arc<AppState>,
+    generation: u64,
     request: &StartTracking,
     job: &TrackJob,
     mut track: TrackingMaterial,
@@ -267,6 +282,12 @@ fn commit(
         return Err("the tracker produced no frames".into());
     }
     let mut guard = state.project.write();
+    // Into the project the job was started for, or nowhere: a track that
+    // lands in the next project names clips it does not have, on an undo
+    // step the user never made.
+    if !state.is_current(generation) {
+        return Err(crate::state::STALE_JOB.into());
+    }
     let project = guard.as_mut().ok_or("no project is open")?;
     // The stamp names the tracker that made the newest samples; a re-track
     // with the other tracker restamps the whole track.
@@ -325,6 +346,13 @@ pub fn tracking_status(job: u64) -> Option<JobStatus> {
 /// Stop a job. The frames done so far are kept and committed.
 pub fn tracking_cancel(job: u64) {
     if let Some(job) = jobs().lock().get(&job) {
+        job.cancel.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Stop every job: their project is going away (`modules::jobs`).
+pub fn cancel_all() {
+    for job in jobs().lock().values() {
         job.cancel.store(true, Ordering::Relaxed);
     }
 }

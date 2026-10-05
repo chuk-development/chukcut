@@ -479,6 +479,10 @@ fn init_engine(verbose: u8) {
         .with_target(false)
         .try_init();
 
+    // A panic goes to the same log file the app writes, with its backtrace;
+    // stderr alone is lost when an agent or a script runs the CLI.
+    chukcut_engine::lifecycle::install_panic_hook();
+
     // The engine sets libav to Error; the hardware encoder probes then print
     // a line for every encoder this machine lacks — NVENC at *fatal* level,
     // hence Quiet rather than Fatal. A CLI's stderr is for its own progress

@@ -108,13 +108,35 @@ impl Editor {
         let (dw, dh) = (cw * fit, ch * fit);
 
         let picture = match (&self.frame, self.player.failure()) {
-            (_, Some(failure)) => div()
-                .max_w(px(360.0))
-                .text_center()
-                .text_size(px(TEXT_LABEL))
-                .text_color(rgb(DANGER))
-                .child(failure)
-                .into_any_element(),
+            (_, Some(failure)) => {
+                // A crash (a bug in the render step) can be retried; a
+                // missing GPU cannot.
+                let restart = self.player.crashed().then(|| {
+                    Button::new("player-restart")
+                        .label("Restart preview")
+                        .small()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.player.restart();
+                            this.last_request = None;
+                            cx.notify();
+                        }))
+                });
+                div()
+                    .max_w(px(360.0))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_center()
+                            .text_size(px(TEXT_LABEL))
+                            .text_color(rgb(DANGER))
+                            .child(failure),
+                    )
+                    .children(restart)
+                    .into_any_element()
+            }
             (Some(frame), None) => div()
                 .w(px(dw))
                 .h(px(dh))

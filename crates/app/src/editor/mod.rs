@@ -451,10 +451,12 @@ impl Editor {
         self.status = Some("Importing…".into());
         cx.spawn(async move |this, cx| {
             let mut errors = Vec::new();
+            let mut notices = Vec::new();
             for path in paths {
                 let path = path.to_string_lossy().to_string();
                 match project_commands::project_import_media(&state, path.clone()).await {
                     Ok(imported) => {
+                        notices.extend(imported.notice.clone());
                         let command = state
                             .with_project(|project| edits::append(project, &imported.id))
                             .and_then(|command| command);
@@ -476,6 +478,9 @@ impl Editor {
                     Err(errors.join(" · "))
                 };
                 editor.report(result, cx);
+                if editor.status.is_none() && !notices.is_empty() {
+                    editor.status = Some(notices.join(" · ").into());
+                }
             });
         })
         .detach();
@@ -703,5 +708,10 @@ impl Render for Editor {
 impl Drop for Editor {
     fn drop(&mut self) {
         self.audio.shutdown();
+        // The editor's own jobs end with it; the engine's are cancelled by
+        // `project_close` and gated by the document generation.
+        if let Some(job) = &self.captions.job {
+            job.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 }

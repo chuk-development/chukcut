@@ -578,6 +578,28 @@ impl ExportQueue {
     /// The worker: take the first queued item, run it, repeat; stop when
     /// none is left.
     fn work(&self) {
+        // A panic that escapes anyway (a listener, the store) must not leave
+        // `worker` set: nothing would ever start the queue again until the
+        // app restarted. The item it was running is marked failed.
+        struct Unstick<'a>(&'a ExportQueue);
+        impl Drop for Unstick<'_> {
+            fn drop(&mut self) {
+                if !std::thread::panicking() {
+                    return;
+                }
+                let mut state = self.0.inner.state.lock();
+                for entry in &mut state.entries {
+                    if entry.item.status == QueueStatus::Running {
+                        entry.item.status = QueueStatus::Failed;
+                        entry.item.error =
+                            Some("The export queue stopped on an internal error.".into());
+                    }
+                }
+                state.worker = false;
+                self.0.inner.idle.notify_all();
+            }
+        }
+        let _unstick = Unstick(self);
         loop {
             let next = {
                 let mut state = self.inner.state.lock();
@@ -616,7 +638,11 @@ impl ExportQueue {
                 queue: self.clone(),
                 id: id.clone(),
             };
-            let result = self.inner.runner.run(&project, &request, cancel, &sink);
+            // Contained: a panic in this one export fails this one item, and
+            // the queue goes on to the next.
+            let result = crate::lifecycle::contained("The export", || {
+                self.inner.runner.run(&project, &request, cancel, &sink)
+            });
 
             let finished = {
                 let mut state = self.inner.state.lock();
@@ -750,6 +776,9 @@ mod tests {
             if request.output_path.contains("fail") {
                 return Err("the encoder exploded".into());
             }
+            if request.output_path.contains("panic") {
+                panic!("a bug in the encoder");
+            }
             Ok(RunResult {
                 output_path: request.output_path.clone(),
                 cancelled: false,
@@ -816,6 +845,63 @@ mod tests {
         assert_eq!(running.lock().1, 1, "never more than one at a time");
         assert!(queue.items().iter().all(|i| i.status == QueueStatus::Done));
         assert_eq!(queue.items()[0].label, "TikTok · t");
+    }
+
+    /// A panic in one export fails that item with a message and the queue
+    /// runs the rest; before, the `worker` flag stayed set and nothing ever
+    /// ran again until a restart.
+    #[test]
+    fn a_panicking_export_fails_its_item_and_the_queue_goes_on() {
+        let (queue, log) = queue(1);
+        let bad = queue.add(project(), request("panic"), None);
+        let good = queue.add(project(), request("after"), None);
+        queue.wait_idle();
+        let bad = queue.item(&bad).unwrap();
+        assert_eq!(bad.status, QueueStatus::Failed);
+        assert!(
+            bad.error
+                .as_deref()
+                .unwrap_or("")
+                .contains("a bug in the encoder"),
+            "{:?}",
+            bad.error
+        );
+        assert_eq!(queue.item(&good).unwrap().status, QueueStatus::Done);
+        let later = queue.add(project(), request("later"), None);
+        queue.wait_idle();
+        assert_eq!(queue.item(&later).unwrap().status, QueueStatus::Done);
+        assert_eq!(*log.lock(), vec!["panic", "after", "later"]);
+    }
+
+    /// A panic outside the export — here a listener — ends the worker
+    /// thread, but not the queue: the flag is cleared, the running item is
+    /// failed, and the next item starts a new worker.
+    #[test]
+    fn a_panic_outside_the_export_does_not_leave_the_queue_stuck() {
+        let (queue, _) = queue(1);
+        let once = Arc::new(AtomicBool::new(true));
+        {
+            let once = Arc::clone(&once);
+            queue.subscribe(move |event| {
+                // On the worker's thread only: `add` emits on the caller's.
+                let on_worker = std::thread::current().name() == Some("chukcut-export-queue");
+                if on_worker
+                    && matches!(event, QueueEvent::Changed)
+                    && once.swap(false, Ordering::SeqCst)
+                {
+                    panic!("a listener with a bug");
+                }
+            });
+        }
+        let first = queue.add(project(), request("first"), None);
+        wait_until("the worker to stop", || {
+            queue.item(&first).unwrap().status != QueueStatus::Running
+                && queue.item(&first).unwrap().status != QueueStatus::Queued
+        });
+        queue.wait_idle();
+        let next = queue.add(project(), request("next"), None);
+        queue.wait_idle();
+        assert_eq!(queue.item(&next).unwrap().status, QueueStatus::Done);
     }
 
     #[test]

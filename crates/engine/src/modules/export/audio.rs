@@ -1,12 +1,13 @@
 //! Mixing the timeline down to one stereo bed.
 //!
 //! Video is a stack — the topmost opaque pixel wins. Audio is a *sum*: every
-//! unmuted segment that is live at an instant contributes to it, so the mix is
-//! one buffer the length of the project with every segment added into its own
-//! slice of it. At 48 kHz stereo that is 384 KB per second, about 1.4 GB for an
-//! hour; a streaming mixer would avoid that, but it would also have to
-//! interleave decoding with encoding at frame granularity for a saving nobody
-//! exporting a social clip will ever notice. Buffer first, be clever later.
+//! unmuted segment that is live at an instant contributes to it. The sum is
+//! taken block by block over the range being exported ([`MixStream`]), so an
+//! export holds one block of the mix and one window of each clip under it,
+//! whatever the timeline's length. It used to be one buffer the length of the
+//! whole project — 1.4 GB an hour at 48 kHz stereo — which a two-second range
+//! export of a three-hour recording paid in full (6.6 GB) and a clip parked at
+//! an absurd time turned into an allocation abort.
 //!
 //! ## Where the samples come from
 //!
@@ -37,7 +38,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::modules::project::document::{
-    AnimatableProperty, Micros, Project, Segment, TrackKind, MICROS_PER_SECOND,
+    AnimatableProperty, KeyframeTrack, Micros, Project, Segment, TrackKind, MICROS_PER_SECOND,
 };
 
 use super::{ExportError, Result};
@@ -73,6 +74,46 @@ impl AudioRequest<'_> {
 /// pads and logs instead of trusting the length.
 pub trait AudioSource: Send + Sync {
     fn samples(&self, request: &AudioRequest<'_>) -> anyhow::Result<Vec<f32>>;
+
+    /// The same samples as [`Self::samples`], handed out in pieces, so a long
+    /// clip is never in memory whole. The default asks `samples` once and
+    /// serves slices of the answer, which is right for generators and tests;
+    /// a file reader overrides it to decode forward as it is read.
+    fn stream(&self, request: &AudioRequest<'_>) -> anyhow::Result<Box<dyn AudioStream + '_>> {
+        let channels = request.channels.max(1) as usize;
+        let samples = self.samples(request)?;
+        Ok(Box::new(BufferedStream { samples, channels }))
+    }
+
+    /// Fail now when `path` will not decode, before an export encodes a
+    /// frame. The default trusts every path.
+    fn probe(&self, _path: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+/// One request's samples, read in pieces.
+pub trait AudioStream: Send {
+    /// Fill `out` with the sample frames that start `offset` frames into the
+    /// request, zero past its end. Callers read forward; a backward offset is
+    /// allowed and may cost a seek.
+    fn read(&mut self, offset: usize, out: &mut [f32]) -> anyhow::Result<()>;
+}
+
+/// [`AudioSource::stream`]'s default: a whole answer, served in slices.
+struct BufferedStream {
+    samples: Vec<f32>,
+    channels: usize,
+}
+
+impl AudioStream for BufferedStream {
+    fn read(&mut self, offset: usize, out: &mut [f32]) -> anyhow::Result<()> {
+        let from = offset.saturating_mul(self.channels).min(self.samples.len());
+        let n = out.len().min(self.samples.len() - from);
+        out[..n].copy_from_slice(&self.samples[from..from + n]);
+        out[n..].fill(0.0);
+        Ok(())
+    }
 }
 
 /// Silence for everything. The default until `media` grows a PCM reader.
@@ -196,10 +237,23 @@ impl AudioMixer {
 // The timeline walk
 // ---------------------------------------------------------------------------
 
+/// Sample frames one [`MixStream`] block holds. About 0.7 s at 48 kHz: big
+/// enough that the per-block bookkeeping is noise, small enough that a block
+/// is a few hundred kilobytes whatever the timeline's length.
+pub const BLOCK_FRAMES: usize = 32_768;
+
+/// The most source frames a resampling voice holds at once. A constant speed
+/// reads `speed` source frames per output frame, so a block is cut into
+/// shorter pieces when the speed is high rather than letting one piece read
+/// minutes of source.
+const MAX_WINDOW_FRAMES: usize = 1 << 18;
+
 /// Mix every audio-bearing segment in `project` into one interleaved buffer.
 ///
 /// Returns exactly `frames_for(project.duration())` sample frames, which is
-/// what the encoder needs to keep audio and video the same length.
+/// what the encoder needs to keep audio and video the same length. The whole
+/// timeline in memory: for a measurement or a test. The export streams
+/// ([`MixStream`]).
 pub fn mix_timeline(
     project: &Project,
     source: &dyn AudioSource,
@@ -207,7 +261,8 @@ pub fn mix_timeline(
     channels: u16,
     cancel: &AtomicBool,
 ) -> Result<Vec<f32>> {
-    mix_into(project, source, sample_rate, channels, cancel).map(AudioMixer::finish)
+    let range = MixRange::whole(project, sample_rate);
+    MixStream::new(project, source, sample_rate, channels, range, cancel)?.collect()
 }
 
 /// [`mix_timeline`] without the clamp at the end: what a compound clip's
@@ -220,130 +275,540 @@ pub fn mix_timeline_unclamped(
     channels: u16,
     cancel: &AtomicBool,
 ) -> Result<Vec<f32>> {
-    mix_into(project, source, sample_rate, channels, cancel).map(AudioMixer::finish_unclamped)
+    let range = MixRange::whole(project, sample_rate);
+    MixStream::new(project, source, sample_rate, channels, range, cancel)?
+        .unclamped()
+        .collect()
 }
 
-fn mix_into(
-    project: &Project,
-    source: &dyn AudioSource,
+/// Which sample frames of the timeline a mix covers.
+///
+/// `first` is a timeline frame (`frames_for` of a time), `frames` the length
+/// of the answer. Frames past the project's end are silence, so a range that
+/// runs past it is padded rather than truncated (see [`slice_range`], which
+/// this replaces for the export).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MixRange {
+    pub first: usize,
+    pub frames: usize,
+}
+
+impl MixRange {
+    /// The whole project: `frames_for(project.duration())` frames from zero.
+    pub fn whole(project: &Project, sample_rate: u32) -> Self {
+        Self {
+            first: 0,
+            frames: frames_for(project.duration(), sample_rate),
+        }
+    }
+
+    /// The audio of an export of `[start, start + duration)`. A whole-project
+    /// export keeps the project's own length (what the buffered mix always
+    /// had), a range export exactly the range's.
+    pub fn export(project: &Project, sample_rate: u32, start: Micros, duration: Micros) -> Self {
+        if start > 0 || duration < project.duration() {
+            Self {
+                first: frames_for(start.max(0), sample_rate),
+                frames: frames_for(duration.max(0), sample_rate),
+            }
+        } else {
+            Self::whole(project, sample_rate)
+        }
+    }
+}
+
+/// The timeline mixed block by block over one [`MixRange`].
+///
+/// The samples are the ones the whole-buffer mix had, bit for bit: every
+/// segment is placed at the same frame, read through the same decoder from
+/// the same position, scaled by the same gain and summed in the same order.
+/// What changed is the shape — at most one block of the mix, one window of
+/// each live clip's source and the processed renders of the clips under the
+/// block are in memory, never the timeline. A clip outside the range is not
+/// decoded at all.
+///
+/// A clip with audio effects, a pitch-preserving speed change or a speed
+/// curve is still rendered whole (`audiofx::render`) when the range first
+/// reaches it, because a compressor or a reverb tail depends on everything
+/// before it in the clip. That costs memory for the clip, not the timeline,
+/// and it is dropped as soon as the range has passed it.
+pub struct MixStream<'a> {
+    source: &'a dyn AudioSource,
     sample_rate: u32,
-    channels: u16,
-    cancel: &AtomicBool,
-) -> Result<AudioMixer> {
-    let duration = project.duration();
-    let mut mixer = AudioMixer::new(sample_rate, channels, duration);
-    // Compound clips' sound, laid out on lanes of its own; see
-    // `sequence::audio`. Borrowed when there are none. A compound clip that
-    // processes its own sound is mixed down first and heard through its
-    // effects (`sequence::bounce`), rendered here if it is not cached.
-    let flat =
-        crate::modules::sequence::audio::flatten_audio_rendered(project, cancel).map_err(|e| {
+    channels: usize,
+    /// Every audible segment, in the order the sum adds them.
+    voices: Vec<Voice<'a>>,
+    /// Timeline frame of the next frame [`Self::next_block`] produces.
+    next: usize,
+    /// Timeline frame one past the range.
+    end: usize,
+    /// Timeline frame one past the project: nothing is mixed at or after it.
+    cap: usize,
+    clamp: bool,
+    cancel: &'a AtomicBool,
+}
+
+/// One audible segment, resolved.
+struct Voice<'a> {
+    /// Timeline frame of the voice's first sample frame.
+    start: usize,
+    /// Sample frames the voice contributes from `start`.
+    frames: usize,
+    base: f32,
+    volume: Option<KeyframeTrack>,
+    kind: VoiceKind<'a>,
+}
+
+enum VoiceKind<'a> {
+    /// Rendered through `audiofx`, whole, the first time the range reaches it.
+    Rendered {
+        spec: crate::modules::audiofx::render::RenderSpec,
+        samples: Option<Vec<f32>>,
+    },
+    /// Read from the file and, at a constant speed whose pitch moves,
+    /// stretched linearly (`resample_linear`, piece by piece).
+    Plain(PlainVoice<'a>),
+}
+
+struct PlainVoice<'a> {
+    material_id: String,
+    path: String,
+    source_start: Micros,
+    source_duration: Micros,
+    /// Source frames the request covers (`frames_for(source_duration)`).
+    in_frames: usize,
+    stream: Option<Box<dyn AudioStream + 'a>>,
+    /// Source frames `[window_start, window_start + window.len() / ch)`.
+    window: Vec<f32>,
+    window_start: usize,
+}
+
+impl<'a> MixStream<'a> {
+    /// Resolve every audible segment of `project` for a mix of `range`.
+    ///
+    /// Compound clips are flattened here (`sequence::audio`), which renders
+    /// the mix-down of any compound clip that processes its own sound and is
+    /// not cached yet. Every file a clip under the range reads is opened once
+    /// now, so a file without a readable audio stream fails the export before
+    /// its first frame rather than in the middle of it.
+    pub fn new(
+        project: &Project,
+        source: &'a dyn AudioSource,
+        sample_rate: u32,
+        channels: u16,
+        range: MixRange,
+        cancel: &'a AtomicBool,
+    ) -> Result<Self> {
+        let cancelled_or = |e: String| {
             if cancel.load(Ordering::Relaxed) {
                 ExportError::Cancelled
             } else {
                 ExportError::Audio(anyhow::anyhow!(e))
             }
-        })?;
-    let project = flat.as_ref();
+        };
+        let cap = frames_for(project.duration(), sample_rate);
+        // Compound clips' sound, laid out on lanes of its own; see
+        // `sequence::audio`. Borrowed when there are none. A compound clip
+        // that processes its own sound is mixed down first and heard through
+        // its effects (`sequence::bounce`), rendered here if it is not cached.
+        let flat = crate::modules::sequence::audio::flatten_audio_rendered(project, cancel)
+            .map_err(cancelled_or)?;
+        let project = flat.as_ref();
+        let channel_count = channels.max(1) as usize;
+        let end = range.first.saturating_add(range.frames);
 
-    for track in &project.tracks {
-        // `muted` silences a lane and `hidden` conceals it: a hidden video
-        // track is still heard, which is how people use a lane they are
-        // comparing against.
-        if track.muted || !track_bears_audio(track.kind) {
-            continue;
-        }
-        for segment in &track.segments {
-            if cancel.load(Ordering::Relaxed) {
-                return Err(ExportError::Cancelled);
-            }
-            let Some(path) = audio_path(project, segment) else {
-                continue;
-            };
-            if segment.target_range.duration <= 0 {
+        let mut voices = Vec::new();
+        for track in &project.tracks {
+            // `muted` silences a lane and `hidden` conceals it: a hidden video
+            // track is still heard, which is how people use a lane they are
+            // comparing against.
+            if track.muted || !track_bears_audio(track.kind) {
                 continue;
             }
-            // The same rule the preview mixer applies, and it has to be applied
-            // in both places or an export sounds different from what was
-            // monitored. A file imported with both streams becomes two linked
-            // segments of one material — picture on a video lane, sound on an
-            // audio lane — and `audio_path` above resolves for both, because a
-            // video material carrying audio contributes sound wherever it sits.
-            // Mixing both is the same waveform summed with itself: 6 dB up and
-            // phasing with every microsecond they are out by.
-            if project.sound_is_on_a_linked_lane(track, segment) {
-                continue;
-            }
-            // A speed factor changes how much source a segment consumes; the
-            // document keeps both ranges, but `source_range.duration` is the
-            // authority and speed is what maps between them.
-            let speed = if segment.speed.is_finite() && segment.speed > 0.0 {
-                segment.speed as f64
-            } else {
-                1.0
-            };
-            let source_duration =
-                ((segment.target_range.duration as f64) * speed).round() as Micros;
-
-            // Voice cleanup swaps in a denoised file and adds a normalising
-            // gain; the preview mixer resolves it the same way.
-            let effective = crate::modules::voice::effective_source(project, segment, path);
-            let channel_count = channels.max(1) as usize;
-            let track_gain = finite_or(track.volume, 1.0);
-            let volume_track = segment
-                .keyframes
-                .iter()
-                .find(|k| k.property == AnimatableProperty::Volume);
-            let base = finite_or(segment.volume, 1.0) * track_gain * effective.gain;
-            let gain_at = |frame: usize| match volume_track {
-                None => base,
-                Some(track) => {
-                    // Keyframe times are relative to the segment start, so
-                    // the offset is the frame's position inside the segment,
-                    // not on the timeline.
-                    let offset = micros_for(frame, sample_rate);
-                    base * track
-                        .sample(offset)
-                        .map(|v| finite_or(v, 1.0))
-                        .unwrap_or(1.0)
+            for segment in &track.segments {
+                if cancel.load(Ordering::Relaxed) {
+                    return Err(ExportError::Cancelled);
                 }
-            };
+                let Some(path) = audio_path(project, segment) else {
+                    continue;
+                };
+                if segment.target_range.duration <= 0 {
+                    continue;
+                }
+                // The same rule the preview mixer applies, and it has to be
+                // applied in both places or an export sounds different from
+                // what was monitored. A file imported with both streams
+                // becomes two linked segments of one material — picture on a
+                // video lane, sound on an audio lane — and `audio_path` above
+                // resolves for both, because a video material carrying audio
+                // contributes sound wherever it sits. Mixing both is the same
+                // waveform summed with itself: 6 dB up and phasing with every
+                // microsecond they are out by.
+                if project.sound_is_on_a_linked_lane(track, segment) {
+                    continue;
+                }
+                let start = frames_for(segment.target_range.start.max(0), sample_rate);
+                let frames = frames_for(segment.target_range.duration, sample_rate);
+                // Outside the range, or past the project's end: never heard
+                // in this mix, so never decoded.
+                let last = start.saturating_add(frames).min(cap);
+                if last <= range.first || start >= end || start >= last {
+                    continue;
+                }
 
-            // A pitch-preserving speed change, a speed curve or an effect
-            // stack: the clip is rendered through `audiofx`, the function the
-            // preview's cached render comes from, and mixed at speed 1.
-            if let Some(spec) = crate::modules::audiofx::spec_for(project, segment, &effective.path)
-            {
-                let rendered = crate::modules::audiofx::render(&spec, source, sample_rate, cancel)
-                    .map_err(|e| {
-                        if cancel.load(Ordering::Relaxed) {
-                            ExportError::Cancelled
-                        } else {
-                            ExportError::Audio(anyhow::anyhow!(e))
-                        }
-                    })?;
-                let rendered = remap_stereo(rendered, channel_count);
-                mixer.mix_at(&rendered, segment.target_range.start, gain_at);
-                continue;
+                // A speed factor changes how much source a segment consumes;
+                // the document keeps both ranges, but `source_range.duration`
+                // is the authority and speed is what maps between them.
+                let speed = if segment.speed.is_finite() && segment.speed > 0.0 {
+                    segment.speed as f64
+                } else {
+                    1.0
+                };
+                let source_duration =
+                    ((segment.target_range.duration as f64) * speed).round() as Micros;
+
+                // Voice cleanup swaps in a denoised file and adds a normalising
+                // gain; the preview mixer resolves it the same way.
+                let effective = crate::modules::voice::effective_source(project, segment, path);
+                let track_gain = finite_or(track.volume, 1.0);
+                let volume = segment
+                    .keyframes
+                    .iter()
+                    .find(|k| k.property == AnimatableProperty::Volume)
+                    .cloned();
+                let base = finite_or(segment.volume, 1.0) * track_gain * effective.gain;
+
+                // A pitch-preserving speed change, a speed curve or an effect
+                // stack: the clip is rendered through `audiofx`, the function
+                // the preview's cached render comes from, and mixed at speed 1.
+                let kind =
+                    match crate::modules::audiofx::spec_for(project, segment, &effective.path) {
+                        Some(spec) => VoiceKind::Rendered {
+                            spec,
+                            samples: None,
+                        },
+                        None => VoiceKind::Plain(PlainVoice {
+                            material_id: segment.material_id.clone(),
+                            path: effective.path.clone(),
+                            source_start: segment.source_range.start,
+                            source_duration,
+                            in_frames: frames_for(source_duration, sample_rate),
+                            stream: None,
+                            window: Vec::new(),
+                            window_start: 0,
+                        }),
+                    };
+                voices.push(Voice {
+                    start,
+                    frames,
+                    base,
+                    volume,
+                    kind,
+                });
             }
+        }
 
-            let request = AudioRequest {
-                material_id: &segment.material_id,
-                path: &effective.path,
-                start: segment.source_range.start,
-                duration: source_duration,
-                sample_rate,
-                channels,
+        // Open every file once, up front: the mix used to be what told the
+        // export the audio was decodable before any frame was encoded, and a
+        // stream that finds out ten minutes in is worse.
+        let mut probed = std::collections::HashSet::new();
+        for voice in &voices {
+            let path = match &voice.kind {
+                VoiceKind::Rendered { spec, .. } => spec.path.as_str(),
+                VoiceKind::Plain(plain) => plain.path.as_str(),
             };
-            let decoded = source.samples(&request).map_err(ExportError::Audio)?;
+            if probed.insert(path.to_string()) {
+                source.probe(path).map_err(ExportError::Audio)?;
+            }
+        }
 
-            let target_frames = frames_for(segment.target_range.duration, sample_rate);
-            let stretched = resample_linear(&decoded, channel_count, target_frames);
-            mixer.mix_at(&stretched, segment.target_range.start, gain_at);
+        Ok(Self {
+            source,
+            sample_rate,
+            channels: channel_count,
+            voices,
+            next: range.first,
+            end,
+            cap,
+            clamp: true,
+            cancel,
+        })
+    }
+
+    /// Hand out the sum as it is, only broken floats zeroed: a compound
+    /// clip's mix-down, whose own effects must see the real peaks.
+    pub fn unclamped(mut self) -> Self {
+        self.clamp = false;
+        self
+    }
+
+    pub fn channels(&self) -> usize {
+        self.channels
+    }
+
+    /// Sample frames still to come.
+    pub fn remaining(&self) -> usize {
+        self.end - self.next
+    }
+
+    /// The next block of at most `max_frames` sample frames, interleaved, into
+    /// `out` (resized to fit). `false` once the range is exhausted.
+    pub fn next_block(&mut self, max_frames: usize, out: &mut Vec<f32>) -> Result<bool> {
+        let frames = max_frames.max(1).min(self.remaining());
+        out.clear();
+        if frames == 0 {
+            return Ok(false);
+        }
+        if self.cancel.load(Ordering::Relaxed) {
+            return Err(ExportError::Cancelled);
+        }
+        out.resize(frames * self.channels, 0.0);
+        let block_start = self.next;
+        let block_end = block_start + frames;
+        let mixed_end = block_end.min(self.cap);
+        let mut scratch = Vec::new();
+        for voice in &mut self.voices {
+            let lo = block_start.max(voice.start);
+            let hi = mixed_end.min(voice.start.saturating_add(voice.frames));
+            if lo < hi {
+                voice.mix(
+                    self.source,
+                    self.sample_rate,
+                    self.channels,
+                    lo - voice.start..hi - voice.start,
+                    &mut out[(lo - block_start) * self.channels..],
+                    &mut scratch,
+                    self.cancel,
+                )?;
+            }
+            // Past the voice: let its decoder and render go.
+            if block_end >= voice.start.saturating_add(voice.frames) {
+                voice.release();
+            }
+        }
+        for s in out.iter_mut() {
+            *s = if !s.is_finite() {
+                // A NaN from a broken float source would otherwise poison
+                // every downstream conversion.
+                0.0
+            } else if self.clamp {
+                // Summing several segments can exceed 1.0 and every sample
+                // format below float wraps rather than saturates; see
+                // `AudioMixer::finish`.
+                s.clamp(-1.0, 1.0)
+            } else {
+                *s
+            };
+        }
+        self.next = block_end;
+        Ok(true)
+    }
+
+    /// The whole range in one buffer.
+    pub fn collect(mut self) -> Result<Vec<f32>> {
+        let mut all = Vec::with_capacity(self.remaining().saturating_mul(self.channels));
+        let mut block = Vec::new();
+        while self.next_block(BLOCK_FRAMES, &mut block)? {
+            all.extend_from_slice(&block);
+        }
+        Ok(all)
+    }
+}
+
+/// The gain of a voice's sample frame `frame`, counted from its start.
+fn voice_gain(base: f32, volume: Option<&KeyframeTrack>, frame: usize, sample_rate: u32) -> f32 {
+    match volume {
+        None => base,
+        // Keyframe times are relative to the segment start, so the offset is
+        // the frame's position inside the segment, not on the timeline.
+        Some(track) => {
+            let offset = micros_for(frame, sample_rate);
+            base * track
+                .sample(offset)
+                .map(|v| finite_or(v, 1.0))
+                .unwrap_or(1.0)
+        }
+    }
+}
+
+impl<'a> Voice<'a> {
+    fn release(&mut self) {
+        match &mut self.kind {
+            VoiceKind::Rendered { samples, .. } => *samples = None,
+            VoiceKind::Plain(plain) => {
+                plain.stream = None;
+                plain.window = Vec::new();
+            }
         }
     }
 
-    Ok(mixer)
+    /// Add the voice's frames `frames` (counted from its start) into `out`,
+    /// whose first frame is the voice's frame `frames.start`.
+    #[allow(clippy::too_many_arguments)] // one call site, all of it the mix's state
+    fn mix(
+        &mut self,
+        source: &'a dyn AudioSource,
+        sample_rate: u32,
+        channels: usize,
+        frames: std::ops::Range<usize>,
+        out: &mut [f32],
+        scratch: &mut Vec<f32>,
+        cancel: &AtomicBool,
+    ) -> Result<()> {
+        let Voice {
+            frames: out_frames,
+            base,
+            volume,
+            kind,
+            ..
+        } = self;
+        let (base, volume, out_frames) = (*base, volume.as_ref(), *out_frames);
+        let base_frame = frames.start;
+        // The arithmetic of `AudioMixer::mix_at`, sample for sample, so the
+        // sum is the same floats in the same order.
+        let mut add = |samples: &[f32], first: usize| {
+            for (i, frame_samples) in samples.chunks_exact(channels).enumerate() {
+                let frame = first + i;
+                let g = voice_gain(base, volume, frame, sample_rate);
+                let at = (frame - base_frame) * channels;
+                for (channel, sample) in frame_samples.iter().enumerate() {
+                    out[at + channel] += sample * g;
+                }
+            }
+        };
+        match kind {
+            VoiceKind::Rendered { spec, samples } => {
+                if samples.is_none() {
+                    let rendered =
+                        crate::modules::audiofx::render(spec, source, sample_rate, cancel)
+                            .map_err(|e| {
+                                if cancel.load(Ordering::Relaxed) {
+                                    ExportError::Cancelled
+                                } else {
+                                    ExportError::Audio(anyhow::anyhow!(e))
+                                }
+                            })?;
+                    *samples = Some(remap_stereo(rendered, channels));
+                }
+                let all = samples.as_deref().unwrap_or_default();
+                // A render shorter than the clip adds nothing past its end,
+                // as the buffered mix did.
+                let hi = frames.end.min(all.len() / channels);
+                if frames.start < hi {
+                    add(&all[frames.start * channels..hi * channels], frames.start);
+                }
+            }
+            VoiceKind::Plain(plain) => {
+                let mut first = frames.start;
+                while first < frames.end {
+                    let piece = plain.read(
+                        source,
+                        sample_rate,
+                        channels,
+                        first..frames.end,
+                        out_frames,
+                        scratch,
+                    )?;
+                    add(scratch, first);
+                    first += piece;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<'a> PlainVoice<'a> {
+    /// Fill `scratch` with the voice's stretched frames from `wanted.start`,
+    /// at most up to `wanted.end`, and answer how many it holds: exactly what
+    /// `resample_linear` makes of the whole clip, one piece of it.
+    fn read(
+        &mut self,
+        source: &'a dyn AudioSource,
+        sample_rate: u32,
+        channels: usize,
+        wanted: std::ops::Range<usize>,
+        out_frames: usize,
+        scratch: &mut Vec<f32>,
+    ) -> Result<usize> {
+        let in_frames = self.in_frames;
+        let first = wanted.start;
+        scratch.clear();
+        if in_frames == 0 {
+            // `resample_linear` of nothing: silence of the clip's length.
+            let count = wanted.len();
+            scratch.resize(count * channels, 0.0);
+            return Ok(count);
+        }
+        if self.stream.is_none() {
+            let request = AudioRequest {
+                material_id: &self.material_id,
+                path: &self.path,
+                start: self.source_start,
+                duration: self.source_duration,
+                sample_rate,
+                channels: channels as u16,
+            };
+            self.stream = Some(source.stream(&request).map_err(ExportError::Audio)?);
+        }
+        let stream = self.stream.as_mut().expect("opened above");
+
+        if in_frames == out_frames {
+            // No stretch: the source frames are the voice's frames.
+            let count = wanted.len().min(MAX_WINDOW_FRAMES);
+            scratch.resize(count * channels, 0.0);
+            stream
+                .read(first, scratch.as_mut_slice())
+                .map_err(ExportError::Audio)?;
+            return Ok(count);
+        }
+
+        let ratio = in_frames as f64 / out_frames as f64;
+        // Output frames whose source window stays under the bound.
+        let per_piece = ((MAX_WINDOW_FRAMES as f64 / ratio.max(1.0)) as usize).max(1);
+        let count = wanted.len().min(per_piece);
+        let last = first + count - 1;
+        let index_of = |frame: usize| ((frame as f64 * ratio).floor() as usize).min(in_frames - 1);
+        let need_lo = index_of(first);
+        let need_hi = (index_of(last) + 1).min(in_frames - 1);
+
+        // Slide the window: drop what is behind, read what is ahead.
+        let have_end = self.window_start + self.window.len() / channels;
+        if need_lo >= have_end || need_lo < self.window_start {
+            self.window.clear();
+            self.window_start = need_lo;
+        } else if need_lo > self.window_start {
+            self.window
+                .drain(..(need_lo - self.window_start) * channels);
+            self.window_start = need_lo;
+        }
+        let have_end = self.window_start + self.window.len() / channels;
+        if need_hi + 1 > have_end {
+            let old = self.window.len();
+            self.window
+                .resize((need_hi + 1 - self.window_start) * channels, 0.0);
+            stream
+                .read(have_end, &mut self.window[old..])
+                .map_err(ExportError::Audio)?;
+        }
+
+        scratch.reserve(count * channels);
+        let window = &self.window;
+        let window_start = self.window_start;
+        for frame in first..first + count {
+            let position = frame as f64 * ratio;
+            let index = position.floor() as usize;
+            let fraction = (position - index as f64) as f32;
+            let next = (index + 1).min(in_frames - 1);
+            let index = index.min(in_frames - 1);
+            for channel in 0..channels {
+                let a = window[(index - window_start) * channels + channel];
+                let b = window[(next - window_start) * channels + channel];
+                scratch.push(a + (b - a) * fraction);
+            }
+        }
+        Ok(count)
+    }
 }
 
 /// The slice of a full-project mix that lies inside `[start, start + duration)`,
@@ -1134,6 +1599,297 @@ mod tests {
         let mixed = counting_mix(RATE as usize, 2);
         let slice = slice_range(mixed.clone(), 2, RATE, 0, MICROS_PER_SECOND);
         assert_eq!(slice, mixed);
+    }
+
+    // -- the streamed mix against the whole-buffer one ----------------------
+
+    /// The whole-buffer mix as it was before the export streamed, kept
+    /// verbatim as the reference the stream must equal bit for bit.
+    fn reference_mix(
+        project: &Project,
+        source: &dyn AudioSource,
+        rate: u32,
+        channels: u16,
+        clamp: bool,
+    ) -> Vec<f32> {
+        let cancel = AtomicBool::new(false);
+        let mut mixer = AudioMixer::new(rate, channels, project.duration());
+        let flat =
+            crate::modules::sequence::audio::flatten_audio_rendered(project, &cancel).unwrap();
+        let project = flat.as_ref();
+        for track in &project.tracks {
+            if track.muted || !track_bears_audio(track.kind) {
+                continue;
+            }
+            for segment in &track.segments {
+                let Some(path) = audio_path(project, segment) else {
+                    continue;
+                };
+                if segment.target_range.duration <= 0 {
+                    continue;
+                }
+                if project.sound_is_on_a_linked_lane(track, segment) {
+                    continue;
+                }
+                let speed = if segment.speed.is_finite() && segment.speed > 0.0 {
+                    segment.speed as f64
+                } else {
+                    1.0
+                };
+                let source_duration =
+                    ((segment.target_range.duration as f64) * speed).round() as Micros;
+                let effective = crate::modules::voice::effective_source(project, segment, path);
+                let channel_count = channels.max(1) as usize;
+                let track_gain = finite_or(track.volume, 1.0);
+                let volume_track = segment
+                    .keyframes
+                    .iter()
+                    .find(|k| k.property == AnimatableProperty::Volume);
+                let base = finite_or(segment.volume, 1.0) * track_gain * effective.gain;
+                let gain_at = |frame: usize| match volume_track {
+                    None => base,
+                    Some(track) => {
+                        let offset = micros_for(frame, rate);
+                        base * track
+                            .sample(offset)
+                            .map(|v| finite_or(v, 1.0))
+                            .unwrap_or(1.0)
+                    }
+                };
+                if let Some(spec) =
+                    crate::modules::audiofx::spec_for(project, segment, &effective.path)
+                {
+                    let rendered =
+                        crate::modules::audiofx::render(&spec, source, rate, &cancel).unwrap();
+                    let rendered = remap_stereo(rendered, channel_count);
+                    mixer.mix_at(&rendered, segment.target_range.start, gain_at);
+                    continue;
+                }
+                let request = AudioRequest {
+                    material_id: &segment.material_id,
+                    path: &effective.path,
+                    start: segment.source_range.start,
+                    duration: source_duration,
+                    sample_rate: rate,
+                    channels,
+                };
+                let decoded = source.samples(&request).unwrap();
+                let target_frames = frames_for(segment.target_range.duration, rate);
+                let stretched = resample_linear(&decoded, channel_count, target_frames);
+                mixer.mix_at(&stretched, segment.target_range.start, gain_at);
+            }
+        }
+        if clamp {
+            mixer.finish()
+        } else {
+            mixer.finish_unclamped()
+        }
+    }
+
+    fn streamed(
+        project: &Project,
+        source: &dyn AudioSource,
+        channels: u16,
+        range: MixRange,
+        block: usize,
+    ) -> Vec<f32> {
+        let cancel = AtomicBool::new(false);
+        let mut stream = MixStream::new(project, source, RATE, channels, range, &cancel).unwrap();
+        let mut all = Vec::new();
+        let mut out = Vec::new();
+        while stream.next_block(block, &mut out).unwrap() {
+            all.extend_from_slice(&out);
+        }
+        all
+    }
+
+    /// Everything the mixer does at once: plain clips, a gap, a linked pair,
+    /// volume keyframes, tape-speed clips at odd ratios (both directions), a
+    /// pitch-kept speed change, a curve, an effect stack, overlapping lanes
+    /// that clip, a muted lane and a clip that starts inside its source.
+    fn busy_project() -> Project {
+        use crate::modules::project::{SpeedCurveMaterial, SpeedPoint};
+        let mut project = project();
+        let s = MICROS_PER_SECOND;
+        project.materials.extras.insert(
+            "tape".into(),
+            serde_json::json!({ "audio_fx": { "pitch_follows_speed": true } }),
+        );
+        let mut a = segment("a1", 0, 2 * s);
+        a.source_range = TimeRange::new(300_000, 2 * s);
+        a.keyframes.push(KeyframeTrack {
+            property: AnimatableProperty::Volume,
+            keyframes: vec![
+                Keyframe {
+                    time: 0,
+                    value: 0.2,
+                    easing: Easing::Linear,
+                },
+                Keyframe {
+                    time: 2 * s,
+                    value: 1.4,
+                    easing: Easing::Linear,
+                },
+            ],
+        });
+        let mut fast = segment("a1", 2_500_000, 1_300_001);
+        fast.speed = 2.37;
+        fast.extras.push("tape".into());
+        let mut slow = segment("a1", 4_000_000, 1_700_000);
+        slow.speed = 0.61;
+        slow.source_range = TimeRange::new(1_234_567, 1_037_000);
+        slow.extras.push("tape".into());
+        let mut kept = segment("a1", 6 * s, s);
+        kept.speed = 1.5;
+        let points = vec![
+            SpeedPoint {
+                source: 0,
+                speed: 0.5,
+            },
+            SpeedPoint {
+                source: s,
+                speed: 2.0,
+            },
+        ];
+        let source_range = TimeRange::new(0, s);
+        let length = crate::modules::project::speed::curve_target_duration(&points, source_range);
+        project.materials.speed_curves.push(SpeedCurveMaterial {
+            id: "curve".into(),
+            preset: None,
+            points,
+        });
+        let mut curved = segment("a1", 7_100_000, length);
+        curved.source_range = source_range;
+        curved.extras.push("curve".into());
+        project
+            .tracks
+            .push(track(TrackKind::Audio, vec![a, fast, slow, kept, curved]));
+
+        // A second lane over the first: the sum clips.
+        let mut loud = segment("a1", 500_000, 3 * s);
+        loud.volume = 2.5;
+        let mut eq = segment("a1", 5_000_000, 2 * s);
+        eq.extras.push("eq".into());
+        project.materials.extras.insert(
+            "eq".into(),
+            serde_json::json!({ "audio_fx": { "effects": [
+                { "id": "r1", "kind": "reverb" },
+                { "id": "c1", "kind": "compressor" }
+            ] } }),
+        );
+        project.tracks.push(track(TrackKind::Audio, vec![loud, eq]));
+
+        // A linked pair heard once, and a muted lane heard not at all.
+        let group = "link".to_string();
+        project.materials.links.insert(group.clone());
+        let mut picture = segment("v1", 3 * s, s);
+        picture.id = "pic".into();
+        picture.extras.push(group.clone());
+        let mut sound = segment("v1", 3 * s, s);
+        sound.id = "snd".into();
+        sound.extras.push(group);
+        project.tracks.push(track(TrackKind::Video, vec![picture]));
+        project.tracks.push(track(TrackKind::Audio, vec![sound]));
+        let mut muted = track(TrackKind::Audio, vec![segment("a1", 0, s)]);
+        muted.muted = true;
+        project.tracks.push(muted);
+        project
+    }
+
+    #[test]
+    fn the_streamed_mix_is_the_buffered_mix_bit_for_bit() {
+        let project = busy_project();
+        for channels in [2u16, 1] {
+            let reference = reference_mix(&project, &Tones, RATE, channels, true);
+            assert!(reference.iter().any(|s| s.abs() > 0.1), "the mix is heard");
+            for block in [1_000, 4_801, BLOCK_FRAMES, usize::MAX] {
+                let whole = MixRange::whole(&project, RATE);
+                let mixed = streamed(&project, &Tones, channels, whole, block);
+                assert!(
+                    mixed == reference,
+                    "{channels} channel(s), blocks of {block}: the stream differs"
+                );
+            }
+            // Ranges, cut exactly as the buffered export cut its slice.
+            let duration = project.duration();
+            for (start, length) in [
+                (0, 1_000_000),
+                (1_234_567, 2_000_000),
+                (2_600_000, 3_333_333),
+                (duration - 500_000, 2_000_000),
+                (duration + 1_000_000, 1_000_000),
+            ] {
+                let range = MixRange::export(&project, RATE, start, length);
+                let mixed = streamed(&project, &Tones, channels, range, 4_801);
+                let expected =
+                    slice_range(reference.clone(), channels as usize, RATE, start, length);
+                assert!(
+                    mixed == expected,
+                    "{channels} channel(s), range {start}+{length}: the stream differs"
+                );
+            }
+        }
+        // And unclamped, as a compound clip's mix-down is.
+        let reference = reference_mix(&project, &Tones, RATE, 2, false);
+        assert!(reference.iter().any(|s| s.abs() > 1.0), "the sum clips");
+        let cancel = AtomicBool::new(false);
+        let mixed = MixStream::new(
+            &project,
+            &Tones,
+            RATE,
+            2,
+            MixRange::whole(&project, RATE),
+            &cancel,
+        )
+        .unwrap()
+        .unclamped()
+        .collect()
+        .unwrap();
+        assert!(mixed == reference);
+    }
+
+    /// The far clip from the audit: a hand-edited file put one at
+    /// 9·10¹⁸ µs, and the export of its first two seconds asked for a buffer
+    /// of 3.5·10¹⁸ bytes and aborted. The range mix never sizes anything by
+    /// the timeline.
+    #[test]
+    fn a_clip_at_an_absurd_time_does_not_size_the_mix_of_a_short_range() {
+        let mut project = project();
+        project.tracks.push(track(
+            TrackKind::Audio,
+            vec![
+                segment("a1", 0, MICROS_PER_SECOND),
+                segment("a1", 9_000_000_000_000_000_000, MICROS_PER_SECOND),
+            ],
+        ));
+        let source = Recording::default();
+        let range = MixRange::export(&project, RATE, 0, 2 * MICROS_PER_SECOND);
+        let mixed = streamed(&project, &source, 2, range, BLOCK_FRAMES);
+        assert_eq!(mixed.len(), frames_for(2 * MICROS_PER_SECOND, RATE) * 2);
+        assert_eq!(mixed[0], 1.0);
+        assert_eq!(*mixed.last().unwrap(), 0.0);
+        // The far clip was never decoded.
+        assert_eq!(source.requests.lock().len(), 1);
+    }
+
+    /// A range export decodes only the clips under it.
+    #[test]
+    fn clips_outside_the_range_are_not_decoded() {
+        let mut project = project();
+        project.tracks.push(track(
+            TrackKind::Audio,
+            vec![
+                segment("a1", 0, MICROS_PER_SECOND),
+                segment("a1", 5 * MICROS_PER_SECOND, MICROS_PER_SECOND),
+            ],
+        ));
+        let source = Recording::default();
+        let range = MixRange::export(&project, RATE, 5 * MICROS_PER_SECOND, MICROS_PER_SECOND);
+        let mixed = streamed(&project, &source, 2, range, BLOCK_FRAMES);
+        assert!(mixed.iter().all(|s| *s == 1.0));
+        let requests = source.requests.lock().clone();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].0, "a1");
     }
 
     #[test]

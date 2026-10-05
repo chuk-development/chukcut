@@ -426,6 +426,18 @@ impl AudioClipReader {
     }
 }
 
+impl AudioClipReader {
+    /// Output frame one past the last sample the file holds, once decoding
+    /// has run into its end; `None` before.
+    pub fn ended_at(&self) -> Option<i64> {
+        if self.finished {
+            self.buffer_end()
+        } else {
+            None
+        }
+    }
+}
+
 impl ClipReader for AudioClipReader {
     fn read(&mut self, at_frame: i64, frames: usize, out: &mut [f32]) -> Result<()> {
         let wanted = frames * self.channels;
@@ -512,6 +524,85 @@ impl crate::modules::export::AudioSource for FileAudioSource {
         let at = super::clock::micros_to_frames(request.start, request.sample_rate);
         reader.read(at, frames, &mut out)?;
         Ok(out)
+    }
+
+    fn stream(
+        &self,
+        request: &crate::modules::export::AudioRequest<'_>,
+    ) -> anyhow::Result<Box<dyn crate::modules::export::AudioStream + '_>> {
+        let channels = request.channels.max(1);
+        let reader = AudioClipReader::open(request.path, request.sample_rate, channels)?;
+        Ok(Box::new(FileStream {
+            reader,
+            base: super::clock::micros_to_frames(request.start, request.sample_rate),
+            frames: request.frames(),
+            channels: channels as usize,
+            next: 0,
+        }))
+    }
+
+    fn probe(&self, path: &str) -> anyhow::Result<()> {
+        AudioClipReader::open(path, 48_000, 2)?;
+        Ok(())
+    }
+}
+
+/// How far ahead of the last read a [`FileStream`] decodes through rather
+/// than seeking, in output frames at 48 kHz (30 s). A read that skips ahead
+/// only when a range export starts inside a clip; decoding through keeps the
+/// samples identical to a read of the whole clip, and past this a seek is
+/// cheaper than the decode.
+const DECODE_THROUGH_FRAMES: usize = 30 * 48_000;
+
+/// [`FileAudioSource`]'s stream: one reader, decoding forward.
+///
+/// The reader is positioned the way the one-shot `samples` positions it — at
+/// the request's start — so reading the request in pieces gives the samples
+/// one read of the whole request gives: same seek, same decoder state, same
+/// resampler phase. Only a read that jumps far ahead seeks again.
+struct FileStream {
+    reader: AudioClipReader,
+    /// Output frame of the request's start in the file.
+    base: i64,
+    /// Frames the request covers; zero past it.
+    frames: usize,
+    channels: usize,
+    /// Offset the reader is positioned at: one past the last frame read.
+    next: usize,
+}
+
+impl crate::modules::export::AudioStream for FileStream {
+    fn read(&mut self, offset: usize, out: &mut [f32]) -> anyhow::Result<()> {
+        out.fill(0.0);
+        let wanted = (out.len() / self.channels).min(self.frames.saturating_sub(offset));
+        if wanted == 0 {
+            return Ok(());
+        }
+        if offset > self.next && offset - self.next <= DECODE_THROUGH_FRAMES {
+            let mut skip = vec![0.0f32; 4_096 * self.channels];
+            while self.next < offset {
+                let n = (offset - self.next).min(4_096);
+                self.decode(self.next, &mut skip[..n * self.channels])?;
+                self.next += n;
+            }
+        }
+        self.decode(offset, &mut out[..wanted * self.channels])?;
+        self.next = offset + wanted;
+        Ok(())
+    }
+}
+
+impl FileStream {
+    fn decode(&mut self, offset: usize, out: &mut [f32]) -> anyhow::Result<()> {
+        let at = self.base + offset as i64;
+        // Past the end of the file there is only silence; asking the reader
+        // would make it seek there once per block.
+        if self.reader.ended_at().is_some_and(|end| at >= end) {
+            out.fill(0.0);
+            return Ok(());
+        }
+        self.reader.read(at, out.len() / self.channels, out)?;
+        Ok(())
     }
 }
 
