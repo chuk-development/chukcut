@@ -993,8 +993,11 @@ mod tests {
                 .unwrap(),
             1
         );
-        // Open and save again: the same bytes.
+        // Open and save again: the same bytes. Opening is a new document
+        // for the jobs: anything started before it commits nowhere.
+        let before = state.generation();
         project_open(&state, path.to_string_lossy().into_owned()).unwrap();
+        assert!(!state.is_current(before));
         project_save(&state, None).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), written);
     }

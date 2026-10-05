@@ -356,6 +356,30 @@ mod tests {
         }
     }
 
+    /// A job's commit lands only in the document it was started for: once
+    /// another project is opened (the generation moved), it is refused and
+    /// the open document is untouched.
+    #[test]
+    fn a_commit_for_an_older_generation_is_refused() {
+        let state = AppState::new();
+        *state.project.write() = Some(project());
+        let started = state.generation();
+        assert!(state
+            .with_project_of(started, |p| {
+                p.name = "committed".into();
+                Ok(())
+            })
+            .is_ok());
+        state.next_generation();
+        *state.project.write() = Some(project());
+        let refused = state.with_project_of(started, |p| {
+            p.name = "late".into();
+            Ok(())
+        });
+        assert_eq!(refused, Err(STALE_JOB.to_string()));
+        assert_eq!(state.with_project(|p| p.name.clone()).unwrap(), "t");
+    }
+
     fn resize(project: &Project, width: u32, height: u32) -> ConfigureCommand {
         ConfigureCommand::new(
             project,

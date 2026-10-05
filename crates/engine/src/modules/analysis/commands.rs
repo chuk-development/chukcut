@@ -922,6 +922,34 @@ mod tests {
         id
     }
 
+    /// An analysis that ends after its project was closed or replaced
+    /// writes nothing: the commit is refused, the pool and the undo stack
+    /// of the open document stay as they are.
+    #[test]
+    fn an_analysis_for_a_closed_project_commits_nothing() {
+        let state = state();
+        let started = state.generation();
+        let before = state.with_project(|p| p.materials.extras.len()).unwrap();
+        // Another document is opened while the job runs.
+        state.next_generation();
+        let entry = store::new_entry(&store::Beats {
+            media_id: "v".into(),
+            analysed: TimeRange::new(0, 1),
+            beats: vec![],
+            bpm: 120.0,
+        });
+        let id = entry.0.clone();
+        let refused = commit(&state, started, vec![entry], |p| {
+            store::swap_entry(p, "a", store::BEATS, Some(&id), "Detect beats")
+        });
+        assert_eq!(refused, Err(crate::state::STALE_JOB.to_string()));
+        assert_eq!(
+            state.with_project(|p| p.materials.extras.len()).unwrap(),
+            before
+        );
+        assert!(!state.history.read().can_undo());
+    }
+
     #[test]
     fn stabilisation_settings_are_undoable_steps() {
         let state = state();
