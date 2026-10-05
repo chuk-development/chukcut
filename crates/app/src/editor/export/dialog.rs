@@ -936,6 +936,15 @@ impl ExportDialog {
                     cx,
                 );
                 let prores = c.codec == Codec::ProRes;
+                let ten_bit = c.ten_bit && c.codec.has_ten_bit();
+                let depth = self.segments(
+                    "export-depth",
+                    &[false, true],
+                    c.ten_bit,
+                    |ten| if ten { "10-bit" } else { "8-bit" },
+                    |c, ten| c.ten_bit = ten,
+                    cx,
+                );
                 Some(
                     Section::new(
                         "export-video",
@@ -965,16 +974,15 @@ impl ExportDialog {
                         self.picker("export-fps", rates, false, cx),
                     ))
                     .child(Self::row("Encoder", div().flex().child(encoder)))
+                    .when(c.codec.has_ten_bit(), |section| {
+                        section.child(Self::row("Bit depth", depth))
+                    })
                     .child(Self::row(
                         "Colour space",
                         div()
                             .text_size(px(TEXT_LABEL))
                             .text_color(rgb(TEXT_MUTED))
-                            .child(if prores {
-                                format!("Rec. 709 · 10-bit 4:2:2 · {width}×{height}")
-                            } else {
-                                format!("Rec. 709 SDR · {width}×{height}")
-                            }),
+                            .child(settings::colour_space_label(prores, ten_bit, width, height)),
                     )),
                 )
             }

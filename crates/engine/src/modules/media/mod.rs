@@ -40,6 +40,7 @@ use ffmpeg_next as ffmpeg;
 pub mod commands;
 pub mod decoder;
 pub mod dmabuf;
+pub mod hdr;
 pub mod hwdecode;
 pub mod probe;
 pub mod provider;

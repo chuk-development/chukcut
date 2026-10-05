@@ -713,6 +713,12 @@ pub fn import_plane_with(
         // …and chroma is interleaved U and V at half resolution, which is
         // exactly a two-channel texture of half the size.
         "GR88" => wgpu::TextureFormat::Rg8Unorm,
+        // P010 exported with SEPARATE_LAYERS: the same two planes with
+        // sixteen bits a sample, ten of them used, at the top. Only on a
+        // device with 16-bit textures; without them the import is refused
+        // and the frame is copied, which `provider` cuts to 8 bits.
+        "R16 " if ctx.supports_deep_planes() => wgpu::TextureFormat::R16Unorm,
+        "GR32" if ctx.supports_deep_planes() => wgpu::TextureFormat::Rg16Unorm,
         "AR24" | "XR24" => wgpu::TextureFormat::Bgra8Unorm,
         "AB24" | "XB24" => wgpu::TextureFormat::Rgba8Unorm,
         other => {

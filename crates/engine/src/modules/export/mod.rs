@@ -52,6 +52,7 @@
 //! [`Fps`]: presets::Fps
 
 pub mod audio;
+pub mod colour;
 pub mod commands;
 pub mod encoder;
 pub mod estimate;
@@ -66,6 +67,7 @@ pub mod store;
 pub use audio::{
     mix_timeline, mix_timeline_unclamped, AudioMixer, AudioRequest, AudioSource, SilentAudioSource,
 };
+pub use colour::{ColorMatrix, ColorRange, OutputColour};
 pub use encoder::{AudioStreamSpec, MediaWriter, VideoStreamSpec, WriterStats};
 pub use estimate::{EstimateMethod, SizeEstimate};
 pub use hwaccel::{HwAccel, HwEncoder, RateControl};

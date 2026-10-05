@@ -37,7 +37,9 @@ struct Params {
     height: u32,
     // `RANGE_LIMITED` for a video encoder, `RANGE_FULL` for the JPEG one.
     range: u32,
-    _pad0: u32,
+    // Always `MATRIX_BT601` today: the only caller is the preview's JPEG
+    // encoder, and JFIF is BT.601. A parameter so the two shaders agree.
+    matrix: u32,
 };
 
 @group(0) @binding(0) var src: texture_2d<f32>;
@@ -67,7 +69,7 @@ fn vertex(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {
 fn luma(@builtin(position) at: vec4<f32>) -> @location(0) vec4<f32> {
     let x = u32(at.x);
     let y = u32(at.y);
-    return vec4<f32>(luma_in(texel(x, y), params.range) / 255.0, 0.0, 0.0, 1.0);
+    return vec4<f32>(luma_in(texel(x, y), params.matrix, params.range) / 255.0, 0.0, 0.0, 1.0);
 }
 
 // The chroma plane: one fragment per 2x2 block, so the attachment is half the
@@ -81,6 +83,6 @@ fn chroma(@builtin(position) at: vec4<f32>) -> @location(0) vec4<f32> {
     let x = u32(at.x) * 2u;
     let y = u32(at.y) * 2u;
     let mean = (texel(x, y) + texel(x + 1u, y) + texel(x, y + 1u) + texel(x + 1u, y + 1u)) * 0.25;
-    let c = chroma_in(mean, params.range);
+    let c = chroma_in(mean, params.matrix, params.range);
     return vec4<f32>(c.x / 255.0, c.y / 255.0, 0.0, 1.0);
 }

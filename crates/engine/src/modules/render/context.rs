@@ -149,10 +149,19 @@ impl RenderContext {
         // extension must still run the editor on the software decoder, and
         // `Features & wanted` yields the empty set there rather than failing
         // device creation.
-        let wanted = wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF;
+        //
+        // 16-bit normalised textures are asked for the same way: they are how
+        // a 10-bit source (P010, from NVDEC, VAAPI or the software decoder)
+        // reaches the shader without being cut to 8 bits first. A device
+        // without them gets the top byte of each sample instead.
+        let wanted = wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF
+            | wgpu::Features::TEXTURE_FORMAT_16BIT_NORM;
         let optional = adapter.features() & wanted;
-        if optional.is_empty() {
+        if !optional.contains(wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF) {
             tracing::info!("this adapter cannot import DMA-BUF; decode stays on the CPU path");
+        }
+        if !optional.contains(wgpu::Features::TEXTURE_FORMAT_16BIT_NORM) {
+            tracing::info!("this adapter has no 16-bit textures; 10-bit sources are cut to 8 bits");
         }
 
         let (device, queue) = adapter
@@ -221,6 +230,14 @@ impl RenderContext {
         self.device
             .features()
             .contains(wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF)
+    }
+
+    /// Whether `R16Unorm` and `Rg16Unorm` can be sampled, which is what lets
+    /// a 10-bit source keep its precision up to the shader.
+    pub fn supports_deep_planes(&self) -> bool {
+        self.device
+            .features()
+            .contains(wgpu::Features::TEXTURE_FORMAT_16BIT_NORM)
     }
 
     pub fn max_texture_dimension_2d(&self) -> u32 {

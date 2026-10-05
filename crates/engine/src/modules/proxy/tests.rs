@@ -66,6 +66,7 @@ fn four_k_fixture() -> PathBuf {
         quality: Quality::Crf(26),
         // The fixture's own encode speed is not what is under test.
         options: vec![("preset".into(), "ultrafast".into())],
+        colour: crate::modules::export::OutputColour::default(),
     };
 
     // Same reason as `generate::partial_path`: the muxer is guessed from the

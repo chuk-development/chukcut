@@ -30,7 +30,9 @@ struct Params {
     // `RANGE_LIMITED` for a video encoder, `RANGE_FULL` for the JPEG one. See
     // `luma_in` in `yuv.wgsl` for why this cannot be a constant.
     range: u32,
-    _pad0: u32,
+    // `MATRIX_BT709` for an HD export, `MATRIX_BT601` for SD and for the JPEG
+    // encoder. See `luma_in` in `yuv.wgsl`.
+    matrix: u32,
     _pad1: u32,
 };
 
@@ -82,12 +84,13 @@ fn convert(@builtin(global_invocation_id) gid: vec3<u32>) {
     );
 
     let range = params.range;
+    let matrix = params.matrix;
 
     dst[y0 * params.y_stride_words + gid.x] = pack(
-        luma_in(top[0], range),
-        luma_in(top[1], range),
-        luma_in(top[2], range),
-        luma_in(top[3], range),
+        luma_in(top[0], matrix, range),
+        luma_in(top[1], matrix, range),
+        luma_in(top[2], matrix, range),
+        luma_in(top[3], matrix, range),
     );
 
     // An odd-height frame has no second row to write for its last block. The
@@ -95,10 +98,10 @@ fn convert(@builtin(global_invocation_id) gid: vec3<u32>) {
     // encoder would do with an odd height anyway.
     if (y0 + 1u < params.height) {
         dst[(y0 + 1u) * params.y_stride_words + gid.x] = pack(
-            luma_in(bottom[0], range),
-            luma_in(bottom[1], range),
-            luma_in(bottom[2], range),
-            luma_in(bottom[3], range),
+            luma_in(bottom[0], matrix, range),
+            luma_in(bottom[1], matrix, range),
+            luma_in(bottom[2], matrix, range),
+            luma_in(bottom[3], matrix, range),
         );
     }
 
@@ -108,8 +111,8 @@ fn convert(@builtin(global_invocation_id) gid: vec3<u32>) {
     // result on saturated edges.
     let left = (top[0] + top[1] + bottom[0] + bottom[1]) * 0.25;
     let right = (top[2] + top[3] + bottom[2] + bottom[3]) * 0.25;
-    let cl = chroma_in(left, range);
-    let cr = chroma_in(right, range);
+    let cl = chroma_in(left, matrix, range);
+    let cr = chroma_in(right, matrix, range);
 
     dst[params.uv_offset_words + gid.y * params.uv_stride_words + gid.x] =
         pack(cl.x, cl.y, cr.x, cr.y);

@@ -8,7 +8,7 @@ use chukcut_engine::modules::captions::srt::SubtitleFormat;
 use chukcut_engine::modules::export::commands as export_commands;
 use chukcut_engine::modules::export::presets::{AudioCodec, Container, Quality, VideoCodec};
 use chukcut_engine::modules::export::{
-    ExportOverrides, ExportProgress, ExportRequest, ExportStage,
+    ColorMatrix, ColorRange, ExportOverrides, ExportProgress, ExportRequest, ExportStage,
 };
 use chukcut_engine::shell::Channel;
 use clap::Args;
@@ -96,6 +96,21 @@ pub struct ExportSettingsArgs {
     #[arg(long)]
     #[serde(default)]
     pub to: Option<Time>,
+    /// The YUV matrix the picture is written in: auto (BT.709 above standard
+    /// definition, BT.601 at or below it; the default), bt709 or bt601. The
+    /// file is tagged with it.
+    #[arg(long)]
+    #[serde(default)]
+    pub color_matrix: Option<String>,
+    /// limited (16-235, the default) or full (0-255).
+    #[arg(long)]
+    #[serde(default)]
+    pub color_range: Option<String>,
+    /// Write 10 bits a sample: HEVC Main 10 (h265) or 10-bit AV1. Other
+    /// codecs refuse it.
+    #[arg(long)]
+    #[serde(default)]
+    pub ten_bit: bool,
 }
 
 impl ExportSettingsArgs {
@@ -158,6 +173,17 @@ impl ExportSettingsArgs {
                 .transpose()?,
             loudness_target: self.loudness,
             loudness_off: self.no_loudness,
+            color_matrix: self
+                .color_matrix
+                .as_deref()
+                .map(|m| enum_named::<ColorMatrix>("colour matrix", m, &["auto", "bt709", "bt601"]))
+                .transpose()?,
+            color_range: self
+                .color_range
+                .as_deref()
+                .map(|r| enum_named::<ColorRange>("colour range", r, &["limited", "full"]))
+                .transpose()?,
+            ten_bit: self.ten_bit,
             ..Default::default()
         };
         if let Some(l) = self.loudness {

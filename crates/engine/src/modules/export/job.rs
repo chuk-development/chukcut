@@ -36,6 +36,7 @@ use crate::modules::project::document::{Micros, Project};
 use crate::modules::render::{Compositor, SourceProvider};
 
 use super::audio::{self, AudioSource, SilentAudioSource};
+use super::colour::{ColorMatrix, ColorRange, OutputColour};
 use super::encoder::{AudioStreamSpec, MediaWriter, VideoStreamSpec};
 use super::hwaccel::{self, HwAccel, HwEncoder};
 use super::presets::{AudioCodec, ExportPreset, Fps, Quality, VideoCodec, CUSTOM_PRESET_ID};
@@ -112,6 +113,19 @@ pub struct ExportOverrides {
     /// a loudness target.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub loudness_off: bool,
+    /// The YUV matrix the picture is written in. Absent is `auto`: BT.709
+    /// above standard definition, BT.601 at or below it.
+    #[serde(default)]
+    pub color_matrix: Option<ColorMatrix>,
+    /// Limited (the default) or full range.
+    #[serde(default)]
+    pub color_range: Option<ColorRange>,
+    /// Ten bits a sample: HEVC Main 10, or 10-bit AV1. Refused for the other
+    /// codecs. The picture is composited in 8 bits, so this buys smoother
+    /// gradients through the YUV conversion and the encoder, not more
+    /// precision than the timeline has; see `export::colour`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ten_bit: bool,
 }
 
 /// A resolved, validated export. Everything the job needs and nothing it has to
@@ -170,6 +184,37 @@ pub fn export_options() -> ExportOptions {
         hardware: hwaccel::detect(),
         default_preset_id: CUSTOM_PRESET_ID.to_string(),
     }
+}
+
+/// The matrix, range and depth the export writes, from the overrides and the
+/// output size; or prose saying why 10-bit is not available for this codec.
+fn output_colour(
+    overrides: Option<&ExportOverrides>,
+    preset: &ExportPreset,
+) -> Result<OutputColour> {
+    let matrix = overrides.and_then(|o| o.color_matrix).unwrap_or_default();
+    let range = overrides.and_then(|o| o.color_range).unwrap_or_default();
+    let mut ten_bit = overrides.is_some_and(|o| o.ten_bit);
+    if ten_bit {
+        match preset.video_codec {
+            VideoCodec::H265 | VideoCodec::Av1 => {}
+            // Already 10-bit 4:2:2, whatever was asked.
+            VideoCodec::ProRes => ten_bit = false,
+            other => {
+                return Err(ExportError::Settings(format!(
+                    "10-bit export is available for H.265 and AV1, not for {}; \
+                     choose H.265 for a 10-bit file",
+                    other.label()
+                )))
+            }
+        }
+    }
+    Ok(OutputColour::resolve(
+        matrix,
+        range,
+        ten_bit,
+        (preset.width, preset.height),
+    ))
 }
 
 /// Turn a request plus the project into settings, or into prose explaining why
@@ -303,6 +348,7 @@ pub fn resolve_settings(project: &Project, request: &ExportRequest) -> Result<Ex
         ),
     };
 
+    let colour = output_colour(request.overrides.as_ref(), &preset)?;
     let video = VideoStreamSpec {
         width: preset.width,
         height: preset.height,
@@ -311,6 +357,7 @@ pub fn resolve_settings(project: &Project, request: &ExportRequest) -> Result<Ex
         accel,
         quality: preset.quality,
         options: Vec::new(),
+        colour,
     };
 
     // A sound-only file is sound whatever `include_audio` says.
@@ -1056,10 +1103,13 @@ fn encode_all(
             }
         }
         if gpu_nv12 {
-            match job
-                .compositor
-                .render_nv12(&job.project, time, size, job.sources.as_ref())
-            {
+            match job.compositor.render_nv12_encoded(
+                &job.project,
+                time,
+                size,
+                job.sources.as_ref(),
+                settings.video.colour.encoding,
+            ) {
                 Ok(nv12) => {
                     let (y_stride, uv_stride) = (nv12.y_stride, nv12.uv_stride);
                     let offset = nv12.uv_offset();
@@ -1305,6 +1355,10 @@ fn describe_export(settings: &ExportSettings, chosen: &FramePathChoice) -> Strin
         chosen.label,
         nv12,
     );
+    block.push_str(&format!(
+        "\n  colour     {}, tagged bt709 primaries and transfer",
+        settings.video.colour.label()
+    ));
     if settings.range_start > 0 {
         block.push_str(&format!(
             "\n  range      timeline {:.3} s to {:.3} s, rebased to start at zero",
@@ -1484,12 +1538,13 @@ impl ZeroCopy {
 
         let exported = self.ring.take();
         job.compositor
-            .render_nv12_into(
+            .render_nv12_into_encoded(
                 &job.project,
                 time,
                 size,
                 job.sources.as_ref(),
                 exported.buffer(),
+                job.settings.video.colour.encoding,
             )
             .map_err(|source| ExportError::Render {
                 frame: index,

@@ -66,8 +66,8 @@ struct QuadUniform {
     opacity: f32,
     /// 1 when the source is two YUV planes rather than one RGBA texture.
     planar: u32,
-    /// [`super::source::YuvMatrix`] and [`super::source::YuvRange`] as their
-    /// discriminants.
+    /// [`super::source::SourceFrame::colour_word`] (the matrix, transfer,
+    /// primaries and sample depth) and [`super::source::YuvRange`].
     matrix: u32,
     range: u32,
     /// Clockwise quarter turns the shader must apply to the texture coordinate.
@@ -868,6 +868,26 @@ impl Compositor {
         size: (u32, u32),
         sources: &dyn SourceProvider,
     ) -> Result<Nv12Frame> {
+        self.render_nv12_encoded(
+            project,
+            time,
+            size,
+            sources,
+            crate::modules::render::source::YuvEncoding::BT601_LIMITED,
+        )
+    }
+
+    /// [`Self::render_nv12`] in the matrix and range the encoder tags its
+    /// stream with. `render_nv12` itself is BT.601, the encoding the tests'
+    /// CPU references are written in; the export always says which it wants.
+    pub fn render_nv12_encoded(
+        &self,
+        project: &Project,
+        time: Micros,
+        size: (u32, u32),
+        sources: &dyn SourceProvider,
+        encoding: crate::modules::render::source::YuvEncoding,
+    ) -> Result<Nv12Frame> {
         let converter = self.nv12_converter().ok_or_else(|| {
             RenderError::Readback("this device has no RGBA to NV12 compute pass".into())
         })?;
@@ -875,7 +895,7 @@ impl Compositor {
 
         let started = Instant::now();
         let before_wait = converter.wait_ns.load(Ordering::Relaxed);
-        let frame = converter.convert(&self.ctx, &target);
+        let frame = converter.convert_encoded(&self.ctx, &target, encoding);
         let waited = converter.wait_ns.load(Ordering::Relaxed) - before_wait;
         add(&self.stats.nv12_ns, started);
         self.stats
@@ -928,6 +948,27 @@ impl Compositor {
         destination: &wgpu::Buffer,
         range: crate::modules::render::source::YuvRange,
     ) -> Result<()> {
+        self.render_nv12_into_encoded(
+            project,
+            time,
+            size,
+            sources,
+            destination,
+            crate::modules::render::source::YuvEncoding::bt601(range),
+        )
+    }
+
+    /// [`Self::render_nv12_into`] in the matrix and range the encoder tags
+    /// its stream with. The zero-copy export's entry point.
+    pub fn render_nv12_into_encoded(
+        &self,
+        project: &Project,
+        time: Micros,
+        size: (u32, u32),
+        sources: &dyn SourceProvider,
+        destination: &wgpu::Buffer,
+        encoding: crate::modules::render::source::YuvEncoding,
+    ) -> Result<()> {
         let converter = self.nv12_converter().ok_or_else(|| {
             RenderError::Readback("this device has no RGBA to NV12 compute pass".into())
         })?;
@@ -935,7 +976,7 @@ impl Compositor {
 
         let started = Instant::now();
         let before_wait = converter.wait_ns.load(Ordering::Relaxed);
-        let result = converter.convert_into_range(&self.ctx, &target, destination, range);
+        let result = converter.convert_into_encoded(&self.ctx, &target, destination, encoding);
         let waited = converter.wait_ns.load(Ordering::Relaxed) - before_wait;
         add(&self.stats.nv12_ns, started);
         self.stats
@@ -1081,7 +1122,7 @@ impl Compositor {
                 lut_hi,
                 opacity: quad.placement.opacity,
                 planar: u32::from(quad.frame.is_planar()),
-                matrix: quad.frame.matrix as u32,
+                matrix: quad.frame.colour_word(),
                 range: quad.frame.range as u32,
                 turns: quad.frame.turns % 4,
                 color_active: u32::from(quad.color.is_some()),

@@ -70,6 +70,84 @@ pub enum YuvRange {
     Full = 1,
 }
 
+/// How a planar source's R'G'B' becomes light.
+///
+/// SDR is everything the editor has always handled — BT.709, BT.601, sRGB —
+/// decoded with the sRGB curve. PQ (SMPTE ST 2084) and HLG (ARIB STD-B67)
+/// are the two HDR transfers phones and cameras write; `yuv.wgsl` converts
+/// both to the SDR working space with a tone map. Read from the file, never
+/// guessed: an HDR clip read as SDR is the grey, flat picture this exists to
+/// remove.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u32)]
+pub enum YuvTransfer {
+    #[default]
+    Sdr = 0,
+    Pq = 1,
+    Hlg = 2,
+}
+
+/// Which primaries a planar source's light is in. BT.2020 is converted to the
+/// compositor's BT.709 in the shader; everything else is treated as BT.709,
+/// which SD's SMPTE 170M and EBU primaries are close enough to that no
+/// editor converts them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u32)]
+pub enum YuvPrimaries {
+    #[default]
+    Bt709 = 0,
+    Bt2020 = 1,
+}
+
+/// Where the transfer sits in [`SourceFrame::colour_word`]. `yuv.wgsl`
+/// spells the same numbers; a test asserts they agree.
+const COLOUR_TRANSFER_SHIFT: u32 = 8;
+const COLOUR_PRIMARIES_SHIFT: u32 = 16;
+/// Set when the planes are 16-bit (`R16Unorm`/`Rg16Unorm`) with the
+/// significant bits at the top, as P010 has them.
+const COLOUR_DEEP_SAMPLES: u32 = 1 << 24;
+
+/// A matrix and a range together: how RGB becomes YUV on the way *out*.
+///
+/// The encoder's side of [`YuvMatrix`] and [`YuvRange`]. The two travel as one
+/// value because they are only ever right as a pair — the preview's JPEG
+/// encoder wants BT.601 in full range (JFIF), a video export wants what its
+/// stream is tagged as, normally BT.709 in limited range — and a caller that
+/// could set one without the other is how the export shipped BT.601 samples in
+/// files every player read as BT.709.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct YuvEncoding {
+    pub matrix: YuvMatrix,
+    pub range: YuvRange,
+}
+
+impl YuvEncoding {
+    /// What an HD video encoder wants, and what `export::colour` picks for it.
+    pub const BT709_LIMITED: Self = Self {
+        matrix: YuvMatrix::Bt709,
+        range: YuvRange::Limited,
+    };
+    /// Standard definition video.
+    pub const BT601_LIMITED: Self = Self {
+        matrix: YuvMatrix::Bt601,
+        range: YuvRange::Limited,
+    };
+    /// JFIF: what a JPEG decoder assumes, since the file cannot say.
+    pub const JPEG: Self = Self {
+        matrix: YuvMatrix::Bt601,
+        range: YuvRange::Full,
+    };
+
+    /// BT.601 in `range`: the encoding the range-only entry points meant
+    /// before the matrix became a parameter.
+    pub const fn bt601(range: YuvRange) -> Self {
+        Self {
+            matrix: YuvMatrix::Bt601,
+            range,
+        }
+    }
+}
+
 /// Something that has to stay alive for as long as the textures do.
 ///
 /// The mapped-decode path imports a texture over memory the *decoder* owns: a
@@ -120,6 +198,10 @@ pub struct SourceFrame {
     /// How to convert, when `chroma` is `Some`. Meaningless otherwise.
     pub matrix: YuvMatrix,
     pub range: YuvRange,
+    /// The source's transfer and primaries, when `chroma` is `Some`. HDR
+    /// sources always arrive planar, so the RGBA path never needs these.
+    pub transfer: YuvTransfer,
+    pub primaries: YuvPrimaries,
     /// Clockwise quarter turns the compositor must apply, because the pixels
     /// have not been. Always 0 on the RGBA path — the decoder rotates there,
     /// since it is already copying every pixel and one more pass is cheap
@@ -146,6 +228,8 @@ impl SourceFrame {
             chroma_view: None,
             matrix: YuvMatrix::default(),
             range: YuvRange::default(),
+            transfer: YuvTransfer::default(),
+            primaries: YuvPrimaries::default(),
             turns: 0,
             guard: None,
         }
@@ -183,9 +267,46 @@ impl SourceFrame {
             chroma_view: Some(chroma_view),
             matrix,
             range,
+            transfer: YuvTransfer::default(),
+            primaries: YuvPrimaries::default(),
             turns,
             guard,
         }
+    }
+
+    /// The same planes, read as HDR or wide-gamut light.
+    ///
+    /// [`Self::from_planes`] leaves a frame SDR in BT.709; a decoder that read
+    /// PQ, HLG or BT.2020 from the file says so here.
+    pub fn with_light(mut self, transfer: YuvTransfer, primaries: YuvPrimaries) -> Self {
+        self.transfer = transfer;
+        self.primaries = primaries;
+        self
+    }
+
+    /// Whether the planes hold 16-bit samples rather than 8-bit ones.
+    pub fn has_deep_samples(&self) -> bool {
+        matches!(
+            self.texture.format(),
+            wgpu::TextureFormat::R16Unorm | wgpu::TextureFormat::Rg16Unorm
+        )
+    }
+
+    /// Everything the shader needs about this frame's colour except the
+    /// range, in one word: the matrix in the low byte, then the transfer, the
+    /// primaries, and whether the samples are 16-bit. It travels in the quad
+    /// uniform's `matrix` slot, which is why it is packed — the uniform's
+    /// layout did not have to change for HDR. `yuv.wgsl` unpacks it.
+    pub fn colour_word(&self) -> u32 {
+        let deep = if self.has_deep_samples() {
+            COLOUR_DEEP_SAMPLES
+        } else {
+            0
+        };
+        self.matrix as u32
+            | (self.transfer as u32) << COLOUR_TRANSFER_SHIFT
+            | (self.primaries as u32) << COLOUR_PRIMARIES_SHIFT
+            | deep
     }
 
     /// Whether the compositor has to convert rather than sample directly.
@@ -469,6 +590,14 @@ mod tests {
             ("MATRIX_BT2020", YuvMatrix::Bt2020 as u32),
             ("RANGE_LIMITED", YuvRange::Limited as u32),
             ("RANGE_FULL", YuvRange::Full as u32),
+            ("TRANSFER_SDR", YuvTransfer::Sdr as u32),
+            ("TRANSFER_PQ", YuvTransfer::Pq as u32),
+            ("TRANSFER_HLG", YuvTransfer::Hlg as u32),
+            ("PRIMARIES_BT709", YuvPrimaries::Bt709 as u32),
+            ("PRIMARIES_BT2020", YuvPrimaries::Bt2020 as u32),
+            ("COLOUR_TRANSFER_SHIFT", COLOUR_TRANSFER_SHIFT),
+            ("COLOUR_PRIMARIES_SHIFT", COLOUR_PRIMARIES_SHIFT),
+            ("COLOUR_DEEP_SAMPLES", COLOUR_DEEP_SAMPLES),
         ] {
             let declaration = format!("const {name}: u32 = {value}u;");
             assert!(
