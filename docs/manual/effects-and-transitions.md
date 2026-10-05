@@ -204,9 +204,11 @@ The other sections of **Video › Basic**:
 - **Reduce image noise** (video and image clips): tick it to smooth sensor
   noise. **Strength** sets how much. **Keep detail** keeps fine texture: a
   high value averages only pixels whose colour is very close. Edges stay
-  sharp at every setting. It is the **Reduce noise** effect, so it also shows
-  in the **Effects** tab, and both sliders take keyframes. Clearing the tick
-  removes the effect. It runs on the GPU, in the preview and in the export.
+  sharp at every setting. **Mode**: **Spatial** looks at one frame;
+  **Temporal** also uses the frames before and after (see below). It is the
+  **Reduce noise** effect, so it also shows in the **Effects** tab, and both
+  sliders take keyframes. Clearing the tick removes the effect. It runs on
+  the GPU, in the preview and in the export.
 - **Enhance quality**: a button that opens **Video › Enhance**, where the AI
   upscaling is (see [AI tools](ai-tools.md#enhance-quality)).
 - **Optical flow** (video clips): a button that opens **Speed › Standard**,
@@ -219,4 +221,16 @@ each pixel with its neighbours, but only with those of a similar colour.
 Grain and sensor noise go; an edge, which is a large difference, stays.
 Above a **Strength** of 60 it runs twice, which smooths more without
 blotches. The radius grows with the frame, so the preview and a 4K export
-look the same. It does not compare frames over time, and it does not use AI.
+look the same. It does not use AI.
+
+**Mode › Temporal** also compares each pixel with the same pixel in the
+frame before and the frame after. Sensor noise changes from frame to frame,
+but a still picture does not, so where the picture holds still the three
+frames are averaged. This removes more noise than the spatial filter and
+keeps more detail. Where something moves, the frames differ much more than
+noise does, and only the current frame is used, so nothing leaves a trail.
+The spatial filter then runs gently on the result. **Strength** and **Keep
+detail** set both parts. Temporal mode works on video clips. On a clip that
+uses frame blending, motion blur or a blur animation, only the spatial part
+runs. The first frame of a file has no frame before it and uses the frame
+after only.

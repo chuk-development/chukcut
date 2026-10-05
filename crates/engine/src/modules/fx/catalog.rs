@@ -232,10 +232,13 @@ static EFFECTS: &[EffectDescriptor] = &[
         id: DENOISE,
         label: "Reduce noise",
         category: Category::Blur,
-        description: "Smooths sensor noise and keeps the edges sharp.",
+        description: "Smooths sensor noise and keeps the edges sharp. Temporal also averages \
+                      the frames either side where the picture holds still.",
         params: &[
             slider("strength", "Strength", 50.0),
             slider("detail", "Keep detail", 50.0),
+            // Last, so the two sliders keep their places in old stacks.
+            choice("mode", "Mode", super::temporal::MODES, 0),
         ],
     },
     EffectDescriptor {

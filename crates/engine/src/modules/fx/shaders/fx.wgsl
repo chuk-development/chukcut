@@ -37,6 +37,8 @@ struct FxUniform {
 @group(1) @binding(0) var t0: texture_2d<f32>;
 @group(1) @binding(1) var t1: texture_2d<f32>;
 @group(1) @binding(2) var s0: sampler;
+// Input 2, at binding 3: only `fs_denoise_temporal` reads it.
+@group(1) @binding(3) var t2: texture_2d<f32>;
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
@@ -196,6 +198,75 @@ fn fs_denoise(in: VertexOutput) -> @location(0) vec4<f32> {
             sum = sum + tap * w;
             total = total + w;
         }
+    }
+    return sum / total;
+}
+
+// ---------------------------------------------------------------------------
+// Reduce noise, temporal: the frames either side, where the picture held still
+// ---------------------------------------------------------------------------
+//
+// p[0] = (range sigma, neighbour weight, has the frame before, has the frame after)
+//
+// Input 0 is this frame, input 1 the frame before, input 2 the frame after,
+// all premultiplied linear and placed alike. A neighbour joins the average
+// with a weight that falls off with how far its 3 x 3 mean (in √-linear
+// units) is from this frame's: the means barely see noise, so a still area
+// averages three frames and a moving one keeps its own. `fx/temporal.rs`
+// picks the numbers.
+fn sqrt_rgb(c: vec4<f32>) -> vec3<f32> {
+    return sqrt(max(unpremultiply(c), vec3<f32>(0.0)));
+}
+
+fn clamp_texel(t: texture_2d<f32>, p: vec2<i32>) -> vec4<f32> {
+    let dims = vec2<i32>(textureDimensions(t));
+    return textureLoad(t, clamp(p, vec2<i32>(0), dims - vec2<i32>(1)), 0);
+}
+
+fn patch_mean(which: u32, centre: vec2<i32>) -> vec3<f32> {
+    var sum = vec3<f32>(0.0);
+    for (var y = -1; y <= 1; y = y + 1) {
+        for (var x = -1; x <= 1; x = x + 1) {
+            let at = centre + vec2<i32>(x, y);
+            var c: vec4<f32>;
+            switch which {
+                case 1u: { c = clamp_texel(t1, at); }
+                case 2u: { c = clamp_texel(t2, at); }
+                default: { c = clamp_texel(t0, at); }
+            }
+            sum = sum + sqrt_rgb(c);
+        }
+    }
+    return sum / 9.0;
+}
+
+@fragment
+fn fs_denoise_temporal(in: VertexOutput) -> @location(0) vec4<f32> {
+    let centre = vec2<i32>(in.clip_position.xy);
+    let c = clamp_texel(t0, centre);
+    if (c.a <= 0.0) {
+        return c;
+    }
+    let range = max(fx.p[0].x, 0.0001);
+    let weight = fx.p[0].y;
+    let here = patch_mean(0u, centre);
+    var sum = c;
+    var total = 1.0;
+    if (fx.p[0].z > 0.5) {
+        let n = clamp_texel(t1, centre);
+        let d = patch_mean(1u, centre) - here;
+        // A neighbour without the clip under this pixel (it moved off) has
+        // nothing to give.
+        let w = select(0.0, weight * exp(-dot(d, d) / (2.0 * range * range)), n.a > 0.0);
+        sum = sum + n * w;
+        total = total + w;
+    }
+    if (fx.p[0].w > 0.5) {
+        let n = clamp_texel(t2, centre);
+        let d = patch_mean(2u, centre) - here;
+        let w = select(0.0, weight * exp(-dot(d, d) / (2.0 * range * range)), n.a > 0.0);
+        sum = sum + n * w;
+        total = total + w;
     }
     return sum / total;
 }

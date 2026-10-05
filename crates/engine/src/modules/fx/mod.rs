@@ -19,6 +19,8 @@
 //! - [`render`] — the pipelines and the pass recorder the compositor drives.
 //! - [`retouch`] — the face retouch effect's geometry, from the clip's
 //!   landmarks.
+//! - [`temporal`] — Reduce noise in its Temporal mode: which neighbour
+//!   frames, and the parameters of the pass that mixes them in.
 //! - [`tiles`] — preview tiles rendered by the compositor and cached on disk.
 
 pub mod catalog;
@@ -27,6 +29,7 @@ pub mod edit;
 pub mod motion_blur;
 pub mod render;
 pub mod retouch;
+pub mod temporal;
 pub mod tiles;
 
 #[cfg(test)]

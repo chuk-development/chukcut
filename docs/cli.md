@@ -767,7 +767,7 @@ chukcut-cli layout split reel.chukcut 0:0 1:0 --layout two_rows
 
 #### `effect add PROJECT KIND`
 
-Adds an effect (`catalog effects`): `gaussian_blur`, `zoom_blur`, `glow`,
+Adds an effect (`catalog effects`): `gaussian_blur`, `denoise`, `zoom_blur`, `glow`,
 `light_sweep`, `shake`, `rgb_split`, `glitch`, `vhs`, `pixelate`, `mirror`,
 `kaleidoscope`, `film_grain`, `halation`, `bloom`, `gate_weave`, `letterbox`,
 `frame`.
@@ -785,6 +785,8 @@ the range in `catalog effects`: many effects count from 0 to 100 (glow's
 ```bash
 chukcut-cli effect add reel.chukcut glow --clip 0:1 --set intensity=60
 chukcut-cli effect add reel.chukcut shake --at 5 --duration 0.4
+# Reduce noise, also over the frames before and after (mode spatial|temporal).
+chukcut-cli effect add reel.chukcut denoise --clip 0:0 --set mode=temporal --set strength=70
 ```
 
 #### `effect set PROJECT CLIP EFFECT`
