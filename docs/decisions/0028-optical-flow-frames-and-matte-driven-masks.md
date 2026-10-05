@@ -130,3 +130,27 @@ background", on one clip, no copy on the lane above.
 
 Missing frames are also baked when a project opens, not only after an edit
 or before an export: `modules::prepare`, decision 0029's amendment.
+
+## Amendment, 2026-10-05 (agent/gaps2): masks everywhere a clip is drawn, flow on remade clips
+
+- **Matte-limited effects inside a transition window and during a blur
+  animation.** Each transition side carries its own effects mask
+  (`Draw::Transition { from_mask, to_mask }`); the side's layer is mixed by
+  its matte (`matte_mix`) after its effects and before the transition
+  blends the two sides. A blur animation is drawn as the incoming side of a
+  blur transition, so it gets the same. The "What it costs" sentence above
+  ("not inside a transition window … nor while a blur animation runs") no
+  longer holds.
+- **Averaged clips (frame blending, motion blur).** The mask is no longer
+  one draw at the clip's own placement: every averaged draw has a mask
+  draw at that draw's placement, with that draw's frame's matte, its
+  opacity the draw's share of the average. They are summed like the clip's
+  draws (`accumulate_layer`), and the mix reads the weight as colour times
+  alpha, so a single draw (alpha 1) and a sum (the mean in colour, the
+  coverage in alpha) are read the same way. The second frame of a blend is
+  also cut and graded by its own matte, not the first frame's.
+- **Optical flow on a clip with Remove object or Enhance quality** makes
+  its in-between frames from the remade frames (decision 0029's
+  amendment), in a directory keyed by the remade chain.
+
+What would change our minds is unchanged.

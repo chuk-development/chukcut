@@ -418,9 +418,12 @@ impl Runtime {
     }
 
     /// The session to run `spec` on inputs of `shapes` (every input with
-    /// dimensions, by name; scalars left out): a TensorRT session built for
-    /// exactly these shapes when the model has a fast plan and TensorRT
-    /// works ("Fast" mode, the add-on installed), else [`Self::session`].
+    /// dimensions, by name; scalars left out): a TensorRT session whose
+    /// profile covers these shapes (`accel::profile_for`: the model's range
+    /// that holds them, or exactly them) when the model has a fast plan and
+    /// TensorRT works ("Fast" mode, the add-on installed), else
+    /// [`Self::session`]. Shapes in one range share one session and one
+    /// engine.
     /// A TensorRT engine that cannot be built leaves the model on CUDA for
     /// the rest of the worker's life, with a log line, never a failed job.
     pub fn session_for(
@@ -435,7 +438,8 @@ impl Runtime {
         if self.tensorrt_failed.contains(spec.id) {
             return self.session(spec);
         }
-        let shape_key = accel::shape_key(shapes);
+        let profiles = accel::profile_for(spec.id, shapes);
+        let shape_key = accel::profile_key(&profiles);
         let key = format!("{}@{shape_key}", spec.id);
         if !self.sessions.contains_key(&key) {
             let path = registry::model_path(&self.root, spec);
@@ -464,14 +468,14 @@ impl Runtime {
             }
             let started = Instant::now();
             let tuning = accel::tuning(spec.id);
-            let mut built = build_tensorrt(&path, &dir, plan.precision, shapes, tuning);
+            let mut built = build_tensorrt(&path, &dir, plan.precision, &profiles, tuning);
             // Even a cached engine needs room on the card to load: BiRefNet's
             // execution context wants 1.9 GB, and after a worker had run four
             // other models it failed with "could not build execution
             // context" (TensorRT says "OutOfMemory" only in its log). Any
             // failure is retried once with the card cleared.
             if built.is_err() && self.evict_others(spec) {
-                built = build_tensorrt(&path, &dir, plan.precision, shapes, tuning);
+                built = build_tensorrt(&path, &dir, plan.precision, &profiles, tuning);
             }
             match built {
                 Ok(session) => {
@@ -590,38 +594,41 @@ pub fn out_of_memory(message: &str) -> bool {
         .any(|m| message.contains(m))
 }
 
-/// A TensorRT session for `model` at exactly `shapes`, its engine cached in
-/// `dir`, with the CUDA provider behind it for any node TensorRT does not
-/// take. The profile's minimum, optimum and maximum are the same shapes:
-/// the engine is the fastest for them and is never rebuilt for another
-/// size, which gets its own session and directory instead (a clip has one
-/// size; a dynamic profile cost speed and rebuilt on every change).
+/// A TensorRT session for `model` with `profiles` (each input's minimum,
+/// optimum and maximum shape), its engine cached in `dir`, with the CUDA
+/// provider behind it for any node TensorRT does not take. An input inside
+/// the profile runs on the engine as built; ONNX Runtime rebuilds only for
+/// one outside it, which `Runtime::session_for` never sends (another range
+/// is another session and directory). The profiles are always explicit:
+/// without them ONNX Runtime's TensorRT provider grows the range to each
+/// new shape it sees and rebuilds the engine every time.
 fn build_tensorrt(
     model: &Path,
     dir: &Path,
     precision: Precision,
-    shapes: &[(&str, Vec<i64>)],
+    profiles: &[accel::InputProfile],
     tuning: accel::Tuning,
 ) -> Result<Session, String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let dir_str = dir.to_string_lossy().to_string();
-    let profile: Vec<String> = shapes
-        .iter()
-        .filter(|(_, s)| !s.is_empty())
-        .map(|(name, s)| accel::profile_entry(name, s))
-        .collect();
-    let profile = profile.join(",");
+    let list = |pick: fn(&accel::InputProfile) -> &Vec<i64>| {
+        profiles
+            .iter()
+            .map(|p| accel::profile_entry(&p.name, pick(p)))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
     let mut trt = ep::TensorRT::default()
         .with_fp16(precision == Precision::Fp16)
         .with_engine_cache(true)
         .with_engine_cache_path(&dir_str)
         .with_timing_cache(true)
         .with_timing_cache_path(&dir_str);
-    if !profile.is_empty() {
+    if !profiles.is_empty() {
         trt = trt
-            .with_profile_min_shapes(&profile)
-            .with_profile_opt_shapes(&profile)
-            .with_profile_max_shapes(&profile);
+            .with_profile_min_shapes(list(|p| &p.min))
+            .with_profile_opt_shapes(list(|p| &p.opt))
+            .with_profile_max_shapes(list(|p| &p.max));
     }
     let mut builder = Session::builder()
         .map_err(|e| e.to_string())?

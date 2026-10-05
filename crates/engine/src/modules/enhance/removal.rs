@@ -24,9 +24,24 @@
 //!   which moves: a painted stroke or a box covers the same pixels in every
 //!   frame, so nothing behind it is ever seen.
 //!
-//! When the camera moves, all of this is dropped and the frame is filled on
-//! its own: a remembered pixel would be from another place in the scene,
-//! and a mixed fill would smear.
+//! - **Following the camera.** When the camera pans or tilts, the picture
+//!   around the mask moves as a whole. [`camera_move`] finds that move (a
+//!   shift, to a tenth of a pixel, on a luma pyramid outside both masks);
+//!   when the shift explains the change (what is left after it is below
+//!   [`FOLLOWED`]), the memory, its ages and the previous frame's output
+//!   are moved with the picture, and the memory and the smoothing work as in
+//!   a still shot. Behind a static logo on a panning shot the background
+//!   slides past: the memory then knows most of what the logo covers (it
+//!   was beside the logo a few frames ago), and what LaMa still invents is
+//!   steadied by the moved previous fill instead of being reinvented every
+//!   frame. The memory is moved by whole pixels; the fraction is carried to
+//!   the next frame, so it is never resampled (it would blur) and never
+//!   more than a pixel off.
+//!
+//! When the camera moves in a way a shift does not explain (a zoom, a
+//! rotation, a cut), all of this is dropped and the frame is filled on its
+//! own: a remembered pixel would be from another place in the scene, and a
+//! mixed fill would smear.
 //!
 //! The state is one frame's worth of pixels and lives here, in the engine,
 //! so a restarted worker loses nothing.
@@ -46,6 +61,16 @@ pub const MEMORY_FRAMES: u16 = 150;
 
 /// The share of the previous frame's fill kept in a still shot.
 pub const SMOOTH: f32 = 0.5;
+
+/// The mean change (code values) left after the camera's shift is taken
+/// out below which the shift counts as the camera's move. Twice [`STILL`]:
+/// what a still shot's noise leaves, plus the bilinear sampling of a
+/// fractional shift.
+pub const FOLLOWED: f32 = 2.0 * STILL;
+
+/// The largest camera move from one frame to the next that is followed, in
+/// pixels on each axis.
+pub const MAX_SHIFT: f32 = 96.0;
 
 /// A still stretch shorter than this many frames gets no clean plate.
 const MIN_PLATE_FRAMES: u32 = 3;
@@ -82,6 +107,248 @@ fn change(
     } else {
         sum as f32 / n as f32
     }
+}
+
+/// The luma of `rgba` (`w × h`) with a validity flag (outside `mask`).
+struct Plane {
+    w: usize,
+    h: usize,
+    luma: Vec<f32>,
+    valid: Vec<bool>,
+}
+
+impl Plane {
+    fn of(rgba: &[u8], mask: &[u8], w: usize, h: usize) -> Plane {
+        let luma = (0..w * h)
+            .map(|i| {
+                let p = &rgba[i * 4..i * 4 + 3];
+                0.299 * p[0] as f32 + 0.587 * p[1] as f32 + 0.114 * p[2] as f32
+            })
+            .collect();
+        let valid = mask.iter().map(|&m| m == 0).collect();
+        Plane { w, h, luma, valid }
+    }
+
+    /// Half the size, 2×2 averages; a block with a masked pixel is masked.
+    fn half(&self) -> Plane {
+        let (w, h) = (self.w / 2, self.h / 2);
+        let mut luma = Vec::with_capacity(w * h);
+        let mut valid = Vec::with_capacity(w * h);
+        for y in 0..h {
+            for x in 0..w {
+                let i = |dx: usize, dy: usize| (2 * y + dy) * self.w + 2 * x + dx;
+                let at = [i(0, 0), i(1, 0), i(0, 1), i(1, 1)];
+                luma.push(at.iter().map(|&k| self.luma[k]).sum::<f32>() / 4.0);
+                valid.push(at.iter().all(|&k| self.valid[k]));
+            }
+        }
+        Plane { w, h, luma, valid }
+    }
+
+    /// Mean absolute difference of `now` against this plane shifted by
+    /// `(dx, dy)` (`now[x, y]` against `self[x − dx, y − dy]`), over every
+    /// `step`-th pixel both see. `f32::MAX` when they share less than a
+    /// quarter of the picture.
+    fn cost(&self, now: &Plane, dx: i32, dy: i32, step: usize) -> f32 {
+        let (mut sum, mut n, mut total) = (0.0f64, 0u64, 0u64);
+        for y in (0..now.h).step_by(step) {
+            let sy = y as i32 - dy;
+            for x in (0..now.w).step_by(step) {
+                total += 1;
+                let sx = x as i32 - dx;
+                if sx < 0 || sy < 0 || sx >= self.w as i32 || sy >= self.h as i32 {
+                    continue;
+                }
+                let (i, j) = (y * now.w + x, sy as usize * self.w + sx as usize);
+                if !now.valid[i] || !self.valid[j] {
+                    continue;
+                }
+                sum += (now.luma[i] - self.luma[j]).abs() as f64;
+                n += 1;
+            }
+        }
+        if n == 0 || n * 4 < total {
+            f32::MAX
+        } else {
+            (sum / n as f64) as f32
+        }
+    }
+
+    /// The integer shift within `centre ± radius` with the lowest cost.
+    /// The shifts are tried in parallel (the bake runs on a thread of its
+    /// own and holds no lock while it does).
+    fn search(&self, now: &Plane, centre: (i32, i32), radius: i32, step: usize) -> (i32, i32, f32) {
+        use rayon::prelude::*;
+        let shifts: Vec<(i32, i32)> = (centre.1 - radius..=centre.1 + radius)
+            .flat_map(|dy| (centre.0 - radius..=centre.0 + radius).map(move |dx| (dx, dy)))
+            .collect();
+        let costs: Vec<f32> = shifts
+            .par_iter()
+            .map(|&(dx, dy)| self.cost(now, dx, dy, step))
+            .collect();
+        let mut best = (centre.0, centre.1, f32::MAX);
+        for (&(dx, dy), &c) in shifts.iter().zip(&costs) {
+            // Ties go to the smaller move.
+            if c < best.2 || (c == best.2 && dx.abs() + dy.abs() < best.0.abs() + best.1.abs()) {
+                best = (dx, dy, c);
+            }
+        }
+        best
+    }
+}
+
+/// The vertex of the parabola through three costs at −1, 0 and +1: the
+/// fraction of a pixel the minimum lies off the middle one, within ±0.5.
+fn vertex(left: f32, middle: f32, right: f32) -> f32 {
+    let curve = left - 2.0 * middle + right;
+    if curve.is_nan() || curve <= 1e-6 || left == f32::MAX || right == f32::MAX {
+        return 0.0;
+    }
+    (0.5 * (left - right) / curve).clamp(-0.5, 0.5)
+}
+
+/// How the camera moved from `before` to `now` (RGBA8, `w × h`, each with
+/// its grown object mask): the shift `(dx, dy)` in pixels, to a tenth or
+/// so, that carries the earlier picture onto the later one, and the mean
+/// change left after it (code values, as [`change`] measures it). `None`
+/// when the frames share too little picture to tell.
+///
+/// The shift is searched on a luma pyramid outside both masks: within
+/// [`MAX_SHIFT`] at an eighth of the size, refined by ±2 pixels at each
+/// level up, then to a fraction of a pixel by a parabola through the costs
+/// around the best whole shift.
+pub fn camera_move(
+    w: usize,
+    h: usize,
+    before: &[u8],
+    before_mask: &[u8],
+    now: &[u8],
+    now_mask: &[u8],
+) -> Option<(f32, f32, f32)> {
+    let mut pyramid = vec![(
+        Plane::of(before, before_mask, w, h),
+        Plane::of(now, now_mask, w, h),
+    )];
+    while pyramid.len() < 4 && pyramid.last().is_some_and(|(b, _)| b.w >= 96 && b.h >= 96) {
+        let (b, n) = pyramid.last().expect("not empty");
+        let next = (b.half(), n.half());
+        pyramid.push(next);
+    }
+    let levels = pyramid.len() as i32;
+    let scale = (1 << (levels - 1)) as f32;
+    let radius = (MAX_SHIFT / scale).ceil() as i32 + 1;
+    let (mut dx, mut dy) = (0i32, 0i32);
+    let mut cost = f32::MAX;
+    for (level, (b, n)) in pyramid.iter().enumerate().rev() {
+        let coarsest = level as i32 == levels - 1;
+        // Every pixel at the small levels, every third at full size.
+        let step = if level == 0 { 3 } else { 1 };
+        let found = if coarsest {
+            b.search(n, (0, 0), radius, step)
+        } else {
+            b.search(n, (dx * 2, dy * 2), 2, step)
+        };
+        (dx, dy, cost) = found;
+    }
+    if cost == f32::MAX {
+        return None;
+    }
+    let (b, n) = &pyramid[0];
+    let fx = vertex(b.cost(n, dx - 1, dy, 2), cost, b.cost(n, dx + 1, dy, 2));
+    let fy = vertex(b.cost(n, dx, dy - 1, 2), cost, b.cost(n, dx, dy + 1, 2));
+    let (sx, sy) = (dx as f32 + fx, dy as f32 + fy);
+    let left = shifted_change(w, h, before, before_mask, now, now_mask, sx, sy);
+    (left < f32::MAX).then_some((sx, sy, left))
+}
+
+/// [`change`] with `before` shifted by `(dx, dy)` (bilinear): what the
+/// camera's move does not explain.
+#[allow(clippy::too_many_arguments)]
+fn shifted_change(
+    w: usize,
+    h: usize,
+    before: &[u8],
+    before_mask: &[u8],
+    now: &[u8],
+    now_mask: &[u8],
+    dx: f32,
+    dy: f32,
+) -> f32 {
+    let (mut sum, mut n) = (0.0f64, 0u64);
+    for y in (0..h).step_by(4) {
+        let sy = y as f32 - dy;
+        if sy < 0.0 || sy > (h - 1) as f32 {
+            continue;
+        }
+        for x in (0..w).step_by(4) {
+            let sx = x as f32 - dx;
+            if sx < 0.0 || sx > (w - 1) as f32 {
+                continue;
+            }
+            let i = y * w + x;
+            let (x0, y0) = (sx.floor() as usize, sy.floor() as usize);
+            let (x1, y1) = ((x0 + 1).min(w - 1), (y0 + 1).min(h - 1));
+            let corners = [y0 * w + x0, y0 * w + x1, y1 * w + x0, y1 * w + x1];
+            if now_mask[i] != 0 || corners.iter().any(|&k| before_mask[k] != 0) {
+                continue;
+            }
+            let (fx, fy) = (sx - x0 as f32, sy - y0 as f32);
+            let weights = [
+                (1.0 - fx) * (1.0 - fy),
+                fx * (1.0 - fy),
+                (1.0 - fx) * fy,
+                fx * fy,
+            ];
+            for c in 0..3 {
+                let v: f32 = corners
+                    .iter()
+                    .zip(weights)
+                    .map(|(&k, wt)| before[k * 4 + c] as f32 * wt)
+                    .sum();
+                sum += (v - now[i * 4 + c] as f32).abs() as f64;
+            }
+            n += 3;
+        }
+    }
+    if n == 0 {
+        f32::MAX
+    } else {
+        (sum / n as f64) as f32
+    }
+}
+
+/// `values` (`w × h` of `T`, `channels` per pixel) moved by whole pixels
+/// `(dx, dy)`: `out[x, y] = values[x − dx, y − dy]`, `fill` where that lies
+/// outside.
+fn shift<T: Copy>(
+    values: &[T],
+    w: usize,
+    h: usize,
+    channels: usize,
+    dx: i32,
+    dy: i32,
+    fill: T,
+) -> Vec<T> {
+    let mut out = vec![fill; values.len()];
+    for y in 0..h {
+        let sy = y as i32 - dy;
+        if sy < 0 || sy >= h as i32 {
+            continue;
+        }
+        let (x0, x1) = (
+            (dx.max(0) as usize).min(w),
+            ((w as i32 + dx.min(0)).max(0) as usize).min(w),
+        );
+        if x0 >= x1 {
+            continue;
+        }
+        let row = y * w * channels;
+        let src = sy as usize * w * channels;
+        let from = (x0 as i32 - dx) as usize;
+        out[row + x0 * channels..row + x1 * channels]
+            .copy_from_slice(&values[src + from * channels..src + (from + x1 - x0) * channels]);
+    }
+    out
 }
 
 /// The background of one still stretch of a shot: the last value seen at
@@ -196,6 +463,15 @@ pub struct Remover {
     /// ago (`u16::MAX`: never).
     memory: Vec<u8>,
     age: Vec<u16>,
+    /// The camera's move summed since the first frame, and the whole
+    /// pixels of it the memory has been moved by (`camera_move`).
+    travelled: (f32, f32),
+    moved: (i32, i32),
+    /// Follow a moving camera (on by default). Off is the removal as it was
+    /// before it could, for a comparison.
+    pub follow_camera: bool,
+    /// How many frames were followed through a camera move.
+    pub followed: u32,
     /// Where the model ran, once it has.
     pub provider: Option<String>,
     /// The model's own time, summed.
@@ -216,6 +492,10 @@ impl Remover {
             previous: None,
             memory: vec![0; width * height * 4],
             age: vec![u16::MAX; width * height],
+            travelled: (0.0, 0.0),
+            moved: (0, 0),
+            follow_camera: true,
+            followed: 0,
             provider: None,
             model_millis: 0.0,
             model_runs: 0,
@@ -247,12 +527,7 @@ impl Remover {
             self.previous = Some((frame.to_vec(), grown, frame.to_vec()));
             return Ok(frame.to_vec());
         };
-        let still = self
-            .previous
-            .as_ref()
-            .is_some_and(|(before, before_mask, _)| {
-                self.change(before, before_mask, frame, &grown) < STILL
-            });
+        let still = self.steady(frame, &grown);
         if !still {
             self.age.fill(u16::MAX);
         }
@@ -296,6 +571,56 @@ impl Remover {
         self.remember(frame, &grown);
         self.previous = Some((frame.to_vec(), grown, out.clone()));
         Ok(out)
+    }
+
+    /// Whether this frame continues the last one: the camera held still,
+    /// or it moved by a shift that explains the change, in which case the
+    /// memory, its ages and the previous frame are moved with the picture
+    /// first (by whole pixels, the fraction carried over).
+    fn steady(&mut self, frame: &[u8], grown: &[u8]) -> bool {
+        let (w, h) = (self.width, self.height);
+        let Some((before, before_mask, _)) = &self.previous else {
+            return false;
+        };
+        if self.change(before, before_mask, frame, grown) < STILL {
+            return true;
+        }
+        if !self.follow_camera {
+            return false;
+        }
+        let Some((dx, dy, left)) = camera_move(w, h, before, before_mask, frame, grown) else {
+            return false;
+        };
+        if left >= FOLLOWED || dx.abs() > MAX_SHIFT || dy.abs() > MAX_SHIFT {
+            return false;
+        }
+        self.travelled.0 += dx;
+        self.travelled.1 += dy;
+        let to = (
+            self.travelled.0.round() as i32,
+            self.travelled.1.round() as i32,
+        );
+        let (sx, sy) = (to.0 - self.moved.0, to.1 - self.moved.1);
+        self.moved = to;
+        if (sx, sy) != (0, 0) {
+            self.memory = shift(&self.memory, w, h, 4, sx, sy, 0);
+            self.age = shift(&self.age, w, h, 1, sx, sy, u16::MAX);
+            if let Some((_, before_mask, before_out)) = &mut self.previous {
+                // What came in from outside the picture was never filled:
+                // marked, so the smoothing leaves it alone.
+                *before_mask = shift(before_mask, w, h, 1, sx, sy, 0);
+                *before_out = shift(before_out, w, h, 4, sx, sy, 0);
+                let mut inside = vec![1u8; w * h];
+                inside = shift(&inside, w, h, 1, sx, sy, 0);
+                for (m, &i) in before_mask.iter_mut().zip(&inside) {
+                    if i == 0 {
+                        *m = 0;
+                    }
+                }
+            }
+        }
+        self.followed += 1;
+        true
     }
 
     /// Blend `filled` (the crop `rect`, RGBA8) into `out` by the soft mask.
@@ -424,6 +749,96 @@ mod tests {
         assert_eq!(remover.model_runs, 0, "no model needed");
         assert_eq!(out, background, "the background from the later frames");
         assert!(plate_at(&plates, 999_999).is_none());
+    }
+
+    /// A picture with detail everywhere and no repeats: a hash of the
+    /// position, smoothed a little so a fractional shift interpolates.
+    fn texture(w: usize, h: usize, x0: i32, y0: i32) -> Vec<u8> {
+        let at = |x: i32, y: i32| -> f32 {
+            let mut v = (x.wrapping_mul(73_856_093) ^ y.wrapping_mul(19_349_663)) as u32;
+            v ^= v >> 13;
+            v = v.wrapping_mul(0x5bd1_e995);
+            v ^= v >> 15;
+            (v % 200) as f32 + 28.0
+        };
+        (0..w * h)
+            .flat_map(|i| {
+                let (x, y) = ((i % w) as i32 + x0, (i / w) as i32 + y0);
+                let v = (at(x, y) * 2.0 + at(x + 1, y) + at(x, y + 1)) / 4.0;
+                let v = v as u8;
+                [v, v.wrapping_add(17), 255 - v, 255]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_camera_move_is_found_outside_the_masks() {
+        let (w, h) = (160usize, 120usize);
+        let before = texture(w, h, 0, 0);
+        // The camera pans right and down: the picture moves left and up.
+        let now = texture(w, h, 7, 3);
+        let mut mask = vec![0u8; w * h];
+        for y in 40..80 {
+            for x in 60..100 {
+                mask[y * w + x] = 255;
+            }
+        }
+        let (dx, dy, left) = camera_move(w, h, &before, &mask, &now, &mask).expect("a move");
+        assert!(
+            (dx + 7.0).abs() < 0.3 && (dy + 3.0).abs() < 0.3,
+            "{dx} {dy}"
+        );
+        assert!(left < 2.0, "the shift explains it: {left}");
+        let still = camera_move(w, h, &before, &mask, &before, &mask).unwrap();
+        assert!(still.0.abs() < 0.3 && still.1.abs() < 0.3 && still.2 < 0.5);
+    }
+
+    #[test]
+    fn a_panning_shot_fills_from_the_moved_memory_without_the_model() {
+        // A static "logo" over a picture that pans 3 px a frame: what the
+        // logo covers slid in from beside it, so the moved memory knows it.
+        let (w, h) = (128usize, 96usize);
+        let mut logo = vec![0u8; w * h];
+        for y in 30..60 {
+            for x in 40..70 {
+                logo[y * w + x] = 255;
+            }
+        }
+        let mut remover = Remover::new(w, h, 0.0);
+        // The first frame shows no logo yet.
+        remover
+            .next(&texture(w, h, 0, 0), &vec![0; w * h], None, None)
+            .unwrap();
+        for n in 1..6 {
+            let clean = texture(w, h, 3 * n, 0);
+            let mut frame = clean.clone();
+            for (i, &m) in logo.iter().enumerate() {
+                if m != 0 {
+                    frame[i * 4..i * 4 + 3].fill(255);
+                }
+            }
+            let out = remover.next(&frame, &logo, None, None).unwrap();
+            assert_eq!(remover.model_runs, 0, "frame {n}: no model needed");
+            assert_eq!(out, clean, "frame {n}: the true background");
+        }
+        assert_eq!(remover.followed, 5);
+
+        // Without following the camera every frame is new to it.
+        let mut still_only = Remover::new(w, h, 0.0);
+        still_only.follow_camera = false;
+        still_only
+            .next(&texture(w, h, 0, 0), &vec![0; w * h], None, None)
+            .unwrap();
+        assert!(!still_only.steady(&texture(w, h, 3, 0), &logo));
+    }
+
+    #[test]
+    fn shifting_moves_by_whole_pixels_and_fills_the_edge() {
+        let values: Vec<u8> = (0..12).collect(); // 4 × 3
+        let moved = shift(&values, 4, 3, 1, 1, -1, 99);
+        assert_eq!(moved, vec![99, 4, 5, 6, 99, 8, 9, 10, 99, 99, 99, 99]);
+        assert_eq!(shift(&values, 4, 3, 1, 0, 0, 99), values);
+        assert!(shift(&values, 4, 3, 1, 9, 0, 7).iter().all(|&v| v == 7));
     }
 
     #[test]

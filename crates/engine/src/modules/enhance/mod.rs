@@ -75,6 +75,11 @@ pub const DEFAULT_GROW: f32 = 0.012;
 /// smoothing), so frames made the old way are never shown for the new one.
 pub const PIPELINE_REVISION: u32 = 2;
 
+/// Changes when the way an object is removed changes, and only then, so an
+/// enhanced-only clip keeps its frames. 1: the removal follows a moving
+/// camera (`removal::camera_move`).
+pub const REMOVAL_REVISION: u32 = 1;
+
 fn default_grow() -> f32 {
     DEFAULT_GROW
 }
@@ -302,6 +307,7 @@ impl Chain {
         h.update(MAX_LONG_SIDE.to_le_bytes());
         if let Some(r) = &self.removal {
             h.update(b"remove");
+            h.update(REMOVAL_REVISION.to_le_bytes());
             h.update(r.model.as_bytes());
             h.update([0]);
             h.update(r.version.as_bytes());

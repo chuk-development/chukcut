@@ -288,7 +288,8 @@ impl AiSettings {
             let mut text = format!("{} · {}", m.provider, m.precision);
             if let Some(build) = m.engines.last().filter(|_| m.provider == "TensorRT") {
                 text.push_str(&format!(
-                    " · prepared in {} ({} size{})",
+                    // One engine serves a range of sizes (`accel::profile_for`).
+                    " · prepared in {} ({} engine{})",
                     build_time(build.millis),
                     m.engines.len(),
                     if m.engines.len() == 1 { "" } else { "s" }

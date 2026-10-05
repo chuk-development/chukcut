@@ -468,3 +468,159 @@ fn a_clip_enhanced_2x_has_every_frame_at_twice_the_size() {
     let project = state.project.read().clone().unwrap();
     assert!(Chain::of(&project.materials, &project.tracks[0].segments[0]).is_none());
 }
+
+/// `project` slowed to 0.25x (its first quarter second over the clip's
+/// second) with optical flow on.
+fn slowed_with_flow(mut project: Project) -> Project {
+    use chukcut_engine::modules::speed::blend::{set_frame_blend_command, FrameBlend};
+    let clip = &mut project.tracks[0].segments[0];
+    clip.source_range = TimeRange::new(0, 250_000);
+    clip.speed = 0.25;
+    let (entry, command) = set_frame_blend_command(&project, "clip", FrameBlend::Flow).unwrap();
+    let (key, value) = entry.unwrap();
+    project.materials.extras.insert(key, value);
+    History::new().apply(&mut project, command).unwrap();
+    project
+}
+
+/// Optical flow on a remade clip draws in-between frames made from the
+/// remade frames: their own directory (keyed by the chain), never the
+/// in-between frames of the decoded clip, which still show the object.
+#[test]
+fn a_remade_clip_flows_between_its_remade_frames() {
+    use chukcut_engine::modules::speed::flow::{self, jobs as flow_jobs, FlowSample};
+    let Some(ctx) = chukcut_engine::modules::gpu::render_context() else {
+        eprintln!("skipping: no GPU adapter on this machine");
+        return;
+    };
+    let Some(path) = square("flow-chain.mp4") else {
+        eprintln!("skipping: ffmpeg could not generate the fixture");
+        return;
+    };
+    let project = slowed_with_flow(with_settings(project_with(&path), Some(boxed()), None));
+    let segment = &project.tracks[0].segments[0];
+    let chain = Chain::of(&project.materials, segment).unwrap();
+    let flow_job = flow_jobs::job_for(&project, segment).unwrap();
+    let remade = flow_job
+        .remade
+        .as_ref()
+        .expect("the remade frames go along");
+    assert_eq!(remade.key().unwrap(), job_of(&project).key().unwrap());
+    assert!(
+        remade.range.1 > job_of(&project).range.1,
+        "one frame past the clip"
+    );
+    let plain_key = flow::key_for(&path, None).unwrap();
+    let chained_key = flow::key_for(&path, Some(&chain)).unwrap();
+    assert_eq!(flow_job.key().unwrap(), chained_key);
+    assert_ne!(plain_key, chained_key);
+    // No dash after the plain key: its directories never list as the plain
+    // clip's.
+    assert!(chained_key.starts_with(&plain_key) && !chained_key[plain_key.len()..].contains('-'));
+
+    // Every remade frame made (magenta); the in-between frame of the
+    // decoded clip green, the remade clip's red.
+    let grid = remade.frame_times(remade.range.0, remade.range.1);
+    fake_bake(remade, &grid);
+    let solid = |rgb: [u8; 3]| -> Vec<u8> {
+        (0..W * H)
+            .flat_map(|_| [rgb[0], rgb[1], rgb[2], 255])
+            .collect()
+    };
+    for key in [&plain_key, &chained_key] {
+        for dir in flow::dirs_of(key) {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+    // Timeline frame 2 at 0.25x is source frame 0 and a half.
+    let sample = FlowSample { index: 0, step: 32 };
+    flow::write(
+        &flow::dir_in(&plain_key, "CPU", W),
+        sample,
+        W,
+        H,
+        &solid([0, 255, 0]),
+    )
+    .unwrap();
+    let render = |project: &Project| {
+        Compositor::new(Arc::clone(&ctx))
+            .render(
+                project,
+                at(2),
+                (W, H),
+                &MediaSourceProvider::from_project(project),
+            )
+            .expect("render")
+            .data
+    };
+    let p = pixel(&render(&project), W, 160, 90);
+    assert!(
+        p[0] > 240 && p[1] < 16 && p[2] > 240,
+        "not baked yet: the remade frames blended, never the decoded clip's flow: {p:?}"
+    );
+    flow::write(
+        &flow::dir_in(&chained_key, "CPU", W),
+        sample,
+        W,
+        H,
+        &solid([255, 0, 0]),
+    )
+    .unwrap();
+    let p = pixel(&render(&project), W, 160, 90);
+    assert!(
+        p[0] > 240 && p[1] < 16 && p[2] < 16,
+        "the remade clip's own in-between frame: {p:?}"
+    );
+    assert_eq!(
+        flow_jobs::coverage(&flow_job).unwrap().baked,
+        1,
+        "counted in its own directory"
+    );
+}
+
+/// A real bake of a remade clip's in-between frames, where the worker and
+/// RIFE are installed: they are made from the remade frames (here grey
+/// levels that step up frame by frame, with no square), so the frame half
+/// way shows the grey half way between and no trace of the decoded clip's
+/// white square.
+#[test]
+fn a_remade_clip_bakes_its_in_between_frames_from_the_remade_ones() {
+    use chukcut_engine::modules::speed::flow::{self, bake as flow_bake, jobs as flow_jobs};
+    if !installed(&["rife"]) {
+        eprintln!("skipping: the ML worker or RIFE is not installed");
+        return;
+    }
+    let Some(path) = square("flow-chain-bake.mp4") else {
+        eprintln!("skipping: ffmpeg could not generate the fixture");
+        return;
+    };
+    let project = slowed_with_flow(with_settings(project_with(&path), Some(boxed()), None));
+    let segment = &project.tracks[0].segments[0];
+    let flow_job = flow_jobs::job_for(&project, segment).unwrap();
+    let remade = flow_job.remade.clone().unwrap();
+    clear(&remade);
+    let key = remade.key().unwrap();
+    let dir = cache::dir_in(&key, "CPU", W);
+    let grid = remade.frame_times(remade.range.0, remade.range.1);
+    for (k, &t) in grid.iter().enumerate() {
+        let v = 40 + 20 * k as u8;
+        let grey: Vec<u8> = (0..W * H).flat_map(|_| [v, v, v, 255]).collect();
+        cache::write(&dir, t, W, H, &grey).unwrap();
+    }
+    for dir in flow::dirs_of(&flow_job.key().unwrap()) {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    let cancel = AtomicBool::new(false);
+    let outcome = flow_bake::run(&flow_job, &cancel, |_| {}).expect("bake");
+    assert_eq!(outcome.written as usize, flow_job.samples.len());
+    let (dir, _) = flow::best(&flow_job.key().unwrap()).expect("baked");
+    let sample = flow::FlowSample { index: 1, step: 32 };
+    let (w, h, rgba) = flow::read(&dir, sample).unwrap();
+    assert_eq!((w, h), (W, H));
+    // Between grey 60 and grey 80: about 70 everywhere, the square's place
+    // included.
+    for (x, y) in [(20, 20), (160, 90), (100, 98), (300, 170)] {
+        let v = rgba[((y * W + x) * 4) as usize] as i32;
+        assert!((v - 70).abs() <= 6, "at {x},{y}: {v}");
+    }
+}

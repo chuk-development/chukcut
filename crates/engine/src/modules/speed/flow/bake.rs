@@ -13,6 +13,8 @@ use std::time::Instant;
 use serde::Serialize;
 
 use super::FlowSample;
+use crate::modules::enhance::bake::EnhanceJob;
+use crate::modules::enhance::Chain;
 use crate::modules::media::decoder::{DecodedFrame, VideoDecoder};
 use crate::modules::ml::interpolate;
 use crate::modules::project::document::{Micros, SAMPLE_SLACK};
@@ -25,6 +27,10 @@ pub struct FlowJob {
     /// Display size of the source (rotation applied).
     pub source_size: (u32, u32),
     pub samples: BTreeSet<FlowSample>,
+    /// The clip's remade frames ("Remove object", "Enhance quality"), when
+    /// it has them: the in-between frames are made from those, not from the
+    /// decoded ones, and the bake makes the ones missing first.
+    pub remade: Option<EnhanceJob>,
 }
 
 /// How far a bake is, in frames to make, and what it expects to take.
@@ -36,13 +42,20 @@ pub struct FlowProgress {
     pub provider: Option<String>,
     /// The time left at the pace so far, once a pair has been made.
     pub seconds_left: Option<f64>,
+    /// What runs before the in-between frames, when something does: the
+    /// remade frames they are made from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stage: Option<String>,
 }
 
 impl FlowProgress {
     /// The sentence a user sees when the bake runs on the CPU, which is
     /// slow enough to deserve one: how long the rest will take.
     pub fn cpu_warning(&self) -> Option<String> {
-        if self.provider.as_deref() != Some("CPU") || self.done >= self.total {
+        if self.provider.as_deref() != Some("CPU")
+            || self.done >= self.total
+            || self.stage.is_some()
+        {
             return None;
         }
         let left = self.total - self.done;
@@ -83,13 +96,23 @@ impl FlowJob {
         ((index as f64 + 0.5) * 1_000_000.0 / self.fps()).round() as Micros
     }
 
+    fn chain(&self) -> Option<&Chain> {
+        self.remade.as_ref().map(|r| &r.chain)
+    }
+
+    /// The size the frames are made at.
+    pub fn frame_size(&self) -> (u32, u32) {
+        super::frame_size(self.source_size.0, self.source_size.1, self.chain())
+    }
+
     /// The long side the frames are made at.
     pub fn long_side(&self) -> u32 {
-        super::long_side(self.source_size.0, self.source_size.1)
+        let (w, h) = self.frame_size();
+        super::long_side(w, h)
     }
 
     pub fn key(&self) -> Result<String, String> {
-        super::key_for(self.path.as_ref())
+        super::key_for(self.path.as_ref(), self.chain())
     }
 
     /// The directory the compositor would draw from and its frames.
@@ -134,6 +157,15 @@ pub fn run(
             ..FlowOutcome::default()
         });
     }
+    if let Some(remade) = &job.remade {
+        if !remade_ready(remade, cancel, &mut report)? {
+            return Ok(FlowOutcome {
+                cancelled: true,
+                seconds: started.elapsed().as_secs_f64(),
+                ..FlowOutcome::default()
+            });
+        }
+    }
     let provider = prepare(cancel)?;
     let dir = super::dir_in(&key, &provider, job.long_side());
     let missing = job.missing(&super::list(&dir));
@@ -155,9 +187,10 @@ pub fn run(
         total: missing.len() as u32,
         provider: Some(provider),
         seconds_left: None,
+        stage: None,
     };
     report(&progress);
-    let mut decoder = job.open_decoder()?;
+    let mut frames = Frames::open(job)?;
     // The later frame of the last pair, which is the earlier one of the next
     // pair when the pairs are consecutive (as they are in slow motion).
     let mut held: Option<(i64, DecodedFrame)> = None;
@@ -170,9 +203,9 @@ pub fn run(
         }
         let first = match held.take() {
             Some((i, frame)) if i == index => frame,
-            _ => decode(&mut decoder, job.middle(index))?,
+            _ => frames.at(job, index)?,
         };
-        let second = decode(&mut decoder, job.middle(index + 1))?;
+        let second = frames.at(job, index + 1)?;
         if (first.width, first.height) != (second.width, second.height) {
             return Err(format!(
                 "frames {index} and {} of {} differ in size",
@@ -225,6 +258,110 @@ pub fn run(
     }
     outcome.seconds = started.elapsed().as_secs_f64();
     Ok(outcome)
+}
+
+/// Where a bake's source frames come from: the decoder, or the remade
+/// frames' cache.
+enum Frames {
+    Decoded(Box<VideoDecoder>),
+    Remade {
+        dir: PathBuf,
+        times: Vec<Micros>,
+        period: Micros,
+        size: (u32, u32),
+    },
+}
+
+impl Frames {
+    fn open(job: &FlowJob) -> Result<Frames, String> {
+        let Some(remade) = &job.remade else {
+            return job.open_decoder().map(|d| Frames::Decoded(Box::new(d)));
+        };
+        let (dir, times) = remade
+            .best()?
+            .ok_or("the clip's remade frames are not made yet")?;
+        Ok(Frames::Remade {
+            dir,
+            times,
+            period: remade.period(),
+            size: job.frame_size(),
+        })
+    }
+
+    /// Source frame `index`, at the size the bake makes frames at.
+    fn at(&mut self, job: &FlowJob, index: i64) -> Result<DecodedFrame, String> {
+        let at = job.middle(index);
+        match self {
+            Frames::Decoded(decoder) => decode(decoder, at),
+            Frames::Remade {
+                dir,
+                times,
+                period,
+                size,
+            } => {
+                let pts = crate::modules::matting::cache::lookup(times, at, *period)
+                    .ok_or_else(|| format!("the remade frame at {at} µs is missing"))?;
+                let (w, h, rgba) = crate::modules::enhance::cache::read(dir, pts, *size)?;
+                let data = if (w, h) == *size {
+                    rgba
+                } else {
+                    let image = image::RgbaImage::from_raw(w, h, rgba)
+                        .ok_or("a remade frame has the wrong number of bytes")?;
+                    image::imageops::resize(
+                        &image,
+                        size.0,
+                        size.1,
+                        image::imageops::FilterType::Triangle,
+                    )
+                    .into_raw()
+                };
+                Ok(DecodedFrame {
+                    data,
+                    width: size.0,
+                    height: size.1,
+                    pts: at,
+                })
+            }
+        }
+    }
+}
+
+/// Make sure every remade frame `remade` covers is in the cache before the
+/// in-between frames are made from them: wait for a bake of the same frames
+/// that is running already, then make what is still missing here. `false`
+/// when cancelled meanwhile.
+fn remade_ready(
+    remade: &EnhanceJob,
+    cancel: &AtomicBool,
+    report: &mut impl FnMut(&FlowProgress),
+) -> Result<bool, String> {
+    use crate::modules::enhance::jobs;
+    let key = remade.key()?;
+    let mut waiting = FlowProgress {
+        stage: Some("Remaking the frames first".into()),
+        ..FlowProgress::default()
+    };
+    while jobs::busy(&key) {
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(false);
+        }
+        report(&waiting);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    let cover = jobs::coverage(remade)?;
+    if cover.baked >= cover.total {
+        return Ok(true);
+    }
+    if let Some(why) = remade.refusal() {
+        return Err(why);
+    }
+    let outcome = crate::modules::enhance::bake::run(remade, cancel, |p| {
+        waiting.done = p.done;
+        waiting.total = p.total;
+        waiting.provider = p.provider.clone();
+        report(&waiting);
+    })?;
+    Ok(!outcome.cancelled)
 }
 
 fn decode(decoder: &mut VideoDecoder, at: Micros) -> Result<DecodedFrame, String> {

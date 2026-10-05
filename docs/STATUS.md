@@ -4487,9 +4487,10 @@ release worker, load 9–11 from other agents' builds).
   by a code value; inside compound clips frames are baked on the preview's
   grid only and an outer speed change falls back to the blend; the nested
   render cache can hold a blended frame until the compound clip changes;
-  matte-limited effects are whole-clip inside a transition window and
-  while a blur animation runs; one matte per clip for both grade and
-  effects; a 4K clip's in-between frames are made at 1080p.
+  one matte per clip for both grade and effects; a 4K clip's in-between
+  frames are made at 1080p. (Matte-limited effects inside a transition
+  window and while a blur animation runs were fixed on agent/gaps2, "Gaps
+  closed" below.)
 
 ### Remove object and enhance quality (2026-10-04, agent/ml4)
 
@@ -4570,11 +4571,12 @@ release worker and release CLI, load 6–7 from other agents' builds).
   a 1080p frame has; equal parts read 11 % more. A click on an object that
   touches a same-coloured area selects both (SAM does what it is asked):
   test footage with a red square on a red bar removed the bar.
-- **Rough:** a static mask never sees behind itself, so a logo is always
-  LaMa's invention (steady in a still shot, shimmering in a moving one); a
-  moving camera gets no memory, plate or smoothing; LaMa runs fp32 on the
-  CUDA provider (TensorRT fp16 with "Fast" since agent/mlspeed, "Faster
-  AI on NVIDIA"); a remade clip with optical flow on blends instead. (The
+- **Rough:** a static mask never sees behind itself in a still shot, so a
+  logo there is LaMa's invention (steady); a camera that zooms or rotates
+  gets no memory, plate or smoothing (a pan or tilt does since agent/gaps2,
+  "Gaps closed" below, as does optical flow on a remade clip); LaMa runs
+  fp32 on the CUDA provider (TensorRT fp16 with "Fast" since agent/mlspeed,
+  "Faster AI on NVIDIA"). (The
   progress below the two sections and the bakes not queued on open were
   fixed on agent/polish3: the progress is pinned under the inspector's
   body, and `modules::prepare` bakes what an opened project lacks.)
@@ -4668,9 +4670,82 @@ TensorRT 10.16.1.11, release worker and CLI, load 4–9 from other agents.
   fp16 · prepared in 51 s (3 sizes)"; switching Fast off saves the setting,
   restarts the worker and shows them on "CUDA · fp32".
 - **Rough:** one engine per input size, so a project with many clip sizes
-  builds many; Fast mode holds a CUDA and a TensorRT session per model (GPU
+  builds many (ranges of sizes since agent/gaps2, "Gaps closed" below);
+  Fast mode holds a CUDA and a TensorRT session per model (GPU
   memory); a model whose TensorRT build fails stays on CUDA until the
   worker restarts; Intel and AMD are unaffected (TensorRT is NVIDIA-only).
+
+### Gaps closed: masks in transitions, flow on remade clips, TensorRT ranges, removal on a pan (2026-10-05, agent/gaps2)
+
+Decision amendments 0028, 0029, 0031. RTX 3060, driver 610.57, TensorRT
+10.16.1.11, release worker, load 12–30 from other agents' builds.
+
+- **Matte-limited effects everywhere a clip is drawn.** A transition side
+  and a running blur animation mix their effects by the clip's matte before
+  the transition blends them (they used the whole layer). A clip averaged
+  from several draws (frame blending, motion blur) gets one mask draw per
+  averaged draw, at its placement, with its own frame's matte, weighted by
+  its share; the second frame of a blend is also cut and graded by its own
+  matte. `quad.wgsl` writes the matte with the draw's opacity as alpha and
+  `matte_mix` reads colour × alpha, so one draw and a sum read the same.
+  Verified (`tests/matte_masks.rs`, RTX 3060 and lavapipe): mid-dissolve
+  between two halves of a clip, both blurring only the background, the
+  subject's detail is within 5 % of the sharp clip and the background below
+  a tenth; near the end of a blur-in the subject keeps 8 times the
+  background's detail; a blend of a frame whose subject is the left half
+  with one whose subject is the right half lifts both halves by 30–75 % of
+  the grade and blurs both halves half.
+- **Optical flow on Remove object / Enhance quality clips.** RIFE makes
+  the in-between frames from the remade frames, in a directory keyed by the
+  remade chain (`<digest>-rife-<version>+<ops>.<signature>`), at the remade
+  frame's size fitted to 1920. The flow bake waits for a running bake of
+  the same remade frames, makes the missing ones itself (one past the
+  clip's range included) and reads them from the enhance cache. Verified
+  (`tests/enhance.rs`): the compositor draws the remade clip's own
+  in-between frame and never the decoded clip's; a real RIFE bake between
+  remade grey frames 60 and 80 gives 70 ± 6 everywhere, the decoded
+  clip's white square gone.
+- **TensorRT: engines for ranges of sizes.** RIFE has four ranges (720p and
+  1080p, wide and tall), Real-ESRGAN one (every tile up to 800 px); LaMa and
+  BiRefNet keep their exact engines. Per frame no difference beyond ±3 %
+  (A/B, interleaved: RIFE 1080p 98.5 against 97.6 ms exact, Real-ESRGAN
+  1080p 429–466 against 439–448 ms); builds are fewer and slower (RIFE 2.0
+  min for the 720p range and 4.6 min per 1080p range against 1.1–2.4 min per
+  size; Real-ESRGAN 1.5 min once against 0.5–1.7 min per tile size). Six
+  RIFE sizes need three engines instead of six, four Real-ESRGAN sources one
+  instead of four. `CHUKCUT_TRT_PROFILES=exact` restores one engine per
+  size. The settings page counts engines ("prepared in 51 s (2 engines)").
+  The TRT → CUDA fallback is unchanged.
+- **Remove object follows a panning camera.** `removal::camera_move` finds
+  the shift between frames on a luma pyramid outside the masks (±96 px,
+  refined by a parabola; on footage panning 8 px a frame it read −8.06 to
+  −8.08 with 0.2 code values left); when the shift explains the change
+  (less than 8 code values left), the memory, its ages and the previous
+  fill move with the picture by whole pixels (the fraction carried over)
+  and the frame counts as still. `examples/removal_flicker` (1280×720, a
+  220×90 static logo, 120 frames, LaMa on TensorRT; flicker = mean change in
+  the hole between frames after the pan is taken out; the footage's own in
+  brackets):
+
+  | Pan | Flicker before → after | Error vs. truth | LaMa runs | ms a frame |
+  |---|---|---|---|---|
+  | 3 px a frame | 4.62 → 0.65 (2.54) | 17.9 → 8.3 | 120 → 80 | 142 → 96 |
+  | 8 px a frame | 2.19 → 0.42 (0.00) | 9.7 → 3.5 | 120 → 30 | 158 → 74 |
+
+  The search costs 20–26 ms a frame at 720p (median; the shifts are tried
+  on rayon, the full-size level on every third pixel; 70 ms single
+  threaded), paid back by the LaMa runs saved once the logo's width has
+  slid past. A zoom, rotation or
+  parallax is not a shift: per-frame LaMa as before. Removed frames have a
+  new signature (`REMOVAL_REVISION`); enhanced-only clips keep theirs.
+- **Traps:** ffmpeg's `crop` on 4:2:0 footage moves the chroma by whole
+  pairs, so a pan at an odd pixel speed leaves 1.6–1.9 code values that are
+  not the camera; a first-time TensorRT build in one worker holds the next
+  request, and two ML tests that both build an engine can miss their
+  deadlines (rerun once the engines are cached).
+- **Rough:** a mask is still one per clip for grade and effects; the flow of
+  a remade clip is made from JPEG q95 frames; a moving camera is followed
+  only as a shift.
 
 ## The research
 

@@ -22,10 +22,11 @@ server. (The optional cloud accounts are a separate thing; see
   Settings › **AI acceleration** makes slow motion, Enhance quality, Remove
   object and the Objects background 1.5 to 2.6 times faster. **Fast
   (fp16/TensorRT)** is on by default and has an effect only when the
-  add-on is installed. The first job of a model at a new frame size
-  prepares the model once: 30 s to 6 min. The progress line says
-  "Preparing TensorRT for … (first time only …)". The next jobs at that
-  size start at once.
+  add-on is installed. The first job of a model at a new range of frame
+  sizes prepares the model once: 30 s to 6 min. The progress line says
+  "Preparing TensorRT for … (first time only …)". The next jobs in that
+  range start at once. Slow motion has four ranges (up to 1280×720 and up
+  to 1920×1080, each wide and tall); Enhance quality has one.
 - **Results are a cache, settings are the project.** The project file keeps
   what you chose (the model, your clicks, the scale). The pictures that the
   models make (mattes, new frames) go into `~/.cache/chukcut/`. If the cache
@@ -137,6 +138,10 @@ To keep the matte without the cut, set **Apply to** first, then clear the
 **Auto remove** checkbox. The matte stays because the grade or the effects
 use it.
 
+The limit also holds inside a transition, while an In or Out animation
+with a blur runs, and on a clip with frame blending or motion blur: there
+each blended frame uses its own matte.
+
 One clip has one matte. The grade and the effects use the same one.
 
 ## Remove object
@@ -156,10 +161,13 @@ The line below says what is removed and gives an estimate in the form
 
 How chukcut fills the hole, cheapest first:
 
-1. In a still shot, the background that earlier frames showed.
+1. The background that earlier frames showed. This works in a still shot
+   and also when the camera pans or tilts: chukcut follows the camera, so
+   the background that slides past a logo is used.
 2. For a selected object, the background seen anywhere in the still part of
    the clip.
-3. LaMa paints the rest.
+3. LaMa paints the rest. While the shot is still or the camera pans, the
+   paint is mixed with the previous frame's, so it stays steady.
 
 **Model:** LaMa (Apache-2.0, 208 MB).
 
@@ -167,9 +175,12 @@ How chukcut fills the hole, cheapest first:
 2 s on the CPU. A 3 s 1080p clip with a static logo took 27 s on the GPU. A
 3 s 720p clip with a moving object on a still background took 19 s.
 
-**Limits:** a painted area never shows what is behind it, so LaMa invents the
-fill. In a still shot the fill is steady. When the camera moves, it can
-shimmer.
+**Limits:** a painted area never shows what is behind it in a still shot,
+so LaMa invents the fill there; the fill is steady. On a pan the background
+slides out from behind a static logo, so most of the hole gets the real
+background after a few frames (on a 3 px a frame pan, the shimmer in the
+hole went down by 85 %). A zoom, a rotation or a shaky camera is not
+followed: there the fill is made frame by frame and can shimmer.
 
 **Cache:** "remade frames", JPEG files in `~/.cache/chukcut/enhance/`. They
 count towards the cache limit. Settings › **AI acceleration** › **Remade
@@ -211,7 +222,9 @@ quality can be on together.
 in **Speed › Speed effects**.
 
 RIFE makes new frames between the real ones, so slow motion is smooth and
-has no double image.
+has no double image. On a clip with Remove object or Enhance quality, the
+new frames are made from the remade frames (the remade frames are made
+first), so the removed object stays away in the slow motion too.
 
 **Model:** RIFE v4 (MIT, 22 MB).
 

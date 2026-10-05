@@ -357,3 +357,234 @@ fn an_effect_lands_only_on_the_rest_or_only_on_the_subject() {
         );
     }
 }
+
+/// The clip cut in two at 0.5 s ("clip" and "b", each with its own copy of
+/// the clip's effects), with a 0.4 s `kind` transition at the cut.
+fn split_with_transition(
+    state: &AppState,
+    kind: chukcut_engine::modules::project::document::TransitionKind,
+) {
+    use chukcut_engine::modules::project::document::{Easing, TransitionMaterial};
+    let mut guard = state.project.write();
+    let project = guard.as_mut().unwrap();
+    let half = DURATION / 2;
+    let track = &mut project.tracks[0];
+    let mut b = track.segments[0].clone();
+    track.segments[0].target_range = TimeRange::new(0, half);
+    track.segments[0].source_range = TimeRange::new(0, half);
+    b.id = "b".into();
+    b.target_range = TimeRange::new(half, half);
+    b.source_range = TimeRange::new(half, half);
+    let mut extras = Vec::new();
+    for id in &b.extras {
+        let Some(effect) = project.materials.effects.iter().find(|e| &e.id == id) else {
+            extras.push(id.clone());
+            continue;
+        };
+        let mut copy = effect.clone();
+        copy.id = format!("{id}-b");
+        extras.push(copy.id.clone());
+        project.materials.effects.push(copy);
+    }
+    let mut transition = TransitionMaterial::new(kind, 400_000);
+    transition.easing = Easing::Linear;
+    extras.push(transition.id.clone());
+    project.materials.transitions.push(transition);
+    b.extras = extras;
+    project.tracks[0].segments.push(b);
+}
+
+/// Inside a transition window each side keeps its matte-limited effects:
+/// mid-dissolve between two halves of the clip, both blurring only the
+/// background, the subject stays sharp. (Before, the transition sides ran
+/// their effects over the whole layer.)
+#[test]
+fn a_matte_limited_effect_keeps_its_limit_inside_a_transition() {
+    use chukcut_engine::modules::project::document::TransitionKind;
+    let Some(path) = checkers("transition.mp4") else {
+        eprintln!("skipping: ffmpeg could not generate the fixture");
+        return;
+    };
+    fake_bake(&path);
+    let plain = state_with(&path, false, false)
+        .project
+        .read()
+        .clone()
+        .unwrap();
+    let Some(sharp) = render(&plain) else {
+        eprintln!("skipping: no GPU adapter on this machine");
+        return;
+    };
+    let detail = stats(&sharp, LEFT).1;
+    let state = state_with(&path, false, true);
+    split_with_transition(&state, TransitionKind::Dissolve);
+    for id in ["clip", "b"] {
+        matting::matting_set_target(
+            &state,
+            id.into(),
+            matting::MattePart::Effects,
+            MatteTarget::Background,
+        )
+        .unwrap();
+    }
+    // 0.5 s is the cut, the middle of the window: both sides at half.
+    let frame = render(&state.project.read().clone().unwrap()).unwrap();
+    let (subject, rest) = (stats(&frame, LEFT).1, stats(&frame, RIGHT).1);
+    assert!(
+        rest < detail / 10.0,
+        "the background is blurred on both sides ({rest} of {detail})"
+    );
+    assert!(
+        (subject - detail).abs() < detail * 0.05,
+        "the subject is sharp on both sides ({subject} of {detail})"
+    );
+}
+
+/// While a blur animation runs, the clip is drawn as a transition side; its
+/// matte-limited effects keep their limit there too.
+#[test]
+fn a_matte_limited_effect_keeps_its_limit_while_a_blur_animation_runs() {
+    use chukcut_engine::modules::motion::edit;
+    use chukcut_engine::modules::project::animation::{
+        AnimationPreset, AnimationSlot, ClipAnimation, Ease,
+    };
+    let Some(path) = checkers("blur-in.mp4") else {
+        eprintln!("skipping: ffmpeg could not generate the fixture");
+        return;
+    };
+    fake_bake(&path);
+    let state = state_with(&path, false, true);
+    matting::matting_set_target(
+        &state,
+        "clip".into(),
+        matting::MattePart::Effects,
+        MatteTarget::Background,
+    )
+    .unwrap();
+    {
+        let mut guard = state.project.write();
+        let project = guard.as_mut().unwrap();
+        let command = edit::set_slot_command(
+            project,
+            "clip",
+            AnimationSlot::In,
+            Some(ClipAnimation {
+                preset: AnimationPreset::Blur,
+                duration: DURATION,
+                easing: Ease::Linear,
+                strength: 1.0,
+            }),
+        )
+        .unwrap();
+        command.apply(project).unwrap();
+    }
+    let project = state.project.read().clone().unwrap();
+    let Some(ctx) = chukcut_engine::modules::gpu::render_context() else {
+        eprintln!("skipping: no GPU adapter on this machine");
+        return;
+    };
+    let sources = MediaSourceProvider::from_project(&project);
+    // Near the end of the animation: the animation's own blur is small,
+    // the background's 40 px blur is not.
+    let frame = Compositor::new(ctx)
+        .render(&project, 950_000, (W, H), &sources)
+        .expect("render")
+        .data;
+    let (subject, rest) = (stats(&frame, LEFT).1, stats(&frame, RIGHT).1);
+    assert!(
+        subject > rest * 8.0,
+        "only the background is blurred: subject {subject}, background {rest}"
+    );
+}
+
+/// The people matte of a blended clip: even frames the left half, odd
+/// frames the right half.
+fn alternating_bake(path: &std::path::Path) {
+    let current = matting::current_model();
+    let key = cache::key_for(path, &current).unwrap();
+    for (_, dir) in cache::dirs_of(&key) {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    let dir = cache::dir_in(&key, "CPU");
+    let (mw, mh) = (160u32, 90u32);
+    for k in 0..30i64 {
+        let left = k % 2 == 0;
+        let alpha: Vec<u8> = (0..mw * mh)
+            .map(|i| if (i % mw < mw / 2) == left { 255 } else { 0 })
+            .collect();
+        cache::write(&dir, (k * 1_000_000 + 15) / 30, mw, mh, alpha).unwrap();
+    }
+}
+
+/// A clip at half speed with frame blending: at 0.5 s it shows source
+/// frames 7 and 8 half and half.
+fn blended(state: &AppState) {
+    use chukcut_engine::modules::speed::blend::{set_frame_blend_command, FrameBlend};
+    let mut guard = state.project.write();
+    let project = guard.as_mut().unwrap();
+    let clip = &mut project.tracks[0].segments[0];
+    clip.target_range = TimeRange::new(0, 2 * DURATION);
+    clip.speed = 0.5;
+    let (entry, command) = set_frame_blend_command(project, "clip", FrameBlend::Blend).unwrap();
+    let (key, value) = entry.expect("an extras block");
+    project.materials.extras.insert(key, value);
+    command.apply(project).unwrap();
+}
+
+/// A blended clip (an average of two draws) is graded and has its effects
+/// limited by each frame's own matte: where the two frames' subjects
+/// differ, both halves get half of the grade and half of the effect. Before,
+/// both draws used the first frame's matte, so one half got all of it.
+#[test]
+fn a_blended_clip_mixes_each_frames_own_matte() {
+    let Some(path) = checkers("blended.mp4") else {
+        eprintln!("skipping: ffmpeg could not generate the fixture");
+        return;
+    };
+    alternating_bake(&path);
+    let plain = state_with(&path, false, false);
+    blended(&plain);
+    let Some(sharp) = render(&plain.project.read().clone().unwrap()) else {
+        eprintln!("skipping: no GPU adapter on this machine");
+        return;
+    };
+    let graded = state_with(&path, true, false);
+    blended(&graded);
+    let whole = render(&graded.project.read().clone().unwrap()).unwrap();
+    let lift = stats(&whole, LEFT).0 - stats(&sharp, LEFT).0;
+    assert!(lift > 30.0, "the grade brightens: {lift}");
+    matting::matting_set_target(
+        &graded,
+        "clip".into(),
+        matting::MattePart::Grade,
+        MatteTarget::Subject,
+    )
+    .unwrap();
+    let frame = render(&graded.project.read().clone().unwrap()).unwrap();
+    for side in [LEFT, RIGHT] {
+        let got = stats(&frame, side.clone()).0 - stats(&sharp, side.clone()).0;
+        assert!(
+            got > lift * 0.3 && got < lift * 0.75,
+            "{side:?}: half the grade, {got} of {lift}"
+        );
+    }
+
+    let effected = state_with(&path, false, true);
+    blended(&effected);
+    matting::matting_set_target(
+        &effected,
+        "clip".into(),
+        matting::MattePart::Effects,
+        MatteTarget::Background,
+    )
+    .unwrap();
+    let frame = render(&effected.project.read().clone().unwrap()).unwrap();
+    let detail = stats(&sharp, LEFT).1;
+    let (left, right) = (stats(&frame, LEFT).1, stats(&frame, RIGHT).1);
+    for v in [left, right] {
+        assert!(
+            v > detail * 0.1 && v < detail * 0.5,
+            "both halves half blurred: {left} and {right} of {detail}"
+        );
+    }
+}

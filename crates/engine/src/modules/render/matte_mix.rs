@@ -40,7 +40,12 @@ fn mixed(position: vec4<f32>, background: bool) -> vec4<f32> {
     let at = vec2<i32>(position.xy);
     let a = premultiplied(textureLoad(before, at, 0));
     let b = premultiplied(textureLoad(after, at, 0));
-    var w = clamp(textureLoad(weights, at, 0).r, 0.0, 1.0);
+    // Colour times alpha: the matte where one draw wrote it (alpha 1), the
+    // share-weighted sum where several were averaged (`render::accumulate`
+    // leaves the mean in colour and the coverage in alpha), 0 where nothing
+    // was drawn.
+    let texel = textureLoad(weights, at, 0);
+    var w = clamp(texel.r * texel.a, 0.0, 1.0);
     if (background) {
         w = 1.0 - w;
     }

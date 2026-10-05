@@ -59,15 +59,17 @@ libraries. See also [AI tools](ai-tools.md).
   - **Finish** completes a bundle that is only partly installed.
 - **Fast (fp16/TensorRT)**: on by default. With the TensorRT add-on
   installed, slow motion, Enhance quality, Remove object and BiRefNet run
-  on TensorRT, 1.5 to 2.6 times faster. The first job of a model at a new
-  frame size prepares it once (30 s to 6 min). Off, all models run on CUDA.
+  on TensorRT, 1.5 to 2.6 times faster. The first job of a model in a new
+  range of frame sizes prepares it once (30 s to 6 min). One preparation
+  serves every size in its range: slow motion has four ranges (up to
+  1280×720 and up to 1920×1080, wide and tall), Enhance quality one. Off, all models run on CUDA.
   A change restarts the AI worker.
 - **TensorRT (CUDA 13)** or **(CUDA 12)**: the add-on for Fast mode, about
   3.7 GB (CUDA 13) or 4.3 GB (CUDA 12) to download and 2.5 GB on disk,
   with **Install** or **Remove**. The size shown includes the prepared
   models.
 - For each of those four models, **Runs on**: for example "TensorRT · fp16
-  · prepared in 51 s (3 sizes)", or "CUDA · fp32".
+  · prepared in 51 s (2 engines)", or "CUDA · fp32".
 - One row for each model, with its licence and its size. A model that runs
   only on a GPU says **needs a GPU**. **Remove** deletes a downloaded model.
   A model that is not there says **Downloads on first use**.

@@ -1207,11 +1207,13 @@ impl Compositor {
                     to,
                     from_fx,
                     to_fx,
+                    from_mask,
+                    to_mask,
                     ..
                 } => {
                     let pipeline = self.transition_pipeline();
                     let mut sides = Vec::with_capacity(2);
-                    for (quad, chain) in [(from, from_fx), (to, to_fx)] {
+                    for (quad, chain, mask) in [(from, from_fx, from_mask), (to, to_fx, to_mask)] {
                         let layer = self.pool.acquire(device, self.target_key(size));
                         self.draw_layer(
                             &mut encoder,
@@ -1228,6 +1230,19 @@ impl Compositor {
                                     size,
                                     chain,
                                     self.target_key(size),
+                                );
+                                // A side's matte-limited effects are mixed
+                                // before the transition blends the sides, so
+                                // the limit holds through the window.
+                                let out = self.masked(
+                                    &mut encoder,
+                                    &uniform_group,
+                                    &source_groups,
+                                    &layer,
+                                    out,
+                                    mask.as_ref(),
+                                    size,
+                                    &mut layer_targets,
                                 );
                                 layer_targets.push(layer);
                                 out
@@ -1718,14 +1733,28 @@ impl Compositor {
             return after;
         };
         let device = self.ctx.device();
-        let weights = self.pool.acquire(device, self.target_key(size));
-        self.draw_layer(
-            encoder,
-            uniform_group,
-            source_groups,
-            Some(&mask.quad),
-            weights.view(),
-        );
+        // One draw writes the matte straight; several are summed by their
+        // shares like the clip's own draws were (`accumulate_layer`), so
+        // the weight smears where the clip smeared.
+        let weights = match mask.quads.as_slice() {
+            [quad] => {
+                let weights = self.pool.acquire(device, self.target_key(size));
+                self.draw_layer(
+                    encoder,
+                    uniform_group,
+                    source_groups,
+                    Some(quad),
+                    weights.view(),
+                );
+                weights
+            }
+            quads => {
+                let (sum, weights) =
+                    self.accumulate_layer(encoder, uniform_group, source_groups, quads, size);
+                keep.push(sum);
+                weights
+            }
+        };
         let mixed = self.pool.acquire(device, self.target_key(size));
         self.matte_mix
             .get_or_init(|| super::matte_mix::MatteMix::new(&self.ctx, self.config.format))
@@ -1925,12 +1954,24 @@ impl Compositor {
                         };
                     let from_fx = side_fx(&from, &instant.from);
                     let to_fx = side_fx(&to, &instant.to);
+                    // Each side's effects keep their matte limit.
+                    let mut side_mask =
+                        |quad: &Option<QuadDraw>,
+                         chain: &[FxInstance],
+                         layer: &transitions::TransitionLayer| {
+                            let quad = quad.as_ref().filter(|_| !chain.is_empty())?;
+                            fx_mask(&project.materials, layer.segment, [(quad, 1.0)], &mut draws)
+                        };
+                    let from_mask = side_mask(&from, &from_fx, &instant.from);
+                    let to_mask = side_mask(&to, &to_fx, &instant.to);
                     draws.items.push(Draw::Transition {
                         params: TransitionParams::from(&instant),
                         from,
                         to,
                         from_fx,
                         to_fx,
+                        from_mask,
+                        to_mask,
                     });
                 }
                 continue;
@@ -1982,18 +2023,16 @@ impl Compositor {
                 .flatten();
             // Optical flow draws the frame RIFE made for this instant, once
             // it is baked; until then the clip takes the frame blend above.
-            // RIFE's frames are made from the decoded ones, so a clip whose
-            // frames are remade (an object removed) blends its remade
-            // frames instead.
+            // A clip whose frames are remade (an object removed) has its
+            // own in-between frames, made from the remade ones.
             let flowed = blend
                 .filter(|_| crate::modules::speed::flow::is_on(&project.materials, segment))
-                .filter(|_| {
-                    crate::modules::enhance::Chain::of(&project.materials, segment).is_none()
-                })
                 .and_then(|b| crate::modules::speed::flow::FlowSample::of(&b))
                 .and_then(|sample| {
                     let video = project.materials.video(&segment.material_id)?;
-                    self.flows.get(&self.ctx, &video.path, sample)
+                    let remade = crate::modules::enhance::Chain::of(&project.materials, segment);
+                    self.flows
+                        .get(&self.ctx, &video.path, remade.as_ref(), sample)
                 });
             // Reduce noise in its Temporal mode mixes in the source frames
             // either side of this one (`fx::temporal`). The frame before is
@@ -2070,10 +2109,17 @@ impl Compositor {
                     sources,
                     &mut draws,
                 );
-                let mask = if chain.is_empty() {
-                    None
-                } else {
-                    fx_mask(&project.materials, segment, &quad, &mut draws)
+                let mask = match (&accumulated, chain.is_empty()) {
+                    (_, true) => None,
+                    (Some(samples), false) => fx_mask(
+                        &project.materials,
+                        segment,
+                        samples.iter().map(|(q, share)| (q, *share)),
+                        &mut draws,
+                    ),
+                    (None, false) => {
+                        fx_mask(&project.materials, segment, [(&quad, 1.0)], &mut draws)
+                    }
                 };
                 // The neighbours drawn like the clip, each with a slot of
                 // its own; only when the chain still has the temporal pass.
@@ -2092,8 +2138,8 @@ impl Compositor {
                         [None, None]
                     };
                 draws.items.push(match (accumulated, mode) {
-                    (Some(quads), mode) => Draw::Accumulated {
-                        quads,
+                    (Some(samples), mode) => Draw::Accumulated {
+                        quads: samples.into_iter().map(|(q, _)| q).collect(),
                         chain,
                         mode,
                         mask,
@@ -2121,6 +2167,8 @@ impl Compositor {
     /// animation running, which owns the clip's layer and wins.
     ///
     /// The first draw keeps `quad`'s uniform slot; the others get new ones.
+    /// Each draw comes with its share of the average (its weight, without
+    /// the clip's opacity), which an effects mask sums by.
     #[allow(clippy::too_many_arguments)]
     fn temporal_samples(
         &self,
@@ -2133,7 +2181,7 @@ impl Compositor {
         size: (u32, u32),
         sources: &dyn SourceProvider,
         draws: &mut DrawList,
-    ) -> Option<Vec<QuadDraw>> {
+    ) -> Option<Vec<(QuadDraw, f32)>> {
         let blur = fx::motion_blur::motion_blur_of(&project.materials, segment, source_time);
         if blend.is_none() && blur.is_none() {
             return None;
@@ -2145,7 +2193,11 @@ impl Compositor {
             return None;
         }
 
-        let mut frames: Vec<(SourceFrame, f32)> = vec![(quad.frame.clone(), 1.0)];
+        // Each frame with its weight and its own baked matte: the second
+        // frame of a blend is cut, graded and masked by its own matte, not
+        // the first's (`None` keeps the first's).
+        type Matte = Option<std::sync::Arc<super::background::GpuMatte>>;
+        let mut frames: Vec<(SourceFrame, f32, Matte)> = vec![(quad.frame.clone(), 1.0, None)];
         if let Some(blend) = blend {
             let request = SourceRequest {
                 material_id: &segment.material_id,
@@ -2163,7 +2215,10 @@ impl Compositor {
             match second {
                 Ok(Some(second)) => {
                     frames[0].1 = 1.0 - blend.weight;
-                    frames.push((second, blend.weight));
+                    let matte = quad.background.as_ref().and_then(|_| {
+                        self.background_at(&project.materials, segment, blend.second)
+                    });
+                    frames.push((second, blend.weight, matte));
                 }
                 Ok(None) => {}
                 // The earlier frame alone is still a correct picture, one
@@ -2213,17 +2268,20 @@ impl Compositor {
         // instant the shutter saw nothing there.
         let n = placements.len() as f32;
         let mut quads = Vec::with_capacity(frames.len() * placements.len());
-        for (frame, weight) in &frames {
+        for (frame, weight, matte) in &frames {
             for placement in placements.iter().flatten() {
                 let mut draw = quad.clone();
                 draw.frame = frame.clone();
+                if matte.is_some() {
+                    draw.background = matte.clone();
+                }
                 draw.placement = *placement;
                 draw.placement.opacity = placement.opacity * weight / n;
                 if !quads.is_empty() {
                     draw.slot = draws.slots as u32;
                     draws.slots += 1;
                 }
-                quads.push(draw);
+                quads.push((draw, weight / n));
             }
         }
         // Every placement missed the canvas: the quad's own slot is still
@@ -2461,16 +2519,7 @@ impl Compositor {
         let setting = compositing
             .and_then(|m| m.background.as_ref())
             .filter(|s| s.is_used());
-        let background = setting.and_then(|setting| {
-            let video = materials.video(&segment.material_id)?;
-            let period = if video.fps.is_finite() && video.fps > 1.0 {
-                (1_000_000.0 / video.fps).round() as Micros
-            } else {
-                33_333
-            };
-            self.backgrounds
-                .get(&self.ctx, &video.path, setting, source_time, period)
-        });
+        let background = setting.and_then(|_| self.background_at(materials, segment, source_time));
         if let (Some(setting), Some(_)) = (setting, &background) {
             use crate::modules::project::compositing::MatteTarget;
             if setting.cut {
@@ -2499,6 +2548,30 @@ impl Compositor {
             background,
             slot,
         }))
+    }
+
+    /// `segment`'s baked matte ("Remove background", or the matte its grade
+    /// or effects are limited by) of the source frame at `source_time`;
+    /// `None` when it has no matte in use or that frame is not baked yet.
+    fn background_at(
+        &self,
+        materials: &MaterialPool,
+        segment: &Segment,
+        source_time: Micros,
+    ) -> Option<std::sync::Arc<super::background::GpuMatte>> {
+        let setting = materials
+            .compositing_of(segment)?
+            .background
+            .as_ref()
+            .filter(|s| s.is_used())?;
+        let video = materials.video(&segment.material_id)?;
+        let period = if video.fps.is_finite() && video.fps > 1.0 {
+            (1_000_000.0 / video.fps).round() as Micros
+        } else {
+            33_333
+        };
+        self.backgrounds
+            .get(&self.ctx, &video.path, setting, source_time, period)
     }
 
     /// A compound clip's picture: its sequence composited at `source_time` into
@@ -2749,8 +2822,8 @@ fn blurred(
     if m.blur <= 0.0 || m.blur_radius <= 0.0 {
         return plain(quad, chain, mask);
     }
-    // The blur animation draws the clip as a transition side, whose effects
-    // apply to the whole layer; a matte-limited effect is whole there.
+    // The blur animation draws the clip as a transition side; its effects,
+    // and their matte limit, apply to that layer before the blur.
     Draw::Transition {
         params: TransitionParams {
             kind: TransitionKind::Blur,
@@ -2766,17 +2839,20 @@ fn blurred(
         // The clip's effects run on its layer before the blur blends it in.
         from_fx: Vec::new(),
         to_fx: chain,
+        from_mask: None,
+        to_mask: mask,
     }
 }
 
-/// The matte draw that limits `segment`'s effects to its subject or the
-/// rest, when its matte says so and the frame drawn has one baked. Without a
-/// baked matte the effects apply to the whole clip, as a frame with no
-/// matte yet is drawn whole.
-fn fx_mask(
+/// The matte draws that limit `segment`'s effects to its subject or the
+/// rest, when its matte says so and every frame drawn has one baked: one
+/// per draw of the clip in `samples`, with that draw's share of the clip's
+/// layer (1 for a clip drawn once). Without a baked matte the effects apply
+/// to the whole clip, as a frame with no matte yet is drawn whole.
+fn fx_mask<'a>(
     materials: &MaterialPool,
     segment: &Segment,
-    quad: &QuadDraw,
+    samples: impl IntoIterator<Item = (&'a QuadDraw, f32)>,
     draws: &mut DrawList,
 ) -> Option<FxMask> {
     use crate::modules::project::compositing::MatteTarget;
@@ -2786,15 +2862,22 @@ fn fx_mask(
         MatteTarget::Background => true,
         _ => return None,
     };
-    quad.background.as_ref()?;
-    let mut mask = quad.clone();
-    mask.matte.flags = [super::matte::flag::MATTE_OUT, 0, 0, 0];
-    mask.slot = draws.slots as u32;
-    draws.slots += 1;
-    Some(FxMask {
-        quad: mask,
-        background,
-    })
+    let samples: Vec<(&QuadDraw, f32)> = samples.into_iter().collect();
+    if samples.is_empty() || samples.iter().any(|(q, _)| q.background.is_none()) {
+        return None;
+    }
+    let quads = samples
+        .into_iter()
+        .map(|(quad, share)| {
+            let mut mask = quad.clone();
+            mask.matte.flags = [super::matte::flag::MATTE_OUT, 0, 0, 0];
+            mask.placement.opacity = share;
+            mask.slot = draws.slots as u32;
+            draws.slots += 1;
+            mask
+        })
+        .collect();
+    Some(FxMask { quads, background })
 }
 
 /// One textured quad: a segment's frame, where it goes, and which uniform
@@ -2843,6 +2926,10 @@ enum Draw {
         /// Each side's own effects, run over its layer before the blend.
         from_fx: Vec<FxInstance>,
         to_fx: Vec<FxInstance>,
+        /// Each side's effects limited by its clip's matte, as an
+        /// `Effected` clip's are.
+        from_mask: Option<FxMask>,
+        to_mask: Option<FxMask>,
     },
     /// A clip with effects: drawn into a layer of its own, the effects run
     /// over the layer, and the result composited where the clip would have
@@ -2890,9 +2977,15 @@ type Neighbours = [Option<QuadDraw>; 2];
 /// A clip's effects limited by its matte (`BackgroundRemoval::effects`): the
 /// matte drawn as weights over the clip's quad (`M_MATTE_OUT`), and which
 /// side of it the effects apply to. See [`super::matte_mix`].
+///
+/// One quad for a clip drawn once. A clip whose layer is an average of
+/// several draws (frame blending, motion blur: `Draw::Accumulated`) has one
+/// mask quad per draw, each at that draw's placement and with that draw's
+/// frame's matte, its opacity the draw's share of the average; their sum is
+/// the weight of the averaged layer, so the mask smears with the clip.
 #[derive(Clone)]
 struct FxMask {
-    quad: QuadDraw,
+    quads: Vec<QuadDraw>,
     /// The effects apply to the rest, not the subject.
     background: bool,
 }
@@ -2924,15 +3017,26 @@ impl DrawList {
                     neighbours,
                     ..
                 } => std::iter::once(quad)
-                    .chain(mask.as_ref().map(|m| &m.quad))
+                    .chain(mask.iter().flat_map(|m| &m.quads))
                     .chain(neighbours.iter().flatten())
                     .collect(),
-                Draw::Transition { from, to, .. } => {
-                    from.as_ref().into_iter().chain(to.as_ref()).collect()
-                }
-                Draw::Accumulated { quads, mask, .. } => {
-                    quads.iter().chain(mask.as_ref().map(|m| &m.quad)).collect()
-                }
+                Draw::Transition {
+                    from,
+                    to,
+                    from_mask,
+                    to_mask,
+                    ..
+                } => from
+                    .as_ref()
+                    .into_iter()
+                    .chain(to.as_ref())
+                    .chain(from_mask.iter().flat_map(|m| &m.quads))
+                    .chain(to_mask.iter().flat_map(|m| &m.quads))
+                    .collect(),
+                Draw::Accumulated { quads, mask, .. } => quads
+                    .iter()
+                    .chain(mask.iter().flat_map(|m| &m.quads))
+                    .collect(),
                 Draw::Adjust { .. } => Vec::new(),
             }
         })

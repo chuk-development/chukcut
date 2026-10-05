@@ -131,3 +131,46 @@ models' sessions and tries again (`Runtime::evict_others`).
   builds: it would replace the 3.7 GB add-on.
 - A dynamic-shape profile that costs no speed: one engine per model instead
   of one per size.
+
+## Amendment, 2026-10-05 (agent/gaps2): engines for ranges of sizes
+
+"A session is built for exactly one set of input shapes (profile min = opt
+= max)" is replaced for the two models whose input follows the footage.
+`accel::profile_for` gives each a few fixed optimisation profiles, and an
+input inside one is served by that profile's engine and session:
+
+| Model | Ranges (`[1, C, H, W]`, H × W at most; tuned for) |
+|---|---|
+| RIFE | 736×1280 (720×1280), 1280×736 (1280×720), 1088×1920 (1080×1920), 1920×1088 (1920×1080); every side at least 32 |
+| Real-ESRGAN | 800×800 (576×672); at least 16: every tile and every frame up to 800 px |
+
+LaMa and BiRefNet have fixed inputs; a shape outside every range (a
+1920×1920 RIFE frame) gets an exact profile. The engine directory is named
+by the range (`input-1x6x32x32-to-1x6x1088x1920-at-1x6x1080x1920`), never by
+the size that came first, and an exact profile keeps the old name, so
+engines built before are still found. The profiles are always explicit:
+without them ONNX Runtime's TensorRT provider widens its range to each new
+shape and rebuilds, which is what the old note ("a dynamic profile … rebuilt
+on every change") had seen. `CHUKCUT_TRT_PROFILES=exact` brings back one
+engine per size, for measurements.
+
+**Measured** (RTX 3060, release worker, `ml bench --accel fast`, exact and
+range engines interleaved, best of 40; load 12–25 from other builds):
+
+- **Per frame: no difference beyond the noise (±3 %).** RIFE 1080p 98.5
+  against 97.6 ms, 720p 39.7–42.1 against 41.0–42.0, 1440×1080 75.5–76.3
+  against 76.7–77.5, 1080×1920 106–114 against 126–127; Real-ESRGAN 1080p
+  429–466 against 439–448 ms, 720p 188–203 against 191–195, 640×360 48
+  against 50.
+- **Builds: fewer, each slower.** RIFE: 2.0 min for the 720p range, 4.6 min
+  for each 1080p range, against 1.1–2.4 min per exact size (load
+  dependent). Real-ESRGAN: 1.5 min for its one range against 0.5–1.7 min
+  per tile size. Six RIFE frame sizes (640×360, 960×540, 1280×720,
+  1440×1080, 1920×1080, 1080×1920) need three engines instead of six;
+  four Real-ESRGAN sources (640×360, 960×540, 1280×720, 1920×1080) one
+  instead of four. A project with a single 1080p clip pays about two
+  minutes more on its first slow-motion bake.
+
+What would change our minds: a TensorRT that builds dynamic profiles as
+fast as static ones (then one range per orientation), or a GPU where the
+range engines measure slower (then narrower ranges).
