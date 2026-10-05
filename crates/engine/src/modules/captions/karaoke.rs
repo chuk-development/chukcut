@@ -34,10 +34,15 @@ pub fn word_ranges(material: &TextMaterial) -> Vec<Option<Range<usize>>> {
     };
     let content = material.content.as_str();
     let lower = content.to_lowercase();
-    // Lower-casing can change byte lengths (rarely: 'İ'), and then a match in
-    // `lower` is not at the same offset in `content`. Fall back to exact
-    // matching only in that case.
-    let same_offsets = lower.len() == content.len();
+    // Lower-casing can change byte lengths (rarely: 'İ' grows, 'ẞ' shrinks),
+    // and then a match in `lower` is not at the same offset in `content`.
+    // Fall back to exact matching in that case. The check is per character:
+    // comparing only the total lengths let one growing and one shrinking
+    // character cancel out, and the range then split a character in
+    // `content`, which panics wherever the range is used to slice it.
+    let same_offsets = content
+        .chars()
+        .all(|c| c.to_lowercase().map(char::len_utf8).sum::<usize>() == c.len_utf8());
 
     let mut cursor = 0usize;
     caption
@@ -205,5 +210,19 @@ mod tests {
         let (request, key) = request_at(&m, -1);
         assert_eq!(key, None);
         assert!(request.highlight.is_none());
+    }
+
+    #[test]
+    fn a_growing_and_a_shrinking_capital_do_not_shift_the_ranges() {
+        // 'İ' is one byte longer lower-cased and 'ẞ' one byte shorter, so the
+        // whole string keeps its length while every offset after 'İ' moves.
+        let content = "İx ẞword";
+        let m = caption(content, &[("İx", 0), ("ẞword", 300_000)], true);
+        let ranges = word_ranges(&m);
+        assert_eq!(ranges, vec![Some(0..3), Some(4..11)]);
+        for range in ranges.into_iter().flatten() {
+            assert!(content.is_char_boundary(range.start));
+            assert!(content.is_char_boundary(range.end));
+        }
     }
 }
