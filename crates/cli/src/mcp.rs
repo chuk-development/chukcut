@@ -681,13 +681,20 @@ fn decode(s: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         match bytes[i] {
-            b'%' if i + 2 < bytes.len() => match u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                Ok(b) => {
+            // The two digits are read from the bytes, not sliced out of `s`:
+            // a `%` before a multi-byte character ("%aé") would put the end
+            // of a `&str` slice inside that character, which panics and
+            // ended the whole MCP session.
+            b'%' if i + 2 < bytes.len() => match std::str::from_utf8(&bytes[i + 1..i + 3])
+                .ok()
+                .and_then(|hex| u8::from_str_radix(hex, 16).ok())
+            {
+                Some(b) => {
                     out.push(b);
                     i += 3;
                     continue;
                 }
-                Err(_) => out.push(b'%'),
+                None => out.push(b'%'),
             },
             b'+' => out.push(b' '),
             b => out.push(b),
@@ -713,6 +720,13 @@ fn parse_uri(uri: &str) -> Option<(String, HashMap<String, String>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_percent_before_a_multibyte_character_is_kept_as_text() {
+        assert_eq!(decode("%aé"), "%aé");
+        assert_eq!(decode("a%20b%2"), "a b%2");
+        assert_eq!(decode("%C3%A9"), "é");
+    }
 
     #[test]
     fn uris_round_trip_paths_with_spaces() {
