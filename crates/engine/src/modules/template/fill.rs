@@ -214,6 +214,9 @@ pub fn replace_command(
     after.source_range = plan.source;
     after.speed = plan.speed;
     after.crop = plan.crop;
+    // The slot's fitted crop replaces whatever crop animation the placeholder
+    // had; its keyframes were measured against another picture.
+    after.keyframes.retain(|t| !t.property.is_crop());
     after.extras.retain(|id| {
         pool.speed_curve(id).is_none() && current.as_ref().is_none_or(|(old, _)| old != id)
     });

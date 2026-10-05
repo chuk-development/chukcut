@@ -114,8 +114,8 @@ Clips show their keyframes as small diamonds near the bottom edge. Click a
 diamond to select it and move the playhead to it. Drag it to move it.
 
 In the inspector, the properties **Scale**, **Position**, **Rotate** and
-**Opacity** have a diamond button: click it to add a keyframe at the
-playhead. The arrows beside it jump to the previous or next keyframe.
+**Opacity**, and the crop in **Video › Crop**, have a diamond button: click
+it to add a keyframe at the playhead. The arrows beside it jump to the previous or next keyframe.
 Right-click a diamond to choose the easing. The **Keyframe easing** section
 in **Video › Basic** has a graph to shape the move between two keyframes,
 and a list: **Linear**, **Hold**, **Ease in**, **Ease out**, **Ease

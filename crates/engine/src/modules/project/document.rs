@@ -1354,6 +1354,53 @@ impl Segment {
         None
     }
 
+    /// Whether any crop edge has keyframes.
+    pub fn has_crop_keyframes(&self) -> bool {
+        self.keyframes.iter().any(|t| t.property.is_crop())
+    }
+
+    /// The crop the segment shows at the timeline instant `time`: the static
+    /// [`Segment::crop`], with each crop edge that has keyframes sampled
+    /// there. A segment without crop keyframes returns its static crop
+    /// unchanged, so an old file draws exactly as it did.
+    ///
+    /// An edge track overrides that edge only; the others keep the static
+    /// value (or the full frame). The four edges are sampled independently, so
+    /// an easing that overshoots can briefly cross two edges; the renderer
+    /// then draws nothing for that frame (`layout::crop_uv`), which is what
+    /// an empty rectangle means.
+    pub fn crop_at(&self, time: Micros) -> Option<Crop> {
+        if !self.has_crop_keyframes() {
+            return self.crop;
+        }
+        let relative = time - self.target_range.start;
+        let mut crop = self.crop.unwrap_or_default();
+        for track in &self.keyframes {
+            let Some(value) = track.sample(relative) else {
+                continue;
+            };
+            match track.property {
+                AnimatableProperty::CropLeft => crop.left = value,
+                AnimatableProperty::CropTop => crop.top = value,
+                AnimatableProperty::CropRight => crop.right = value,
+                AnimatableProperty::CropBottom => crop.bottom = value,
+                _ => {}
+            }
+        }
+        Some(crop)
+    }
+
+    /// Fold the crop keyframes into the static crop at `time` and drop their
+    /// tracks: the segment as a still at that instant draws the same crop.
+    /// For a render-time copy (follow, stabilise, the crop tab's uncropped
+    /// view), never for the document.
+    pub fn fold_crop_at(&mut self, time: Micros) {
+        if self.has_crop_keyframes() {
+            self.crop = self.crop_at(time);
+            self.keyframes.retain(|t| !t.property.is_crop());
+        }
+    }
+
     /// Map a timeline instant to a position inside the source material,
     /// accounting for `speed`. Returns `None` when `time` is outside the
     /// segment.
@@ -1484,6 +1531,28 @@ pub enum AnimatableProperty {
     Rotation,
     Opacity,
     Volume,
+    /// The crop rectangle's edges, as fractions of the source picture like
+    /// [`Crop`]'s fields. Last in the order, so a file written before crops
+    /// had keyframes keeps its tracks where they were.
+    CropLeft,
+    CropTop,
+    CropRight,
+    CropBottom,
+}
+
+impl AnimatableProperty {
+    /// The four crop edges, in the order [`Crop`] lists them.
+    pub const CROP: [AnimatableProperty; 4] = [
+        AnimatableProperty::CropLeft,
+        AnimatableProperty::CropTop,
+        AnimatableProperty::CropRight,
+        AnimatableProperty::CropBottom,
+    ];
+
+    /// Whether this is one of the crop edges.
+    pub fn is_crop(self) -> bool {
+        Self::CROP.contains(&self)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2286,6 +2355,81 @@ mod tests {
         // Half a second into the segment at 2x speed = one second into source.
         assert_eq!(seg.source_time_at(1_500_000), Some(1_500_000));
         assert_eq!(seg.source_time_at(0), None);
+    }
+
+    #[test]
+    fn crop_keyframes_override_their_edge_and_ease_between_keys() {
+        let close = |got: f32, want: f64, what: &str| {
+            assert!((got as f64 - want).abs() < 1e-5, "{what}: {got} vs {want}");
+        };
+        let key = |time, value, easing| Keyframe {
+            time,
+            value,
+            easing,
+        };
+        let mut seg = Segment {
+            id: new_id(),
+            material_id: "m".into(),
+            target_range: TimeRange::new(1_000_000, 2_000_000),
+            source_range: TimeRange::new(0, 2_000_000),
+            render_index: 0,
+            speed: 1.0,
+            volume: 1.0,
+            transform: Transform::default(),
+            crop: Some(Crop {
+                left: 0.1,
+                top: 0.2,
+                right: 0.9,
+                bottom: 0.8,
+            }),
+            extras: Vec::new(),
+            keyframes: Vec::new(),
+        };
+        // No crop keyframes: the static crop, untouched.
+        let still = seg.crop_at(1_500_000).expect("cropped");
+        assert_eq!((still.left, still.bottom), (0.1, 0.8));
+        seg.keyframes = vec![
+            KeyframeTrack {
+                property: AnimatableProperty::Opacity,
+                keyframes: vec![key(0, 0.5, Easing::Linear)],
+            },
+            KeyframeTrack {
+                property: AnimatableProperty::CropLeft,
+                keyframes: vec![
+                    key(0, 0.0, Easing::Linear),
+                    key(1_000_000, 0.4, Easing::Linear),
+                ],
+            },
+            KeyframeTrack {
+                property: AnimatableProperty::CropRight,
+                keyframes: vec![
+                    key(0, 1.0, Easing::EaseIn),
+                    key(1_000_000, 0.6, Easing::Linear),
+                ],
+            },
+        ];
+        assert!(seg.has_crop_keyframes());
+        // Timeline time; keyframe times are relative to the clip start.
+        let mid = seg.crop_at(1_500_000).expect("cropped");
+        close(mid.left, 0.2, "linear left");
+        // Ease-in at half way is a quarter of the move.
+        close(mid.right, 1.0 - 0.4 * 0.25, "eased right");
+        // Edges without keyframes keep the static crop.
+        close(mid.top, 0.2, "static top");
+        close(mid.bottom, 0.8, "static bottom");
+        // Before the first and after the last keyframe, the end values hold.
+        close(seg.crop_at(0).unwrap().left, 0.0, "held before");
+        close(seg.crop_at(2_900_000).unwrap().right, 0.6, "held after");
+
+        let mut folded = seg.clone();
+        folded.fold_crop_at(1_500_000);
+        assert!(!folded.has_crop_keyframes());
+        assert_eq!(folded.keyframes.len(), 1, "the opacity track stays");
+        let f = folded.crop.expect("folded");
+        assert_eq!((f.left, f.right), (mid.left, mid.right));
+        // A track written by name reads back as the same edge.
+        let json = serde_json::to_string(&seg.keyframes[1]).unwrap();
+        assert!(json.contains("\"crop_left\""), "{json}");
     }
 
     /// A graded project must come back from disk exactly as it went in. The

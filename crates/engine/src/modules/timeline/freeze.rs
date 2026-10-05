@@ -325,7 +325,8 @@ pub fn freeze_frame_edit(
 /// The transform is the *animated* one at the playhead and the still carries
 /// no keyframes: a freeze frame holds the picture, so a zoom running through
 /// the cut stops where it was rather than replaying from the clip's start.
-/// The crop is the clip's. Colour and effect extras are shared, as a split
+/// The crop is the clip's at that instant (a keyframed crop holds where it
+/// was, like the transform). Colour and effect extras are shared, as a split
 /// shares them; transitions, link groups, animations and a template slot
 /// marker are not, for the reasons `split_one` gives for the right half.
 fn still_segment(
@@ -354,7 +355,7 @@ fn still_segment(
         speed: 1.0,
         volume: 1.0,
         transform,
-        crop: clip.crop,
+        crop: clip.crop_at(at),
         extras,
         keyframes: Vec::new(),
     }

@@ -169,13 +169,27 @@ that stays, and the rest is dark.
   horizontally**, **Flip vertically**, and **Rotate** for any angle. A flip
   button is lit while the clip is flipped. The rotation takes keyframes like
   the one in **Basic › Transform**.
-- The reset arrow of **Crop** removes the crop. The reset arrow of **Rotate
-  and flip** sets the rotation to 0 and removes the flips.
+- **Keyframe**: the diamond adds a crop keyframe at the playhead. The
+  keyframe holds the crop that the player shows, so nothing moves yet.
+  Click the diamond again on a keyframe to delete it. The arrows move the
+  playhead to the previous or the next crop keyframe.
+- **Animate a crop**: add a keyframe, move the playhead, then drag the box
+  or click a ratio. When the crop has keyframes, each change sets the
+  keyframe at the playhead. If there is no keyframe there, chukcut adds one.
+  The crop moves between the keyframes. Right-click the diamond to set the
+  easing. The **Keyframe easing** graph shows under **Crop** and in
+  **Basic**, with a **Crop** chip.
+- The reset arrow of **Crop** removes the crop and all its keyframes, in one
+  undo step. The reset arrow of **Rotate and flip** sets the rotation to 0
+  and removes the flips.
 
 When you leave the tab, the player shows the cropped clip again. The cropped
 part fills the clip's frame: a 9:16 crop of a 16:9 clip becomes a 9:16 clip
-on the canvas. A crop has no keyframes. `chukcut-cli crop` sets the same
-crop from a script.
+on the canvas. When the crop moves, the clip's shape on the canvas changes
+with it. A crop keyframe stays with the clip when you move, trim or split
+the clip, like a transform keyframe. A freeze frame keeps the crop of its
+instant. `chukcut-cli crop` sets the same crop from a script, and `crop
+--at` sets a crop keyframe.
 
 ## Video › Basic
 

@@ -299,7 +299,8 @@ fn cropped_size(project: &Project, segment: &Segment) -> Option<(u32, u32)> {
         let image = pool.image(&segment.material_id)?;
         (image.width, image.height)
     };
-    let (cw, ch) = crop_extent(crop_uv(segment.crop)?);
+    // A keyframed crop is measured as the clip starts.
+    let (cw, ch) = crop_extent(crop_uv(segment.crop_at(segment.target_range.start))?);
     Some((
         ((w.max(1) as f32 * cw).max(1.0)) as u32,
         ((h.max(1) as f32 * ch).max(1.0)) as u32,
@@ -364,7 +365,7 @@ pub fn reframe_command(
     let (cw, ch) = (canvas.0.max(1) as f32, canvas.1.max(1) as f32);
     let cover = (cw / fw).max(ch / fh);
     let (qw, qh) = (fw * cover, fh * cover);
-    let crop = crop_uv(segment.crop).unwrap_or([0.0, 0.0, 1.0, 1.0]);
+    let crop = crop_uv(segment.crop_at(segment.target_range.start)).unwrap_or([0.0, 0.0, 1.0, 1.0]);
 
     let before = segment.transform;
     let mut after = before;

@@ -11,7 +11,7 @@
 use std::sync::Arc;
 
 use super::edit::{self, ClipAttributes, ColorEdit, GradeControl, GradeEdit, GradeSection};
-use crate::modules::project::document::{ColorAdjustMaterial, Crop, LutRef, Project};
+use crate::modules::project::document::{ColorAdjustMaterial, Crop, LutRef, Micros, Project};
 use crate::modules::project::grade::{CurveChannel, Wheel, WheelKind};
 use crate::modules::timeline::commands::EditResponse;
 use crate::modules::timeline::ops::EditCommand;
@@ -28,6 +28,40 @@ pub fn inspector_set_crop(
         let mut guard = state.project.write();
         let project = guard.as_mut().ok_or("no project is open")?;
         let command = edit::set_crop_command(project, &segment_id, crop)?;
+        state.history.write().apply(project, command)?;
+    }
+    respond(state)
+}
+
+/// Make a clip show `crop` at the timeline instant `time`, as a keyframe on
+/// each crop edge (added, or the one there changed). `None` keys the whole
+/// picture. One undo step.
+pub fn inspector_set_crop_at(
+    state: &Arc<AppState>,
+    segment_id: String,
+    crop: Option<Crop>,
+    time: Micros,
+) -> Result<EditResponse, String> {
+    {
+        let mut guard = state.project.write();
+        let project = guard.as_mut().ok_or("no project is open")?;
+        let command = edit::crop_keyframe_command(project, &segment_id, crop, time)?;
+        state.history.write().apply(project, command)?;
+    }
+    respond(state)
+}
+
+/// The crop's keyframe diamond at the timeline instant `time`: remove the
+/// crop keyframes there, or add them holding the crop shown there.
+pub fn inspector_toggle_crop_keyframe(
+    state: &Arc<AppState>,
+    segment_id: String,
+    time: Micros,
+) -> Result<EditResponse, String> {
+    {
+        let mut guard = state.project.write();
+        let project = guard.as_mut().ok_or("no project is open")?;
+        let command = edit::toggle_crop_keyframe_command(project, &segment_id, time)?;
         state.history.write().apply(project, command)?;
     }
     respond(state)

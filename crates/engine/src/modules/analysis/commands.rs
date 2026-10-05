@@ -625,8 +625,10 @@ pub fn analysis_reframe(
             let Some((axis, fraction)) = reframe::window_fraction(aspect, canvas_aspect) else {
                 continue;
             };
-            let crop = crate::modules::render::layout::crop_uv(segment.crop)
-                .unwrap_or([0.0, 0.0, 1.0, 1.0]);
+            let crop = crate::modules::render::layout::crop_uv(
+                segment.crop_at(segment.target_range.start),
+            )
+            .unwrap_or([0.0, 0.0, 1.0, 1.0]);
             let extent = match axis {
                 Axis::Horizontal => crop[2] - crop[0],
                 Axis::Vertical => crop[3] - crop[1],

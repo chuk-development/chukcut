@@ -173,6 +173,9 @@ pub(crate) enum Prop {
     SpeedCurve,
     /// A handle of the keyframe easing graph being dragged.
     Easing,
+    /// Not a slider: the crop rectangle, for its keyframe diamond
+    /// (Video › Crop). The box on the player edits it.
+    Crop,
     // --- a title's material (`text_style.rs`) ---
     TextSize,
     LetterSpacing,
@@ -268,6 +271,7 @@ impl Prop {
             Prop::WheelPuck(_) => spec("Wheel", 0.0, 1.0, 0.01, 0.0, 2, "", false),
             Prop::SpeedCurve => spec("Speed curve", 0.0, 1.0, 0.01, 0.0, 2, "", false),
             Prop::Easing => spec("Easing", 0.0, 1.0, 0.01, 0.0, 2, "", false),
+            Prop::Crop => spec("Crop", 0.0, 1.0, 0.01, 0.0, 3, "", false),
             Prop::TextSize => spec("Size", 4.0, 400.0, 1.0, 96.0, 0, "", true),
             Prop::LetterSpacing => spec("Letter spacing", -50.0, 200.0, 1.0, 0.0, 0, "", true),
             Prop::LineSpacing => spec("Line spacing", 50.0, 300.0, 1.0, 120.0, 0, "%", true),
@@ -330,6 +334,9 @@ impl Prop {
             Prop::PosY => &[A::PositionY],
             Prop::Rotation => &[A::Rotation],
             Prop::Opacity => &[A::Opacity],
+            // The four edges are keyed together: a crop animates as one
+            // rectangle.
+            Prop::Crop => &A::CROP,
             // No diamond on volume: the `Volume` keyframe track is the fade
             // envelope (it multiplies the clip volume), owned by the fade rows
             // and the timeline's fade handles.
@@ -628,6 +635,8 @@ impl Editor {
             A::Rotation => value,
             A::Opacity => value / 100.0,
             A::Volume => db_to_gain(value),
+            // Crop edges are fractions in the panel as in the document.
+            A::CropLeft | A::CropTop | A::CropRight | A::CropBottom => value,
         }
     }
 
@@ -773,6 +782,8 @@ impl Editor {
                     });
                     continue;
                 }
+                // The crop box sets these (`crop.rs`), never a number row.
+                A::CropLeft | A::CropTop | A::CropRight | A::CropBottom => continue,
             }
             transform_changed = true;
         }
@@ -925,6 +936,17 @@ impl Editor {
         let Some(segment) = self.target_segment(prop) else {
             return;
         };
+        if prop == Prop::Crop {
+            // Four edges with a value each; the engine keys the crop shown.
+            let result = inspector_commands::inspector_toggle_crop_keyframe(
+                &self.state,
+                segment.id.clone(),
+                self.clock.position(),
+            );
+            self.refresh(cx);
+            self.report(result.map(|_| ()), cx);
+            return;
+        }
         let Some(rel) = self.relative_time(segment) else {
             self.report(
                 Err("move the playhead onto the clip to add a keyframe".into()),

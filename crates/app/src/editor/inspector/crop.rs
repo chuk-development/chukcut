@@ -2,8 +2,12 @@
 //! rotate and flip, reset.
 //!
 //! The crop is the document's `Segment::crop` (fractions of the source
-//! picture), set through `inspector_set_crop` as one undo step. It is not
-//! keyframable: the engine stores one rectangle per clip.
+//! picture), set through `inspector_set_crop` as one undo step. It is
+//! keyframable like the transform: the diamond on the Keyframe row keys all
+//! four edges at the playhead (`inspector_toggle_crop_keyframe`), and once a
+//! crop has keyframes every change from this tab — the box, a ratio — is
+//! written as the keyframe at the playhead (`inspector_set_crop_at`). Reset
+//! removes the crop and its keyframes.
 //!
 //! While the tab is open the player shows the clip **uncropped**
 //! ([`Editor::crop_view_project`]), with everything outside the box dimmed,
@@ -251,6 +255,18 @@ fn dragged(
     }
 }
 
+/// `segment` with no crop at all: neither the static rectangle nor its
+/// keyframes. The crop tab's view of the whole picture.
+fn uncropped(segment: &mut Segment) {
+    segment.crop = None;
+    segment.keyframes.retain(|t| !t.property.is_crop());
+}
+
+/// Whether `segment` has a crop, static or keyframed.
+fn is_cropped(segment: &Segment) -> bool {
+    segment.crop.is_some() || segment.has_crop_keyframes()
+}
+
 /// A picture's size as the clip shows it: a video's coded size turned by its
 /// rotation tag, or an image's.
 fn source_size(project: &Project, segment: &Segment) -> Option<(u32, u32)> {
@@ -280,10 +296,9 @@ struct SourceFrame {
 impl SourceFrame {
     fn of(project: &Project, segment: &Segment, time: Micros, size: (f32, f32)) -> Option<Self> {
         let source = source_size(project, segment)?;
-        let mut uncropped = segment.clone();
-        uncropped.crop = None;
-        let followed =
-            chukcut_engine::modules::tracking::follow::resolve(project, &uncropped, time);
+        let mut whole = segment.clone();
+        uncropped(&mut whole);
+        let followed = chukcut_engine::modules::tracking::follow::resolve(project, &whole, time);
         let resolved =
             chukcut_engine::modules::analysis::stabilise::resolve(project, followed, time);
         let keyed = layout::animated_transform(&resolved, time);
@@ -356,7 +371,7 @@ impl Editor {
     pub(crate) fn crop_view_project(&self, project: Arc<Project>) -> Arc<Project> {
         let Some(id) = self
             .crop_view_segment()
-            .filter(|s| s.crop.is_some())
+            .filter(|s| is_cropped(s))
             .map(|s| s.id.clone())
         else {
             return project;
@@ -368,7 +383,7 @@ impl Editor {
             .flat_map(|t| t.segments.iter_mut())
             .find(|s| s.id == id)
         {
-            segment.crop = None;
+            uncropped(segment);
         }
         Arc::new(copy)
     }
@@ -383,6 +398,12 @@ impl Editor {
         }
     }
 
+    /// The crop `segment` shows at the playhead: its keyframes sampled there,
+    /// or its one rectangle.
+    fn shown_crop(&self, segment: &Segment) -> Option<Crop> {
+        segment.crop_at(self.clock.position())
+    }
+
     /// The box's shape in source fractions for `ratio` on `segment`.
     fn crop_aspect(&self, segment: &Segment, ratio: Ratio) -> Option<f32> {
         let (w, h) = source_size(&self.project, segment)?;
@@ -395,7 +416,7 @@ impl Editor {
     /// The ratio the tab lights: the one picked for this clip, else the one
     /// the crop has.
     fn crop_ratio(&self, segment: &Segment) -> Ratio {
-        let shape = segment.crop.map(|crop| {
+        let shape = to_crop(edges(self.shown_crop(segment))).map(|crop| {
             source_size(&self.project, segment).map(|(w, h)| {
                 (crop.right - crop.left) * w as f32 / ((crop.bottom - crop.top) * h as f32)
             })
@@ -426,16 +447,33 @@ impl Editor {
         }
     }
 
+    /// Make the clip show `crop`: its one rectangle, or — once the crop has
+    /// keyframes — the keyframe at the playhead.
     fn set_crop(&mut self, segment_id: String, crop: Option<Crop>, cx: &mut Context<Self>) {
-        let unchanged = self
-            .project
-            .segment(&segment_id)
-            .is_some_and(|(_, s)| edges(s.crop) == edges(crop));
-        if unchanged {
+        let Some((_, segment)) = self.project.segment(&segment_id) else {
+            return;
+        };
+        if edges(self.shown_crop(segment)) == edges(crop) {
             cx.notify();
             return;
         }
-        let result = inspector_commands::inspector_set_crop(&self.state, segment_id, crop);
+        let result = if segment.has_crop_keyframes() {
+            inspector_commands::inspector_set_crop_at(
+                &self.state,
+                segment_id,
+                crop,
+                self.clock.position(),
+            )
+        } else {
+            inspector_commands::inspector_set_crop(&self.state, segment_id, crop)
+        };
+        self.refresh(cx);
+        self.report(result.map(|_| ()), cx);
+    }
+
+    /// Reset: the crop and all its keyframes go, as one step.
+    fn clear_crop(&mut self, segment_id: String, cx: &mut Context<Self>) {
+        let result = inspector_commands::inspector_set_crop(&self.state, segment_id, None);
         self.refresh(cx);
         self.report(result.map(|_| ()), cx);
     }
@@ -453,7 +491,7 @@ impl Editor {
                 let Some(aspect) = self.crop_aspect(&segment, ratio) else {
                     return;
                 };
-                let r = fitted(edges(segment.crop), aspect);
+                let r = fitted(edges(self.shown_crop(&segment)), aspect);
                 self.set_crop(segment.id.clone(), to_crop(r), cx);
             }
         }
@@ -550,20 +588,36 @@ impl Editor {
                 )
             }),
         );
+        let shown = self.shown_crop(segment);
         let kept = source_size(&self.project, segment).map(|(w, h)| {
-            let r = edges(segment.crop);
+            let r = edges(shown);
             let (kw, kh) = (
                 ((r[2] - r[0]) * w as f32).round() as u32,
                 ((r[3] - r[1]) * h as f32).round() as u32,
             );
-            if segment.crop.is_some() {
+            if to_crop(r).is_some() {
                 format!("Keeps {kw} \u{d7} {kh} px of {w} \u{d7} {h}.")
             } else {
                 format!("The whole picture, {w} \u{d7} {h} px.")
             }
         });
+        let keyframe = self.keyframe_slot(Prop::Crop, segment, cx);
+        let keyframe_row = crate::ui::PropertyRow::new("row-crop-keyframe", "Keyframe")
+            .when_some(keyframe, |row, slot| row.keyframe(slot))
+            .child(
+                div()
+                    .flex_1()
+                    .text_size(px(TEXT_CAPTION))
+                    .text_color(rgb(TEXT_MUTED))
+                    .child(if segment.has_crop_keyframes() {
+                        "Animated: the box sets the crop at the playhead."
+                    } else {
+                        "Add one to animate the crop."
+                    }),
+            );
         let crop_rows = vec![
             ratio_buttons.into_any_element(),
+            keyframe_row.into_any_element(),
             div()
                 .text_size(px(TEXT_CAPTION))
                 .text_color(rgb(TEXT_MUTED))
@@ -575,10 +629,10 @@ impl Editor {
         ];
         let id = segment.id.clone();
         let crop = Section {
-            on_reset: segment.crop.is_some().then(|| {
+            on_reset: is_cropped(segment).then(|| {
                 Box::new(move |this: &mut Editor, cx: &mut Context<Editor>| {
                     this.inspector.crop.ratio = None;
-                    this.set_crop(id.clone(), None, cx);
+                    this.clear_crop(id.clone(), cx);
                 }) as ResetHandler
             }),
             ..Section::new(CROP)
@@ -628,10 +682,16 @@ impl Editor {
         }
         .render(self.collapsed("Rotate and flip"), rotate_rows, cx);
 
+        // The graph of a keyframed crop's move, as under Basic › Transform.
+        let easing = segment
+            .has_crop_keyframes()
+            .then(|| self.easing_section(segment, cx))
+            .flatten();
         div()
             .flex()
             .flex_col()
             .child(crop)
+            .children(easing)
             .child(rotate)
             .into_any_element()
     }
@@ -650,7 +710,7 @@ impl Editor {
         let frame = SourceFrame::of(&self.project, segment, self.clock.position(), (dw, dh))?;
         let r = match &self.inspector.crop.drag {
             Some(drag) if drag.segment_id == segment.id => drag.current,
-            _ => edges(segment.crop),
+            _ => edges(self.shown_crop(segment)),
         };
         let corners = |q: [f32; 4]| -> [[f32; 2]; 4] {
             [
@@ -800,7 +860,7 @@ impl Editor {
         let Some(grab) = frame.source(at) else {
             return;
         };
-        let r = edges(segment.crop);
+        let r = edges(self.shown_crop(&segment));
         let handle = HANDLES
             .iter()
             .map(|&h| {

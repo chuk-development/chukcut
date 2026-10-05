@@ -2528,7 +2528,8 @@ fn place(
     // without one, which then takes exactly the path it always took.
     let motion = motion::clip_motion(materials, segment, time, keyed);
     let transform = motion.map_or(keyed, |m| m.transform);
-    let placement = layout::place_quad(canvas, frame_size, &transform, segment.crop)?;
+    let crop = layout::animated_crop(segment, time);
+    let placement = layout::place_quad(canvas, frame_size, &transform, crop)?;
     match motion {
         Some(m) if m.reveal != [0.0, 0.0, 1.0, 1.0] => layout::reveal(placement, m.reveal),
         _ => Some(placement),

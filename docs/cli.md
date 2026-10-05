@@ -724,10 +724,20 @@ In JSON, `points` is a list of `[x, y]` pairs or `"x,y"` strings.
 Crops the clip's picture. `--left`, `--top`, `--right` and `--bottom` are
 fractions of the source frame: left and top from 0, right and bottom up
 to 1. An edge that you do not give keeps its value. `--clear` removes the
-crop. One undo step.
+crop and all its keyframes. One undo step.
+
+`--at TIME` sets a crop keyframe at that timeline time. The keyframe is on
+all four edges. If a keyframe is already there (within half a frame), it
+changes. An edge that you do not give keeps the value that the crop has at
+that time. `--at TIME --remove` deletes the crop keyframe at that time.
+When a crop has keyframes, a crop without `--at` is refused. One undo step
+each.
 
 ```bash
 chukcut-cli crop reel.chukcut 0:0 --left 0.1 --right 0.9
+# Zoom in from the full picture to the middle over two seconds.
+chukcut-cli crop reel.chukcut 0:0 --at 0 --left 0 --top 0 --right 1 --bottom 1
+chukcut-cli crop reel.chukcut 0:0 --at 2s --left 0.25 --top 0.25 --right 0.75 --bottom 0.75
 ```
 
 #### `layout pip PROJECT CLIP`
@@ -839,7 +849,10 @@ hides cuts in a talking-head video.
 
 Adds a keyframe, or changes the keyframe at that time. Properties:
 `position_x` (or `x`, as in `set --x`), `position_y` (or `y`), `scale_x`,
-`scale_y`, `rotation`, `opacity`, `volume`. `--value` is required, except with `--remove`. `--easing` is
+`scale_y`, `rotation`, `opacity`, `volume`, and the crop edges `crop_left`,
+`crop_top`, `crop_right`, `crop_bottom` (fractions of the source frame;
+`crop --at` sets all four together). `--value` is required, except with
+`--remove`. `--easing` is
 `hold`, `linear`, `ease_in`, `ease_out` or `ease_in_out`. `--at` is a
 timeline time. The engine keeps keyframes relative to the clip start, so they
 move with the clip.
