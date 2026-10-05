@@ -249,6 +249,17 @@ fn held_line(waiting: usize) -> String {
 pub(crate) struct QueueWatch {
     events: Arc<parking_lot::Mutex<Vec<QueueEvent>>>,
     subscribed: bool,
+    /// The listener's id, so a closed editor stops listening (`Drop`):
+    /// every editor used to leave one behind for the life of the process.
+    listener: Option<u64>,
+}
+
+impl Drop for QueueWatch {
+    fn drop(&mut self) {
+        if let Some(id) = self.listener.take() {
+            export_commands::export_queue_unsubscribe(id);
+        }
+    }
 }
 
 impl QueueWatch {
@@ -260,16 +271,18 @@ impl QueueWatch {
         }
         self.subscribed = true;
         let events = Arc::clone(&self.events);
-        export_commands::export_queue_subscribe(Channel::new(move |event: QueueEvent| {
-            // Progress floods `Changed`; one pending is enough to redraw.
-            let mut pending = events.lock();
-            if !(matches!(event, QueueEvent::Changed)
-                && pending.iter().any(|e| matches!(e, QueueEvent::Changed)))
-            {
-                pending.push(event);
-            }
-            true
-        }));
+        self.listener = Some(export_commands::export_queue_subscribe(Channel::new(
+            move |event: QueueEvent| {
+                // Progress floods `Changed`; one pending is enough to redraw.
+                let mut pending = events.lock();
+                if !(matches!(event, QueueEvent::Changed)
+                    && pending.iter().any(|e| matches!(e, QueueEvent::Changed)))
+                {
+                    pending.push(event);
+                }
+                true
+            },
+        )));
     }
 }
 

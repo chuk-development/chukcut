@@ -82,6 +82,10 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ("prepare::prepare_missing", "the count behind prepare_status, for tests and the app; a CLI export bakes what it needs first"),
     ("compositing::compositing_set_background", "the setting alone; remove_background also bakes the matte"),
     ("ml::gpu_vendors", "part of ml status, which reports it"),
+    ("project::project_open_notes", "the app shows a file's problems once after it opens; validate reports the same issues"),
+    ("project::import_material_planned", "import_material without the canvas change, for the import command's undo step; import uses that command"),
+    ("project::adopted_fps", "the frame-rate rule import applies, public for its tests"),
+    ("tracking::cancel_all", "closing a project cancels its jobs (modules::jobs), not an operation"),
     // The live preview, playback and the app's own windows.
     ("preview::preview_start", "the app's live preview server; render_frame and view_frame render a frame"),
     ("preview::preview_seek", "the live preview"),

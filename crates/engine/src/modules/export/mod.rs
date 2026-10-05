@@ -65,7 +65,8 @@ pub mod snapshot;
 pub mod store;
 
 pub use audio::{
-    mix_timeline, mix_timeline_unclamped, AudioMixer, AudioRequest, AudioSource, SilentAudioSource,
+    mix_timeline, mix_timeline_unclamped, AudioMixer, AudioRequest, AudioSource, AudioStream,
+    MixRange, MixStream, SilentAudioSource,
 };
 pub use colour::{ColorMatrix, ColorRange, OutputColour};
 pub use encoder::{AudioStreamSpec, MediaWriter, VideoStreamSpec, WriterStats};
@@ -124,6 +125,11 @@ pub enum ExportError {
 
     #[error("mixing audio failed: {0}")]
     Audio(#[source] anyhow::Error),
+
+    /// A panic inside the export, contained (`run_export`). The text is the
+    /// user-facing sentence `lifecycle::contain` made of it.
+    #[error("{0}")]
+    Internal(String),
 
     /// Not a failure — the user asked to stop. Carried as an error so the frame
     /// loop can unwind with `?` instead of threading an outcome through every

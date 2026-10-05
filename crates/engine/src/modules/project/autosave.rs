@@ -165,7 +165,12 @@ fn writer() -> &'static Writer {
                     pending.jobs.remove(0)
                 };
 
-                if let Err(error) = write_to(&job.file, &job.project, job.origin.as_deref()) {
+                // Contained: a bug while writing one working copy must not
+                // end the thread, or every later autosave waits forever.
+                let written = crate::lifecycle::contained("The autosave", || {
+                    write_to(&job.file, &job.project, job.origin.as_deref())
+                });
+                if let Err(error) = written {
                     // A failed autosave is not worth interrupting an edit for,
                     // but it is worth knowing about: it usually means the
                     // config directory is unwritable or the disk is full.

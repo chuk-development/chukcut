@@ -354,6 +354,10 @@ pub fn template_new_project(
 /// half of [`template_new_project`], for a shell that builds off its UI
 /// thread and opens on it.
 pub fn template_open_project(state: &Arc<AppState>, project: &Project) {
+    // Raised before the new document is in place: a job that
+    // takes the lock after this sees a different generation and
+    // drops its result rather than writing into this document.
+    state.next_generation();
     *state.project.write() = Some(project.clone());
     *state.project_path.write() = None;
     state.history.write().clear();

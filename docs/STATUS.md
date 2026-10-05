@@ -55,13 +55,13 @@ denoiser.
 **Before you change code:** read "Traps that have already cost time" and
 the CLAUDE.md non-negotiables. Judge performance from a release build only.
 
-**Newest sections first:** Colour in and out, Crop keyframes and temporal denoise, Release builds, The crash after the export, QA pass 3, UX gaps, Body landmarks, Polish pass 3, CI, Colour AI, QA pass 2, Flaky
+**Newest sections first:** Robustness, Colour in and out, Crop keyframes and temporal denoise, Release builds, The crash after the export, QA pass 3, UX gaps, Body landmarks, Polish pass 3, CI, Colour AI, QA pass 2, Flaky
 tests, Frame blending, Timelines and compound clips. The ML sections are at
 the end of the file ("The ML worker" and its sub-sections).
 
 ## Update history
 
-Last updated: 2026-10-05 (colour in and out: exports converted and tagged as BT.709 or BT.601, 10-bit HEVC/AV1 export, HDR and 10-bit sources tone-mapped to SDR on every decode path — see "Colour in and out" below). Previously 2026-10-05 (crop keyframes and a temporal mode for Reduce noise — see "Crop keyframes and temporal denoise" below). Previously 2026-10-04 (release builds: a manual Release workflow with a .deb, AppImages that bundle FFmpeg, and experimental macOS and Windows jobs — see "Release builds" below). Previously 2026-10-04 (the CLI's crash after an export found and fixed, and the shells leave through `lifecycle::exit` — see "The crash after the export" below). Previously 2026-10-04 (QA pass 3 over waves 10–11: five fixes, the showcase extended — see "QA pass 3" below). Previously 2026-10-04 (crop, speed effects, denoise, Performance settings, a persisted export queue with a quit guard, and the ML worker and CLI in the tarball — see "UX gaps" below). Previously 2026-10-04 (body landmarks, follow a body part, reframe on a body, zipped models, faces and voices in the preparation — see "Body landmarks" below). Previously 2026-10-04 (the "At a glance" block above, after polish pass 3). Previously 2026-10-04 (QA pass 2 over the wave 7–9 features and a showcase that shows them — see "QA pass 2" below). Previously 2026-10-04 (CI: clippy is fatal, the engine tests run on lavapipe with ffmpeg, the CLI and ML worker tests run too — see "CI" below). Previously 2026-10-04 (preview frames no longer leave the GPU: shared with GPUI through a patched GPUI, readback as the fallback — see "Preview frames shared with GPUI" under Perf). Previously 2026-10-04 (ML worker: VitTrack re-finding, Remove background, CUDA — see "The ML worker" below). Previously 2026-10-02 (**the UI is native now** — decision 0011. The Tauri
+Last updated: 2026-10-05 (robustness: the export streams its audio over its range, panics are logged and contained, damaged documents do not render, jobs commit only into their own project, `run_export` joins its thread. See "Robustness" below). Previously 2026-10-05 (colour in and out: exports converted and tagged as BT.709 or BT.601, 10-bit HEVC/AV1 export, HDR and 10-bit sources tone-mapped to SDR on every decode path — see "Colour in and out" below). Previously 2026-10-05 (crop keyframes and a temporal mode for Reduce noise — see "Crop keyframes and temporal denoise" below). Previously 2026-10-04 (release builds: a manual Release workflow with a .deb, AppImages that bundle FFmpeg, and experimental macOS and Windows jobs — see "Release builds" below). Previously 2026-10-04 (the CLI's crash after an export found and fixed, and the shells leave through `lifecycle::exit` — see "The crash after the export" below). Previously 2026-10-04 (QA pass 3 over waves 10–11: five fixes, the showcase extended — see "QA pass 3" below). Previously 2026-10-04 (crop, speed effects, denoise, Performance settings, a persisted export queue with a quit guard, and the ML worker and CLI in the tarball — see "UX gaps" below). Previously 2026-10-04 (body landmarks, follow a body part, reframe on a body, zipped models, faces and voices in the preparation — see "Body landmarks" below). Previously 2026-10-04 (the "At a glance" block above, after polish pass 3). Previously 2026-10-04 (QA pass 2 over the wave 7–9 features and a showcase that shows them — see "QA pass 2" below). Previously 2026-10-04 (CI: clippy is fatal, the engine tests run on lavapipe with ffmpeg, the CLI and ML worker tests run too — see "CI" below). Previously 2026-10-04 (preview frames no longer leave the GPU: shared with GPUI through a patched GPUI, readback as the fallback — see "Preview frames shared with GPUI" under Perf). Previously 2026-10-04 (ML worker: VitTrack re-finding, Remove background, CUDA — see "The ML worker" below). Previously 2026-10-02 (**the UI is native now** — decision 0011. The Tauri
 shell and the React frontend are gone; the engine is `crates/engine`
 (`chukcut-engine`, no UI dependency) and the app is a GPUI window in
 `crates/app`. What the native app does today: import (dialog or command line),
@@ -90,6 +90,81 @@ forgets). Previously 2026-07-27: the preview stopped copying its frames — the
 JPEG encoder now reads a surface the compositor drew into, 2.7–2.9× on a whole
 frame; and earlier the same day, the attempt that went the other way round and
 the `vkDeviceWaitIdle` crash it found.
+
+## Robustness (2026-10-05, `agent/robust`)
+
+This section covers findings 1, 2, 3, 8 and 10 of
+`docs/research/quality-audit-2026-10.md`. Decision 0035 has the policy.
+
+- **The export mixes only its range, block by block** (`export::audio::MixStream`).
+  The mix is bit-identical to the old whole-buffer mix. The unit test
+  `the_streamed_mix_is_the_buffered_mix_bit_for_bit` keeps the old algorithm
+  as its reference: speeds, a curve, effects, keyframes, links, clipping,
+  1 and 2 channels, five ranges and four block sizes. In an end-to-end check
+  against the master release CLI, a project with a video clip at volume 0.7
+  and an MP3 on an audio lane gave byte-identical WAV files for the whole
+  project and for a 1.3–4.7 s range. File sources are read in pieces through
+  one forward decoder (`FileStream`). That gives the same samples as one
+  read, on AAC at 44.1 kHz too (`tests/export_audio_stream.rs`).
+  **Measured** (allocation peak, three-hour timeline):
+
+  | Range | Before | Now |
+  |---|---|---|
+  | 2 s at the start | 4.1 GB buffer; killed at 6.6 GB RSS | 2.3 MB |
+  | 2 s on a pitch-kept 2x clip | the same | 18 MB (the clip's render) |
+  | Whole 3 h, streamed | 4.1 GB | 19 MB |
+
+  A clip at 9·10¹⁸ µs no longer aborts the export. The document check now
+  refuses it before the render.
+- **Traps:**
+  - A loudness-target export still buffers its **range**: a three-hour export
+    with a target needs 4 GB. A clip with effects or a pitch-kept speed is
+    rendered whole when the range reaches it.
+  - `AudioClipReader` seeks when a read jumps more than 2 s ahead. A seek is
+    not sample-identical to decoding through, because of the codec priming
+    after the seek. So `FileStream` decodes through gaps of up to 30 s. A
+    range that starts more than 30 s into a clip seeks. The old export
+    decoded from the clip's start; the difference is in the first packet
+    only.
+- **Panics** go to the log file with a backtrace, in the app, the CLI and
+  (through the editor's log) the ML worker. They are contained where they
+  happen; decision 0035 has the table. The preview shows "The preview
+  stopped: …" with a **Restart preview** button. To inject a panic in a
+  test, use `chukcut_engine::faults::arm("point:key")`. The points are
+  `export.run`, `export.frame`, `player.render`, `bake.matting`,
+  `bake.enhance`, `bake.flow`, `tracking.run`, `prepare.item` and
+  `mcp.request`. Always arm a fault with a key: a fault armed without one
+  can fire in a parallel test.
+- **Documents:** `validate` refuses a canvas outside 2–8192 px, a frame rate
+  outside 1–240 and times past 100 hours. Every render runs `render_check`:
+  the app's dialog, the queue, the CLI's `export` and `render-frame`, and
+  MCP. A damaged project still opens; its problems are shown once. The
+  first clip's canvas change is on the undo stack, and a 1 fps clip leaves
+  the project at 30 fps with a notice.
+- **Stale jobs:** `AppState::generation` is raised *before* a project is
+  installed. Every job that edits the document commits through it.
+  Tracking, analyses, reframe and caption transcripts drop a result for a
+  project that is no longer open, and `project_close` cancels them.
+- **`run_export` runs on its own thread and joins it.** The lead reported
+  `tests/export.rs` dying with SIGSEGV at process exit (1 run in 9). This
+  is the class of the CLI crash in "The crash after the export": a thread
+  that used NVDEC, NVENC or Vulkan was still ending (thread-local
+  destructors) when `exit` ran the drivers' destructors. In a test binary
+  that thread is the test thread itself. libtest reports a result before
+  the thread has ended, and test binaries do not exit through
+  `lifecycle::exit`. Now the export, its decoder teardown
+  (`SourceProvider::release`) and the thread's end all happen before
+  `run_export` returns. This covers the export threads and the queue too.
+  **Not verified by a loop:** see the next trap.
+- **TRAP: never run more than one GPU test binary at a time, and never kill
+  one in the middle of GPU work.** Six copies of `tests/export.rs` at once,
+  pinned to four cores, include `every_hardware_encoder…` and can go past
+  the NVENC session limit. Ending them with SIGTERM then hung the NVIDIA
+  driver for the whole machine: gnome-shell, Xvfb, `nvidia-smi` and every
+  GPU process stuck in D state. Only a reboot recovers from that. Copies of
+  one test binary also share their `CARGO_TARGET_TMPDIR` scratch files and
+  fail each other (exit 101). To reproduce an exit race, run **one** binary
+  in a loop, one run after another, while other load runs next to it.
 
 ## Crop keyframes and temporal denoise (2026-10-05, `agent/crop2`)
 

@@ -367,6 +367,41 @@ fn missing_frames_are_queued_and_complete_clips_are_left_alone() {
     }
 }
 
+/// A bug in a bake is contained to that bake: the job finishes with an
+/// error that says the background removal stopped, the failure is recorded
+/// so it is not retried after every edit, and the process goes on.
+#[test]
+fn a_panic_in_a_bake_fails_that_bake_and_nothing_else() {
+    let Some(path) = white("panic.mp4") else {
+        eprintln!("skipping: ffmpeg could not generate the fixture");
+        return;
+    };
+    let state = state_with(&path);
+    let key = cache::key_for(&path, &matting::current_model()).unwrap();
+    for (_, dir) in cache::dirs_of(&key) {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    chukcut_engine::faults::arm(&format!("bake.matting:{key}"));
+    let response = matting::matting_remove_background(&state, "clip".into(), true).unwrap();
+    let job = response.job.expect("a bake starts");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let finished = loop {
+        if let Some(done) = matting::matting_status(job).and_then(|s| s.finished) {
+            break done;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the bake never finished"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    };
+    let error = finished.expect_err("the bake failed");
+    assert!(
+        error.contains("stopped on an internal error") && error.contains("injected fault"),
+        "{error}"
+    );
+}
+
 /// "Select object" turns clicks on the canvas into points of the source
 /// frame, records them with the frame's source time as one undoable edit,
 /// and refuses clicks it cannot use, in words.

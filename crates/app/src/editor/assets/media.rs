@@ -512,23 +512,30 @@ impl Editor {
         cx.notify();
         cx.spawn(async move |this, cx| {
             let mut errors = Vec::new();
+            let mut notices = Vec::new();
             let mut imported = 0;
             for path in paths {
                 let path = path.to_string_lossy().to_string();
                 match project_commands::project_import_media(&state, path.clone()).await {
-                    Ok(_) => imported += 1,
+                    Ok(material) => {
+                        imported += 1;
+                        notices.extend(material.notice);
+                    }
                     Err(error) => errors.push(format!("{}: {error}", file_name(&path))),
                 }
             }
             let _ = this.update(cx, |editor, cx| {
                 editor.refresh(cx);
-                editor.status = Some(if errors.is_empty() {
+                editor.status = Some(if !errors.is_empty() {
+                    errors.join(" · ").into()
+                } else if !notices.is_empty() {
+                    // The frame rate the first clip was not allowed to set.
+                    notices.join(" · ").into()
+                } else {
                     match imported {
                         1 => "Imported 1 file".into(),
                         n => format!("Imported {n} files").into(),
                     }
-                } else {
-                    errors.join(" · ").into()
                 });
                 cx.notify();
             });

@@ -371,6 +371,11 @@ pub trait SourceProvider: Send + Sync {
     fn cache_identity(&self) -> Option<u64> {
         None
     }
+
+    /// A render session ended: close what was opened for it (decoders,
+    /// cached textures). Called by the export on the thread that did the
+    /// decoding (`export::job::run_export`). The default holds nothing.
+    fn release(&self) {}
 }
 
 impl<T: SourceProvider + ?Sized> SourceProvider for &T {
@@ -385,6 +390,10 @@ impl<T: SourceProvider + ?Sized> SourceProvider for &T {
     fn cache_identity(&self) -> Option<u64> {
         (**self).cache_identity()
     }
+
+    fn release(&self) {
+        (**self).release()
+    }
 }
 
 impl<T: SourceProvider + ?Sized> SourceProvider for Arc<T> {
@@ -398,6 +407,10 @@ impl<T: SourceProvider + ?Sized> SourceProvider for Arc<T> {
 
     fn cache_identity(&self) -> Option<u64> {
         (**self).cache_identity()
+    }
+
+    fn release(&self) {
+        (**self).release()
     }
 }
 

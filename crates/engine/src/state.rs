@@ -7,11 +7,16 @@
 
 use parking_lot::RwLock;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::modules::project::{ConfigureCommand, Project};
 use crate::modules::timeline::ops::{self, EditCommand};
 use crate::modules::tracking::TrackingCommand;
+
+/// What a background job answers when its project was closed or replaced
+/// before it finished: its result is dropped, not written anywhere.
+pub const STALE_JOB: &str = "the project this was started for is no longer open";
 
 pub struct AppState {
     /// The open document. `None` before the first project is created or opened.
@@ -20,17 +25,57 @@ pub struct AppState {
     pub project_path: RwLock<Option<PathBuf>>,
     /// Undo/redo stacks for the open project.
     pub history: RwLock<DocumentHistory>,
+    /// Which opened document this is: raised every time a project is opened,
+    /// created, restored or closed. A background job captures it when it
+    /// starts and drops its result when it has changed, so a finished
+    /// tracking, reframe or analysis never writes into the next project
+    /// (decision 0035).
+    generation: AtomicU64,
+    /// What the last open found wrong with the file — migration repairs and
+    /// validation problems — in sentences, for the app to show once.
+    pub open_notes: RwLock<Vec<String>>,
 }
 
 impl AppState {
     pub fn new() -> Arc<Self> {
         // Filler-word cutting reads the captions' words; see `captions::words`.
         crate::modules::captions::words::register();
-        Arc::new(Self {
-            project: RwLock::new(None),
-            project_path: RwLock::new(None),
-            history: RwLock::new(DocumentHistory::new()),
-        })
+        Arc::new(Self::default())
+    }
+
+    /// The open document's generation; see the field.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    /// A different document is now open (or none): every job started for
+    /// the previous one is stale from here on. Returns the new generation.
+    pub fn next_generation(&self) -> u64 {
+        self.generation.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    /// Whether a job started at `generation` still belongs to the open
+    /// document.
+    pub fn is_current(&self, generation: u64) -> bool {
+        self.generation() == generation
+    }
+
+    /// Run `f` on the open project — the commit of a background job — only
+    /// if it is still the document of `generation`, the one the job was
+    /// started for. Checked under the write lock, and the generation is
+    /// raised before a new document is installed, so no commit can land in
+    /// a project opened after its job started.
+    pub fn with_project_of<T>(
+        &self,
+        generation: u64,
+        f: impl FnOnce(&mut Project) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let mut guard = self.project.write();
+        if !self.is_current(generation) {
+            return Err(STALE_JOB.into());
+        }
+        let project = guard.as_mut().ok_or("no project is open")?;
+        f(project)
     }
 
     /// Run `f` against the open project, or return a "no project open" error.
@@ -53,6 +98,8 @@ impl Default for AppState {
             project: RwLock::new(None),
             project_path: RwLock::new(None),
             history: RwLock::new(DocumentHistory::new()),
+            generation: AtomicU64::new(1),
+            open_notes: RwLock::new(Vec::new()),
         }
     }
 }
@@ -307,6 +354,30 @@ mod tests {
             track: Track::new(TrackKind::Video, "V1"),
             index: 0,
         }
+    }
+
+    /// A job's commit lands only in the document it was started for: once
+    /// another project is opened (the generation moved), it is refused and
+    /// the open document is untouched.
+    #[test]
+    fn a_commit_for_an_older_generation_is_refused() {
+        let state = AppState::new();
+        *state.project.write() = Some(project());
+        let started = state.generation();
+        assert!(state
+            .with_project_of(started, |p| {
+                p.name = "committed".into();
+                Ok(())
+            })
+            .is_ok());
+        state.next_generation();
+        *state.project.write() = Some(project());
+        let refused = state.with_project_of(started, |p| {
+            p.name = "late".into();
+            Ok(())
+        });
+        assert_eq!(refused, Err(STALE_JOB.to_string()));
+        assert_eq!(state.with_project(|p| p.name.clone()).unwrap(), "t");
     }
 
     fn resize(project: &Project, width: u32, height: u32) -> ConfigureCommand {

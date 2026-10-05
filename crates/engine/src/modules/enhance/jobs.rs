@@ -135,10 +135,15 @@ pub(crate) fn start(job: EnhanceJob, segment_id: String) -> Result<Option<u64>, 
     std::thread::Builder::new()
         .name("chukcut-enhance".into())
         .spawn(move || {
-            let result = bake::run(&job, &handle.cancel, |p| {
-                let mut status = handle.status.lock();
-                status.progress = p.clone();
-                status.warning = p.cpu_warning();
+            // Contained: a bug in a model run fails this bake, which is
+            // reported and retried like any other failure.
+            let result = crate::lifecycle::contained("Remaking the frames", || {
+                crate::faults::hit_keyed("bake.enhance", &handle.key);
+                bake::run(&job, &handle.cancel, |p| {
+                    let mut status = handle.status.lock();
+                    status.progress = p.clone();
+                    status.warning = p.cpu_warning();
+                })
             });
             match &result {
                 Ok(outcome) => tracing::info!(

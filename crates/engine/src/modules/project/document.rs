@@ -35,6 +35,20 @@ pub type Micros = i64;
 
 pub const MICROS_PER_SECOND: Micros = 1_000_000;
 
+/// The longest edge a canvas may have. Past it the GPU refuses the texture
+/// (8192 is the guaranteed minimum of every adapter we support) and the
+/// encoders refuse the frame.
+pub const MAX_CANVAS_EDGE: u32 = 8192;
+/// The project frame rates a document may have. Below one frame a second
+/// every keyframe snaps to a second; above 240 no encoder or display keeps
+/// up, and `frame_duration` divides by it.
+pub const MIN_FPS: f64 = 1.0;
+pub const MAX_FPS: f64 = 240.0;
+/// No instant on a timeline, and no source position, lies past this: 100
+/// hours. A clip at 9·10¹⁸ µs (a hand-edited file) made the export ask for an
+/// exabyte; the bound keeps every `start + duration` far from overflowing.
+pub const MAX_TIME: Micros = 100 * 3_600 * MICROS_PER_SECOND;
+
 /// A half-open time interval `[start, start + duration)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimeRange {
@@ -1967,6 +1981,37 @@ pub enum Severity {
 }
 
 impl Project {
+    /// `Ok` when [`Self::validate`] finds no error, else a sentence naming
+    /// the first few. Every render — an export, a queued export, a saved
+    /// frame, from the app or the CLI — runs this first: a document with an
+    /// error renders wrong or fails late (a clip at 9·10¹⁸ µs aborted the
+    /// export with an allocation failure), and the reason is in the document,
+    /// not in the encoder.
+    pub fn render_check(&self) -> Result<(), String> {
+        let errors: Vec<String> = self
+            .validate()
+            .into_iter()
+            .filter(|i| i.severity == Severity::Error)
+            .map(|i| i.message)
+            .collect();
+        if errors.is_empty() {
+            return Ok(());
+        }
+        let shown: Vec<&str> = errors.iter().take(3).map(String::as_str).collect();
+        let more = errors.len().saturating_sub(shown.len());
+        Err(format!(
+            "the project has {} problem{} that must be fixed before it can render: {}{}",
+            errors.len(),
+            if errors.len() == 1 { "" } else { "s" },
+            shown.join("; "),
+            if more > 0 {
+                format!("; and {more} more")
+            } else {
+                String::new()
+            }
+        ))
+    }
+
     /// Structural checks. Warnings are things the app can live with (a missing
     /// file); errors mean an edit operation produced an inconsistent document
     /// and is a bug on our side.
@@ -1992,8 +2037,34 @@ impl Project {
                 None,
             );
         }
+        if self.fps.is_finite() && self.fps > 0.0 && !(MIN_FPS..=MAX_FPS).contains(&self.fps) {
+            error(
+                format!(
+                    "project frame rate {} is outside {MIN_FPS}–{MAX_FPS} fps",
+                    self.fps
+                ),
+                None,
+            );
+        }
         if !self.canvas.background.iter().all(|c| c.is_finite()) {
             error("canvas background is not a finite colour".into(), None);
+        }
+        let (width, height) = (self.canvas.width, self.canvas.height);
+        if width < 2 || height < 2 || width > MAX_CANVAS_EDGE || height > MAX_CANVAS_EDGE {
+            error(
+                format!(
+                    "the canvas is {width}x{height}; each edge must be 2 to {MAX_CANVAS_EDGE} pixels"
+                ),
+                None,
+            );
+        } else if !width.is_multiple_of(2) || !height.is_multiple_of(2) {
+            // Renders, but every 4:2:0 encoder refuses an odd edge; the
+            // export rounds it down.
+            outside.push(ValidationIssue {
+                severity: Severity::Warning,
+                message: format!("the canvas {width}x{height} has an odd edge"),
+                subject_id: None,
+            });
         }
 
         // Ids are the document's only cross-references — `segment_mut` and
@@ -2046,7 +2117,62 @@ impl Project {
                         Some(seg.id.clone()),
                     );
                 }
+                // Checked, not `end()`: a hand-edited time near `i64::MAX`
+                // overflows the sum, and everything downstream that sizes a
+                // buffer or counts frames by it fails late and badly.
+                let target_end = seg
+                    .target_range
+                    .start
+                    .checked_add(seg.target_range.duration.max(0));
+                let source_end = seg
+                    .source_range
+                    .start
+                    .checked_add(seg.source_range.duration.max(0));
+                let hours = MAX_TIME / (3_600 * MICROS_PER_SECOND);
+                if target_end.is_none_or(|end| end > MAX_TIME) {
+                    error(
+                        format!(
+                            "segment ends past the {hours}-hour limit of a timeline (it starts at {} µs)",
+                            seg.target_range.start
+                        ),
+                        Some(seg.id.clone()),
+                    );
+                    // The checks below do arithmetic on these times.
+                    prev_end = Micros::MAX;
+                    continue;
+                }
+                if source_end.is_none_or(|end| end > MAX_TIME) {
+                    error(
+                        format!(
+                            "segment reads its material past {hours} hours (from {} µs)",
+                            seg.source_range.start
+                        ),
+                        Some(seg.id.clone()),
+                    );
+                    prev_end = target_end.unwrap_or(Micros::MAX);
+                    continue;
+                }
                 prev_end = seg.target_range.end();
+
+                // Past the end of its file: black or silent, which a user
+                // should hear about but can still open and fix.
+                let material_length = self
+                    .materials
+                    .video(&seg.material_id)
+                    .map(|m| m.duration)
+                    .or_else(|| self.materials.audio(&seg.material_id).map(|m| m.duration));
+                if let Some(length) = material_length.filter(|l| *l > 0) {
+                    if seg.source_range.start >= length {
+                        outside.push(ValidationIssue {
+                            severity: Severity::Warning,
+                            message: format!(
+                                "segment reads from {} µs, past the end of its media ({length} µs)",
+                                seg.source_range.start
+                            ),
+                            subject_id: Some(seg.id.clone()),
+                        });
+                    }
+                }
 
                 if seg.source_range.start < 0 {
                     error(
@@ -2306,6 +2432,85 @@ impl Project {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn errors(project: &Project) -> Vec<String> {
+        project
+            .validate()
+            .into_iter()
+            .filter(|i| i.severity == Severity::Error)
+            .map(|i| i.message)
+            .collect()
+    }
+
+    fn one_clip(start: Micros, duration: Micros) -> Project {
+        let mut project = Project::new("t", CanvasConfig::default(), 30.0);
+        let mut track = Track::new(TrackKind::Video, "V1");
+        track.segments.push(Segment {
+            id: "s".into(),
+            material_id: "m".into(),
+            target_range: TimeRange::new(start, duration),
+            source_range: TimeRange::new(0, duration),
+            render_index: 0,
+            speed: 1.0,
+            volume: 1.0,
+            transform: Transform::default(),
+            crop: None,
+            extras: Vec::new(),
+            keyframes: Vec::new(),
+        });
+        project.tracks.push(track);
+        project
+    }
+
+    /// The audit's damaged files, each refused by `validate` and by
+    /// `render_check`: they all used to pass and then rendered, exported or
+    /// aborted.
+    #[test]
+    fn absurd_canvases_rates_and_times_are_errors() {
+        assert!(errors(&one_clip(0, 1_000_000)).is_empty());
+
+        let mut zero = one_clip(0, 1_000_000);
+        zero.canvas.width = 0;
+        assert!(errors(&zero)[0].contains("canvas"), "{:?}", errors(&zero));
+        let mut huge = one_clip(0, 1_000_000);
+        huge.canvas.width = 100_000;
+        huge.canvas.height = 100_000;
+        assert!(!errors(&huge).is_empty());
+
+        let mut fast = one_clip(0, 1_000_000);
+        fast.fps = 100_000.0;
+        assert!(errors(&fast)[0].contains("frame rate"));
+        let mut none = one_clip(0, 1_000_000);
+        none.fps = 0.0;
+        assert!(!errors(&none).is_empty());
+
+        // 9·10¹⁸ µs: far past 100 hours, and near enough to `i64::MAX` that
+        // `start + duration` overflows. No panic, an error.
+        let far = one_clip(9_000_000_000_000_000_000, 1_000_000);
+        assert!(errors(&far)[0].contains("100-hour"), "{:?}", errors(&far));
+        let edge = one_clip(i64::MAX - 10, 1_000_000);
+        assert!(!errors(&edge).is_empty());
+
+        let mut stopped = one_clip(0, 1_000_000);
+        stopped.tracks[0].segments[0].speed = 0.0;
+        assert!(!errors(&stopped).is_empty());
+
+        let message = far.render_check().unwrap_err();
+        assert!(message.contains("1 problem"), "{message}");
+        assert!(one_clip(0, 1_000_000).render_check().is_ok());
+    }
+
+    /// An odd canvas renders and only the encoders mind: a warning.
+    #[test]
+    fn an_odd_canvas_is_a_warning() {
+        let mut odd = one_clip(0, 1_000_000);
+        odd.canvas.width = 1081;
+        assert!(errors(&odd).is_empty());
+        assert!(odd
+            .validate()
+            .iter()
+            .any(|i| i.severity == Severity::Warning && i.message.contains("odd")));
+    }
 
     #[test]
     fn time_range_intersection() {

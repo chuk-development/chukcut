@@ -100,7 +100,15 @@ pub(super) fn start(state: Arc<AppState>, grace: Duration) -> u64 {
     let spawned = std::thread::Builder::new()
         .name("chukcut-prepare".into())
         .spawn(move || {
-            work(&state, &thread, grace);
+            // Contained twice: a panic in one clip's bake fails that clip
+            // (in `work`), and one anywhere else ends the run with a
+            // failure on the status line rather than a chip that never
+            // finishes.
+            if let Err(error) =
+                crate::lifecycle::contain("Preparing the project", || work(&state, &thread, grace))
+            {
+                fail(&thread, "Preparing the project", &error);
+            }
             thread.status.lock().finished = true;
         });
     if let Err(error) = spawned {
@@ -147,7 +155,13 @@ fn work(state: &Arc<AppState>, run: &Run, grace: Duration) {
         if !going(state, run, &project_id) {
             break;
         }
-        execute(state, run, &project, &project_id, item);
+        let contained = crate::lifecycle::contain("Preparing a clip", || {
+            crate::faults::hit_keyed("prepare.item", &project_id);
+            execute(state, run, &project, &project_id, item)
+        });
+        if let Err(error) = contained {
+            fail(run, "A clip", &error);
+        }
     }
     run.status.lock().stage = None;
 }

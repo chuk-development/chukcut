@@ -487,6 +487,7 @@ pub async fn export_snapshot(
         .read()
         .clone()
         .ok_or("no project is open, so there is no frame to save")?;
+    project.render_check()?;
 
     // Rendering a canvas-sized frame plus a PNG encode is tens to hundreds of
     // milliseconds, which is far past what a command may spend on the main

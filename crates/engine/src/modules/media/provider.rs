@@ -1047,6 +1047,10 @@ impl SourceProvider for MediaSourceProvider {
         Some(self.identity.load(std::sync::atomic::Ordering::Relaxed))
     }
 
+    fn release(&self) {
+        self.clear();
+    }
+
     fn prefetch(&self, ctx: &RenderContext, project: &Project, time: Micros, size: (u32, u32)) {
         self.prefetch_clips(ctx, project, time, size);
     }

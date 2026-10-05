@@ -94,42 +94,76 @@ pub fn render_to_cache(spec: &RenderSpec, cancel: &AtomicBool) -> Result<PathBuf
 
 /// Write interleaved `f32` as a WAVE_FORMAT_IEEE_FLOAT file.
 pub fn write_wav_f32(path: &Path, samples: &[f32], rate: u32, channels: u16) -> Result<(), String> {
-    let io = |e: std::io::Error| format!("cannot write {}: {e}", path.display());
-    let data = samples.len() as u64 * 4;
-    if data > u32::MAX as u64 - 50 {
-        return Err("the rendered audio is longer than a WAV file can hold".into());
-    }
-    let file = std::fs::File::create(path).map_err(io)?;
-    let mut w = BufWriter::new(file);
-    let block = channels as u32 * 4;
-    let mut header = Vec::with_capacity(58);
-    header.extend_from_slice(b"RIFF");
-    header.extend_from_slice(&(50 + data as u32).to_le_bytes());
-    header.extend_from_slice(b"WAVEfmt ");
-    header.extend_from_slice(&18u32.to_le_bytes());
-    header.extend_from_slice(&3u16.to_le_bytes()); // IEEE float
-    header.extend_from_slice(&channels.to_le_bytes());
-    header.extend_from_slice(&rate.to_le_bytes());
-    header.extend_from_slice(&(rate * block).to_le_bytes());
-    header.extend_from_slice(&(block as u16).to_le_bytes());
-    header.extend_from_slice(&32u16.to_le_bytes());
-    header.extend_from_slice(&0u16.to_le_bytes()); // cbSize
-                                                   // Non-PCM WAVE files carry a fact chunk with the frame count.
-    header.extend_from_slice(b"fact");
-    header.extend_from_slice(&4u32.to_le_bytes());
-    header.extend_from_slice(&((samples.len() / channels.max(1) as usize) as u32).to_le_bytes());
-    header.extend_from_slice(b"data");
-    header.extend_from_slice(&(data as u32).to_le_bytes());
-    w.write_all(&header).map_err(io)?;
-    let mut bytes = Vec::with_capacity(64 * 1024);
-    for chunk in samples.chunks(16 * 1024) {
-        bytes.clear();
-        for s in chunk {
-            bytes.extend_from_slice(&s.to_le_bytes());
+    let frames = samples.len() / channels.max(1) as usize;
+    let mut w = WavF32Writer::create(path, frames, rate, channels)?;
+    w.write(samples)?;
+    w.finish()
+}
+
+/// A WAVE_FORMAT_IEEE_FLOAT file written in pieces, for a mix too long to
+/// hold: the length is known up front, so the header is final from the start.
+pub struct WavF32Writer {
+    path: std::path::PathBuf,
+    w: BufWriter<std::fs::File>,
+    bytes: Vec<u8>,
+}
+
+impl WavF32Writer {
+    /// Create `path` for `frames` sample frames of `channels` at `rate`.
+    pub fn create(path: &Path, frames: usize, rate: u32, channels: u16) -> Result<Self, String> {
+        let io = |e: std::io::Error| format!("cannot write {}: {e}", path.display());
+        let data = frames as u64 * channels as u64 * 4;
+        if data > u32::MAX as u64 - 50 {
+            return Err("the rendered audio is longer than a WAV file can hold".into());
         }
-        w.write_all(&bytes).map_err(io)?;
+        let file = std::fs::File::create(path).map_err(io)?;
+        let mut w = BufWriter::new(file);
+        let block = channels as u32 * 4;
+        let mut header = Vec::with_capacity(58);
+        header.extend_from_slice(b"RIFF");
+        header.extend_from_slice(&(50 + data as u32).to_le_bytes());
+        header.extend_from_slice(b"WAVEfmt ");
+        header.extend_from_slice(&18u32.to_le_bytes());
+        header.extend_from_slice(&3u16.to_le_bytes()); // IEEE float
+        header.extend_from_slice(&channels.to_le_bytes());
+        header.extend_from_slice(&rate.to_le_bytes());
+        header.extend_from_slice(&(rate * block).to_le_bytes());
+        header.extend_from_slice(&(block as u16).to_le_bytes());
+        header.extend_from_slice(&32u16.to_le_bytes());
+        header.extend_from_slice(&0u16.to_le_bytes()); // cbSize
+                                                       // Non-PCM WAVE files carry a fact chunk with the frame count.
+        header.extend_from_slice(b"fact");
+        header.extend_from_slice(&4u32.to_le_bytes());
+        header.extend_from_slice(&(frames as u32).to_le_bytes());
+        header.extend_from_slice(b"data");
+        header.extend_from_slice(&(data as u32).to_le_bytes());
+        w.write_all(&header).map_err(io)?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            w,
+            bytes: Vec::with_capacity(64 * 1024),
+        })
     }
-    w.flush().map_err(io)
+
+    pub fn write(&mut self, samples: &[f32]) -> Result<(), String> {
+        let path = &self.path;
+        let io = |e: std::io::Error| format!("cannot write {}: {e}", path.display());
+        for chunk in samples.chunks(16 * 1024) {
+            self.bytes.clear();
+            for s in chunk {
+                self.bytes.extend_from_slice(&s.to_le_bytes());
+            }
+            self.w.write_all(&self.bytes).map_err(io)?;
+        }
+        Ok(())
+    }
+
+    pub fn finish(mut self) -> Result<(), String> {
+        let path = &self.path;
+        self.w
+            .flush()
+            .map_err(|e| format!("cannot write {}: {e}", path.display()))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -203,7 +237,10 @@ fn worker_loop(r: Arc<Renderer>) {
             }
         };
         let started = std::time::Instant::now();
-        let result = render_to_cache(&spec, &never);
+        // Contained: a bug in one clip's render fails that clip (it plays
+        // unprocessed) instead of ending the thread every render waits on.
+        let result =
+            crate::lifecycle::contained("The audio render", || render_to_cache(&spec, &never));
         let mut q = r.queue.lock();
         q.busy.remove(&path);
         match result {

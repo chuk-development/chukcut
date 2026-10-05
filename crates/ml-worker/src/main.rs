@@ -64,7 +64,59 @@ fn default_root() -> PathBuf {
         .join("ml")
 }
 
+/// Report a panic on stderr, every line marked, with a backtrace. The editor
+/// forwards the worker's stderr into its own log file line by line
+/// (`modules::ml::worker`), so this is how a worker panic reaches the log a
+/// user sends.
+fn install_panic_hook() {
+    std::panic::set_hook(Box::new(move |info| {
+        let thread = std::thread::current();
+        let place = info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()))
+            .unwrap_or_default();
+        let message = panic_message(info.payload());
+        let backtrace = std::backtrace::Backtrace::force_capture().to_string();
+        let mut report = format!(
+            "panic: thread '{}' at {place}: {message}\n",
+            thread.name().unwrap_or("unnamed")
+        );
+        for line in backtrace.lines() {
+            report.push_str("panic:   ");
+            report.push_str(line);
+            report.push('\n');
+        }
+        eprint!("{report}");
+    }));
+}
+
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(text) = payload.downcast_ref::<&str>() {
+        (*text).to_string()
+    } else if let Some(text) = payload.downcast_ref::<String>() {
+        text.clone()
+    } else {
+        "a panic without a message".into()
+    }
+}
+
+/// Run one request's work with a panic turned into an error reply: a bug in
+/// one model run answers that request and leaves the worker serving the next
+/// one, rather than ending the process and every request queued behind it.
+fn contain_request(work: impl FnOnce() -> Result<Outcome, Failure>) -> Result<Outcome, Failure> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).unwrap_or_else(|payload| {
+        Err((
+            ErrorKind::Inference,
+            format!(
+                "the ML worker stopped on an internal error: {}",
+                panic_message(payload.as_ref())
+            ),
+        ))
+    })
+}
+
 fn main() {
+    install_panic_hook();
     let mut args = std::env::args().skip(1);
     let mut root = default_root();
     let mut mode = Acceleration::Standard;
@@ -170,7 +222,7 @@ fn main() {
                 )
             })));
         }
-        let reply = match worker.handle(id, request.body, &payload, &progress) {
+        let reply = match contain_request(|| worker.handle(id, request.body, &payload, &progress)) {
             Ok(outcome) => Reply::Done { outcome },
             Err((kind, message)) => Reply::Error { kind, message },
         };
@@ -1733,4 +1785,19 @@ fn quality(task: Task, reference: &[u8], output: &[u8]) -> Option<Quality> {
         output,
         matches!(task, Task::Matte | Task::MatteImage | Task::SegmentEncoder),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_panicking_request_answers_an_error_and_the_next_one_runs() {
+        let failed = contain_request(|| panic!("model blew up"));
+        let (kind, message) = failed.unwrap_err();
+        assert_eq!(kind, ErrorKind::Inference);
+        assert!(message.contains("model blew up"), "{message}");
+        let next = contain_request(|| Ok(Outcome::Ok));
+        assert!(matches!(next, Ok(Outcome::Ok)));
+    }
 }

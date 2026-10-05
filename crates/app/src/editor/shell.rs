@@ -240,10 +240,24 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         let state = Arc::clone(&self.state);
+        // What the open found wrong with the file, said once: the project
+        // opens anyway, and a render refuses it until it is fixed.
+        let notes = project_commands::project_open_notes(&state);
         let editor = cx.new(|cx| {
             let mut editor = Editor::new(state, media, window, cx);
             if restored {
                 editor.mark_unsaved();
+            }
+            if let Some(first) = notes.first() {
+                editor.status = Some(
+                    match notes.len() {
+                        1 => format!("This project opened with a problem: {first}"),
+                        n => format!(
+                            "This project opened with {n} problems; the first: {first}. The log lists all of them."
+                        ),
+                    }
+                    .into(),
+                );
             }
             editor
         });

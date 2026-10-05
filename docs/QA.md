@@ -582,6 +582,39 @@ Paint on player and Select on player for Remove object (covered by the
 ml4 pass; here through the CLI); the people fallback of auto reframe on a
 clip where YuNet finds nothing at all (here 15 % of frames had a "face").
 
+## Robustness, 2026-10-05 (`agent/robust`)
+
+What is tested and how to check it again. Decision 0035 has the policy.
+
+| Check | Test | GPU |
+|---|---|---|
+| The streamed mix is bit-identical to the old whole-buffer mix (busy project, ranges, block sizes, 1 and 2 channels, unclamped) | `export::audio::tests::the_streamed_mix_is_the_buffered_mix_bit_for_bit` | no |
+| A file read in pieces is the same samples as one read (AAC, 44.1 kHz) | `tests/export_audio_stream.rs` `reading_a_file_in_pieces…` | no |
+| A 2 s range of a 3 h timeline peaks at 2.3 MB of allocations (bound 64 MB) | `tests/export_audio_stream.rs` `a_short_range…` | no |
+| The same through `run_export` to a WAV | `tests/export_audio_stream.rs` `a_range_export…` | yes |
+| A clip at 9·10¹⁸ µs: no allocation abort, never decoded | `export::audio::tests::a_clip_at_an_absurd_time…` | no |
+| The panic hook reports message, thread, place and backtrace | `lifecycle::tests` | no |
+| The player stops on a panic, says why and restarts | `preview::player::tests::a_panic_in_the_render_thread…` | yes |
+| The queue fails a panicking item and goes on; a panic outside the export does not leave the queue stuck | `export::queue::tests` | no |
+| An MCP request that panics answers `-32603` and the next request is served | `chukcut-cli` `mcp::tests::a_panicking_request…` | no |
+| An ML worker request that panics answers an error | `chukcut-ml-worker` `tests::a_panicking_request…` | no |
+| A panicking bake fails only that bake | `tests/matting.rs` `a_panic_in_a_bake…` | no |
+| A panic while preparing a clip is a failure on the status line, and the next run works | `tests/prepare.rs` `a_panic_while_preparing…` | no |
+| Canvas 0 or 100000, fps 0 or 100000, speed 0, a clip at 9·10¹⁸ µs, near `i64::MAX`: errors, no overflow | `project::document::tests::absurd_canvases…` | no |
+| The CLI refuses `export` and `render-frame` on six damaged files; `validate` still opens them | `chukcut-cli` `tests/guard.rs` | the last step |
+| Undo gives back the canvas the first clip set; a 1 fps clip keeps the project at 30 fps and says so | `project::commands::tests` | no |
+| A job's commit for an older generation is refused and changes nothing | `state::tests`, `analysis::commands::tests::an_analysis_for_a_closed_project…` | no |
+
+End to end against the master release CLI (`_scratch/cmp/cmp.sh` in the
+worktree): a whole-project WAV export and a 1.3–4.7 s range export of a
+two-lane project (a video clip at volume 0.7 and an MP3) are byte-identical.
+
+**Not verified:** the in-app Restart button and the open/import notices were
+not looked at on screen. The loop that should show the exit SIGSEGV of
+`tests/export.rs` gone was cut short when the NVIDIA driver hung (STATUS,
+"Robustness"). Run it again after the reboot, one binary at a time:
+`scripts/loop-test.sh target/debug/deps/export-<hash> 40 _scratch/loop.txt`.
+
 ## Crop keyframes and temporal denoise, 2026-10-05 (`agent/crop2`)
 
 Checked in the debug app on Xvfb with lavapipe, generated media

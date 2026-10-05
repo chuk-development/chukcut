@@ -160,8 +160,7 @@ pub fn spawn(
             let started = std::time::Instant::now();
             // A panic in an analysis must end the job, not leave the status
             // line saying "Detecting…" forever.
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(&context)))
-                .unwrap_or_else(|_| Err("the analysis crashed".into()));
+            let result = crate::lifecycle::contained("The analysis", || work(&context));
             let result = match result {
                 Err(error) if error == CANCELLED || context.cancelled() => {
                     Err("Analysis cancelled".to_string())
@@ -202,6 +201,13 @@ pub fn all() -> Vec<JobStatus> {
 /// Ask a job to stop. Nothing it found is committed.
 pub fn cancel(id: u64) {
     if let Some(job) = jobs().lock().get(&id) {
+        job.cancel.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Ask every job to stop: their project is going away (`modules::jobs`).
+pub fn cancel_all() {
+    for job in jobs().lock().values() {
         job.cancel.store(true, Ordering::Relaxed);
     }
 }

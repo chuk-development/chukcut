@@ -9,9 +9,9 @@ use std::sync::Arc;
 
 use serde::Serialize;
 
-use super::measure::{measure, measure_file, Loudness, CHANNELS, RATE};
+use super::measure::{measure, measure_file, Loudness, Meter, CHANNELS, RATE};
 use crate::modules::audio::decode::FileAudioSource;
-use crate::modules::export::audio::mix_timeline;
+use crate::modules::export::audio::{MixRange, MixStream, BLOCK_FRAMES};
 use crate::modules::voice::cleanup::{audible_segment, effective_source, original_source};
 use crate::state::AppState;
 
@@ -111,7 +111,17 @@ pub fn loudness_measure_mix(
         return Err("the timeline is empty".into());
     }
     crate::modules::voice::denoise::ensure_rendered(&project, cancel)?;
-    let mixed = mix_timeline(&project, &FileAudioSource, RATE, CHANNELS, cancel)
+    // Streamed through the meter: an hour of timeline is never in memory.
+    let range = MixRange::whole(&project, RATE);
+    let mut stream = MixStream::new(&project, &FileAudioSource, RATE, CHANNELS, range, cancel)
         .map_err(|e| e.to_string())?;
-    measure(&mixed, CHANNELS as u32, RATE)
+    let mut meter = Meter::new(CHANNELS as u32, RATE)?;
+    let mut block = Vec::new();
+    while stream
+        .next_block(BLOCK_FRAMES, &mut block)
+        .map_err(|e| e.to_string())?
+    {
+        meter.add(&block)?;
+    }
+    Ok(meter.finish())
 }

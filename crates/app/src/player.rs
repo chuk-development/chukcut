@@ -146,6 +146,15 @@ impl Player {
         self.inner.failure()
     }
 
+    /// The render thread stopped on a bug; [`Self::restart`] starts it again.
+    pub fn crashed(&self) -> bool {
+        self.inner.crashed()
+    }
+
+    pub fn restart(&mut self) {
+        self.inner.restart();
+    }
+
     /// Whether frames reach GPUI through shared memory right now.
     #[cfg(test)]
     pub fn sharing(&self) -> Sharing {

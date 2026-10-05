@@ -165,13 +165,16 @@ pub fn serve() -> std::io::Result<()> {
         };
         // Batches were in the 2025-03-26 revision; answer them as a batch.
         if let Value::Array(items) = message {
-            let replies: Vec<Value> = items.into_iter().filter_map(|m| server.handle(m)).collect();
+            let replies: Vec<Value> = items
+                .into_iter()
+                .filter_map(|m| server.handle_contained(m))
+                .collect();
             if !replies.is_empty() {
                 send(&server.out, &Value::Array(replies));
             }
             continue;
         }
-        if let Some(reply) = server.handle(message) {
+        if let Some(reply) = server.handle_contained(message) {
             send(&server.out, &reply);
         }
     }
@@ -179,6 +182,26 @@ pub fn serve() -> std::io::Result<()> {
 }
 
 impl Server {
+    /// [`Self::handle`] with a panic contained: one request that hits a bug
+    /// answers an internal error and the session goes on. Before, it ended
+    /// the server and every project the client had open with it.
+    ///
+    /// The open projects are dropped, because the request may have stopped
+    /// half way through an edit; every tool call saves, so the next call
+    /// reopens them from disk as they were after the last good one.
+    fn handle_contained(&mut self, message: Value) -> Option<Value> {
+        let id = message.get("id").cloned();
+        match chukcut_engine::lifecycle::contain("That request", || self.handle(message)) {
+            Ok(reply) => reply,
+            Err(error) => {
+                self.sessions.clear();
+                id.map(|id| {
+                    json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32603, "message": error}})
+                })
+            }
+        }
+    }
+
     /// Handle one message; `None` for a notification or a response.
     fn handle(&mut self, message: Value) -> Option<Value> {
         let id = message.get("id").cloned();
@@ -189,6 +212,7 @@ impl Server {
             });
         };
         let params = message.get("params").cloned().unwrap_or(Value::Null);
+        chukcut_engine::faults::hit_keyed("mcp.request", method);
         let result = match method {
             "initialize" => Ok(self.initialize(&params)),
             "ping" => Ok(json!({})),
@@ -720,6 +744,38 @@ fn parse_uri(uri: &str) -> Option<(String, HashMap<String, String>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One request that panics answers an internal error; the next one is
+    /// served as if nothing happened.
+    #[test]
+    fn a_panicking_request_answers_an_error_and_the_session_goes_on() {
+        let mut server = Server {
+            out: Arc::new(Mutex::new(std::io::stdout())),
+            sessions: HashMap::new(),
+            protocol: PROTOCOL_VERSIONS[0],
+        };
+        chukcut_engine::faults::arm("mcp.request:resources/templates/list");
+        let reply = server
+            .handle_contained(
+                json!({"jsonrpc": "2.0", "id": 7, "method": "resources/templates/list"}),
+            )
+            .expect("a reply");
+        assert_eq!(reply["id"], 7);
+        assert_eq!(reply["error"]["code"], -32603);
+        let message = reply["error"]["message"].as_str().unwrap();
+        assert!(message.contains("internal error"), "{message}");
+        let reply = server
+            .handle_contained(
+                json!({"jsonrpc": "2.0", "id": 8, "method": "resources/templates/list"}),
+            )
+            .expect("a reply");
+        assert!(reply.get("result").is_some(), "{reply}");
+        // A notification that panics answers nothing, and nothing breaks.
+        chukcut_engine::faults::arm("mcp.request:notifications/initialized");
+        assert!(server
+            .handle_contained(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}))
+            .is_none());
+    }
 
     #[test]
     fn a_percent_before_a_multibyte_character_is_kept_as_text() {

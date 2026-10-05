@@ -273,6 +273,40 @@ fn an_opened_project_mixes_its_compound_clips_down_or_stops_when_asked() {
     assert_eq!(prepare_missing(&project).sounds, 0);
 }
 
+/// A bug while preparing one clip is contained to that clip: the run
+/// records the failure, finishes, and the next run does the work.
+#[test]
+fn a_panic_while_preparing_a_clip_is_a_failure_on_the_status_line() {
+    isolate();
+    let media = require_media!();
+    let _run = RUNS.lock().unwrap_or_else(|e| e.into_inner());
+    let (state, outer) =
+        with_processed_compound(Project::new("panic", canvas(), 30.0), &media.audio_only);
+    let project = state.project.read().clone().unwrap();
+    let sequence = project.segment(&outer).unwrap().1.material_id.clone();
+    let (mix_down, _) = bounce::source_of(&project, &sequence).unwrap();
+
+    chukcut_engine::faults::arm(&format!("prepare.item:{}", project.id));
+    let first = prepare_start(&state);
+    let failed = finished();
+    assert_eq!(failed.run, first);
+    assert!(failed.finished, "{failed:?}");
+    assert_eq!(failed.failures.len(), 1, "{:?}", failed.failures);
+    assert!(
+        failed.failures[0].contains("stopped on an internal error"),
+        "{:?}",
+        failed.failures
+    );
+    assert!(!mix_down.is_file());
+
+    // The next run is not affected.
+    let second = prepare_start(&state);
+    let done = finished();
+    assert_eq!(done.run, second);
+    assert!(done.failures.is_empty(), "{:?}", done.failures);
+    assert!(mix_down.is_file());
+}
+
 /// Where the face mesh and HTDemucs are installed: an opened project finds
 /// the faces and isolates the voice its parked clips lack, and counts them.
 #[test]
