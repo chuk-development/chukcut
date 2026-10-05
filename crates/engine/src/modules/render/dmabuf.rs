@@ -567,6 +567,33 @@ mod tests {
         assert_eq!(first, second, "lap two must repeat lap one");
     }
 
+    /// P010 surfaces export as `R16 ` and `GR32` layers. They import as
+    /// 16-bit textures where the device has them and not at all where it does
+    /// not, which sends the frame down the copying path instead of drawing
+    /// a 16-bit plane as garbage through an 8-bit view.
+    #[test]
+    fn p010_layers_import_as_sixteen_bit_planes_only_on_a_device_that_has_them() {
+        assert_eq!(
+            plane_format("R16 ", true),
+            Some(wgpu::TextureFormat::R16Unorm)
+        );
+        assert_eq!(
+            plane_format("GR32", true),
+            Some(wgpu::TextureFormat::Rg16Unorm)
+        );
+        assert_eq!(plane_format("R16 ", false), None);
+        assert_eq!(plane_format("GR32", false), None);
+        assert_eq!(
+            plane_format("R8  ", false),
+            Some(wgpu::TextureFormat::R8Unorm)
+        );
+        assert_eq!(
+            plane_format("GR88", false),
+            Some(wgpu::TextureFormat::Rg8Unorm)
+        );
+        assert_eq!(plane_format("YU12", true), None);
+    }
+
     #[test]
     fn the_nv12_fourcc_is_the_one_drm_uses() {
         // 0x3231564E. Worth asserting because a byte-swapped fourcc is accepted
@@ -698,16 +725,11 @@ pub enum PlaneUse {
     Write,
 }
 
-/// [`import_plane`], saying what the plane is going to be used for.
-pub fn import_plane_with(
-    ctx: &RenderContext,
-    plane: &Plane,
-    intent: PlaneUse,
-) -> Option<wgpu::Texture> {
-    if !ctx.can_import_dmabuf() || !plane.is_importable() {
-        return None;
-    }
-    let format = match plane.fourcc_name().as_str() {
+/// The texture format a DRM layer imports as, or `None` for a layout the
+/// compositor has no case for. `deep` is whether the device can sample
+/// 16-bit normalised textures.
+fn plane_format(fourcc: &str, deep: bool) -> Option<wgpu::TextureFormat> {
+    Some(match fourcc {
         // NV12 exported with SEPARATE_LAYERS: luma is a single-channel plane…
         "R8  " => wgpu::TextureFormat::R8Unorm,
         // …and chroma is interleaved U and V at half resolution, which is
@@ -717,14 +739,29 @@ pub fn import_plane_with(
         // sixteen bits a sample, ten of them used, at the top. Only on a
         // device with 16-bit textures; without them the import is refused
         // and the frame is copied, which `provider` cuts to 8 bits.
-        "R16 " if ctx.supports_deep_planes() => wgpu::TextureFormat::R16Unorm,
-        "GR32" if ctx.supports_deep_planes() => wgpu::TextureFormat::Rg16Unorm,
+        "R16 " if deep => wgpu::TextureFormat::R16Unorm,
+        "GR32" if deep => wgpu::TextureFormat::Rg16Unorm,
         "AR24" | "XR24" => wgpu::TextureFormat::Bgra8Unorm,
         "AB24" | "XB24" => wgpu::TextureFormat::Rgba8Unorm,
-        other => {
-            tracing::debug!(fourcc = other, "no wgpu format for this DRM fourcc");
-            return None;
-        }
+        _ => return None,
+    })
+}
+
+/// [`import_plane`], saying what the plane is going to be used for.
+pub fn import_plane_with(
+    ctx: &RenderContext,
+    plane: &Plane,
+    intent: PlaneUse,
+) -> Option<wgpu::Texture> {
+    if !ctx.can_import_dmabuf() || !plane.is_importable() {
+        return None;
+    }
+    let Some(format) = plane_format(&plane.fourcc_name(), ctx.supports_deep_planes()) else {
+        tracing::debug!(
+            fourcc = plane.fourcc_name(),
+            "no wgpu format for this DRM fourcc"
+        );
+        return None;
     };
     let fd = plane.dup_fd().ok()?;
     let size = wgpu::Extent3d {

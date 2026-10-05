@@ -1636,6 +1636,51 @@ mod tests {
         assert!(spec.dictionary_for(&ladder[0]).is_empty());
     }
 
+    /// 10-bit is P010 for every hardware encoder (VAAPI and QSV surfaces,
+    /// NVENC's system-memory input) and yuv420p10le for the software ones,
+    /// with Main 10 asked of every HEVC encoder. VAAPI is checked here rather
+    /// than end to end because the machine this was written on has none.
+    #[test]
+    fn ten_bit_uploads_p010_on_hardware_and_asks_for_main10() {
+        for (accel, name, upload) in [
+            (HwAccel::Vaapi, "hevc_vaapi", format::Pixel::P010LE),
+            (HwAccel::Qsv, "hevc_qsv", format::Pixel::P010LE),
+            (HwAccel::Nvenc, "hevc_nvenc", format::Pixel::P010LE),
+            (HwAccel::Software, "libx265", format::Pixel::YUV420P10LE),
+            (HwAccel::Software, "libsvtav1", format::Pixel::YUV420P10LE),
+        ] {
+            let mut ten = spec(accel, name, Quality::Crf(22));
+            ten.colour = OutputColour::resolve(
+                super::super::colour::ColorMatrix::Auto,
+                super::super::colour::ColorRange::Limited,
+                true,
+                (1920, 1080),
+            );
+            assert_eq!(ten.upload_format(), upload, "{name}");
+            if name.starts_with("hevc") || name == "libx265" {
+                assert!(
+                    ten.dictionary()
+                        .contains(&("profile".into(), "main10".into())),
+                    "{name}: {:?}",
+                    ten.dictionary()
+                );
+            }
+            // And 8-bit stays what it was.
+            let eight = spec(accel, name, Quality::Crf(22));
+            assert_ne!(eight.upload_format(), upload, "{name}");
+            assert!(!eight
+                .dictionary()
+                .contains(&("profile".into(), "main10".into())));
+        }
+    }
+
+    #[test]
+    fn every_stream_but_a_gif_is_tagged() {
+        assert!(spec(HwAccel::Vaapi, "h264_vaapi", Quality::Crf(22)).is_tagged());
+        assert!(spec(HwAccel::Software, "prores_ks", Quality::Crf(22)).is_tagged());
+        assert!(!spec(HwAccel::Software, "gif", Quality::Crf(22)).is_tagged());
+    }
+
     #[test]
     fn a_hardware_frame_carries_the_same_pts_as_a_software_one() {
         // The upload copies pixels and nothing else, so the hardware path sets

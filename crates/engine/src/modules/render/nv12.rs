@@ -905,6 +905,15 @@ mod tests {
         height: u32,
         range: YuvRange,
     ) -> Option<Nv12Frame> {
+        convert_solid_encoded(colour, width, height, YuvEncoding::bt601(range))
+    }
+
+    fn convert_solid_encoded(
+        colour: [u8; 4],
+        width: u32,
+        height: u32,
+        encoding: YuvEncoding,
+    ) -> Option<Nv12Frame> {
         let ctx = crate::modules::render::test_context()?;
         let pool = TexturePool::default();
         let target = pool.acquire(
@@ -946,9 +955,46 @@ mod tests {
         let converter = Nv12Converter::new(&ctx);
         Some(
             converter
-                .convert_range(&ctx, &target, range)
+                .convert_encoded(&ctx, &target, encoding)
                 .expect("convert"),
         )
+    }
+
+    /// The export's matrix: an HD export is BT.709, and a pass that ignored
+    /// the matrix and wrote BT.601 — what this did until the export started
+    /// tagging its streams — is off by ten code values and more in saturated
+    /// colours. Checked against the coefficients BT.709 prints, not against
+    /// `luma_weights`.
+    #[test]
+    fn the_export_matrix_is_bt709_when_asked_for() {
+        for colour in [
+            [255, 0, 0, 255],
+            [0, 255, 0, 255],
+            [0, 0, 255, 255],
+            [191, 191, 0, 255],
+            [128, 128, 128, 255],
+        ] {
+            let Some(frame) = convert_solid_encoded(colour, 16, 8, YuvEncoding::BT709_LIMITED)
+            else {
+                eprintln!("skipping: no GPU adapter");
+                return;
+            };
+            let [r, g, b] = [colour[0], colour[1], colour[2]].map(|v| v as f32 / 255.0);
+            let y = 16.0 + 219.0 * (0.2126 * r + 0.7152 * g + 0.0722 * b);
+            let cb = 128.0 + 224.0 * (-0.114_572 * r - 0.385_428 * g + 0.5 * b);
+            let cr = 128.0 + 224.0 * (0.5 * r - 0.454_153 * g - 0.045_847 * b);
+            let got = (frame.luma(5, 3) as f32, frame.chroma(5, 3));
+            assert!(
+                (got.0 - y).abs() <= 1.0,
+                "{colour:?}: luma {} want {y}",
+                got.0
+            );
+            assert!(
+                (got.1 .0 as f32 - cb).abs() <= 1.0 && (got.1 .1 as f32 - cr).abs() <= 1.0,
+                "{colour:?}: chroma {:?} want ({cb}, {cr})",
+                got.1
+            );
+        }
     }
 
     fn assert_matches_reference(frame: &Nv12Frame, colour: [u8; 4]) {
