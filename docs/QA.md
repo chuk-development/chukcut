@@ -613,4 +613,4 @@ two-lane project (a video clip at volume 0.7 and an MP3) are byte-identical.
 not looked at on screen. The loop that should show the exit SIGSEGV of
 `tests/export.rs` gone was cut short when the NVIDIA driver hung (STATUS,
 "Robustness"). Run it again after the reboot, one binary at a time:
-`_scratch/loop2.sh <export test binary> 40 <out>`.
+`scripts/loop-test.sh target/debug/deps/export-<hash> 40 _scratch/loop.txt`.
