@@ -165,6 +165,14 @@ rotated 8-bit clip exact (RGBA path); 10-bit 4:2:0 32.5 dB and a rotated High
 10 clip 34.3 dB (planar path, bilinear chroma on hard edges, the same
 difference NVDEC frames have).
 
+**Not re-run after the merge with master (c569abb):** the NVIDIA driver hung
+machine-wide during the final gate run, so `cargo test -p chukcut-cli` (its
+`delivery` test was in the hung export), and the real-GPU runs of
+`tests/colour.rs`, `every_card`, `export` and `export_presets`, still need a
+pass on the merged tree after a reboot. Lavapipe passed the engine lib,
+`compositor`, `every_card` and `colour` suites on the merged tree; every
+suite passed on the RTX 3060 on the tree just before the merge.
+
 **Open:** the source peak is fixed at 1000 nits (mastering metadata and MaxCLL
 are not read); VAAPI P010 import is untested (no VAAPI device here);
 `tests/every_card.rs` has no HDR fixture; the app shows no colour-space line
