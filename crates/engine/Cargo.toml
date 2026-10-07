@@ -135,7 +135,7 @@ skrifa = "0.45.1"
 # Sticker and icon SVGs (Fluent Flat, Iconify) to PNG in `modules/library`.
 # The version GPUI already links, without default features, so it adds no
 # second copy to the build.
-resvg = { version = "0.46", default-features = false }
+resvg = { version = "0.48", default-features = false }
 # Animated stickers (modules/animated): Lottie parsed by velato into its own
 # model and drawn by vello, both linebender, Apache-2.0 OR MIT. velato without
 # its `vello` feature, because velato 0.12 pins vello 0.10 (wgpu 29); our
