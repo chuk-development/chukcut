@@ -171,7 +171,7 @@ wrote it. To find something, search for these words:
 | `over budget` | work that took too long |
 | `preview playback` | how smooth playback was |
 | `export progress`, `export throughput` | how fast an export ran |
-| `resources` | memory, CPU and GPU load every 30 seconds |
+| `resources` | memory, CPU and GPU load: every 30 seconds while chukcut works, else every 5 minutes |
 | `[ml-worker` | the AI worker's own messages |
 | `ffmpeg:` | FFmpeg's error messages |
 | `clip decode route` | how each clip decodes: GPU or CPU |
