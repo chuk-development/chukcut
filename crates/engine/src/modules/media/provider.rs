@@ -94,6 +94,39 @@ struct OpenDecoder {
     /// strictly one thread at a time, because it is a demuxer position.
     decoder: Mutex<VideoDecoder>,
     height: u32,
+    /// Whether this decoder's route has been logged. Once per decoder: the
+    /// per-frame lines are TRACE, and this is the one line a log reader needs
+    /// to see which clips really decoded on the GPU.
+    reported: std::sync::atomic::AtomicBool,
+}
+
+impl OpenDecoder {
+    /// Log, once, how this decoder's frames reach the compositor: which
+    /// decoder ran (`path`, the truth after the first frame) and which of the
+    /// four routes (`mapped` zero-copy, `nv12` download, `planes`, `rgba`).
+    fn report_route(
+        &self,
+        path: &Path,
+        route: &'static str,
+        acceleration: Acceleration,
+        size: (u32, u32),
+        decode_micros: u128,
+    ) {
+        if self
+            .reported
+            .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            return;
+        }
+        tracing::info!(
+            file = %file_name(path),
+            path = ?acceleration,
+            route,
+            decoded = format_args!("{}x{}", size.0, size.1),
+            first_frame_ms = decode_micros as f64 / 1000.0,
+            "clip decode route"
+        );
+    }
 }
 
 /// How tall this source needs to be decoded, given the area it will be drawn
@@ -603,7 +636,8 @@ impl MediaSourceProvider {
                 // software. (`CHUKCUT_DECODE` fails loudly instead.)
                 let decoder = match VideoDecoder::open_scaled_with(path, want_height, wanted) {
                     Err(error) if chosen && wanted != Acceleration::Software => {
-                        tracing::debug!(
+                        // A fallback: once per opened file, so a WARN.
+                        tracing::warn!(
                             file = %file_name(path),
                             %error,
                             "the decode path chosen in Settings cannot open this file; using software"
@@ -616,6 +650,7 @@ impl MediaSourceProvider {
                 let opened = Arc::new(OpenDecoder {
                     decoder: Mutex::new(decoder),
                     height,
+                    reported: Default::default(),
                 });
                 Arc::clone(
                     self.decoders
@@ -664,7 +699,14 @@ impl MediaSourceProvider {
                     let decode_micros = started.elapsed().as_micros();
                     let import_started = std::time::Instant::now();
                     if let Some(frame) = import_mapped(ctx, mapped) {
-                        tracing::debug!(
+                        open.report_route(
+                            path,
+                            "mapped",
+                            decoder.acceleration(),
+                            (frame.width, frame.height),
+                            decode_micros,
+                        );
+                        tracing::trace!(
                             file = %file_name(path),
                             at_ms = source_time / 1000,
                             decoded = format_args!("{}x{}", frame.width, frame.height),
@@ -712,7 +754,14 @@ impl MediaSourceProvider {
                     let decode_micros = started.elapsed().as_micros();
                     let upload_started = std::time::Instant::now();
                     let frame = upload_nv12(ctx, &planes);
-                    tracing::debug!(
+                    open.report_route(
+                        path,
+                        "nv12",
+                        decoder.acceleration(),
+                        (planes.width, planes.height),
+                        decode_micros,
+                    );
+                    tracing::trace!(
                         file = %file_name(path),
                         at_ms = source_time / 1000,
                         decoded = format_args!("{}x{}", planes.width, planes.height),
@@ -746,7 +795,14 @@ impl MediaSourceProvider {
             let decode_micros = started.elapsed().as_micros();
             let upload_started = std::time::Instant::now();
             let frame = upload_nv12(ctx, &planes);
-            tracing::debug!(
+            open.report_route(
+                path,
+                "planes",
+                decoder.acceleration(),
+                (planes.width, planes.height),
+                decode_micros,
+            );
+            tracing::trace!(
                 file = %file_name(path),
                 at_ms = source_time / 1000,
                 decoded = format_args!("{}x{}", planes.width, planes.height),
@@ -769,10 +825,20 @@ impl MediaSourceProvider {
         let frame = upload_rgba(ctx, &decoded.data, decoded.width, decoded.height);
         let upload_micros = upload_started.elapsed().as_micros();
 
-        // Per-frame, at debug: this is the line that tells you whether a stutter
+        open.report_route(
+            path,
+            "rgba",
+            decoder.acceleration(),
+            (decoded.width, decoded.height),
+            decode_micros,
+        );
+        // Per-frame, at trace: this is the line that tells you whether a stutter
         // is decode, upload, or something further down the pipeline — and which
         // file caused it, which matters the moment a timeline has more than one.
-        tracing::debug!(
+        // Trace and not debug because it is one line per clip per frame, which
+        // would be most of a DEBUG log; `clip decode route` above says once
+        // which path each clip took.
+        tracing::trace!(
             file = %file_name(path),
             at_ms = source_time / 1000,
             decoded = format_args!("{}x{}", decoded.width, decoded.height),

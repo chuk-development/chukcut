@@ -17,7 +17,7 @@
 //! editor.
 
 use std::collections::{HashMap, VecDeque};
-use std::io::{BufRead, BufReader, BufWriter};
+use std::io::{BufReader, BufWriter};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -246,19 +246,9 @@ impl Client {
                 })
                 .map_err(|e| MlError::Failed(e.to_string()))?;
         }
-        std::thread::Builder::new()
-            .name("ml-worker-log".into())
-            .spawn(move || {
-                for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                    // A worker panic arrives as marked lines with its
-                    // backtrace; they belong in the log as errors.
-                    if line.starts_with("panic:") {
-                        tracing::error!("ML worker {pid}: {line}");
-                    } else {
-                        tracing::info!("ML worker {pid}: {line}");
-                    }
-                }
-            })
+        // Into the app's log, tagged `[ml-worker <pid>]`; a panic's marked
+        // lines become errors there (`diag::child`).
+        crate::modules::diag::child::forward_stderr("ml-worker", pid, stderr)
             .map_err(|e| MlError::Failed(e.to_string()))?;
         let client = Client {
             child: Mutex::new(child),

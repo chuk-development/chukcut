@@ -364,6 +364,20 @@ impl Runtime {
         probe.providers.push("CPU".to_string());
         order.push("CPU");
         probe.libraries = loaded_cuda_libraries();
+        // One line for the editor's log, which takes this process's stderr:
+        // which providers work on this machine and why the others do not.
+        let unavailable: Vec<String> = probe
+            .unavailable
+            .iter()
+            .map(|(name, why)| format!("{name}: {why}"))
+            .collect();
+        eprintln!(
+            "chukcut-ml-worker: startup: ml runtime={} acceleration={} providers={} unavailable=\"{}\"",
+            probe.runtime_version,
+            mode.as_str(),
+            probe.providers.join(","),
+            unavailable.join("; ")
+        );
         Ok(Runtime {
             probe,
             sessions: HashMap::new(),
