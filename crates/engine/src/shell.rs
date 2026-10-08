@@ -65,12 +65,23 @@ impl fmt::Display for TaskPanicked {
 
 impl std::error::Error for TaskPanicked {}
 
+/// How long a command's blocking work may take before the log says so.
+///
+/// Two seconds: a probe, a font list or a snapshot is tens to hundreds of
+/// milliseconds, and anything a user waits on longer than this without a
+/// progress bar reads as a hang.
+pub const COMMAND_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Run `work` on its own thread; the returned future resolves to its result.
 ///
 /// Decoders, probes and file I/O block, and none of them may run on the UI
 /// thread or on an async executor's workers. Like Tauri's version, the work
 /// starts **now**, not when the future is first polled: a caller that only
 /// wants the side effect may drop the future and the work still runs.
+///
+/// Work that runs longer than [`COMMAND_BUDGET`] writes an `over budget` line
+/// naming the caller's file and line (`modules::diag::budget`).
+#[track_caller]
 pub fn spawn_blocking<T, F>(
     work: F,
 ) -> impl std::future::Future<Output = Result<T, TaskPanicked>> + Send
@@ -78,8 +89,12 @@ where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
 {
+    let caller = std::panic::Location::caller();
     let (tx, rx) = futures::channel::oneshot::channel();
     std::thread::spawn(move || {
+        let _budget = crate::modules::diag::budget("command", COMMAND_BUDGET, || {
+            format!("{}:{}", caller.file(), caller.line())
+        });
         let _ = tx.send(work());
     });
     async move { rx.await.map_err(|_| TaskPanicked) }

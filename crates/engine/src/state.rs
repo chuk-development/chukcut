@@ -113,6 +113,10 @@ impl Default for AppState {
 /// of edit apart and the stack must not behave as if there were two.
 const MAX_DEPTH: usize = 500;
 
+/// How long one timeline edit may take before the log says so: two frames at
+/// 60 Hz, since an edit holds the document lock on the UI thread.
+const EDIT_BUDGET: std::time::Duration = std::time::Duration::from_millis(33);
+
 /// Any invertible change to the open document.
 ///
 /// Two kinds, one stack. Timeline edits are `timeline::ops::EditCommand` and
@@ -208,6 +212,7 @@ impl DocumentHistory {
     /// Apply a timeline edit and record it. On failure nothing is recorded, so
     /// a rejected edit never shows up in the undo menu.
     pub fn apply(&mut self, project: &mut Project, command: EditCommand) -> Result<(), String> {
+        let started = std::time::Instant::now();
         // The same two expansions, in the same order, as `History::apply`, and
         // for the same reasons: link partners come along exactly once, and
         // transitions get to see the whole expanded edit before deciding
@@ -216,6 +221,14 @@ impl DocumentHistory {
         let command = ops::detach_broken_transitions(project, command);
         command.apply(project)?;
         self.record(DocumentCommand::Edit(command));
+        // An edit runs on the UI thread under the document lock; one that
+        // takes a frame or more is a stall the user feels.
+        crate::modules::diag::check("document edit", started.elapsed(), EDIT_BUDGET, || {
+            self.undo_stack
+                .last()
+                .map(DocumentCommand::label)
+                .unwrap_or_default()
+        });
         Ok(())
     }
 

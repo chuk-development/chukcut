@@ -1718,13 +1718,64 @@ pub fn walk_frames<F>(fps: Fps, total: u64, cancel: &AtomicBool, mut on_frame: F
 where
     F: FnMut(u64, Micros) -> Result<()>,
 {
+    let started = Instant::now();
+    // The current progress window: when it began, at which frame, and its
+    // slowest frame.
+    let mut window = (started, 0u64, Duration::ZERO);
+    let mut worst = Duration::ZERO;
     for index in 0..total {
         if cancel.load(Ordering::Relaxed) {
             return Err(ExportError::Cancelled);
         }
+        let frame_started = Instant::now();
         on_frame(index, fps.frame_time(index))?;
+        let took = frame_started.elapsed();
+        worst = worst.max(took);
+        window.2 = window.2.max(took);
+        crate::modules::diag::check("export frame", took, EXPORT_FRAME_BUDGET, || {
+            format!("frame {index} of {total}")
+        });
+        let now = Instant::now();
+        if now.saturating_duration_since(window.0) >= EXPORT_PROGRESS_INTERVAL {
+            let (frames, speed) = pace(fps, window.1, index + 1, now - window.0);
+            tracing::info!(
+                frame = index + 1,
+                total,
+                fps = frames,
+                speed = %format_args!("{speed:.2}x"),
+                worst_frame_ms = window.2.as_millis() as u64,
+                "export progress"
+            );
+            window = (now, index + 1, Duration::ZERO);
+        }
     }
+    let (frames, speed) = pace(fps, 0, total, started.elapsed());
+    tracing::info!(
+        frames = total,
+        seconds = (started.elapsed().as_secs_f64() * 10.0).round() / 10.0,
+        fps = frames,
+        speed = %format_args!("{speed:.2}x"),
+        worst_frame_ms = worst.as_millis() as u64,
+        "export throughput"
+    );
     Ok(total)
+}
+
+/// One export frame slower than this is logged: a stall, not a slow project.
+/// A heavy 4K frame takes a few hundred milliseconds; a second is a decoder,
+/// a driver or the disk holding the export up.
+pub const EXPORT_FRAME_BUDGET: Duration = Duration::from_secs(1);
+
+/// How often a running export writes its pace.
+pub const EXPORT_PROGRESS_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Frames per second and speed against real time (`1.00x` exports a second
+/// of video per second) for frames `from..to` done in `took`.
+fn pace(fps: Fps, from: u64, to: u64, took: Duration) -> (f64, f64) {
+    let seconds = took.as_secs_f64().max(1e-6);
+    let frames = to.saturating_sub(from) as f64 / seconds;
+    let media = (fps.frame_time(to) - fps.frame_time(from)) as f64 / 1e6;
+    ((frames * 10.0).round() / 10.0, media / seconds)
 }
 
 // ---------------------------------------------------------------------------

@@ -147,6 +147,24 @@ const FORWARD_DECODE_WINDOW: Micros = 500_000;
 /// the file after a handful of steps.
 const SEEK_BACKOFF: Micros = 1_000_000;
 
+/// How long opening a decoder may take before the log says so. A local file
+/// opens in a few milliseconds and a hardware decoder adds tens; 200 ms is a
+/// slow disk, a network mount or a driver that took its time.
+const OPEN_BUDGET: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long a seek, and decoding forward to the frame it was for, may take
+/// before the log says so. NVDEC pays ~25 ms per seek and a backward seek in
+/// long-GOP footage was measured at 130–227 ms (`docs/STATUS.md`); 150 ms
+/// keeps the ordinary ones out and the ones a user sees as a hitch in.
+const SEEK_BUDGET: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// The file's name without its directory, for a log line.
+fn file_label(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
 /// Whether a seek failed to put the requested frame within reach.
 ///
 /// `av_seek_frame` is only as accurate as the container's index, and some
@@ -222,6 +240,10 @@ pub struct VideoDecoder {
     last: Option<(Micros, frame::Video)>,
     /// Whether the demuxer has run out and the decoder has been told so.
     draining: bool,
+    /// Whether the colour-matrix guess has been logged for this file.
+    colour_guess_reported: std::sync::atomic::AtomicBool,
+    /// Demuxer seeks made by the `locate` running now, for its timing line.
+    seeks_in_locate: u32,
 }
 
 /// # Safety
@@ -315,6 +337,9 @@ impl VideoDecoder {
         acceleration: Acceleration,
     ) -> Result<Self> {
         ensure_initialized();
+        let _budget = crate::modules::diag::budget("decoder open", OPEN_BUDGET, || {
+            format!("{} {:?}", file_label(path), acceleration)
+        });
 
         let input = ffmpeg::format::input(&path).map_err(|source| MediaError::Open {
             path: path.to_path_buf(),
@@ -393,6 +418,8 @@ impl VideoDecoder {
             pending: None,
             last: None,
             draining: false,
+            seeks_in_locate: 0,
+            colour_guess_reported: Default::default(),
         })
     }
 
@@ -817,11 +844,18 @@ impl VideoDecoder {
             } else {
                 Space::BT470BG
             };
-            tracing::debug!(
-                file = %self.path.display(),
-                guessed = ?space,
-                "no colour matrix declared; guessing from the picture height"
-            );
+            // Once per decoder: this runs for every frame, and a per-frame
+            // line was most of a DEBUG log during playback.
+            if !self
+                .colour_guess_reported
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+            {
+                tracing::debug!(
+                    file = %self.path.display(),
+                    guessed = ?space,
+                    "no colour matrix declared; guessing from the picture height"
+                );
+            }
         }
 
         let mut range = frame.color_range();
@@ -843,7 +877,31 @@ impl VideoDecoder {
     /// here, and there is deliberately only one copy of it.
     fn locate(&mut self, micros: Micros) -> Result<Micros> {
         let target = micros.max(0);
+        let started = std::time::Instant::now();
+        let from = self.position;
+        self.seeks_in_locate = 0;
+        let located = self.locate_inner(target);
+        // Only a request that moved the demuxer is a seek; walking forward a
+        // frame is decode time, which the preview and export measure per frame.
+        if self.seeks_in_locate > 0 {
+            let seeks = std::mem::take(&mut self.seeks_in_locate);
+            crate::modules::diag::check("decoder seek", started.elapsed(), SEEK_BUDGET, || {
+                format!(
+                    "{} to {:.3} s from {} ({} seek{}, {:?})",
+                    file_label(&self.path),
+                    target as f64 / 1e6,
+                    from.map(|p| format!("{:.3} s", p as f64 / 1e6))
+                        .unwrap_or_else(|| "a cold decoder".into()),
+                    seeks,
+                    if seeks == 1 { "" } else { "s" },
+                    self.acceleration()
+                )
+            });
+        }
+        located
+    }
 
+    fn locate_inner(&mut self, target: Micros) -> Result<Micros> {
         let mut seeked = false;
         if self.needs_seek(target) {
             self.seek(target)?;
@@ -931,6 +989,7 @@ impl VideoDecoder {
         self.pending = None;
         self.last = None;
         self.draining = false;
+        self.seeks_in_locate += 1;
         Ok(())
     }
 
