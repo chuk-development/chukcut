@@ -487,8 +487,40 @@ fn a_whole_session_through_the_command_layer() {
         1,
         "the stock still's licence record was read"
     );
+    // Importing into the pool is not an edit, but the first clip's canvas is:
+    // the project was not given a canvas on purpose, so it takes clip A's 16:9
+    // shape at a 1080 short edge, and that change is on the undo stack
+    // (STATUS.md, "Documents"). It must be the only entry there.
+    let adopted = snapshot(&state);
+    assert_eq!(
+        (adopted.canvas.width, adopted.canvas.height),
+        (1920, 1080),
+        "the first clip set the canvas"
+    );
+    assert_eq!(
+        state.history.read().undo_label().as_deref(),
+        Some("Project settings"),
+        "the canvas adoption is the edit on the undo stack"
+    );
+    ok("undo adoption", timeline::timeline_undo(&state).map(|_| ()));
     let empty = snapshot(&state);
-    assert!(!state.history.read().can_undo());
+    assert_eq!((empty.canvas.width, empty.canvas.height), (W, H));
+    assert!(
+        !state.history.read().can_undo(),
+        "the imports themselves left nothing to undo"
+    );
+    assert_eq!(
+        serde_json::to_value(&empty.materials).unwrap(),
+        serde_json::to_value(&adopted.materials).unwrap(),
+        "undoing the canvas keeps every imported material"
+    );
+    ok("redo adoption", timeline::timeline_redo(&state).map(|_| ()));
+    let redone = snapshot(&state);
+    assert_eq!(
+        (redone.canvas.width, redone.canvas.height, redone.fps),
+        (adopted.canvas.width, adopted.canvas.height, adopted.fps),
+        "redo puts the adopted canvas back"
+    );
 
     // --- place, split, ripple delete, move, multi-select delete ---------------
     let a_seg = append(&state, &a.id, TrackKind::Video, a.duration);

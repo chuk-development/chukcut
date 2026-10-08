@@ -140,7 +140,11 @@ This section covers findings 1, 2, 3, 8 and 10 of
   the app's dialog, the queue, the CLI's `export` and `render-frame`, and
   MCP. A damaged project still opens; its problems are shown once. The
   first clip's canvas change is on the undo stack, and a 1 fps clip leaves
-  the project at 30 fps with a notice.
+  the project at 30 fps with a notice. So after the first video import into
+  a project whose canvas was not chosen, `can_undo()` is true ("Project
+  settings"), although the import itself is not an edit; undoing it keeps
+  the material in the pool. `tests/full_workflow.rs` asserted an empty
+  stack after the imports and failed from 6a533e7 until it was updated.
 - **Stale jobs:** `AppState::generation` is raised *before* a project is
   installed. Every job that edits the document commits through it.
   Tracking, analyses, reframe and caption transcripts drop a result for a
