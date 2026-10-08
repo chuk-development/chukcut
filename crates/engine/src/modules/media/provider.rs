@@ -107,9 +107,9 @@ struct OpenDecoder {
 /// footage on a vertical timeline drop 85 frames in a row.
 ///
 /// The compositor fits a source into the canvas preserving aspect ratio, so the
-/// same fit is computed here. A clip scaled above 100% by its transform will be
-/// slightly soft as a result; that is a preview, and the export path asks for
-/// full resolution.
+/// same fit is computed here. A clip drawn larger than that fit (a zoom, a
+/// crop, an animation) asks with a larger `max_size`; the compositor works
+/// that out in `video_request_size`.
 fn fitted_height(display: (u32, u32), max_size: (u32, u32)) -> u32 {
     let (source_w, source_h) = (display.0.max(1) as f32, display.1.max(1) as f32);
     let (canvas_w, canvas_h) = (max_size.0.max(1) as f32, max_size.1.max(1) as f32);

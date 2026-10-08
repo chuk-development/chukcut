@@ -2386,12 +2386,25 @@ impl Compositor {
         // untouched. See `modules::animated`.
         let fetch_time = crate::modules::animated::clip_time(materials, segment, kind, source_time);
 
+        // A video is decoded only as large as it is drawn. A zoomed clip is
+        // drawn larger than the plain fit, so it asks for more pixels.
+        let max_size = match materials.video(&segment.material_id) {
+            Some(video) if kind == MaterialKind::Video => video_request_size(
+                canvas,
+                materials,
+                segment,
+                (video.width, video.height),
+                time,
+                size,
+            ),
+            _ => size,
+        };
         let request = SourceRequest {
             material_id: &segment.material_id,
             kind,
             source_time: fetch_time,
             segment_id: &segment.id,
-            max_size: size,
+            max_size,
         };
 
         // A title whose text animator is running is drawn by the motion
@@ -2783,6 +2796,49 @@ fn place(
     }
 }
 
+/// The most a clip's zoom raises a video request. The provider never decodes
+/// above the source's own resolution, so this only bounds the arithmetic for
+/// a clip scaled to absurd values.
+const MAX_SOURCE_ZOOM: f32 = 16.0;
+
+/// The size to ask the provider for when `segment` shows a video of
+/// `display` pixels in a render of `size`.
+///
+/// The provider decodes a video just large enough to fit the render. A clip
+/// zoomed by its scale, its keyframes, an animation or a crop is drawn
+/// larger than that fit, and a plain fit is then enlarged on the GPU and
+/// looks soft. So the request grows by how many more source pixels the
+/// placed quad shows than the fit does. A clip at or below 100 % asks for
+/// `size` unchanged.
+fn video_request_size(
+    canvas: (u32, u32),
+    materials: &MaterialPool,
+    segment: &Segment,
+    display: (u32, u32),
+    time: Micros,
+    size: (u32, u32),
+) -> (u32, u32) {
+    let Some(placement) = place(canvas, materials, segment, display, time) else {
+        return size;
+    };
+    let (quad_w, quad_h) = super::matte::quad_pixel_size(&placement.mvp, size);
+    let [u0, v0, u1, v1] = placement.crop;
+    let (dw, dh) = (display.0.max(1) as f32, display.1.max(1) as f32);
+    let fit = (size.0 as f32 / dw).min(size.1 as f32 / dh);
+    // Screen pixels per source pixel, against the same ratio at a plain fit.
+    let zoom_x = quad_w / ((u1 - u0).abs().max(1e-3) * dw * fit);
+    let zoom_y = quad_h / ((v1 - v0).abs().max(1e-3) * dh * fit);
+    let zoom = zoom_x.max(zoom_y);
+    if !zoom.is_finite() || zoom <= 1.0 {
+        return size;
+    }
+    let zoom = zoom.min(MAX_SOURCE_ZOOM);
+    (
+        (size.0 as f32 * zoom).ceil() as u32,
+        (size.1 as f32 * zoom).ceil() as u32,
+    )
+}
+
 /// `quad` as it should be drawn: as itself, or — while a blur animation runs —
 /// as the incoming side of a blur transition from nothing.
 ///
@@ -3133,6 +3189,36 @@ mod tests {
     /// target would leave every expected value looking arbitrary.
     fn srgb_compositor() -> Option<Compositor> {
         Some(Compositor::new(crate::modules::render::test_context()?))
+    }
+
+    /// A clip zoomed to 200 % in a half-size preview must be decoded at the
+    /// full canvas size, or the GPU enlarges a half-size picture and the
+    /// preview looks soft. A crop zooms the same way.
+    #[test]
+    fn a_zoomed_clip_asks_for_more_pixels() {
+        let mut project = project([0.0; 4]);
+        add_video(&mut project, "clip");
+        let mut clip = segment("clip", 0, 1_000_000);
+        let materials = &project.materials;
+        let ask = |clip: &Segment| {
+            video_request_size((640, 480), materials, clip, (640, 480), 0, (320, 240))
+        };
+        assert_eq!(ask(&clip), (320, 240), "100 % asks for the render size");
+
+        clip.transform.scale = [2.0, 2.0];
+        assert_eq!(ask(&clip), (640, 480));
+
+        clip.transform.scale = [0.5, 0.5];
+        assert_eq!(ask(&clip), (320, 240), "a smaller clip never asks for less");
+
+        clip.transform.scale = [1.0, 1.0];
+        clip.crop = Some(crate::modules::project::document::Crop {
+            left: 0.25,
+            top: 0.25,
+            right: 0.75,
+            bottom: 0.75,
+        });
+        assert_eq!(ask(&clip), (640, 480), "a crop to the middle half");
     }
 
     #[test]
