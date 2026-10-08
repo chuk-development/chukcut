@@ -142,10 +142,105 @@ them.
 | `~/.cache/chukcut/` | `thumbnails/`, `waveforms/`, `proxies/`, `mattes/`, `flow/` (slow-motion frames), `enhance/` (remade frames), `landmarks/`, `voice/`, `audiofx/`, `compound-mix/`, `analysis/`, `library/` (downloaded stickers, music, stock) |
 | `~/.cache/chukcut/ml/` | AI models and the GPU bundles. Not in the cache limit |
 | `~/.cache/chukcut/whisper/` | caption models. Not in the cache limit |
-| `~/.local/state/chukcut/logs/` | `chukcut-YYYY-MM-DD.log`, the newest 7 days |
+| `~/.local/state/chukcut/logs/` | the log: `chukcut-YYYY-MM-DD.log`, at most 20 MB a file and 100 MB in total (see [The log file](#the-log-file)) |
 
 A voiceover recording goes into a folder "<project> Media" next to the
 project file.
+
+## The log file
+
+chukcut always writes a log. You do not have to turn it on.
+
+- **Where**: `~/.local/state/chukcut/logs/` (or `$XDG_STATE_HOME/chukcut/logs/`).
+  Settings › **Logs** shows the folder and opens today's file.
+- **Files**: one file a day, `chukcut-2026-10-09.log`. When a file reaches
+  20 MB, the log continues in `chukcut-2026-10-09.2.log`, then `.3.log`.
+- **Size**: the folder never holds more than 100 MB or 30 files. chukcut
+  deletes the oldest files first. A normal day of work writes some hundred
+  kilobytes.
+- **Level**: the file gets chukcut's INFO lines and the WARN and ERROR lines
+  of all libraries. `RUST_LOG` changes only the terminal output, not the file.
+
+Each line starts with the time in UTC, the level and the part of chukcut that
+wrote it. To find something, search for these words:
+
+| Search for | You find |
+|---|---|
+| `startup:` | the hardware and the setup of this run (see below) |
+| ` WARN ` and ` ERROR ` | problems, fallbacks and retries |
+| `over budget` | work that took too long |
+| `preview playback` | how smooth playback was |
+| `export progress`, `export throughput` | how fast an export ran |
+| `resources` | memory, CPU and GPU load every 30 seconds |
+| `[ml-worker` | the AI worker's own messages |
+| `ffmpeg:` | FFmpeg's error messages |
+| `clip decode route` | how each clip decodes: GPU or CPU |
+
+### The startup block
+
+Each start writes one block of `startup:` lines. They tell which hardware
+chukcut found and which parts of it it uses:
+
+```text
+startup: app version=0.1.0 commit=18a37080fe build=release pid=41180
+startup: os name="Linux Mint 22.1" kernel=6.8.0-139-generic arch=x86_64 display=x11 desktop=ubuntu:GNOME
+startup: cpu model="AMD Ryzen 7 5700X3D 8-Core Processor" cores=8 threads=16 usable_threads=11 ram_mb=32018
+startup: ffmpeg avcodec=60.31.102 avformat=60.16.100 avutil=58.29.100 swscale=7.5.100 swresample=4.12.100
+startup: nvidia driver=610.57.04
+startup: settings decode=Auto proxies=Auto preview_scale=1 preview_max_edge=0 ml_fast=true
+startup: transcription engine=whisper.cpp in-process gpu=none
+startup: gpu adapter="NVIDIA GeForce RTX 3060" backend=Vulkan type=DiscreteGpu vendor=0x10de driver=NVIDIA driver_info=610.57.04 dmabuf=true
+startup: decode vaapi="" nvdec="h264 hevc vp9 av1" vaapi_device=none refused="h264/vaapi hevc/vaapi vp9/vaapi av1/vaapi: hardware decode is unavailable: no VAAPI device on this machine"
+startup: display scale=1 window=1600x960
+startup: encode hardware="h264_nvenc hevc_nvenc" refused="h264_vaapi hevc_vaapi av1_vaapi: this machine has no usable VAAPI device; av1_nvenc: cannot open the av1_nvenc encoder with bitrate: Generic error in an external library"
+startup: hardware probes took ms=4421
+```
+
+- `gpu` is the graphics card that renders the preview and the export.
+  `type=Cpu` means a software renderer: everything is slow.
+- `decode` lists the codecs that decode on the GPU, per path (VAAPI for
+  Intel and AMD, NVDEC for NVIDIA). `refused` says why a path does not work.
+- `encode` lists the GPU encoders that passed a test encode.
+- The AI worker writes its own line when it loads its runtime:
+  `[ml-worker 41207] chukcut-ml-worker: startup: ml runtime=1.22.0 acceleration=standard providers=CUDA,CPU unavailable="…"`.
+
+### The timing lines
+
+Work that takes longer than its budget writes one WARN line:
+
+```text
+WARN … over budget what="decoder seek" ms=359.5 budget_ms=150.0 detail=h264_1080.mp4 to 2.188 s from a cold decoder (1 seek, Software)
+```
+
+- `what` is the kind of work, `ms` is the time it took, `budget_ms` is the
+  time it may take. `detail` tells which file, frame or command it was.
+- The budgets: `ui thread` and `ui tick` 50 ms (the window does not react
+  for that time), `document edit` 33 ms, `decoder open` 200 ms,
+  `decoder seek` 150 ms, `command` 2 s, `export frame` 1 s.
+- One kind of work writes at most one line in 10 seconds. The next line then
+  has `suppressed=N worst_suppressed_ms=…`: N more were too slow, and the
+  slowest took that long. A line `over budget, held back by the rate limit`
+  gives the count when no next line came.
+
+During playback, the player writes one line every 10 seconds and one line
+when playback stops:
+
+```text
+WARN … preview playback window seconds=10.0 fps=30.0 size=484x272 sharing="shared" shown=295 stalls=1 gap_p95_ms=43.8 gap_max_ms=189.0 rendered=303 render_mean_ms=5.0 render_p95_ms=8.5 render_max_ms=165.0 over_budget=2 budget_ms=33.3 skipped=7 late=0 discarded=4
+```
+
+- `shown` is the frames on the screen. `gap_p95_ms` and `gap_max_ms` are the
+  times between two frames. At 30 fps a smooth gap is about 33 ms.
+- `stalls` is the number of times one picture stayed for two frames or more.
+  This is the stutter that you see.
+- `render_*` is the time to make one frame. If `render_mean_ms` is more than
+  `budget_ms`, the computer cannot play this project at full speed.
+- `skipped` frames were not made, because the player jumped ahead to stay in
+  sync with the sound.
+- The line is a WARN when there was a stall, a skipped frame or a late frame.
+
+An export writes `export progress` every 10 seconds and `export throughput`
+at the end. `speed=1.00x` means one second of video in one second.
 
 ## Report a problem
 

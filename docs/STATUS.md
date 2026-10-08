@@ -91,6 +91,82 @@ JPEG encoder now reads a surface the compositor drew into, 2.7–2.9× on a whol
 frame; and earlier the same day, the attempt that went the other way round and
 the `vkDeviceWaitIdle` crash it found.
 
+## The diagnostic log (2026-10-09, `agent/diaglog`)
+
+The log file is now the one place to read what a run did, without asking
+for a reproduction. User-facing description: `docs/manual/troubleshooting.md`,
+"The log file". Code: `modules/workspace/logging.rs` (the file and its caps)
+and `modules/diag/` (what goes in).
+
+- **Bounded.** 20 MB a file (then `chukcut-YYYY-MM-DD.2.log`, `.3.log`),
+  100 MB and 30 files for the directory. The prune reserves a full file for
+  the current one, so the directory never exceeds 100 MB even between prunes.
+  The prune sorts parsed `(day, part)` keys: as strings `.2.log` sorts before
+  `.log` and `.10.log` before `.2.log`.
+- **`startup:` block**, once per run (`diag::startup`): version and commit
+  (from `crates/app/build.rs`), OS, kernel, X11/Wayland, CPU, RAM, FFmpeg's
+  loaded library versions, NVIDIA driver, the settings that pick a decode
+  path, the transcription engine, then from a thread: the wgpu adapter
+  (name, backend, driver), the NVDEC/VAAPI codecs, the encoders that passed
+  their trial encode, the window's scale. It calls the cached probes of
+  `gpu`, `hwdecode` and `hwaccel`; nothing is opened twice. The ML worker
+  prints `startup: ml runtime=… providers=…` when it loads ONNX Runtime.
+- **Timing** goes through one helper, `diag::budget` / `diag::check`:
+  `over budget what=… ms=… budget_ms=… detail=…`, at most one line per `what`
+  per 10 s, with `suppressed=N worst_suppressed_ms=…` on the next one and a
+  flush from the sampler. Checked: the UI thread (the editor's 8 ms ticker
+  doubles as a watchdog, 50 ms), one editor tick (50 ms), `DocumentHistory::apply`
+  (33 ms), `shell::spawn_blocking` (2 s, keyed by the caller's file and line
+  through `#[track_caller]`), decoder open (200 ms), decoder seek plus the
+  decode to the target (150 ms), one export frame (1 s).
+- **Playback** (`preview::playback_log`): the native player writes
+  `preview playback window` every 10 s and `preview playback run` at stop:
+  frames shown, gaps between them (p95, max), stalls (a gap of two frame
+  intervals), render time (mean, p95, max), skipped, late. WARN when a stall,
+  a skip or a late frame happened. The older `preview::stats` lines belong to
+  the preview *server*, which the app does not use.
+- **Export**: `export progress` every 10 s and `export throughput` at the end
+  (fps, `speed=…x` against real time, worst frame).
+- **Resources** every 30 s while the app or a helper uses 10 % of a core,
+  else every 5 min: RSS, CPU %, threads, machine CPU %, load, available RAM,
+  helpers' RSS and CPU, and on NVIDIA the card's load, VRAM, NVENC and NVDEC
+  use through NVML (`libnvidia-ml.so.1`, `dlopen`ed; no NVIDIA dependency).
+  A sample costs 0.2–0.35 ms; the first one with NVML 5–6 ms.
+- **Helpers** (`diag::child::forward_stderr`): a helper's stderr goes into
+  the log as `[name pid] …`, its level read from the text, at most 100 lines
+  a minute, and its pid joins the resource line. The ML worker uses it; a new
+  helper (a CUDA Whisper process) needs the same one call.
+- **FFmpeg's own errors** (`diag::ffmpeg_log`, x86-64): `av_log` is routed
+  into the log as `ffmpeg: [component @ 0x…] message`, WARN, 60 a minute. It
+  showed at once that the VAAPI open fails on this machine with
+  `Failed to initialise VAAPI connection: -1`.
+- **Per-frame DEBUG lines are TRACE now** (the four "source frame" lines in
+  `media::provider`); a clip's decode route is one INFO line instead,
+  `clip decode route file=… path=Cuda route="nv12"`. The colour-matrix guess
+  is logged once per decoder; it was 535 of 594 stdout lines in a minute of
+  playback.
+- **The file stays at INFO.** DEBUG lines are not rate-limited and some fire
+  per frame on paths a session may never hit in testing (the compositor's
+  missing-material line, for one), so DEBUG in the file would trade a
+  bounded, readable log for a guess. The aggregated lines carry what the
+  per-frame ones did.
+
+Measured on the RTX 3060 machine, debug build, machine load 13–19 from other
+builds: continuous playback of a 1080p clip wrote **2.8 KB in a minute**
+(6 playback lines, 2 resource lines, over-budget lines for one stall); a
+paused editor wrote 304 bytes in two minutes. A 102-second playback run left
+12 lines. At that rate the 20 MB cap is about five days of continuous
+playback. A 20-second CLI export of the same clip wrote two lines of pace
+(`export progress … speed=1.53x`, `export throughput … speed=1.59x
+worst_frame_ms=664`).
+
+**Found by the first run, not fixed:** during plain playback of
+`_scratch/media/long.mp4` (x264 ultrafast, 250-frame GOP) the player asked the
+NVDEC decoder for 15.400 s after it had decoded 15.500 s. That is a backward
+seek: 367 ms, a 418 ms gap on screen and 11 skipped frames (log of 2026-10-08
+23:33:49). The render-ahead should never ask for an earlier frame during
+playback; the cause is not known yet.
+
 ## Robustness (2026-10-05, `agent/robust`)
 
 This section covers findings 1, 2, 3, 8 and 10 of
@@ -3766,7 +3842,9 @@ work. That is the gap the file closes.
 - **Where.** `$XDG_STATE_HOME/chukcut/logs`, or `~/.local/state/chukcut/logs`.
   Not under the cache root, deliberately: "clear cache" must not delete the log
   of the export somebody is about to ask about. One file a day,
-  `chukcut-YYYY-MM-DD.log`, the newest seven kept.
+  `chukcut-YYYY-MM-DD.log`. Since 2026-10-09 capped at 20 MB a file (then
+  `.2.log`, `.3.log`) and 100 MB / 30 files in total; see "The diagnostic
+  log" near the top.
 - **What.** stdout keeps its old behaviour exactly — `RUST_LOG` still works and
   still defaults to `chukcut=debug,warn`. The **file** is fixed at
   `chukcut=info,warn` and deliberately ignores `RUST_LOG`, so a log somebody

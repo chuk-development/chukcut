@@ -149,4 +149,8 @@ To choose a decode path, use **Performance › Video decoding**.
 ## Logs
 
 - **Log folder**: the path of the logs.
-- **Open folder** opens it. **Show today's log** opens today's file.
+- **Open folder** opens it. **Show today's log** opens the file chukcut
+  writes to now.
+
+What the log contains and how to read it:
+[Troubleshooting › The log file](troubleshooting.md#the-log-file).
