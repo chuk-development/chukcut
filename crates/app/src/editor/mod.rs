@@ -25,9 +25,9 @@ use chukcut_engine::shell::Channel;
 use chukcut_engine::state::AppState;
 use gpui::prelude::*;
 use gpui::{
-    actions, canvas, div, img, px, rgb, App, Bounds, Context, FocusHandle, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, RenderImage, ScrollWheelEvent,
-    SharedString, Task, Window,
+    actions, canvas, div, img, px, rgb, App, Bounds, Context, Div, FocusHandle, KeyDownEvent,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, RenderImage,
+    ScrollWheelEvent, SharedString, Task, Window,
 };
 
 use crate::edits;
@@ -37,6 +37,7 @@ actions!(
     chukcut,
     [
         PlayPause,
+        ToggleFullscreen,
         Split,
         DeleteSelected,
         Undo,
@@ -176,6 +177,7 @@ impl Editor {
         let shell = lifecycle::ShellState::new(&project);
         let preview = preview::PreviewState {
             quality: settings::quality_for_scale(shell.settings.preview_scale()),
+            fullscreen: false,
         };
         let captions = captions::CaptionsPanel::new(window, cx);
         let mut editor = Self {
@@ -618,7 +620,6 @@ impl Render for Editor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.scale = window.scale_factor();
         self.sync_window_title(window);
-        let (media_w, inspector_w) = side_widths(f32::from(window.viewport_size().width));
         div()
             .track_focus(&self.focus)
             .key_context("Editor")
@@ -648,6 +649,16 @@ impl Render for Editor {
                 this.seek(end);
                 cx.notify();
             }))
+            .on_action(cx.listener(|this, _: &ToggleFullscreen, window, cx| {
+                this.toggle_fullscreen(window, cx)
+            }))
+            // Escape leaves the full-screen preview, as in every player.
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if this.preview.fullscreen && event.keystroke.key == "escape" {
+                    this.toggle_fullscreen(window, cx);
+                    cx.stop_propagation();
+                }
+            }))
             .on_action(cx.listener(|this, _: &ZoomIn, _, cx| this.zoom_by(1.4, cx)))
             .on_action(cx.listener(|this, _: &ZoomOut, _, cx| this.zoom_by(1.0 / 1.4, cx)))
             .map(|root| self.timeline_actions(root, cx))
@@ -673,7 +684,21 @@ impl Render for Editor {
             .bg(rgb(BG))
             .text_color(rgb(TEXT))
             .font_family("Noto Sans")
-            .child(self.render_toolbar(cx))
+            .map(|root| {
+                if self.preview.fullscreen {
+                    root.p(px(6.0)).child(self.render_preview(cx))
+                } else {
+                    self.render_editor(root, window, cx)
+                }
+            })
+    }
+}
+
+impl Editor {
+    /// The whole editor: toolbar, the three panels, the timeline.
+    fn render_editor(&mut self, root: Div, window: &mut Window, cx: &mut Context<Self>) -> Div {
+        let (media_w, inspector_w) = side_widths(f32::from(window.viewport_size().width));
+        root.child(self.render_toolbar(cx))
             // CapCut's arrangement: assets | player | inspector over the
             // timeline, as separate rounded panels on the window colour.
             .child(

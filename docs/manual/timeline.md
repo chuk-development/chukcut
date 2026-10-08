@@ -7,7 +7,7 @@ can change them. See [Keyboard shortcuts](shortcuts.md).
 
 Left side:
 
-- **Tool**: **Select** (`A`) or **Split** (`B`). With the split tool, a click
+- **Tool**: **Select** (`A`) or **Split** (`B` or `C`). With the split tool, a click
   on a clip cuts it there.
 - **Undo** (`Ctrl+Z`), **Redo** (`Ctrl+Shift+Z`).
 - **Split** (`S` or `Ctrl+B`): cuts the clip at the playhead.

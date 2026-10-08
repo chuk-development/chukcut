@@ -44,6 +44,7 @@ macro_rules! bindings {
 
 bindings!(
     PlayPause,
+    ToggleFullscreen,
     ShuttleForward,
     ShuttleBack,
     ShuttleStop,

@@ -58,6 +58,8 @@ glyphs! {
     FIT = r#"<path d="M4 9V6a2 2 0 0 1 2-2h3M15 4h3a2 2 0 0 1 2 2v3M20 15v3a2 2 0 0 1-2 2h-3M9 20H6a2 2 0 0 1-2-2v-3"/><rect x="8.5" y="8.5" width="7" height="7" rx="1.5"/>"#;
     /// Player: full screen.
     FULLSCREEN = r#"<path d="M14 4h6v6M10 20H4v-6M20 4l-6 6M4 20l6-6"/>"#;
+    /// Player: leave full screen, the same arrows pointing in.
+    EXIT_FULLSCREEN = r#"<path d="M20 10h-6V4M4 14h6v6M14 10l6-6M10 14l-6 6"/>"#;
     /// Player: canvas ratio.
     RATIO = r#"<rect x="3.5" y="6" width="17" height="12" rx="2.5"/><path d="M8 9.5H6.5V11M16 14.5h1.5V13"/>"#;
 

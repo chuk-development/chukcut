@@ -23,6 +23,10 @@ the **Video** tab, then the **Enhance** sub-tab.
   styles, stickers, effects, transitions, filters, captions, stock and
   templates.
 - The **player** (top centre) shows the frame at the playhead.
+  **Full screen** (the button at the bottom right of the player, or
+  `Ctrl+Shift+F`) shows only the player on the whole screen. `Esc` or the
+  same button goes back to the editor. A zoomed or cropped clip is decoded
+  at the size it is drawn, so it stays sharp in the player.
 - The **inspector** (top right) shows the settings of the selected clip.
   When no clip is selected, it shows the project's **Details**.
 - The **timeline** (bottom) holds the clips in lanes.

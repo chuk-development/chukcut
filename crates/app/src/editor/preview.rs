@@ -49,6 +49,8 @@ impl PreviewQuality {
 #[derive(Default)]
 pub(crate) struct PreviewState {
     pub(crate) quality: PreviewQuality,
+    /// The player alone fills the screen, as CapCut's full-screen preview.
+    pub(crate) fullscreen: bool,
 }
 
 /// Canvas shapes the ratio menu offers, as (label, long, short) where the
@@ -351,12 +353,41 @@ impl Editor {
                             )
                             .child(ratio_menu)
                             .child(
-                                IconButton::new("player-fullscreen", icons::FULLSCREEN)
-                                    .tooltip("Full screen")
-                                    .on_click(|_, window, _| window.toggle_fullscreen()),
+                                IconButton::new(
+                                    "player-fullscreen",
+                                    if self.preview.fullscreen {
+                                        icons::EXIT_FULLSCREEN
+                                    } else {
+                                        icons::FULLSCREEN
+                                    },
+                                )
+                                .tooltip(if self.preview.fullscreen {
+                                    "Exit full screen"
+                                } else {
+                                    "Full screen"
+                                })
+                                .shortcut("ctrl-shift-f")
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| this.toggle_fullscreen(window, cx),
+                                )),
                             ),
                     ),
             )
+    }
+
+    /// Show the player alone on the whole screen, or go back to the editor.
+    ///
+    /// Making the window full screen is not enough: the layout stays the
+    /// editor's, and the player stays the size of its panel. So the editor
+    /// also renders only the player while this is on.
+    pub(super) fn toggle_fullscreen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.preview.fullscreen = !self.preview.fullscreen;
+        if window.is_fullscreen() != self.preview.fullscreen {
+            window.toggle_fullscreen();
+        }
+        // The viewer has a new size; render for it.
+        self.last_request = None;
+        cx.notify();
     }
 
     /// Ratio menu: a new canvas shape, as one undoable project edit.

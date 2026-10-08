@@ -106,6 +106,15 @@ pub const ACTIONS: &[ActionSpec] = &[
         ["space"]
     ),
     a!(
+        "ToggleFullscreen",
+        "Playback",
+        "Full-screen preview",
+        false,
+        ["ctrl-shift-f"],
+        ["ctrl-shift-f"],
+        ["ctrl-`"]
+    ),
+    a!(
         "ShuttleForward",
         "Playback",
         "Shuttle forward (again: 2\u{d7}, 4\u{d7}, 8\u{d7})",
@@ -365,7 +374,8 @@ pub const ACTIONS: &[ActionSpec] = &[
         "Timeline",
         "Blade tool",
         false,
-        ["b"],
+        // B is CapCut's, C is Premiere's razor; both, since both are habits.
+        ["b", "c"],
         ["b"],
         ["c"]
     ),

@@ -50,6 +50,7 @@ Most of them are also in the clip's right-click menu.
 | Action | chukcut | CapCut-like | Premiere-like |
 |---|---|---|---|
 | Play / pause | `Space` | `Space` | `Space` |
+| Full-screen preview | `Ctrl+Shift+F` | `Ctrl+Shift+F` | `Ctrl+`` |
 | Shuttle forward (again: 2×, 4×, 8×) | `L` | `L` | `L` |
 | Shuttle backward | `J` | `J` | `J` |
 | Stop | `K` | `K` | `K` |
@@ -89,7 +90,7 @@ Most of them are also in the clip's right-click menu.
 | Main track magnet | `P` | `P` | `Alt+P` |
 | Snapping | `N` | `N` | `S` |
 | Select tool | `A` | `A` | `V` |
-| Blade tool | `B` | `B` | `C` |
+| Blade tool | `B`, `C` | `B` | `C` |
 | Zoom in | `Ctrl+=`, `Ctrl++`, `Ctrl+Shift+=` | `Ctrl+=`, `Ctrl++` | `=` |
 | Zoom out | `Ctrl+-` | `Ctrl+-` | `-` |
 | Zoom to fit | `Shift+Z` | `Shift+Z` | `\` |
