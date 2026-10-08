@@ -19,11 +19,26 @@
 //!
 //! ## Why the rotation is written here rather than taken from a crate
 //!
-//! It is a date comparison and a directory listing, and owning it means the
-//! current file's *path* is something we can hand to the UI without guessing at
-//! another crate's naming scheme. Files are named `chukcut-YYYY-MM-DD.log`, one
-//! per day the app is used, and the newest [`KEEP_FILES`] survive — a log
-//! directory that grows without bound is its own bug report.
+//! It is a date comparison, a byte count and a directory listing, and owning it
+//! means the current file's *path* is something we can hand to the UI without
+//! guessing at another crate's naming scheme.
+//!
+//! ## The size bound
+//!
+//! The log is always on, so it must never be the thing that fills a disk. Two
+//! hard limits hold whatever the app does, even when something logs in a loop
+//! for hours:
+//!
+//! - **Per file, [`MAX_FILE_BYTES`].** A day starts in
+//!   `chukcut-YYYY-MM-DD.log`. When the next line would take it past the cap,
+//!   the line goes into a new part, `chukcut-YYYY-MM-DD.2.log`, then `.3.log`.
+//! - **For the directory, [`MAX_TOTAL_BYTES`]**, and at most [`MAX_FILES`]
+//!   files. After every roll-over the oldest files go until the others plus a
+//!   full current file fit in the total, so the directory never holds more
+//!   than the total, not even for a moment. The current file is never deleted.
+//!
+//! Rate limits in `modules::diag` keep a misbehaving loop from pushing a
+//! week of history out; the caps are what holds when those are not enough.
 //!
 //! Nothing is buffered. Every event is one `write` to the file, so a log ends
 //! at the last thing that happened rather than a few kilobytes before it, which
@@ -55,9 +70,35 @@ const STDOUT_DEFAULT: &str = "chukcut=debug,warn";
 /// event is raised.
 const FILE_FILTER: &str = "chukcut=info,warn";
 
-/// How many daily files to keep. A week of use is enough to cover "it broke on
-/// Friday" reported on Monday, and costs a few hundred kilobytes.
-const KEEP_FILES: usize = 7;
+/// The largest one file may grow. A bigger file is hard to open in an editor
+/// and hard to attach to a bug report; 20 MB is several days of normal use.
+pub const MAX_FILE_BYTES: u64 = 20 * 1024 * 1024;
+
+/// The most the whole directory may hold.
+pub const MAX_TOTAL_BYTES: u64 = 100 * 1024 * 1024;
+
+/// The most files the directory may hold, whatever their size. About a month
+/// of daily use: "it broke last week" is still in there.
+pub const MAX_FILES: usize = 30;
+
+/// The caps a [`DailyFile`] holds. The app uses [`Limits::default`]; tests use
+/// small numbers to reach the caps quickly.
+#[derive(Debug, Clone, Copy)]
+pub struct Limits {
+    pub max_file_bytes: u64,
+    pub max_total_bytes: u64,
+    pub max_files: usize,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            max_file_bytes: MAX_FILE_BYTES,
+            max_total_bytes: MAX_TOTAL_BYTES,
+            max_files: MAX_FILES,
+        }
+    }
+}
 
 const PREFIX: &str = "chukcut-";
 const SUFFIX: &str = ".log";
@@ -83,7 +124,7 @@ pub fn init() {
     // Opened before the subscriber exists, so the failure cannot be logged
     // here; it is reported a few lines down, once there is somewhere to report
     // it to.
-    let opened = DailyFile::new(paths::logs_dir(), KEEP_FILES);
+    let opened = DailyFile::new(paths::logs_dir(), Limits::default());
     let (file, failure) = match opened {
         Ok(file) => (Some(Arc::new(file)), None),
         Err(error) => (None, Some(error)),
@@ -112,7 +153,12 @@ pub fn init() {
             %error,
             "could not open a log file; this run is logging to stdout only"
         ),
-        (None, Some(path)) => tracing::info!(path = %path.display(), "logging to file"),
+        (None, Some(path)) => tracing::info!(
+            path = %path.display(),
+            max_file_mb = MAX_FILE_BYTES / (1024 * 1024),
+            max_total_mb = MAX_TOTAL_BYTES / (1024 * 1024),
+            "logging to file"
+        ),
         (None, None) => {}
     }
 }
@@ -130,7 +176,7 @@ pub fn write_raw(text: &str) -> bool {
         Some(file) => file.clone(),
         None => FALLBACK
             .get_or_init(|| {
-                DailyFile::new(paths::logs_dir(), KEEP_FILES)
+                DailyFile::new(paths::logs_dir(), Limits::default())
                     .ok()
                     .map(Arc::new)
             })
@@ -152,34 +198,40 @@ pub fn log_file() -> Option<PathBuf> {
 // The appender
 // ---------------------------------------------------------------------------
 
-/// An append-only file that rolls over at midnight UTC and prunes its
-/// predecessors.
+/// An append-only file that rolls over at midnight UTC and at a size cap, and
+/// prunes its predecessors to a total size.
 pub struct DailyFile {
     dir: PathBuf,
-    keep: usize,
+    limits: Limits,
     open: Mutex<Open>,
 }
 
 struct Open {
-    /// Days since the Unix epoch, UTC. The whole rotation rule is "has this
-    /// changed".
+    /// Days since the Unix epoch, UTC. A change is a roll-over.
     day: i64,
+    /// Which part of the day this is, from 1.
+    part: u32,
+    /// Bytes in the file: its length at open plus what this process wrote.
+    /// Another process appending to the same file (the CLI's panic report) is
+    /// not counted; the cap is then off by that report, which is small.
+    written: u64,
     file: File,
     path: PathBuf,
 }
 
 impl DailyFile {
-    /// Create `dir` if it is missing, open today's file for appending, and drop
-    /// everything but the newest `keep` files.
-    pub fn new(dir: impl Into<PathBuf>, keep: usize) -> io::Result<Self> {
+    /// Create `dir` if it is missing, open today's newest part for appending
+    /// (or a new part when that one is full), and prune to `limits`.
+    pub fn new(dir: impl Into<PathBuf>, limits: Limits) -> io::Result<Self> {
         let dir = dir.into();
         fs::create_dir_all(&dir)?;
         let day = today();
-        let (file, path) = open_for(&dir, day)?;
+        let part = newest_part(&dir, day);
+        let open = open_part(&dir, day, part, limits.max_file_bytes)?;
         let this = Self {
             dir,
-            keep,
-            open: Mutex::new(Open { day, file, path }),
+            limits,
+            open: Mutex::new(open),
         };
         this.prune();
         Ok(this)
@@ -204,16 +256,21 @@ impl DailyFile {
         let written = {
             let mut open = self.lock();
             let day = today();
-            if day != open.day {
-                // A failed rollover keeps yesterday's file rather than losing
-                // the line: a log in the wrong file is recoverable, a dropped
-                // one is not.
-                if let Ok((file, path)) = open_for(&self.dir, day) {
-                    *open = Open { day, file, path };
+            let full =
+                open.written > 0 && open.written + buf.len() as u64 > self.limits.max_file_bytes;
+            if day != open.day || full {
+                let part = if day == open.day { open.part + 1 } else { 1 };
+                // A failed roll-over keeps writing to the current file rather
+                // than losing the line: a log in the wrong file is
+                // recoverable, a dropped one is not.
+                if let Ok(next) = open_part(&self.dir, day, part, self.limits.max_file_bytes) {
+                    *open = next;
                     rolled = true;
                 }
             }
-            open.file.write(buf)?
+            let written = open.file.write(buf)?;
+            open.written += written as u64;
+            written
         };
         if rolled {
             self.prune();
@@ -221,28 +278,45 @@ impl DailyFile {
         Ok(written)
     }
 
-    /// Delete all but the newest `keep` files. Names sort as dates do, which is
-    /// the reason for the `YYYY-MM-DD` spelling.
+    /// Delete the oldest files until at most `max_files` remain and the
+    /// others plus a *full* current file fit in `max_total_bytes`.
+    ///
+    /// Reserving the current file's whole cap is what makes the total a hard
+    /// bound: the current file grows between prunes, and nothing is deleted
+    /// while it does. The current file itself is never deleted.
     fn prune(&self) {
-        if self.keep == 0 {
-            return;
-        }
+        let current = self.path();
         let Ok(entries) = fs::read_dir(&self.dir) else {
             return;
         };
-        let mut ours: Vec<PathBuf> = entries
+        let mut others: Vec<((i64, u32), PathBuf, u64)> = entries
             .flatten()
-            .map(|entry| entry.path())
-            .filter(|path| is_ours(path))
+            .filter_map(|entry| {
+                let path = entry.path();
+                let key = parse_name(path.file_name()?.to_str()?)?;
+                let size = entry.metadata().ok()?.len();
+                Some((key, path, size))
+            })
+            .filter(|(_, path, _)| *path != current)
             .collect();
-        if ours.len() <= self.keep {
-            return;
-        }
-        ours.sort();
-        for stale in &ours[..ours.len() - self.keep] {
+        others.sort_by_key(|(key, _, _)| *key);
+        let mut total: u64 = others.iter().map(|(_, _, size)| size).sum();
+        let budget = self
+            .limits
+            .max_total_bytes
+            .saturating_sub(self.limits.max_file_bytes);
+        let keep_others = self.limits.max_files.saturating_sub(1);
+        let mut count = others.len();
+        for (_, stale, size) in &others {
+            if total <= budget && count <= keep_others {
+                break;
+            }
             // A file we cannot delete is not worth failing a log write over,
-            // and the next run will try again.
-            let _ = fs::remove_file(stale);
+            // and the next roll-over will try again.
+            if fs::remove_file(stale).is_ok() {
+                total -= size;
+                count -= 1;
+            }
         }
     }
 }
@@ -280,21 +354,78 @@ impl<'a> MakeWriter<'a> for LogWriter {
     }
 }
 
-fn is_ours(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.starts_with(PREFIX) && name.ends_with(SUFFIX))
+/// `(day, part)` for one of our file names, `None` for anything else.
+///
+/// The prune sorts these keys, not the names: as a string,
+/// `chukcut-2026-10-09.2.log` sorts *before* `chukcut-2026-10-09.log`
+/// ('2' < 'l'), and `.10.log` before `.2.log`.
+fn parse_name(name: &str) -> Option<(i64, u32)> {
+    let stem = name.strip_prefix(PREFIX)?.strip_suffix(SUFFIX)?;
+    let (date, part) = match stem.split_once('.') {
+        Some((date, part)) => (date, part.parse::<u32>().ok().filter(|p| *p >= 2)?),
+        None => (stem, 1),
+    };
+    if date.len() != 10 {
+        return None;
+    }
+    let mut fields = date.splitn(3, '-');
+    let year: i64 = fields.next()?.parse().ok()?;
+    let month: u32 = fields.next()?.parse().ok()?;
+    let day: u32 = fields.next()?.parse().ok()?;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    Some((days_from_civil(year, month, day), part))
 }
 
-fn open_for(dir: &Path, day: i64) -> io::Result<(File, PathBuf)> {
-    let path = dir.join(file_name(day));
-    let file = OpenOptions::new().create(true).append(true).open(&path)?;
-    Ok((file, path))
+/// The highest part that exists for `day`, or 1 when none does.
+fn newest_part(dir: &Path, day: i64) -> u32 {
+    fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| parse_name(entry.file_name().to_str()?))
+        .filter(|(d, _)| *d == day)
+        .map(|(_, part)| part)
+        .max()
+        .unwrap_or(1)
 }
 
+/// Open `part` of `day` for appending, moving on to the next part while the
+/// one asked for is already full: a restart must not append to a file that
+/// is at its cap.
+fn open_part(dir: &Path, day: i64, mut part: u32, max_file_bytes: u64) -> io::Result<Open> {
+    loop {
+        let path = dir.join(part_name(day, part));
+        let written = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        if written >= max_file_bytes && part < u32::MAX {
+            part += 1;
+            continue;
+        }
+        let file = OpenOptions::new().create(true).append(true).open(&path)?;
+        return Ok(Open {
+            day,
+            part,
+            written,
+            file,
+            path,
+        });
+    }
+}
+
+/// The first file of `day`.
 pub fn file_name(day: i64) -> String {
+    part_name(day, 1)
+}
+
+/// `chukcut-YYYY-MM-DD.log` for part 1, `chukcut-YYYY-MM-DD.N.log` after.
+pub fn part_name(day: i64, part: u32) -> String {
     let (year, month, dom) = civil_from_days(day);
-    format!("{PREFIX}{year:04}-{month:02}-{dom:02}{SUFFIX}")
+    if part <= 1 {
+        format!("{PREFIX}{year:04}-{month:02}-{dom:02}{SUFFIX}")
+    } else {
+        format!("{PREFIX}{year:04}-{month:02}-{dom:02}.{part}{SUFFIX}")
+    }
 }
 
 /// Days since the Unix epoch, UTC.
@@ -334,6 +465,17 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     (if month <= 2 { year + 1 } else { year }, month, day)
 }
 
+/// The inverse of [`civil_from_days`], from the same source.
+fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let year_of_era = year - era * 400; // [0, 399]
+    let month_prime = if month > 2 { month - 3 } else { month + 9 } as i64; // [0, 11]
+    let day_of_year = (153 * month_prime + 2) / 5 + day as i64 - 1; // [0, 365]
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -368,7 +510,7 @@ mod tests {
     #[test]
     fn events_reach_the_file_the_ui_would_point_at() {
         let dir = scratch("writes");
-        let file = Arc::new(DailyFile::new(&dir, KEEP_FILES).expect("open the log file"));
+        let file = Arc::new(DailyFile::new(&dir, Limits::default()).expect("open the log file"));
         let path = file.path();
         assert!(path.exists(), "the file exists before anything is logged");
 
@@ -406,12 +548,12 @@ mod tests {
     fn a_second_run_on_the_same_day_appends() {
         let dir = scratch("append");
         {
-            let file = DailyFile::new(&dir, KEEP_FILES).expect("first run");
+            let file = DailyFile::new(&dir, Limits::default()).expect("first run");
             LogWriter::new(Arc::new(file))
                 .write_all(b"first\n")
                 .unwrap();
         }
-        let file = DailyFile::new(&dir, KEEP_FILES).expect("second run");
+        let file = DailyFile::new(&dir, Limits::default()).expect("second run");
         let path = file.path();
         LogWriter::new(Arc::new(file))
             .write_all(b"second\n")
@@ -431,7 +573,11 @@ mod tests {
         // Something else's file in the same directory is left alone.
         fs::write(dir.join("notes.txt"), b"keep me\n").unwrap();
 
-        let file = DailyFile::new(&dir, 2).expect("open with a two-file limit");
+        let limits = Limits {
+            max_files: 2,
+            ..Limits::default()
+        };
+        let file = DailyFile::new(&dir, limits).expect("open with a two-file limit");
         let surviving: Vec<String> = fs::read_dir(&dir)
             .unwrap()
             .flatten()
@@ -456,10 +602,130 @@ mod tests {
             "today's file is never pruned: {surviving:?}"
         );
         assert!(
+            surviving.contains(&format!("{PREFIX}2026-07-04{SUFFIX}")),
+            "the newest old file is the one kept: {surviving:?}"
+        );
+        assert!(
             dir.join("notes.txt").exists(),
             "foreign files are not ours to delete"
         );
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn ours_in(dir: &Path) -> Vec<(String, u64)> {
+        let mut files: Vec<(String, u64)> = fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().to_string();
+                parse_name(&name)?;
+                Some((name, e.metadata().unwrap().len()))
+            })
+            .collect();
+        files.sort();
+        files
+    }
+
+    #[test]
+    fn names_parse_and_sort_by_day_then_part() {
+        let day = 19_723 + 59;
+        assert_eq!(part_name(day, 1), "chukcut-2024-02-29.log");
+        assert_eq!(part_name(day, 2), "chukcut-2024-02-29.2.log");
+        assert_eq!(parse_name("chukcut-2024-02-29.log"), Some((day, 1)));
+        assert_eq!(parse_name("chukcut-2024-02-29.10.log"), Some((day, 10)));
+        // As strings these sort the wrong way round; as keys they do not.
+        assert!(parse_name("chukcut-2024-02-29.2.log") > parse_name("chukcut-2024-02-29.log"));
+        assert!(parse_name("chukcut-2024-02-29.10.log") > parse_name("chukcut-2024-02-29.2.log"));
+        assert!(parse_name("chukcut-2024-03-01.log") > parse_name("chukcut-2024-02-29.10.log"));
+        for foreign in [
+            "notes.txt",
+            "chukcut-2024-02-29.txt",
+            "chukcut-2024-13-01.log",
+            "chukcut-2024-02-29.1.log",
+            "chukcut-2024-02-29.x.log",
+            "chukcut-24-02-29.log",
+        ] {
+            assert_eq!(parse_name(foreign), None, "{foreign} is not ours");
+        }
+        for days in [-1000, 0, 19_723, 19_782, 20_735, 100_000] {
+            let (y, m, d) = civil_from_days(days);
+            assert_eq!(days_from_civil(y, m, d), days);
+        }
+    }
+
+    /// A file at its cap rolls over to the next part, and a restart appends
+    /// to the newest part, not to the full first one.
+    #[test]
+    fn a_full_file_rolls_over_to_the_next_part() {
+        let dir = scratch("roll");
+        let limits = Limits {
+            max_file_bytes: 100,
+            max_total_bytes: 10_000,
+            max_files: 100,
+        };
+        let file = Arc::new(DailyFile::new(&dir, limits).unwrap());
+        let first = file.path();
+        let mut writer = LogWriter::new(Arc::clone(&file));
+        // One write per line, as the `fmt` layer does it.
+        let mut line = vec![b'x'; 39];
+        line.push(b'\n');
+        for _ in 0..5 {
+            writer.write_all(&line).unwrap();
+        }
+        let second = file.path();
+        assert_ne!(first, second, "200 bytes do not fit in one 100-byte file");
+        assert!(second.to_string_lossy().ends_with(".3.log"), "{second:?}");
+        for (name, size) in ours_in(&dir) {
+            assert!(size <= 100, "{name} is {size} bytes, over the cap");
+        }
+        // Whole lines only: the cap rolls *before* a write, never inside one.
+        assert_eq!(fs::read_to_string(&first).unwrap().len(), 80);
+
+        drop(writer);
+        drop(file);
+        let again = DailyFile::new(&dir, limits).unwrap();
+        assert_eq!(again.path(), second, "a restart continues the newest part");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The directory never holds more than the total, however much is
+    /// written, and the oldest files are the ones that go.
+    #[test]
+    fn the_directory_stays_under_its_total() {
+        let dir = scratch("total");
+        fs::create_dir_all(&dir).unwrap();
+        // A week of old logs, 120 bytes each.
+        for day in 1..=7 {
+            fs::write(
+                dir.join(format!("{PREFIX}2026-07-0{day}{SUFFIX}")),
+                [b'o'; 120],
+            )
+            .unwrap();
+        }
+        let limits = Limits {
+            max_file_bytes: 200,
+            max_total_bytes: 1000,
+            max_files: 100,
+        };
+        let file = Arc::new(DailyFile::new(&dir, limits).unwrap());
+        let mut writer = LogWriter::new(Arc::clone(&file));
+        let mut line = vec![b'n'; 49];
+        line.push(b'\n');
+        for _ in 0..400 {
+            writer.write_all(&line).unwrap();
+            let total: u64 = ours_in(&dir).iter().map(|(_, size)| size).sum();
+            assert!(total <= 1000, "the directory holds {total} bytes");
+        }
+        let left = ours_in(&dir);
+        assert!(
+            left.iter().all(|(name, _)| !name.contains("2026-07")),
+            "20 KB of new log pushed every old file out: {left:?}"
+        );
+        assert!(
+            left.len() >= 4,
+            "and kept as many new parts as fit: {left:?}"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 }
