@@ -14,6 +14,7 @@ pub mod body;
 pub mod captions;
 pub mod cloud;
 pub mod compositing;
+pub mod diag;
 pub mod effects;
 pub mod enhance;
 pub mod export;
