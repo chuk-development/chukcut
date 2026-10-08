@@ -187,6 +187,9 @@ struct Shared {
     share: AtomicBool,
     /// What the render thread is actually doing, a [`Sharing`].
     sharing: AtomicU8,
+    /// Playback timing for the log (`playback_log`). A leaf lock: nothing
+    /// else is taken while it is held.
+    playback: Mutex<super::playback_log::PlaybackLog>,
 }
 
 impl Shared {
@@ -313,6 +316,9 @@ impl FramePlayer {
             stats.shown += 1;
         }
         drop(stats);
+        if playing && chosen.is_some() {
+            self.shared.playback.lock().record_shown(Instant::now());
+        }
         if chosen.is_some() || late > 0 {
             // Room in the ring.
             self.shared.notify();
@@ -590,14 +596,46 @@ impl Renderer {
             }
             self.adopt_newest_request();
             let Some((request, arrived, _)) = self.current.clone() else {
+                self.log_playback(None);
                 self.idle();
                 continue;
             };
+            self.log_playback(Some(&request));
             if request.playing {
                 self.play_step(&request, arrived);
             } else {
                 self.still_step(&request);
             }
+        }
+    }
+
+    /// Keep the playback log in step with the request: a run starts when
+    /// playback does, writes a line per window, and its last line when
+    /// playback stops. The lines are written with no lock held.
+    fn log_playback(&self, request: Option<&PlayerRequest>) {
+        let playing = request.is_some_and(|r| r.playing);
+        if !playing && !self.shared.playback.lock().is_running() {
+            return;
+        }
+        let now = Instant::now();
+        let stats = *self.shared.stats.lock();
+        let report = {
+            let mut log = self.shared.playback.lock();
+            match request.filter(|r| r.playing) {
+                Some(request) => {
+                    let sharing = if self.output.sharing {
+                        "shared"
+                    } else {
+                        "readback"
+                    };
+                    log.playing(now, stats, request.project.fps, request.size, sharing);
+                    log.tick(now, stats)
+                }
+                None => log.stop(now, stats),
+            }
+        };
+        if let Some(report) = report {
+            report.emit();
         }
     }
 
@@ -838,6 +876,8 @@ impl Renderer {
         };
         let elapsed = tag.started.elapsed().as_micros() as f64;
         self.latency = self.latency * 0.8 + elapsed * 0.2;
+        // Counted only while a playback run is open; a scrub's frame is not.
+        self.shared.playback.lock().record_render(elapsed as i64);
         let current = self.key.as_ref().map(|k| k.generation);
         let stats = self.output.stats();
         {
