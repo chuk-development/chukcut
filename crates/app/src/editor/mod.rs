@@ -90,6 +90,10 @@ use crate::theme::*;
 use files::{FileRequest, Filter};
 use widgets::*;
 
+/// How long the UI thread may be busy at a stretch before the log says so.
+/// Three frames at 60 Hz: the point where a drag or a scrub visibly hitches.
+const UI_BUDGET: std::time::Duration = std::time::Duration::from_millis(50);
+
 // --- state -------------------------------------------------------------------
 
 pub struct Editor {
@@ -166,10 +170,44 @@ impl Editor {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
 
-        let ticker = cx.spawn(async move |this, cx| loop {
-            cx.background_executor().timer(TICK).await;
-            if this.update(cx, |editor, cx| editor.tick(cx)).is_err() {
-                break;
+        let viewport = window.viewport_size();
+        chukcut_engine::modules::diag::startup::line(
+            "display",
+            &format!(
+                "scale={} window={}x{}",
+                window.scale_factor(),
+                f32::from(viewport.width).round(),
+                f32::from(viewport.height).round()
+            ),
+        );
+
+        let ticker = cx.spawn(async move |this, cx| {
+            // The ticker doubles as the UI thread's watchdog: it asks to run
+            // every TICK, so when it runs much later than that, the thread was
+            // busy with something else (a render, an event handler) the whole
+            // time. Measured from the end of the last tick, so a slow tick is
+            // reported as itself, not as the loop's delay.
+            let mut rested = std::time::Instant::now();
+            loop {
+                cx.background_executor().timer(TICK).await;
+                let woke = std::time::Instant::now();
+                let late = woke.saturating_duration_since(rested).saturating_sub(TICK);
+                // Minutes late is a suspended machine, not a blocked thread.
+                if late < std::time::Duration::from_secs(30) {
+                    chukcut_engine::modules::diag::check("ui thread", late, UI_BUDGET, || {
+                        "the UI thread did not run its 8 ms tick for this long".into()
+                    });
+                }
+                if this.update(cx, |editor, cx| editor.tick(cx)).is_err() {
+                    break;
+                }
+                rested = std::time::Instant::now();
+                chukcut_engine::modules::diag::check(
+                    "ui tick",
+                    rested.saturating_duration_since(woke),
+                    UI_BUDGET,
+                    || "one editor tick (playback, polling) took this long".into(),
+                );
             }
         });
 

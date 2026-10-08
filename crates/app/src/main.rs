@@ -20,6 +20,12 @@ use editor::*;
 
 fn main() {
     chukcut_engine::init();
+    // The startup block, the resource sampler and FFmpeg's messages in the
+    // log (`modules::diag`).
+    chukcut_engine::modules::diag::start(chukcut_engine::modules::diag::Build {
+        version: env!("CARGO_PKG_VERSION"),
+        commit: env!("CHUKCUT_GIT_COMMIT"),
+    });
     // The export queue outlives a restart: what was queued or running when
     // the app last quit comes back, held until the user runs it.
     chukcut_engine::modules::export::commands::export_queue_restore();
