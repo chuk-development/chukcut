@@ -85,6 +85,13 @@ mkdir -p "$appdir/usr/bin" "$dist"
 for bin in "${binaries[@]}"; do
     install -m755 "target/release/$bin" "$appdir/usr/bin/$bin"
 done
+# The CUDA transcription helper, when the build machine had nvcc
+# (crates/engine/build.rs). It is not handed to linuxdeploy: its CUDA
+# libraries (cudart, cuBLAS, ~700 MB) come from the user's system or never,
+# and without them the editor transcribes on the CPU.
+if [ -x target/release/chukcut-whisper-cuda ]; then
+    install -m755 target/release/chukcut-whisper-cuda "$appdir/usr/bin/chukcut-whisper-cuda"
+fi
 
 linux=packaging/linux
 metainfo_id="io.github.chuk_development.chukcut"
@@ -117,6 +124,7 @@ exclude=(
     'libwayland-*.so*'
     'libstdc++.so*' 'libgcc_s.so*'
     'libcuda.so*' 'libnvidia-*.so*' 'libnvcuvid.so*'
+    'libcudart.so*' 'libcublas.so*' 'libcublasLt.so*'
 )
 exclude_args=()
 for pattern in "${exclude[@]}"; do

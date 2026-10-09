@@ -4,7 +4,8 @@
 #   scripts/install.sh               check dependencies, build release, install
 #   scripts/install.sh --check       only check dependencies
 #   scripts/install.sh --no-build    install the binaries already in target/release
-#   scripts/install.sh --cuda        build whisper.cpp with CUDA (needs nvcc)
+#   scripts/install.sh --cuda        require the CUDA transcription helper (needs nvcc;
+#                                    without the flag it is built whenever nvcc is found)
 #   scripts/install.sh --uninstall   remove everything this script installed
 #
 # What goes where (XDG_DATA_HOME defaults to ~/.local/share):
@@ -12,6 +13,8 @@
 #   ~/.local/bin/chukcut                                   the editor
 #   ~/.local/bin/chukcut-ml-worker                         the AI models' process
 #   ~/.local/bin/chukcut-cli                               the command line and MCP server
+#   ~/.local/bin/chukcut-whisper-cuda                      transcription on an NVIDIA GPU,
+#                                                          when the build had nvcc
 #   $XDG_DATA_HOME/applications/chukcut.desktop            menu entry
 #   $XDG_DATA_HOME/icons/hicolor/<size>/apps/chukcut.png   icons
 #   $XDG_DATA_HOME/mime/packages/chukcut.xml               .chukcut file type
@@ -37,15 +40,14 @@ datadir="${XDG_DATA_HOME:-$HOME/.local/share}"
 
 mode=install
 build=1
-features=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --uninstall) mode=uninstall ;;
         --check) mode=check ;;
         --no-build) build=0 ;;
-        --cuda) features=(--features "chukcut/cuda,chukcut-cli/cuda") ;;
+        --cuda) export CHUKCUT_WHISPER_CUDA=1 ;;
         --bindir) bindir="$2"; shift ;;
-        -h|--help) sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "install.sh: unknown option '$1' (try --help)" >&2; exit 2 ;;
     esac
     shift
@@ -62,6 +64,10 @@ fi
 # What gets installed. The editor is required; the worker and the CLI are
 # installed when they were built (or shipped), and a missing one is reported.
 binaries=(chukcut chukcut-ml-worker chukcut-cli)
+# Installed when present, never required and never checked with ldd: the CUDA
+# helper links the CUDA libraries, and without them the editor transcribes on
+# the CPU (crates/engine/build.rs builds it when nvcc is found).
+optional=(chukcut-whisper-cuda)
 
 # A tarball ships the binaries in bin/ and has no Cargo.toml.
 prebuilt=0
@@ -95,7 +101,7 @@ refresh_caches() {
 
 if [ "$mode" = uninstall ]; then
     say "Removing chukcut"
-    for name in "${binaries[@]}"; do
+    for name in "${binaries[@]}" "${optional[@]}"; do
         rm -fv "$bindir/$name"
     done
     rm -fv \
@@ -247,7 +253,7 @@ if [ "$build" = 1 ]; then
     jobs="${CARGO_BUILD_JOBS:-$jobs}"
     say "Building release with $jobs jobs (the first build takes a while)"
     (cd "$root" && cargo build --release --locked -p chukcut -p chukcut-ml-worker -p chukcut-cli \
-        -j "$jobs" "${features[@]}")
+        -j "$jobs")
 fi
 
 if [ ! -x "$from/chukcut" ]; then
@@ -270,6 +276,14 @@ for name in "${binaries[@]}"; do
             chukcut-ml-worker) warn "No $name in $from: the AI tools will say they are not installed." ;;
             chukcut-cli) warn "No $name in $from: the command line and MCP server are not installed." ;;
         esac
+    fi
+done
+for name in "${optional[@]}"; do
+    if [ -x "$from/$name" ]; then
+        install -Dm755 "$from/$name" "$bindir/$name"
+        installed+=("$name")
+    else
+        rm -f "$bindir/$name"
     fi
 done
 

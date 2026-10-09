@@ -35,6 +35,11 @@ fi
 for bin in "${binaries[@]}"; do
     [ -x "$root/target/release/$bin" ] || { echo "tarball.sh: no binary at target/release/$bin" >&2; exit 1; }
 done
+# The CUDA transcription helper exists only when the build machine had nvcc
+# (crates/engine/build.rs); it is optional, the editor falls back to the CPU.
+if [ -x "$root/target/release/chukcut-whisper-cuda" ]; then
+    binaries+=(chukcut-whisper-cuda)
+fi
 
 rm -rf "$stage"
 mkdir -p "$stage/bin" "$stage/scripts" "$stage/packaging"

@@ -120,6 +120,12 @@ jobs:
       - name: ML worker tests
         run: cargo test -p chukcut-ml-worker -j 2
 
+      # The CUDA transcription helper's protocol. The runner has no nvcc, so
+      # the helper itself is not built (crates/engine/build.rs) and the app
+      # transcribes on the CPU, which the CLI tests cover.
+      - name: Whisper helper tests
+        run: cargo test -p chukcut-whisper -j 2
+
   release:
     name: Release build
     runs-on: ubuntu-24.04

@@ -64,6 +64,15 @@ mkdir -p "$stage/DEBIAN" "$dist"
 install -Dm755 target/release/chukcut "$stage/usr/bin/chukcut"
 install -Dm755 target/release/chukcut-cli "$stage/usr/bin/chukcut-cli"
 install -Dm755 target/release/chukcut-ml-worker "$stage/usr/libexec/chukcut/chukcut-ml-worker"
+# The CUDA transcription helper exists only when the build machine had nvcc
+# (crates/engine/build.rs). It is optional: without it, or without the CUDA
+# libraries it links, the editor transcribes on the CPU. So it stays out of
+# the Depends line and its libraries are only suggested.
+suggests=""
+if [ -x target/release/chukcut-whisper-cuda ]; then
+    install -Dm755 target/release/chukcut-whisper-cuda "$stage/usr/libexec/chukcut/chukcut-whisper-cuda"
+    suggests="libcudart12, libcublas12, libcublaslt12"
+fi
 
 linux=packaging/linux
 metainfo_id="io.github.chuk_development.chukcut"
@@ -131,7 +140,8 @@ Maintainer: chukcut contributors <https://github.com/chuk-development/chukcut/is
 Installed-Size: $installed_kb
 Depends: $depends
 Recommends: $recommends
-Section: video
+${suggests:+Suggests: $suggests
+}Section: video
 Priority: optional
 Homepage: https://github.com/chuk-development/chukcut
 Description: video editor with a native GPU interface
@@ -141,8 +151,10 @@ Description: video editor with a native GPU interface
  NVDEC/NVENC when the driver supports them.
  .
  The package contains the editor (chukcut), the command line and MCP server
- (chukcut-cli) and the process that runs the AI models (chukcut-ml-worker).
- ONNX Runtime and the models download on first use.
+ (chukcut-cli) and the process that runs the AI models (chukcut-ml-worker),
+ and, when it was built with CUDA, the helper that transcribes on an NVIDIA
+ GPU (chukcut-whisper-cuda). ONNX Runtime and the models download on first
+ use.
 EOF
 
 # The desktop database, the MIME database and the icon cache are refreshed

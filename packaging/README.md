@@ -104,6 +104,7 @@ chukcut-<version>-x86_64-linux/
   bin/chukcut              the editor
   bin/chukcut-ml-worker    the AI models' process; the editor finds it next to itself
   bin/chukcut-cli          the command line and MCP server
+  bin/chukcut-whisper-cuda transcription on an NVIDIA GPU; only when the build had nvcc
   scripts/install.sh       the same installer; it finds bin/chukcut and skips the build
   packaging/linux/…        desktop entry, MIME type, metainfo, icons
   LICENSE NOTICE.md README.md CHANGELOG.md
@@ -168,10 +169,23 @@ dependencies. In October 2026 that was FFmpeg, ALSA, xcb, xkbcommon,
 fontconfig and libstdc++. wgpu loads Vulkan, and GPUI loads Wayland, with
 `dlopen`, so `ldd` does not show them.
 
-A CUDA build of whisper.cpp (`scripts/install.sh --cuda`) links the CUDA
-runtime from the CUDA toolkit. A tarball made from such a build would carry a
-dependency on the toolkit's `libcudart`. Build release tarballs without
-`--cuda`.
+**The CUDA transcription helper** (`chukcut-whisper-cuda`, decision 0036)
+is whisper.cpp with its CUDA backend in a process of its own. The engine's
+build script builds it whenever `nvcc` is on the build machine
+(`CHUKCUT_WHISPER_CUDA=0` skips it, `=1` requires it); CI and the release
+builders have no `nvcc`, so their packages do not contain it. When it is
+there, every recipe ships it as an **optional** binary: it links
+`libcudart.so.12`, `libcublas.so.12` and `libcublasLt.so.12` from the CUDA
+toolkit, which are never bundled and never a dependency. On a machine
+without them (or without an NVIDIA driver) the helper does not start and the
+editor transcribes on the CPU in its own process; with chukcut's NVIDIA
+bundle installed (Settings › AI acceleration), the editor puts the bundle's
+CUDA libraries on the helper's library path, so the toolkit is not needed
+either. The helper's CPU code is compiled for the build machine's CPU and
+its CUDA kernels for the build machine's GPU (ggml's `GGML_NATIVE` default);
+a packager who ships it sets `GGML_NATIVE=OFF` and
+`CMAKE_CUDA_ARCHITECTURES` (for example `"75;86;89"`) in the environment of
+the build, which whisper.cpp's CMake run reads.
 
 ## The .deb
 
@@ -184,6 +198,7 @@ A version `0.2.0-rc.1` becomes `0.2.0~rc.1`, so that it sorts before
 /usr/bin/chukcut                              the editor
 /usr/bin/chukcut-cli                          the command line and MCP server
 /usr/libexec/chukcut/chukcut-ml-worker        the AI worker; the editor looks here
+/usr/libexec/chukcut/chukcut-whisper-cuda     the CUDA transcription helper, when built
 /usr/share/applications/chukcut.desktop       and the MIME type, metainfo, icons
 /usr/share/doc/chukcut/                       copyright, NOTICE.md, README.md
 ```
