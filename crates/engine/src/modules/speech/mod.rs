@@ -8,9 +8,11 @@
 //!   chunks at pauses to stay under upload limits and the answers are stitched
 //!   back together on the timeline.
 //! - **Local**: whisper.cpp through `whisper-rs`, offline, with the model
-//!   downloaded on first use and checked against a pinned SHA-256. Compiled in
-//!   with the `local-whisper` feature (the app enables it); CUDA with
-//!   `local-whisper-cuda`. Why whisper.cpp and not candle:
+//!   downloaded on first use and checked against a pinned SHA-256. On an
+//!   NVIDIA GPU it runs in the CUDA helper process `chukcut-whisper-cuda`
+//!   ([`helper`], decision 0036); everywhere else, and whenever the helper
+//!   cannot, on the CPU in this process (the `local-whisper` feature, which
+//!   the app enables). Why whisper.cpp and not candle:
 //!   `docs/decisions/0013-local-transcription-with-whisper-cpp.md`.
 //!
 //! Both hear the same thing — the timeline's own mix at 16 kHz mono, see
@@ -18,6 +20,7 @@
 
 pub mod audio;
 pub mod commands;
+pub mod helper;
 pub mod local;
 pub mod models;
 pub mod settings;

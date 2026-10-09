@@ -365,18 +365,22 @@ fn settings_line() -> String {
     )
 }
 
-/// What local transcription runs on in this build. A helper process that
-/// transcribes elsewhere says so itself, through [`line`] or its stderr.
+/// What local transcription can run on: whisper.cpp on the CPU in this
+/// process (the `local-whisper` feature) and the CUDA helper when it is
+/// installed and an NVIDIA driver is loaded (decision 0036). Not probed here,
+/// which would start CUDA at every launch; each transcription logs the device
+/// it used, and a fallback logs why.
 fn transcription_line() -> String {
-    if !crate::modules::speech::local::AVAILABLE {
-        return "engine=none (built without local-whisper)".into();
-    }
-    let gpu = if cfg!(feature = "local-whisper-cuda") {
-        "cuda"
+    use crate::modules::speech::{helper, local};
+    let cpu = if local::AVAILABLE {
+        "in-process"
     } else {
         "none"
     };
-    format!("engine=whisper.cpp in-process gpu={gpu}")
+    let gpu = helper::worth_trying()
+        .map(|path| format!("cuda-helper={}", path.display()))
+        .unwrap_or_else(|| "cuda-helper=none".to_string());
+    format!("engine=whisper.cpp cpu={cpu} {gpu}")
 }
 
 #[cfg(test)]

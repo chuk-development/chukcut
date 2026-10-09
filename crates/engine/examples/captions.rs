@@ -9,6 +9,10 @@
 //! Without `--account` it runs whisper.cpp locally (the model is downloaded on
 //! first use). The same functions the captions panel calls, minus the
 //! timeline: the file's own audio is read at 16 kHz mono directly.
+//!
+//! On a machine with `nvcc` the build also produces the CUDA helper and the
+//! local path runs on the GPU; `CHUKCUT_WHISPER_HELPER=off` forces the CPU,
+//! which is how the two are compared (docs/STATUS.md).
 
 use std::sync::atomic::AtomicBool;
 
@@ -86,7 +90,15 @@ fn main() -> Result<(), String> {
                 &cancel,
             )?;
             eprintln!();
-            local::transcribe(&file, &samples, language.as_deref(), &|_| {}, &cancel)?
+            // The device, once: "on the GPU (…, CUDA)" or "on the CPU".
+            let named = std::sync::Once::new();
+            local::transcribe(
+                &file,
+                &samples,
+                language.as_deref(),
+                &|device, _| named.call_once(|| eprintln!("transcribing on {device}")),
+                &cancel,
+            )?
         }
     };
     eprintln!(

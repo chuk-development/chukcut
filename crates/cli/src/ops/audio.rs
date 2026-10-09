@@ -162,6 +162,9 @@ impl Operation for CaptionsTranscribeArgs {
         )?;
         let mut outcome = captions_added(added, "transcribed");
         outcome.data["language"] = json!(transcript.language);
+        if settings.backend == Backend::Local {
+            outcome.data["device"] = json!(speech_commands::speech_device_known());
+        }
         Ok(outcome)
     }
 }

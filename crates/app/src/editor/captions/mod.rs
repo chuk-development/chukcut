@@ -76,6 +76,10 @@ pub(crate) struct CaptionsPanel {
     emoji_open: bool,
     emoji_category: usize,
     pub(crate) drag: Option<CaptionDrag>,
+    /// Whether the panel has asked where offline transcription runs (the
+    /// GPU or the CPU). Asking starts the CUDA helper once, so it happens
+    /// in the background the first time the model section is shown.
+    device_asked: bool,
 
     name: Entity<InputState>,
     url: Entity<InputState>,
@@ -171,6 +175,7 @@ impl CaptionsPanel {
             emoji_open: false,
             emoji_category: 0,
             drag: None,
+            device_asked: false,
             name,
             url,
             model,

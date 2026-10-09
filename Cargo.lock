@@ -1045,6 +1045,7 @@ dependencies = [
  "base64",
  "bytemuck",
  "chukcut-ml-worker",
+ "chukcut-whisper",
  "cpal",
  "ebur128",
  "ffmpeg-next",
@@ -1086,7 +1087,6 @@ dependencies = [
  "vello",
  "wgpu 30.0.1",
  "wgpu-hal 30.0.1",
- "whisper-rs",
  "zeno",
  "zip",
 ]
@@ -1098,6 +1098,15 @@ dependencies = [
  "ort",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "chukcut-whisper"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "whisper-rs",
 ]
 
 [[package]]

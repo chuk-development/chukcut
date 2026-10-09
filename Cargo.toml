@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/engine", "crates/app", "crates/cli", "crates/ml-worker"]
+members = ["crates/engine", "crates/app", "crates/cli", "crates/ml-worker", "crates/whisper"]
 default-members = ["crates/app"]
 # A vendored dependency, not a member: it is built and linted as a dependency.
 exclude = ["vendor/signalsmith-stretch"]

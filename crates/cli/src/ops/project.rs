@@ -387,6 +387,8 @@ impl CatalogArgs {
             "hardware" => json!(export::commands::export_presets().hardware),
             "models" => json!({
                 "local_available": speech::commands::speech_local_available(),
+                // Where a local transcription runs: the GPU (CUDA helper) or the CPU.
+                "device": speech::commands::speech_device(),
                 "models": speech::commands::speech_models(),
             }),
             "luts" => json!(inspector::commands::inspector_lut_library()),

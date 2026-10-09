@@ -36,8 +36,8 @@ ffmpeg-next = "9.0"
 
 # Offline transcription (whisper.cpp) is on, as in the app. The same engine
 # features also mean the CLI and the app share one engine build in the
-# workspace target instead of compiling it twice.
+# workspace target instead of compiling it twice. With `nvcc` present the
+# engine's build script adds the CUDA helper (decision 0036).
 [features]
 default = ["local-whisper"]
 local-whisper = ["chukcut-engine/local-whisper"]
-cuda = ["chukcut-engine/local-whisper-cuda"]

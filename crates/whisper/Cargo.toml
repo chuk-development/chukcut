@@ -1,0 +1,36 @@
+[package]
+name = "chukcut-whisper"
+version = "0.1.0"
+description = "Offline transcription with whisper.cpp for chukcut: the in-process runner, and the CUDA helper process with its protocol."
+license = "GPL-3.0-or-later"
+repository = "https://github.com/chuk-development/chukcut"
+publish = false
+edition = "2021"
+
+[lib]
+name = "chukcut_whisper"
+
+# The CUDA helper. It links cudart and cuBLAS, so it cannot start on a
+# machine without them; the editor starts it when it can and otherwise
+# transcribes in its own process on the CPU. Built only with `cuda`, so a
+# workspace build without nvcc never produces a CPU binary under this name.
+# `crates/engine/build.rs` builds it on machines that have nvcc.
+# docs/decisions/0036-whisper-on-cuda-in-a-helper-process.md.
+[[bin]]
+name = "chukcut-whisper-cuda"
+path = "src/main.rs"
+required-features = ["cuda"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# whisper.cpp, built from source by `whisper-rs-sys` with CMake. `raw-api`
+# exposes ggml's device list, which says whether the CUDA backend found a GPU.
+whisper-rs = { version = "0.16", optional = true, features = ["raw-api"] }
+
+[features]
+default = []
+# whisper.cpp on the CPU, in the caller's process.
+whisper = ["dep:whisper-rs"]
+# whisper.cpp with its CUDA backend (needs nvcc to build).
+cuda = ["whisper", "whisper-rs/cuda"]

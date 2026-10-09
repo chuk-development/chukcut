@@ -12,8 +12,9 @@ name = "chukcut"
 path = "src/main.rs"
 
 [dependencies]
-# Offline transcription (whisper.cpp) is on in the app; `--features cuda`
-# adds whisper.cpp's CUDA backend and needs `nvcc`.
+# Offline transcription (whisper.cpp) is on in the app. On a machine with
+# `nvcc` the engine's build script also builds the CUDA helper beside the
+# app, which transcribes on an NVIDIA GPU (decision 0036).
 chukcut-engine = { path = "../engine", features = ["local-whisper"] }
 
 # GPUI (Zed's UI toolkit) plus GPUI Component's widgets, themes and the Lucide
@@ -31,9 +32,6 @@ serde_json = "1"
 # The answer channel of the built-in file browser; the same crate GPUI's
 # own file prompts answer on.
 futures-channel = "0.3"
-
-[features]
-cuda = ["chukcut-engine/local-whisper-cuda"]
 
 [dev-dependencies]
 # The patched GPUI renderer's import (`vendor/README.md`), driven without a

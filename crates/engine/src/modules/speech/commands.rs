@@ -94,9 +94,9 @@ pub fn speech_transcribe(
                 &path,
                 &samples,
                 settings.language.as_deref(),
-                &|fraction| {
+                &|device, fraction| {
                     progress(SpeechProgress::new(
-                        "Transcribing on this computer",
+                        format!("Transcribing on {device}"),
                         Some(fraction),
                     ))
                 },
@@ -182,7 +182,20 @@ pub fn speech_models() -> Vec<ModelInfo> {
 
 /// Whether this build can transcribe offline.
 pub fn speech_local_available() -> bool {
-    super::local::AVAILABLE
+    super::local::available()
+}
+
+/// Where offline transcription runs on this machine: the NVIDIA GPU through
+/// the CUDA helper, or the CPU; `None` when this build cannot transcribe
+/// offline. The first call starts the helper once to ask it, so call it off
+/// the UI thread; [`speech_device_known`] is the non-blocking form.
+pub fn speech_device() -> Option<super::local::Device> {
+    super::local::device()
+}
+
+/// What [`speech_device`] already knows, without starting anything.
+pub fn speech_device_known() -> Option<super::local::Device> {
+    super::local::device_known()
 }
 
 #[cfg(test)]

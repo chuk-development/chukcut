@@ -669,6 +669,21 @@ impl Editor {
                 })
             });
         let downloaded = current.is_downloaded();
+        // Where it runs: the GPU through the CUDA helper, or the CPU. The
+        // first answer starts the helper, so it is fetched in the background
+        // and the panel redraws when it arrives.
+        let device = speech_commands::speech_device_known();
+        if device.is_none() && !self.captions.device_asked {
+            self.captions.device_asked = true;
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .spawn(async move { speech_commands::speech_device() })
+                    .await;
+                let _ = this.update(cx, |_, cx| cx.notify());
+            })
+            .detach();
+        }
+        let runs_on = device.map(|d| format!(" Runs on {d}.")).unwrap_or_default();
         section(
             "Model",
             div()
@@ -677,9 +692,11 @@ impl Editor {
                 .gap_1()
                 .child(row().child(picker))
                 .child(label(if downloaded {
-                    "Ready. Runs offline with whisper.cpp; nothing leaves this computer."
+                    format!(
+                        "Ready. Runs offline with whisper.cpp; nothing leaves this computer.{runs_on}"
+                    )
                 } else {
-                    "Downloaded once on first use, checked, and kept in the cache."
+                    format!("Downloaded once on first use, checked, and kept in the cache.{runs_on}")
                 })),
         )
         .into_any_element()

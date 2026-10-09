@@ -160,10 +160,13 @@ toml = "0.8"
 # the tree through wgpu and ureq; this only names it.
 base64 = "0.22"
 # Local transcription: whisper.cpp, built from source by `whisper-rs-sys` with
-# CMake. Optional because that build costs a few minutes once; the app turns it
-# on. `local-whisper-cuda` adds the CUDA backend and needs `nvcc`. See
-# docs/decisions/0013-local-transcription-with-whisper-cpp.md.
-whisper-rs = { version = "0.16", optional = true }
+# CMake, behind the `local-whisper` feature because that build costs a few
+# minutes once; the app and the CLI turn it on. Without the feature this is
+# only the protocol of the CUDA helper (`chukcut-whisper-cuda`), which
+# `build.rs` builds when `nvcc` is present. See
+# docs/decisions/0013-local-transcription-with-whisper-cpp.md and
+# docs/decisions/0036-whisper-on-cuda-in-a-helper-process.md.
+chukcut-whisper = { path = "../whisper" }
 
 # --- the ML worker (modules/ml) ----------------------------------------------
 #
@@ -180,8 +183,9 @@ tar = { version = "0.4", default-features = false }
 
 [features]
 default = []
-local-whisper = ["dep:whisper-rs"]
-local-whisper-cuda = ["local-whisper", "whisper-rs/cuda"]
+# whisper.cpp on the CPU in this process, and (through `build.rs`) the CUDA
+# helper beside the binaries when `nvcc` is found.
+local-whisper = ["chukcut-whisper/whisper"]
 
 # The escape hatch under wgpu, for the one thing WebGPU has no concept of:
 # allocating a buffer whose memory can be exported as a DMA-BUF file descriptor,
