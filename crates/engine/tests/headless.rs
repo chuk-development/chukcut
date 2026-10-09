@@ -1,9 +1,9 @@
 //! A headless shell (the CLI, the MCP server) must not touch the user's
 //! working copy.
 //!
-//! Its own test binary, because `autosave::disable_for_process` is one way and
-//! process wide: in the library's test binary it would silently change what
-//! every other test sees.
+//! Its own test binary, because `autosave::enable_for_process` and
+//! `disable_for_process` are one way and process wide: in the library's test
+//! binary they would silently change what every other test sees.
 
 use std::sync::Arc;
 
@@ -20,6 +20,10 @@ fn edits_in_a_headless_process_leave_the_working_copy_alone() {
     std::fs::create_dir_all(&root).unwrap();
     std::env::set_var("XDG_CONFIG_HOME", &root);
 
+    // Off unless the app turns it on; and a headless shell's opt-out wins
+    // even over that.
+    assert!(!autosave::is_enabled());
+    autosave::enable_for_process();
     assert!(autosave::is_enabled());
     autosave::disable_for_process();
     assert!(!autosave::is_enabled());

@@ -457,6 +457,9 @@ fn a_whole_session_through_the_command_layer() {
     // What the app's `main` runs first: logging, settings, and the export's
     // audio source (without it every export is silent).
     chukcut_engine::init();
+    // The app turns the working copy on; this session checks it, into the
+    // scratch config above.
+    chukcut_engine::modules::project::autosave::enable_for_process();
 
     let media = fixture_dir();
     let (a_path, b_path, still_path) = (clip_a(&media), clip_b(&media), still(&media));

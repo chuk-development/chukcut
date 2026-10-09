@@ -189,21 +189,35 @@ fn writer() -> &'static Writer {
 /// Persist `project` in the background, replacing any write that has not
 /// started yet.
 ///
-/// Does nothing once [`disable_for_process`] has been called.
+/// Does nothing unless [`enable_for_process`] has been called, or once
+/// [`disable_for_process`] has.
 pub fn schedule(project: &Project, origin: Option<PathBuf>) {
-    if DISABLED.load(Ordering::Relaxed) {
+    if !is_enabled() {
         return;
     }
     schedule_to(file(), project, origin);
 }
 
-/// Set by [`disable_for_process`]; never cleared.
+/// Set by [`enable_for_process`], which only the app calls.
 ///
-/// Already set in the engine's own unit tests: every timeline command
-/// schedules the working copy, and without this a test run overwrote the
-/// user's real `autosave.chukcut` with test documents, which the next app
-/// launch would offer to restore. Tests of the writer use [`schedule_to`].
-static DISABLED: AtomicBool = AtomicBool::new(cfg!(test));
+/// Off by default, so a process has to ask for the working copy. Every
+/// timeline command schedules it, and while it was on by default every
+/// integration test that edits through `AppState` overwrote the user's real
+/// `autosave.chukcut` with a test document (it happened on 2026-10-09, twice
+/// in one night), which the next app launch would offer to restore. Opting
+/// out had to be remembered in each test binary and was forgotten in a
+/// dozen. Tests of the writer use [`schedule_to`].
+static ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Set by [`disable_for_process`]; never cleared, and wins over
+/// [`ENABLED`].
+static DISABLED: AtomicBool = AtomicBool::new(false);
+
+/// Turn the working copy on for this process. The GUI app calls this once at
+/// startup; nothing else should.
+pub fn enable_for_process() {
+    ENABLED.store(true, Ordering::Relaxed);
+}
 
 /// Turn the working copy off for the rest of this process.
 ///
@@ -222,7 +236,7 @@ pub fn disable_for_process() {
 
 /// Whether [`schedule`] writes the working copy in this process.
 pub fn is_enabled() -> bool {
-    !DISABLED.load(Ordering::Relaxed)
+    ENABLED.load(Ordering::Relaxed) && !DISABLED.load(Ordering::Relaxed)
 }
 
 /// [`schedule`], to a path of the caller's choosing.

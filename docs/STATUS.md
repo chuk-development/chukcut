@@ -983,6 +983,12 @@ a timing to be serialised away:
   real `~/.config/chukcut/autosave.chukcut`** — every timeline command
   schedules it; autosave now starts disabled under `cfg(test)`. Other
   worktrees still do this until they merge this branch.
+  **It came back through the integration tests** (2026-10-09: `voice_isolation`
+  and a dozen others edit through `AppState` without `cfg(test)` and wrote a
+  test project over the owner's working copy twice in one night). The working
+  copy is now **off unless a process calls `autosave::enable_for_process()`**,
+  which only the app's `main` does (and `full_workflow`, into its scratch
+  XDG). A new shell or test cannot forget to opt out.
 - **`preview::player` `playback_hands_out_frames_in_order_and_never_from_the_future`,
   lavapipe: "only 0 frames in 600 ms".** The first frame on a loaded lavapipe
   took longer than the whole window. The test now runs until five frames or

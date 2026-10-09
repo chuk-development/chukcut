@@ -30,6 +30,9 @@ fn main() {
     // the app last quit comes back, held until the user runs it.
     chukcut_engine::modules::export::commands::export_queue_restore();
 
+    // The crash-recovery working copy is the app's alone; tests, the CLI and
+    // helper processes leave the user's copy untouched.
+    chukcut_engine::modules::project::autosave::enable_for_process();
     let state = AppState::new();
     // Before the window: claims crash recovery, then opens or creates what
     // the command line names. See `editor/shell.rs`.
