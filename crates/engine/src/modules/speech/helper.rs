@@ -115,6 +115,7 @@ impl Running {
     fn stop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        crate::modules::diag::child::unregister(self.child.id());
     }
 
     /// What the helper said on stderr, trimmed for a log line.
@@ -201,6 +202,10 @@ fn start(binary: &Path, probe: bool, library_dirs: &[PathBuf]) -> Result<Running
             .map_err(|e| format!("a thread could not be started: {e}"))?;
     }
 
+    // The resource sampler reports its memory and CPU next to the app's.
+    // Its stderr is kept here rather than forwarded to the log: the tail is
+    // the reason a fallback gives, and it goes into the log with that.
+    crate::modules::diag::child::register("whisper", child.id());
     let mut running = Running {
         child,
         replies,
