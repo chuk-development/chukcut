@@ -26,7 +26,9 @@ cargo build --release -p chukcut-cli
 
 The CLI uses the same system packages as the app (see the README). It has
 offline transcription (whisper.cpp) by default. `--no-default-features` builds
-it without whisper.cpp. `--features cuda` adds the CUDA backend.
+it without whisper.cpp. On a machine with `nvcc` the build also makes the
+CUDA helper `chukcut-whisper-cuda` next to it, and local transcription runs
+on the NVIDIA GPU (decision 0036).
 
 Copy the binary to a folder on your `PATH`, for example `~/.local/bin`, to use
 it as `chukcut-cli`.

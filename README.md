@@ -219,10 +219,12 @@ the release binaries and installs them for your user only, with no sudo:
 - `~/.local/bin/chukcut-cli`, the command line and the MCP server
 - a menu entry, icons, the `.chukcut` file type and AppStream metadata under `~/.local/share`
 
-Other options: `--check` (only check dependencies), `--cuda` (whisper.cpp
-with CUDA, needs `nvcc`), `--no-build` (install the binaries you already
-built) and `--uninstall`. Uninstalling removes the three binaries and keeps
-your projects and settings.
+On a machine with the CUDA toolkit (`nvcc`), the build also makes
+`chukcut-whisper-cuda`, which runs auto captions on an NVIDIA GPU; it is
+installed next to the others. Other options: `--check` (only check
+dependencies), `--cuda` (fail if that helper cannot be built),
+`--no-build` (install the binaries you already built) and `--uninstall`.
+Uninstalling removes the binaries and keeps your projects and settings.
 
 ### From a release tarball
 

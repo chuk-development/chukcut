@@ -71,7 +71,9 @@ Captions are titles on the caption lane. Open the asset panel's
    - **On this computer**: whisper.cpp. Nothing leaves your computer.
      **Model**: **Tiny (75 MB, fastest)**, **Base (142 MB)**, **Small
      (466 MB)**, **Medium (515 MB, quantised)** or **Large v3 turbo (548 MB,
-     best)**. The model downloads once and is checked.
+     best)**. The model downloads once and is checked. The text under
+     **Model** says where it runs: on an NVIDIA GPU with CUDA, or on the CPU
+     ([AI tools](ai-tools.md#auto-captions)).
    - **Cloud account**: an OpenAI-compatible server with your own key.
      **Add OpenAI**, **Add Groq** or **Other OpenAI-compatible**, then
      **Test connection**.

@@ -309,8 +309,26 @@ of memory (2 GB on the CPU) while it runs.
 [Text and captions](text-and-captions.md#auto-captions).
 
 **Model:** Whisper through whisper.cpp (MIT). Five sizes, from **Tiny
-(75 MB, fastest)** to **Large v3 turbo (548 MB, best)**. It runs on the CPU.
-A build with `scripts/install.sh --cuda` runs it on an NVIDIA GPU.
+(75 MB, fastest)** to **Large v3 turbo (548 MB, best)**.
+
+**GPU or CPU.** On an NVIDIA GPU, transcription runs on the GPU with CUDA,
+in a helper program (`chukcut-whisper-cuda`) next to `chukcut`. Everywhere
+else it runs on the CPU. You do not choose: chukcut uses the GPU when it
+can, and the CPU when the helper is missing, cannot start or fails. The
+Captions tab shows where it runs under **Model** ("Runs on the GPU (NVIDIA
+GeForce RTX 3060, CUDA)" or "Runs on the CPU"), and the progress line says
+it again while it transcribes.
+
+The helper is there when chukcut was built on a computer with the CUDA
+toolkit (`nvcc`). It needs the CUDA 12 runtime and cuBLAS: from the system
+(Ubuntu: `sudo apt install libcudart12 libcublas12 libcublaslt12`), or from
+chukcut's own NVIDIA bundle for CUDA 12 in Settings ›
+[AI acceleration](settings.md#ai-acceleration). Packages built without the
+CUDA toolkit have no helper and transcribe on the CPU.
+
+**Cost:** 5 minutes of speech took 4 s with **Base** and 6 s with **Large
+v3 turbo** on the GPU (RTX 3060). On the CPU they took 45 s and 9 minutes.
+On the GPU the large model is fast enough to be the everyday choice.
 
 **Cache:** the models are in `~/.cache/chukcut/whisper/`. They are not in
 the cache limit.

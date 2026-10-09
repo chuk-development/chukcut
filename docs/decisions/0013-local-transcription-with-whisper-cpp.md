@@ -38,7 +38,7 @@ loses on every axis that matters to a user:
   minutes) and `clang`/`libclang` for bindgen. Both are on the build machines.
   The engine's own tests do not enable the feature, so `cargo test -p
   chukcut-engine` does not pay for it.
-- **CUDA is opt-in** because building ggml-cuda needs `nvcc` and takes long.
+- **CUDA was opt-in** (until 0036) because building ggml-cuda needs `nvcc` and takes long.
   Without it the CPU path is fast enough for `tiny`/`base`/`small`.
 - **No Vulkan backend**, on purpose. whisper.cpp's Vulkan backend would open
   its own Vulkan instance next to wgpu's, which `CLAUDE.md` forbids
@@ -55,3 +55,12 @@ loses on every axis that matters to a user:
   a target we ship to: move to candle and accept segment-level timing plus our
   own alignment.
 - A Rust speech model with native word timing and comparable CPU speed appears.
+
+## Amended 2026-10-09: CUDA in a helper process, without a flag
+
+`local-whisper-cuda` and the app's and CLI's `cuda` features are gone. On a
+machine with `nvcc` the engine's build script builds `chukcut-whisper-cuda`,
+whisper.cpp with CUDA in a process of its own, beside the binaries; the
+editor uses it when an NVIDIA GPU is usable and transcribes on the CPU in
+its own process otherwise. The whisper.cpp call itself moved to
+`crates/whisper` (`chukcut_whisper::run`), shared by both. Decision 0036.

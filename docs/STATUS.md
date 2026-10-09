@@ -21,8 +21,8 @@ works on the code.
 - **Picture:** grading (basic, HSL, curves, wheels, LUTs, auto adjust, colour
   match, presets), masks, chroma key, blend modes, 20 effects (one of them a
   GPU denoise), crop with a box on the player, effect clips, ~130
-  transitions, titles and the text animator, captions (whisper.cpp or a
-  server), animated stickers, frame blending, motion blur, speed curves and
+  transitions, titles and the text animator, captions (whisper.cpp on the
+  GPU with CUDA or on the CPU, or a server), animated stickers, frame blending, motion blur, speed curves and
   speed effects.
 - **Local AI** (`chukcut-ml-worker`, ONNX Runtime, CUDA bundle with an optional
   TensorRT "Fast" add-on, or CPU):
@@ -55,13 +55,13 @@ denoiser.
 **Before you change code:** read "Traps that have already cost time" and
 the CLAUDE.md non-negotiables. Judge performance from a release build only.
 
-**Newest sections first:** Robustness, Colour in and out, Crop keyframes and temporal denoise, Release builds, The crash after the export, QA pass 3, UX gaps, Body landmarks, Polish pass 3, CI, Colour AI, QA pass 2, Flaky
+**Newest sections first:** Whisper on the GPU, The diagnostic log, Robustness, Colour in and out, Crop keyframes and temporal denoise, Release builds, The crash after the export, QA pass 3, UX gaps, Body landmarks, Polish pass 3, CI, Colour AI, QA pass 2, Flaky
 tests, Frame blending, Timelines and compound clips. The ML sections are at
 the end of the file ("The ML worker" and its sub-sections).
 
 ## Update history
 
-Last updated: 2026-10-05 (robustness: the export streams its audio over its range, panics are logged and contained, damaged documents do not render, jobs commit only into their own project, `run_export` joins its thread. See "Robustness" below). Previously 2026-10-05 (colour in and out: exports converted and tagged as BT.709 or BT.601, 10-bit HEVC/AV1 export, HDR and 10-bit sources tone-mapped to SDR on every decode path — see "Colour in and out" below). Previously 2026-10-05 (crop keyframes and a temporal mode for Reduce noise — see "Crop keyframes and temporal denoise" below). Previously 2026-10-04 (release builds: a manual Release workflow with a .deb, AppImages that bundle FFmpeg, and experimental macOS and Windows jobs — see "Release builds" below). Previously 2026-10-04 (the CLI's crash after an export found and fixed, and the shells leave through `lifecycle::exit` — see "The crash after the export" below). Previously 2026-10-04 (QA pass 3 over waves 10–11: five fixes, the showcase extended — see "QA pass 3" below). Previously 2026-10-04 (crop, speed effects, denoise, Performance settings, a persisted export queue with a quit guard, and the ML worker and CLI in the tarball — see "UX gaps" below). Previously 2026-10-04 (body landmarks, follow a body part, reframe on a body, zipped models, faces and voices in the preparation — see "Body landmarks" below). Previously 2026-10-04 (the "At a glance" block above, after polish pass 3). Previously 2026-10-04 (QA pass 2 over the wave 7–9 features and a showcase that shows them — see "QA pass 2" below). Previously 2026-10-04 (CI: clippy is fatal, the engine tests run on lavapipe with ffmpeg, the CLI and ML worker tests run too — see "CI" below). Previously 2026-10-04 (preview frames no longer leave the GPU: shared with GPUI through a patched GPUI, readback as the fallback — see "Preview frames shared with GPUI" under Perf). Previously 2026-10-04 (ML worker: VitTrack re-finding, Remove background, CUDA — see "The ML worker" below). Previously 2026-10-02 (**the UI is native now** — decision 0011. The Tauri
+Last updated: 2026-10-09 (Whisper on the GPU: a CUDA helper process built whenever `nvcc` is found, the CPU everywhere else — see "Whisper on the GPU" below). Previously 2026-10-05 (robustness: the export streams its audio over its range, panics are logged and contained, damaged documents do not render, jobs commit only into their own project, `run_export` joins its thread. See "Robustness" below). Previously 2026-10-05 (colour in and out: exports converted and tagged as BT.709 or BT.601, 10-bit HEVC/AV1 export, HDR and 10-bit sources tone-mapped to SDR on every decode path — see "Colour in and out" below). Previously 2026-10-05 (crop keyframes and a temporal mode for Reduce noise — see "Crop keyframes and temporal denoise" below). Previously 2026-10-04 (release builds: a manual Release workflow with a .deb, AppImages that bundle FFmpeg, and experimental macOS and Windows jobs — see "Release builds" below). Previously 2026-10-04 (the CLI's crash after an export found and fixed, and the shells leave through `lifecycle::exit` — see "The crash after the export" below). Previously 2026-10-04 (QA pass 3 over waves 10–11: five fixes, the showcase extended — see "QA pass 3" below). Previously 2026-10-04 (crop, speed effects, denoise, Performance settings, a persisted export queue with a quit guard, and the ML worker and CLI in the tarball — see "UX gaps" below). Previously 2026-10-04 (body landmarks, follow a body part, reframe on a body, zipped models, faces and voices in the preparation — see "Body landmarks" below). Previously 2026-10-04 (the "At a glance" block above, after polish pass 3). Previously 2026-10-04 (QA pass 2 over the wave 7–9 features and a showcase that shows them — see "QA pass 2" below). Previously 2026-10-04 (CI: clippy is fatal, the engine tests run on lavapipe with ffmpeg, the CLI and ML worker tests run too — see "CI" below). Previously 2026-10-04 (preview frames no longer leave the GPU: shared with GPUI through a patched GPUI, readback as the fallback — see "Preview frames shared with GPUI" under Perf). Previously 2026-10-04 (ML worker: VitTrack re-finding, Remove background, CUDA — see "The ML worker" below). Previously 2026-10-02 (**the UI is native now** — decision 0011. The Tauri
 shell and the React frontend are gone; the engine is `crates/engine`
 (`chukcut-engine`, no UI dependency) and the app is a GPUI window in
 `crates/app`. What the native app does today: import (dialog or command line),
@@ -91,6 +91,64 @@ JPEG encoder now reads a surface the compositor drew into, 2.7–2.9× on a whol
 frame; and earlier the same day, the attempt that went the other way round and
 the `vkDeviceWaitIdle` crash it found.
 
+## Whisper on the GPU (2026-10-09, `worktree-agent-a04e288338de8e558`)
+
+Decision 0036. Local transcription runs whisper.cpp with CUDA in a helper
+process, `chukcut-whisper-cuda` (`crates/whisper`), when an NVIDIA GPU is
+usable, and on the CPU in the editor's own process otherwise. One build
+starts everywhere: the editor never links CUDA.
+
+- **How it gets built.** `crates/engine/build.rs` (with `local-whisper`, so
+  for the app and the CLI) finds `nvcc` and runs a nested `cargo build
+  --release -p chukcut-whisper --features cuda` into `target/whisper-cuda/`,
+  then copies the binary beside `chukcut` in `target/<profile>/`. So
+  `cargo run -p chukcut` transcribes on the GPU here with no flag. First
+  build: **15 min 54 s** at load ~27 (2350 CPU-seconds; ggml's CUDA kernels
+  for `sm_86` only), then a no-op. No `nvcc` (CI, release builders): nothing
+  happens. `CHUKCUT_WHISPER_CUDA=0` skips, `=1` requires. It skips under
+  clippy. The old `local-whisper-cuda` / `--features cuda` are gone.
+- **How it is chosen.** Per transcription (`speech/local.rs`, `helper.rs`):
+  helper beside the binary (or `CHUKCUT_WHISPER_HELPER`; `off` disables) and
+  an NVIDIA driver loaded → start it, read its hello (the device ggml found).
+  Anything else falls back to the CPU with a log line: missing binary or
+  libraries, no GPU, protocol mismatch, no hello in 20 s, an error reply, a
+  crash. A loader error ("error while loading shared libraries") gets one
+  more try with chukcut's NVIDIA bundle dirs on `LD_LIBRARY_PATH` (checked:
+  the helper resolves `libcudart.so.12` and `libcublas*.so.12` from the CUDA 12
+  bundle and finds the GPU). Cancel kills the helper.
+- **Where the user sees it.** The Captions tab says "Runs on the GPU
+  (NVIDIA GeForce RTX 3060, CUDA)" under Model (asked once in the
+  background with `--probe`), and the progress line says "Transcribing on
+  the GPU (…)". `chukcut-cli catalog models` has `device`, and `captions
+  transcribe` reports it. Seen on Xvfb: the hint, the progress line, 35 s of
+  speech captioned in 1.6 s with Tiny.
+- **Measured** (RTX 3060, driver 610.57, CUDA toolkit 12.0; flite speech,
+  `examples/captions.rs`; GPU times include starting the helper and loading
+  the model; CPU 8 threads at load 15–29):
+
+  | Audio | Model | CPU | GPU (CUDA) |
+  |---|---|---|---|
+  | 35 s | Base | 11.8 s | 1.2–2.1 s |
+  | 35 s | Large v3 turbo | 49.1 s | 1.8–3.6 s |
+  | 5 min 16 s | Base | 44.9 s | 3.7–4.0 s (10.3 s once, at load 29) |
+  | 5 min 16 s | Large v3 turbo | 516.6 s | 5.9–6.4 s |
+
+  Same words on both (115, 1035), word times within 20 ms. Flash attention
+  is on for the GPU (whisper.cpp's default; whisper-rs turns it off).
+- **ML worker on this machine, checked again the same day:** `chukcut-cli
+  ml status --probe` says "CUDA 13 on the GPU with chukcut's CUDA libraries,
+  and TensorRT 10.16.1.11 for the Fast models"; `ml bench yunet` logged
+  "yunet … on CUDA", 3.6 ms per 640×360 frame; `ml bench lama --accel fast`
+  logged "lama on TensorRT (fp16 …) cached engine", 95 ms per frame. Nothing
+  falls back to the CPU; nothing to install.
+- **Traps.** The helper's first start on a busy machine took 1.8–5 s
+  (CUDA init), usually 0.2 s. Every new worktree builds the helper once (16
+  min); set `CHUKCUT_WHISPER_CUDA=0` when the work is not about
+  transcription. ggml compiles CPU and CUDA code for the build machine
+  (`GGML_NATIVE`), so a helper built here is for this CPU and an `sm_86`
+  GPU; packagers set `GGML_NATIVE=OFF` and `CMAKE_CUDA_ARCHITECTURES`
+  (`packaging/README.md`). The in-process CPU whisper.cpp has the same
+  `GGML_NATIVE` issue in today's release builds (built on the runner's CPU).
 ## The diagnostic log (2026-10-09, `agent/diaglog`)
 
 The log file is now the one place to read what a run did, without asking

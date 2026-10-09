@@ -27,6 +27,9 @@ crates/cli/           chukcut-cli — the commands from a shell, a batch file,
                       and an MCP server (docs/cli.md)
 crates/ml-worker/     chukcut-ml-worker — the AI models on ONNX Runtime, in
                       their own process (decision 0025)
+crates/whisper/       chukcut-whisper — the whisper.cpp call, and the CUDA
+                      helper chukcut-whisper-cuda that the engine's build.rs
+                      builds when nvcc is found (decision 0036)
 docs/                 STATUS, ROADMAP, architecture/, decisions/, research/
 docs/manual/          the user manual, one page per area of the app; update
                       it with every user-visible change. shortcuts.md is
@@ -71,7 +74,7 @@ Before calling anything done, and before every commit:
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings   # fatal in CI
 cargo test -p chukcut-engine -j 4
-cargo test -p chukcut -p chukcut-cli -p chukcut-ml-worker
+cargo test -p chukcut -p chukcut-cli -p chukcut-ml-worker -p chukcut-whisper
 cargo build -p chukcut
 ```
 
@@ -236,6 +239,11 @@ packaging/appimage/build-appimage.sh --no-build    # chukcut-<v>-<arch>.AppImage
   was 1 GB and `target/` grew to 21 GB during one test run, which filled the
   disk and failed the suite with "no space left on device". The workspace
   profile keeps line tables for our crates and none for dependencies.
+- **On a machine with `nvcc`, the first build of the app or CLI also builds
+  the CUDA whisper helper** (`crates/engine/build.rs`, a nested cargo into
+  `target/whisper-cuda/`): about 16 minutes once per target directory, so
+  once per worktree. `CHUKCUT_WHISPER_CUDA=0` skips it when you do not touch
+  transcription; the app then transcribes on the CPU.
 
 ## Legal boundary
 
