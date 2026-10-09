@@ -1069,7 +1069,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml_ng",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "shaderc",
  "signalsmith-stretch",
  "skrifa 0.45.1",

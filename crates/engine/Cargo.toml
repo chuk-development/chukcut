@@ -153,7 +153,7 @@ vello = { version = "0.11", default-features = false, features = ["wgpu"] }
 # docs/research/integrations.md §7.1.
 ureq = "2.12"
 # Model downloads are verified against a pinned SHA-256.
-sha2 = "0.10"
+sha2 = "0.11"
 # `secrets.toml` and `accounts.toml`.
 toml = "0.8"
 # ElevenLabs sends speech with timestamps as base64 inside JSON. Already in
