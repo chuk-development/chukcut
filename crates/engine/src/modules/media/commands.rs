@@ -30,10 +30,15 @@
 //! Errors come back as `String` and are shown to the user unchanged, so
 //! `MediaError`'s `Display` is written as prose with the path in it.
 
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
+use serde::Serialize;
+
+use super::relink;
 use crate::shell::Channel;
+use crate::state::AppState;
 
 use super::thumbnails;
 use super::{BatchSink, MediaError, MediaInfo, ThumbnailBatch, Waveform};
@@ -192,4 +197,224 @@ mod tests {
         assert!(MediaError::Cancelled.is_cancellation());
         assert!(!MediaError::Invalid("bad".into()).is_cancellation());
     }
+}
+
+// ---------------------------------------------------------------------------
+// Relinking moved media (`relink.rs`)
+// ---------------------------------------------------------------------------
+
+/// One material pointed at a new file.
+#[derive(Debug, Clone, Serialize)]
+pub struct Relinked {
+    pub material_id: String,
+    pub from: String,
+    pub to: String,
+}
+
+/// A file that has the right name but is not the original.
+#[derive(Debug, Clone, Serialize)]
+pub struct Refused {
+    /// The path the project wanted.
+    pub wanted: String,
+    pub candidate: String,
+    pub reasons: Vec<String>,
+}
+
+/// What a relink did.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct RelinkReport {
+    pub relinked: Vec<Relinked>,
+    pub refused: Vec<Refused>,
+    /// Files still missing afterwards.
+    pub still_missing: usize,
+}
+
+/// The project's files that are not on disk: what the media panel's
+/// "missing" banner counts and what a relink looks for. A `stat` per file;
+/// a dead network mount can make that slow, so the app asks off its UI
+/// thread.
+pub fn media_missing(state: &Arc<AppState>) -> std::result::Result<Vec<relink::Missing>, String> {
+    let pool = state.with_project(|p| p.materials.clone())?;
+    Ok(relink::missing(&pool)
+        .into_iter()
+        .filter(|m| !crate::modules::template::assets::is_template_asset(&m.path))
+        .collect())
+}
+
+/// A planned relink: the material, its place in the pool, the new path.
+struct Plan {
+    material: crate::modules::timeline::ops::PoolMaterial,
+    index: usize,
+    from: String,
+    to: String,
+}
+
+/// Apply plans as one undo step and say what happened.
+fn apply_relinks(
+    state: &Arc<AppState>,
+    plans: Vec<Plan>,
+    refused: Vec<Refused>,
+) -> std::result::Result<RelinkReport, String> {
+    let mut report = RelinkReport {
+        refused,
+        ..Default::default()
+    };
+    if !plans.is_empty() {
+        let mut commands = Vec::new();
+        for plan in &plans {
+            commands.extend(relink::relink_edit(
+                plan.material.clone(),
+                plan.index,
+                &plan.to,
+            ));
+        }
+        crate::modules::timeline::commands::timeline_apply(
+            state,
+            crate::modules::timeline::ops::EditCommand::Composite {
+                label: "Relink media".into(),
+                commands,
+            },
+        )?;
+        report.relinked = plans
+            .into_iter()
+            .map(|p| Relinked {
+                material_id: p.material.id().to_string(),
+                from: p.from,
+                to: p.to,
+            })
+            .collect();
+    }
+    report.still_missing = media_missing(state)?.len();
+    Ok(report)
+}
+
+/// Point material `material_id` at the file `path`, after checking it is
+/// the same recording (picture, sound, size, length) unless `force`. The
+/// folder move this implies is tried on every other missing file, so
+/// relinking one file of a moved project folder relinks them all. One undo
+/// step.
+pub async fn media_relink(
+    state: Arc<AppState>,
+    material_id: String,
+    path: String,
+    force: bool,
+) -> std::result::Result<RelinkReport, String> {
+    let pool = state.with_project(|p| p.materials.clone())?;
+    let (material, index, want) = relink::expected(&pool, &material_id)
+        .ok_or_else(|| format!("no video, sound or picture with the id {material_id}"))?;
+    let worker_state = Arc::clone(&state);
+    let (plans, refused) = crate::shell::spawn_blocking(move || {
+        let found = relink::Found::probe(Path::new(&path))?;
+        let problems = relink::check(&want, &found);
+        if !problems.is_empty() && !force {
+            return Err(format!(
+                "{} does not look like the original: {}",
+                path,
+                problems.join("; ")
+            ));
+        }
+        let mut plans = vec![Plan {
+            material,
+            index,
+            from: want.path.clone(),
+            to: path.clone(),
+        }];
+        let mut refused = Vec::new();
+        if let Some((from, to)) = relink::derive_remap(&want.path, &path) {
+            for gone in media_missing(&worker_state)?
+                .into_iter()
+                .filter(|m| m.material_id != material_id)
+            {
+                let Some(candidate) = relink::apply_remap(&gone.path, &from, &to) else {
+                    continue;
+                };
+                if !Path::new(&candidate).exists() {
+                    continue;
+                }
+                let Some((m, i, w)) = relink::expected(&pool, &gone.material_id) else {
+                    continue;
+                };
+                match relink::Found::probe(Path::new(&candidate)) {
+                    Ok(f) if relink::check(&w, &f).is_empty() => plans.push(Plan {
+                        material: m,
+                        index: i,
+                        from: gone.path,
+                        to: candidate,
+                    }),
+                    Ok(f) => refused.push(Refused {
+                        wanted: gone.path,
+                        candidate,
+                        reasons: relink::check(&w, &f),
+                    }),
+                    Err(e) => refused.push(Refused {
+                        wanted: gone.path,
+                        candidate,
+                        reasons: vec![e],
+                    }),
+                }
+            }
+        }
+        Ok((plans, refused))
+    })
+    .await
+    .map_err(|e| format!("the relink failed: {e}"))??;
+    apply_relinks(&state, plans, refused)
+}
+
+/// How many files a folder search looks at before it stops.
+const SEARCH_LIMIT: usize = 200_000;
+
+/// Look in `folder` (and below) for every missing file by its name, and
+/// relink each to the first file that is the same recording. One undo step.
+pub async fn media_relink_folder(
+    state: Arc<AppState>,
+    folder: PathBuf,
+) -> std::result::Result<RelinkReport, String> {
+    let pool = state.with_project(|p| p.materials.clone())?;
+    let gone = media_missing(&state)?;
+    if gone.is_empty() {
+        return Ok(RelinkReport::default());
+    }
+    if !folder.is_dir() {
+        return Err(format!("{} is not a folder", folder.display()));
+    }
+    let (plans, refused) = crate::shell::spawn_blocking(move || {
+        let index = relink::index_folder(&folder, SEARCH_LIMIT);
+        let mut plans = Vec::new();
+        let mut refused = Vec::new();
+        for g in gone {
+            let Some((m, i, want)) = relink::expected(&pool, &g.material_id) else {
+                continue;
+            };
+            let mut why = None;
+            for candidate in relink::candidates(&index, &g.path) {
+                let reasons = match relink::Found::probe(candidate) {
+                    Ok(found) => relink::check(&want, &found),
+                    Err(e) => vec![e],
+                };
+                if reasons.is_empty() {
+                    plans.push(Plan {
+                        material: m.clone(),
+                        index: i,
+                        from: g.path.clone(),
+                        to: candidate.to_string_lossy().into_owned(),
+                    });
+                    why = None;
+                    break;
+                }
+                why.get_or_insert((candidate.to_string_lossy().into_owned(), reasons));
+            }
+            if let Some((candidate, reasons)) = why {
+                refused.push(Refused {
+                    wanted: g.path,
+                    candidate,
+                    reasons,
+                });
+            }
+        }
+        (plans, refused)
+    })
+    .await
+    .map_err(|e| format!("the search failed: {e}"))?;
+    apply_relinks(&state, plans, refused)
 }

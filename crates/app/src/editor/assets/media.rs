@@ -3,9 +3,12 @@
 
 use std::collections::HashSet;
 
+use chukcut_engine::modules::media::commands as media_commands;
 use chukcut_engine::modules::media::thumbnail_strip;
 use chukcut_engine::modules::project::{new_id, Segment, TimeRange, Transform};
 use chukcut_engine::modules::template::assets as template_assets;
+use gpui::component::button::{Button, ButtonVariants as _};
+use gpui::component::{Disableable as _, Sizable as _};
 use gpui::{img, ObjectFit};
 
 use super::*;
@@ -294,6 +297,8 @@ impl Editor {
                 .into_any_element();
         }
 
+        self.check_missing_media(cx);
+        let banner = self.missing_banner(cx);
         let mut tiles = Vec::with_capacity(items.len() + 1);
         if category == 0 {
             tiles.push(self.import_tile(cx));
@@ -303,6 +308,7 @@ impl Editor {
             tiles.push(self.media_tile(item, on_timeline, cx));
         }
         Self::tile_area("media-grid")
+            .children(banner)
             .child(
                 div()
                     .flex()
@@ -315,6 +321,130 @@ impl Editor {
                     .children(tiles),
             )
             .into_any_element()
+    }
+
+    /// Ask, off the UI thread, which of the project's files are gone — once
+    /// per document generation: a `stat` on a dead network mount can hang.
+    fn check_missing_media(&mut self, cx: &mut Context<Self>) {
+        if self.assets.missing_pending || self.assets.missing_checked == Some(self.generation) {
+            return;
+        }
+        self.assets.missing_pending = true;
+        let (state, generation) = (Arc::clone(&self.state), self.generation);
+        cx.spawn(async move |this, cx| {
+            let missing = cx
+                .background_executor()
+                .spawn(async move { media_commands::media_missing(&state).unwrap_or_default() })
+                .await;
+            let _ = this.update(cx, |editor, cx| {
+                editor.assets.missing_pending = false;
+                editor.assets.missing_checked = Some(generation);
+                if editor.assets.missing != missing {
+                    editor.assets.missing = missing;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// "3 files are missing · Find in folder…" over the tiles, while any
+    /// file of the project is not on disk (decision 0009's offline state;
+    /// the relink is `media::relink`, after FilmCraft's Link Media).
+    fn missing_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let count = self.assets.missing.len();
+        if count == 0 {
+            return None;
+        }
+        let line = match count {
+            1 => format!(
+                "{} is missing. It may have moved or be on a drive that is not mounted.",
+                file_name(&self.assets.missing[0].path)
+            ),
+            n => format!(
+                "{n} files are missing. They may have moved or be on a drive that is not mounted."
+            ),
+        };
+        Some(
+            div()
+                .w_full()
+                .flex()
+                // Line above, button below: the panel is narrow, and a row
+                // pushed the button out of it.
+                .flex_col()
+                .items_start()
+                .gap(px(8.0))
+                .mb(px(10.0))
+                .px(px(10.0))
+                .py(px(8.0))
+                .rounded(px(R_SM))
+                .bg(rgb(WELL))
+                .border_1()
+                .border_color(rgb(WARNING))
+                .child(
+                    div()
+                        .w_full()
+                        .text_size(px(TEXT_LABEL))
+                        .text_color(rgb(TEXT))
+                        .child(line),
+                )
+                .child(
+                    Button::new("media-relink-folder")
+                        .small()
+                        .primary()
+                        .label(if self.assets.relinking {
+                            "Searching…"
+                        } else {
+                            "Find in folder…"
+                        })
+                        .disabled(self.assets.relinking)
+                        .on_click(cx.listener(|this, _, _, cx| this.relink_from_folder(cx))),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// Ask for a folder and relink every missing file found in it.
+    fn relink_from_folder(&mut self, cx: &mut Context<Self>) {
+        let picked = files::choose_one(FileRequest::folder("Find missing media in"), cx);
+        cx.spawn(async move |this, cx| {
+            let Some(folder) = picked.await else {
+                return;
+            };
+            let Ok(state) = this.update(cx, |editor, cx| {
+                editor.assets.relinking = true;
+                editor.status = Some("Looking for the missing files…".into());
+                cx.notify();
+                Arc::clone(&editor.state)
+            }) else {
+                return;
+            };
+            let result = media_commands::media_relink_folder(state, folder).await;
+            let _ = this.update(cx, |editor, cx| {
+                editor.assets.relinking = false;
+                editor.refresh(cx);
+                match result {
+                    Ok(report) => {
+                        let mut text = match (report.relinked.len(), report.still_missing) {
+                            (0, _) => "No missing file was found in that folder".to_string(),
+                            (n, 0) => format!("Relinked {n} file(s); nothing is missing now"),
+                            (n, left) => format!("Relinked {n} file(s); {left} still missing"),
+                        };
+                        if let Some(refused) = report.refused.first() {
+                            text.push_str(&format!(
+                                ". Not used: {} ({})",
+                                refused.candidate,
+                                refused.reasons.join("; ")
+                            ));
+                        }
+                        editor.status = Some(text.into());
+                        cx.notify();
+                    }
+                    Err(error) => editor.report(Err(error), cx),
+                }
+            });
+        })
+        .detach();
     }
 
     /// The first tile of the library: opens the file picker.

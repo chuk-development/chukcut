@@ -57,13 +57,13 @@ denoiser.
 **Before you change code:** read "Traps that have already cost time" and
 the CLAUDE.md non-negotiables. Judge performance from a release build only.
 
-**Newest sections first:** The MCP server after FilmCraft, Whisper on the GPU, The diagnostic log, Robustness, Colour in and out, Crop keyframes and temporal denoise, Release builds, The crash after the export, QA pass 3, UX gaps, Body landmarks, Polish pass 3, CI, Colour AI, QA pass 2, Flaky
+**Newest sections first:** FilmCraft ports, The MCP server after FilmCraft, Whisper on the GPU, The diagnostic log, Robustness, Colour in and out, Crop keyframes and temporal denoise, Release builds, The crash after the export, QA pass 3, UX gaps, Body landmarks, Polish pass 3, CI, Colour AI, QA pass 2, Flaky
 tests, Frame blending, Timelines and compound clips. The ML sections are at
 the end of the file ("The ML worker" and its sub-sections).
 
 ## Update history
 
-Last updated: 2026-10-09 (Whisper on the GPU: a CUDA helper process built whenever `nvcc` is found, the CPU everywhere else — see "Whisper on the GPU" below). Previously 2026-10-05 (robustness: the export streams its audio over its range, panics are logged and contained, damaged documents do not render, jobs commit only into their own project, `run_export` joins its thread. See "Robustness" below). Previously 2026-10-05 (colour in and out: exports converted and tagged as BT.709 or BT.601, 10-bit HEVC/AV1 export, HDR and 10-bit sources tone-mapped to SDR on every decode path — see "Colour in and out" below). Previously 2026-10-05 (crop keyframes and a temporal mode for Reduce noise — see "Crop keyframes and temporal denoise" below). Previously 2026-10-04 (release builds: a manual Release workflow with a .deb, AppImages that bundle FFmpeg, and experimental macOS and Windows jobs — see "Release builds" below). Previously 2026-10-04 (the CLI's crash after an export found and fixed, and the shells leave through `lifecycle::exit` — see "The crash after the export" below). Previously 2026-10-04 (QA pass 3 over waves 10–11: five fixes, the showcase extended — see "QA pass 3" below). Previously 2026-10-04 (crop, speed effects, denoise, Performance settings, a persisted export queue with a quit guard, and the ML worker and CLI in the tarball — see "UX gaps" below). Previously 2026-10-04 (body landmarks, follow a body part, reframe on a body, zipped models, faces and voices in the preparation — see "Body landmarks" below). Previously 2026-10-04 (the "At a glance" block above, after polish pass 3). Previously 2026-10-04 (QA pass 2 over the wave 7–9 features and a showcase that shows them — see "QA pass 2" below). Previously 2026-10-04 (CI: clippy is fatal, the engine tests run on lavapipe with ffmpeg, the CLI and ML worker tests run too — see "CI" below). Previously 2026-10-04 (preview frames no longer leave the GPU: shared with GPUI through a patched GPUI, readback as the fallback — see "Preview frames shared with GPUI" under Perf). Previously 2026-10-04 (ML worker: VitTrack re-finding, Remove background, CUDA — see "The ML worker" below). Previously 2026-10-02 (**the UI is native now** — decision 0011. The Tauri
+Last updated: 2026-10-21 (FilmCraft ports: eleven audio effects, timeline export as OTIO / FCPXML / EDL, marker export as CSV and YouTube chapters, sync by sound, relink of moved media — see "FilmCraft ports" below); the same day the MCP server was redesigned after FilmCraft's, with a control socket into the running app — see "The MCP server after FilmCraft" — and the release pipeline taken from FilmCraft — see "Release builds"). Previously 2026-10-09 (Whisper on the GPU: a CUDA helper process built whenever `nvcc` is found, the CPU everywhere else — see "Whisper on the GPU" below). Previously 2026-10-05 (robustness: the export streams its audio over its range, panics are logged and contained, damaged documents do not render, jobs commit only into their own project, `run_export` joins its thread. See "Robustness" below). Previously 2026-10-05 (colour in and out: exports converted and tagged as BT.709 or BT.601, 10-bit HEVC/AV1 export, HDR and 10-bit sources tone-mapped to SDR on every decode path — see "Colour in and out" below). Previously 2026-10-05 (crop keyframes and a temporal mode for Reduce noise — see "Crop keyframes and temporal denoise" below). Previously 2026-10-04 (release builds: a manual Release workflow with a .deb, AppImages that bundle FFmpeg, and experimental macOS and Windows jobs — see "Release builds" below). Previously 2026-10-04 (the CLI's crash after an export found and fixed, and the shells leave through `lifecycle::exit` — see "The crash after the export" below). Previously 2026-10-04 (QA pass 3 over waves 10–11: five fixes, the showcase extended — see "QA pass 3" below). Previously 2026-10-04 (crop, speed effects, denoise, Performance settings, a persisted export queue with a quit guard, and the ML worker and CLI in the tarball — see "UX gaps" below). Previously 2026-10-04 (body landmarks, follow a body part, reframe on a body, zipped models, faces and voices in the preparation — see "Body landmarks" below). Previously 2026-10-04 (the "At a glance" block above, after polish pass 3). Previously 2026-10-04 (QA pass 2 over the wave 7–9 features and a showcase that shows them — see "QA pass 2" below). Previously 2026-10-04 (CI: clippy is fatal, the engine tests run on lavapipe with ffmpeg, the CLI and ML worker tests run too — see "CI" below). Previously 2026-10-04 (preview frames no longer leave the GPU: shared with GPUI through a patched GPUI, readback as the fallback — see "Preview frames shared with GPUI" under Perf). Previously 2026-10-04 (ML worker: VitTrack re-finding, Remove background, CUDA — see "The ML worker" below). Previously 2026-10-02 (**the UI is native now** — decision 0011. The Tauri
 shell and the React frontend are gone; the engine is `crates/engine`
 (`chukcut-engine`, no UI dependency) and the app is a GPUI window in
 `crates/app`. What the native app does today: import (dialog or command line),
@@ -92,6 +92,71 @@ forgets). Previously 2026-07-27: the preview stopped copying its frames — the
 JPEG encoder now reads a surface the compositor drew into, 2.7–2.9× on a whole
 frame; and earlier the same day, the attempt that went the other way round and
 the `vkDeviceWaitIdle` crash it found.
+
+## FilmCraft ports (2026-10-21, `agent/features`)
+
+FilmCraft (storytold/filmcraft, MIT OR Apache-2.0) is a pure-Rust,
+Premiere-style NLE. `docs/research/filmcraft-feature-gap.md` compares it
+with chukcut and ranks what to take; these five are taken, engine first,
+in our UI. `NOTICE.md` lists the files and what each came from; adapted
+files keep FilmCraft's copyright line at the top.
+
+- **Audio effects** (`audiofx/dsp/repair.rs`, `modulation.rs`,
+  `character.rs`, gate and limiter in `dynamics.rs`): high-pass, low-pass
+  (12 or 24 dB/oct Butterworth), Remove hum (50/60 Hz notch comb, up to 10
+  harmonics), De-esser (band vs. full power, a high shelf that follows),
+  Noise gate (with hold and range), Limiter (5 ms look-ahead), Chorus,
+  Flanger, Phaser, Distortion, Stereo width. FilmCraft's are streaming
+  processors with smoothed parameters; ours run once over a whole clip
+  like every chukcut audio effect, so the limiter's look-ahead costs no
+  latency (a forward sliding minimum and a forward box average) and nothing
+  needs smoothing. New catalog groups `repair` and `character`. The Audio
+  tab lists them like the old ones (`SECTIONS`); a 0..1 parameter with no
+  unit is a switch, so "60 Hz mains" and "Steep" are switches. Trap: the
+  hum notch at Q 30 takes ~0.2 s to settle at 50 Hz, so a test measuring
+  after half a second sees −23 dB, not −40.
+- **Timeline interchange export** (`modules::interchange`): `timeline.rs`
+  flattens the active timeline (picture tracks bottom to top, sound tracks,
+  markers), `otio.rs`, `fcpxml.rs` (1.10) and `edl.rs` (CMX 3600) write
+  it, and a `Report` collects what could not go (titles, stickers, effect
+  clips, compound clips, looks, keyframes). chukcut's centred transitions
+  are exactly OTIO's `in_offset = out_offset = d/2`; FCPXML gets the main
+  lane's dissolves only; the EDL gets the main lane plus A and A2, records
+  from 01:00:00:00, drop-frame at 29.97/59.94. Times in FCPXML are whole
+  frames (`88/25s`), so a 0.5 s half-dissolve at 25 fps lands on frame
+  88, not 87.5. Not done: import (the next interchange step), FCP7 XML,
+  AAF; and it is not checked against Resolve or Final Cut yet — the tests
+  check structure (roxmltree for FCPXML, a dev-dependency) and numbers.
+  Menu › Export timeline as …, `chukcut-cli export-timeline`.
+- **Marker export** (`interchange/markers.rs`): CSV (quoted, formula
+  guard, as FilmCraft) and YouTube chapters (`0:00 Intro` lines, a 0:00
+  chapter always, warnings for fewer than three chapters or one under
+  10 s). Menu › Export markers as …, `chukcut-cli export-markers`.
+- **Sync by sound** (`analysis/sync.rs`, `analysis_sync_audio`): GCC-PHAT-β
+  (β 0.75) at 8 kHz over the first ten minutes of each clip's playing
+  stretch, through `realfft`; refused unless confidence ≥ 8 and the peak
+  is 1.5× the next one 50 ms away (FilmCraft's thresholds). FilmCraft's
+  full-rate refinement pass is left out: 125 µs is far under a frame. The
+  others move with `MoveSegment` through `timeline_apply_many`, so linked
+  clips follow and it is one undo step. Clips with a speed change are
+  refused. Clip menu › Sync by sound to this clip (two or more clips with
+  sound selected; the right-clicked one stays), `chukcut-cli sync`.
+- **Relink moved media** (`media/relink.rs`, `media_missing`,
+  `media_relink`, `media_relink_folder`): the step decision 0009 named. A
+  candidate must be the same recording by a probe (picture, sound, size
+  in either orientation, length within 1 % or 0.5 s) — chukcut stores no
+  file fingerprint, so this replaces FilmCraft's head/tail hash. Relinking
+  one file derives the folder move and tries it on the rest. The edit is
+  `RemoveMaterial` + `AddMaterial` at the same index per material, one
+  `Composite`, so undo restores the old paths byte for byte and no new
+  `EditCommand` was needed. The Media tab shows a yellow-bordered bar with
+  Find in folder… while files are missing; the check runs off the UI
+  thread once per document generation (a stat on a dead mount can hang).
+  `chukcut-cli relink`.
+
+Next ports, in order (the gap file has the reasons): music remix to a
+target length, text-based editing on the caption words, video scopes,
+close gaps on any lane, interchange import, reverse.
 
 ## The MCP server after FilmCraft (2026-10-21, `agent/mcp`)
 

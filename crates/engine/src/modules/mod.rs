@@ -22,6 +22,7 @@ pub mod fx;
 pub mod gpu;
 pub mod grading;
 pub mod inspector;
+pub mod interchange;
 pub mod jobs;
 pub mod keymap;
 pub mod landmarks;

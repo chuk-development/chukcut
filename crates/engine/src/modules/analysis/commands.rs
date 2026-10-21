@@ -1049,3 +1049,123 @@ mod tests {
             .unwrap();
     }
 }
+
+// --- sync by sound ----------------------------------------------------------------
+
+/// One clip [`analysis_sync_audio`] moved.
+#[derive(Debug, Clone, Serialize)]
+pub struct SyncedClip {
+    pub segment_id: Id,
+    /// How far it moved, later positive.
+    pub shift: Micros,
+    /// The correlation peak over its RMS: above 8 is a clear match.
+    pub confidence: f32,
+}
+
+/// The longest stretch of each clip the sync listens to. Ten minutes at
+/// 8 kHz is 4.8 M samples per side, a few hundred milliseconds of FFT.
+const SYNC_MAX: Micros = 600_000_000;
+
+/// The stretch of `segment_id`'s file that plays, decoded at the sync rate.
+fn sync_sound(
+    project: &Project,
+    segment_id: &str,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<(Vec<f32>, Micros), String> {
+    let (_, segment) = project
+        .segment(segment_id)
+        .ok_or_else(|| format!("unknown clip {segment_id}"))?;
+    if segment.speed != 1.0 || project.materials.speed_curve_of(segment).is_some() {
+        return Err(
+            "a clip with a speed change cannot be synced by sound; set its speed to 1x first"
+                .into(),
+        );
+    }
+    let (path, _) = original_source(project, segment)
+        .ok_or_else(|| "a clip without sound cannot be synced by sound".to_string())?;
+    let range = TimeRange::new(
+        segment.source_range.start,
+        segment.source_range.duration.min(SYNC_MAX),
+    );
+    use crate::modules::audio::ClipReader as _;
+    let mut reader = crate::modules::audio::AudioClipReader::open(&path, super::sync::SYNC_RATE, 1)
+        .map_err(|e| e.to_string())?;
+    let rate = super::sync::SYNC_RATE as i128;
+    let first = (range.start.max(0) as i128 * rate / 1_000_000) as i64;
+    let total = (range.duration.max(0) as i128 * rate / 1_000_000) as usize;
+    let mut out = vec![0.0f32; total];
+    for (i, chunk) in out.chunks_mut(1 << 15).enumerate() {
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(jobs::CANCELLED.into());
+        }
+        reader
+            .read(first + (i << 15) as i64, chunk.len(), chunk)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok((out, segment.target_range.start))
+}
+
+/// Line clips up with `reference` by their sound: each of `others` moves
+/// so that what it heard plays at the moment the reference heard it — a
+/// separate recorder and the camera's own microphone, two cameras of one
+/// event. Linked clips move along. One undo step.
+///
+/// A clip is refused when the match is not clear (music and steady noise
+/// can match at several places), when it is linked to the reference, when
+/// it would move before the timeline's start or onto another clip, and when
+/// either clip has a speed change. Blocking: seconds of decoding; `cancel`
+/// is checked between chunks.
+pub fn analysis_sync_audio(
+    state: &Arc<AppState>,
+    reference: String,
+    others: Vec<String>,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<Vec<SyncedClip>, String> {
+    use super::sync::{find_offset, SYNC_RATE};
+    if others.is_empty() {
+        return Err("choose the clips to line up with the reference".into());
+    }
+    let project = state.with_project(|p| p.clone())?;
+    let (reference_sound, reference_start) =
+        sync_sound(&project, &reference, cancel).map_err(|e| format!("the reference: {e}"))?;
+    let reference_group = project.link_group_of(&reference).cloned();
+    let mut moves = Vec::new();
+    let mut synced = Vec::new();
+    for other in &others {
+        if other == &reference {
+            continue;
+        }
+        if reference_group.is_some() && project.link_group_of(other) == reference_group.as_ref() {
+            return Err("a clip linked to the reference already plays in sync with it".into());
+        }
+        let (sound, start) = sync_sound(&project, other, cancel)?;
+        let found = find_offset(&reference_sound, &sound, SYNC_RATE).ok_or_else(|| {
+            "one of the clips is silent or too short to sync by sound".to_string()
+        })?;
+        if !found.reliable() {
+            return Err(format!(
+                "no clear match between the sounds (confidence {:.1}); the clips may not share a moment, or the sound is music or steady noise",
+                found.confidence
+            ));
+        }
+        let to = reference_start + found.lag * 1_000_000 / SYNC_RATE as i64;
+        if to < 0 {
+            return Err(
+                "the clip would start before the timeline; move the reference later first".into(),
+            );
+        }
+        moves.push(crate::modules::timeline::gesture::move_to(
+            &project, other, None, to,
+        )?);
+        synced.push(SyncedClip {
+            segment_id: other.clone(),
+            shift: to - start,
+            confidence: found.confidence,
+        });
+    }
+    if moves.is_empty() {
+        return Ok(synced);
+    }
+    crate::modules::timeline::commands::timeline_apply_many(state, moves, "Sync by sound".into())?;
+    Ok(synced)
+}

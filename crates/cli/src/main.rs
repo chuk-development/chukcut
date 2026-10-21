@@ -71,6 +71,8 @@ enum Command {
     Info(On<InfoArgs>),
     /// Check the project for missing media and inconsistencies.
     Validate(On<ValidateArgs>),
+    /// Find media that moved: list what is missing, search a folder, or point one file.
+    Relink(On<RelinkArgs>),
     /// Change the project's name, canvas size, frame rate or background.
     Configure(On<ConfigureArgs>),
     /// Add media files to the project, optionally appending them to the timeline.
@@ -190,6 +192,8 @@ enum Command {
     Reframe(On<ReframeArgs>),
     /// Show the scene changes, beats and stabilisation a clip carries.
     Analysis(On<AnalysisArgs>),
+    /// Line clips up with a reference clip by their sound.
+    Sync(On<SyncArgs>),
     /// Cloud features: caption translation, text to speech, stock media.
     #[command(subcommand)]
     Cloud(CloudCommand),
@@ -212,6 +216,10 @@ enum Command {
     ExportQueue(On<ExportQueueArgs>),
     /// Render one frame as a PNG.
     RenderFrame(On<RenderFrameArgs>),
+    /// Write the timeline for another editor: OTIO, FCPXML or EDL.
+    ExportTimeline(On<ExportTimelineArgs>),
+    /// Write the markers as a CSV spreadsheet or a YouTube chapter list.
+    ExportMarkers(On<ExportMarkersArgs>),
     /// Project templates: list, make a project from one, save one, fill slots.
     #[command(subcommand)]
     Template(TemplateCommand),
@@ -684,6 +692,10 @@ fn dispatch(command: Command, dry: bool, ctx: &Ctx) -> CliResult<(&'static str, 
         Command::Estimate(o) => on(o, dry, ctx),
         Command::ExportQueue(o) => on(o, dry, ctx),
         Command::RenderFrame(o) => on(o, dry, ctx),
+        Command::ExportTimeline(o) => on(o, dry, ctx),
+        Command::ExportMarkers(o) => on(o, dry, ctx),
+        Command::Sync(o) => on(o, dry, ctx),
+        Command::Relink(o) => on(o, dry, ctx),
         Command::Template(TemplateCommand::List(args)) => Ok(("template_list", args.run()?, false)),
         Command::Template(TemplateCommand::Apply(o)) if o.args.into => {
             let into: On<TemplateApplyIntoArgs> = On {

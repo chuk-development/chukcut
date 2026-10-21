@@ -290,3 +290,78 @@ fn an_export_refuses_missing_media_and_names_the_clips() {
         "a refused export leaves nothing that looks like a video"
     );
 }
+
+/// Relinking (`media::relink`, after FilmCraft's Link Media): a project
+/// whose media folder moved is whole again after one relink, which carries
+/// the folder move over to every other missing file; a file with the right
+/// name but another picture is refused in words; a folder search finds
+/// them all; and undo puts the old paths back.
+#[test]
+fn a_moved_media_folder_is_relinked_in_one_step() {
+    use chukcut_engine::modules::media::commands::{
+        media_missing, media_relink, media_relink_folder,
+    };
+    use chukcut_engine::modules::timeline::commands::timeline_undo;
+    use chukcut_engine::state::AppState;
+
+    let media = require_media!();
+    let root = std::env::temp_dir().join(format!("chukcut-relink-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let old = root.join("laptop/trip");
+    std::fs::create_dir_all(&old).unwrap();
+    std::fs::copy(&media.solid_red_landscape, old.join("a.mp4")).unwrap();
+    std::fs::copy(&media.audio_only, old.join("b.m4a")).unwrap();
+
+    let mut project = blank_project();
+    let a = import(&mut project, &old.join("a.mp4"));
+    let b = import(&mut project, &old.join("b.m4a"));
+    let state = AppState::new();
+    *state.project.write() = Some(project);
+
+    // The folder moves to another disk.
+    let new = root.join("desktop/trip");
+    std::fs::create_dir_all(new.parent().unwrap()).unwrap();
+    std::fs::rename(&old, &new).unwrap();
+    assert_eq!(media_missing(&state).unwrap().len(), 2);
+
+    // Another file under the right name is not the original.
+    let impostor = root.join("impostor/a.mp4");
+    std::fs::create_dir_all(impostor.parent().unwrap()).unwrap();
+    std::fs::copy(&media.solid_white_wide, &impostor).unwrap();
+    let refused = pollster::block_on(media_relink(
+        state.clone(),
+        a.clone(),
+        impostor.to_string_lossy().into_owned(),
+        false,
+    ))
+    .unwrap_err();
+    assert!(refused.contains("320×180"), "{refused}");
+
+    // The real one: and b follows by the same folder move.
+    let report = pollster::block_on(media_relink(
+        state.clone(),
+        a.clone(),
+        new.join("a.mp4").to_string_lossy().into_owned(),
+        false,
+    ))
+    .unwrap();
+    assert_eq!(report.relinked.len(), 2, "{report:?}");
+    assert_eq!(report.still_missing, 0);
+    let path_of_b = |state: &Arc<AppState>| {
+        state
+            .with_project(|p| p.materials.audio(&b).unwrap().path.clone())
+            .unwrap()
+    };
+    assert_eq!(path_of_b(&state), new.join("b.m4a").to_string_lossy());
+
+    // One undo step for both.
+    timeline_undo(&state).unwrap();
+    assert_eq!(media_missing(&state).unwrap().len(), 2);
+
+    // A folder search from the top finds both by name.
+    let report =
+        pollster::block_on(media_relink_folder(state.clone(), root.join("desktop"))).unwrap();
+    assert_eq!(report.relinked.len(), 2, "{report:?}");
+    assert_eq!(report.still_missing, 0);
+    let _ = std::fs::remove_dir_all(&root);
+}

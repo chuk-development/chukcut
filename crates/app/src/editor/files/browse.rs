@@ -18,6 +18,10 @@ pub(crate) enum Filter {
     Luts,
     /// PNG stills (Save frame).
     Png,
+    /// Timelines for other editors: `.otio`, `.fcpxml`, `.edl`.
+    Interchange,
+    /// Marker lists: `.csv` spreadsheets, `.txt` chapter lists.
+    Markers,
     /// Everything.
     Any,
 }
@@ -42,6 +46,8 @@ impl Filter {
             Filter::Subtitles => vec!["srt", "vtt"],
             Filter::Luts => vec!["cube"],
             Filter::Png => vec!["png"],
+            Filter::Interchange => vec!["otio", "fcpxml", "edl"],
+            Filter::Markers => vec!["csv", "txt"],
             Filter::Any => Vec::new(),
         }
     }
@@ -54,6 +60,8 @@ impl Filter {
             Filter::Subtitles => "Subtitles (.srt, .vtt)",
             Filter::Luts => "LUTs (.cube)",
             Filter::Png => "PNG images",
+            Filter::Interchange => "Timelines (.otio, .fcpxml, .edl)",
+            Filter::Markers => "Marker lists (.csv, .txt)",
             Filter::Any => "All files",
         }
     }

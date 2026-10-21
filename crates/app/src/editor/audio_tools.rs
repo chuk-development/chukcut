@@ -1,5 +1,6 @@
 //! Audio tools on the timeline: "Duck under speech" in a music clip's menu,
-//! and the voiceover record button in the toolbar.
+//! "Sync by sound" for a selection of clips, and the voiceover record button
+//! in the toolbar.
 //!
 //! Both are engine commands (`modules/audiofx/commands.rs`); this file picks
 //! the clip, runs the slow part off the UI thread, and draws the record
@@ -8,6 +9,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use chukcut_engine::modules::analysis::commands as analysis_commands;
 use chukcut_engine::modules::audiofx::commands as fx_commands;
 use chukcut_engine::modules::audiofx::record::Recorder;
 use chukcut_engine::modules::audiofx::{fx_or_default, DuckParams};
@@ -18,7 +20,10 @@ use super::*;
 use crate::ui::icons::Glyph;
 use crate::ui::IconButton;
 
-actions!(chukcut, [DuckUnderSpeech, RemoveDucking, ToggleVoiceover]);
+actions!(
+    chukcut,
+    [DuckUnderSpeech, RemoveDucking, ToggleVoiceover, SyncBySound]
+);
 
 /// How long the count-in before a take lasts.
 const COUNT_IN: Duration = Duration::from_secs(3);
@@ -60,6 +65,8 @@ pub(crate) struct AudioToolsUi {
     take: Option<Take>,
     /// A ducking analysis is running.
     ducking: bool,
+    /// A sync by sound is listening.
+    syncing: bool,
 }
 
 /// What the clip menu's audio entries may do.
@@ -68,6 +75,8 @@ pub(crate) struct MenuFlags {
     /// The clicked clip is a sound clip on an audio lane.
     music: bool,
     ducked: bool,
+    /// Two or more clips with sound are selected.
+    sync: bool,
 }
 
 /// The clip menu's audio entries, appended under the others.
@@ -81,11 +90,12 @@ pub(crate) fn audio_menu(menu: PopupMenu, f: MenuFlags) -> PopupMenu {
         Box::new(DuckUnderSpeech),
         !f.music,
     );
-    if f.ducked {
+    let menu = if f.ducked {
         menu.menu("Remove ducking", Box::new(RemoveDucking))
     } else {
         menu
-    }
+    };
+    menu.menu_with_disabled("Sync by sound to this clip", Box::new(SyncBySound), !f.sync)
 }
 
 impl Editor {
@@ -98,13 +108,22 @@ impl Editor {
             return MenuFlags::default();
         };
         let pool = &self.project.materials;
-        let sound = pool.audio(&segment.material_id).is_some()
-            || pool
-                .video(&segment.material_id)
-                .is_some_and(|v| v.has_audio);
+        let has_sound = |material: &str| {
+            pool.audio(material).is_some() || pool.video(material).is_some_and(|v| v.has_audio)
+        };
+        let sound = has_sound(&segment.material_id);
+        let selection = self.selection();
+        let sync = selection.len() >= 2
+            && !self.audio_tools.syncing
+            && selection.iter().all(|id| {
+                self.project
+                    .segment(id)
+                    .is_some_and(|(_, s)| has_sound(&s.material_id))
+            });
         MenuFlags {
             music: track.kind == TrackKind::Audio && sound && !self.audio_tools.ducking,
             ducked: fx_or_default(&self.project, segment).ducking.is_some(),
+            sync,
         }
     }
 
@@ -112,6 +131,59 @@ impl Editor {
         root.on_action(cx.listener(|this, _: &DuckUnderSpeech, _, cx| this.duck_selected(cx)))
             .on_action(cx.listener(|this, _: &RemoveDucking, _, cx| this.unduck_selected(cx)))
             .on_action(cx.listener(|this, _: &ToggleVoiceover, _, cx| this.toggle_voiceover(cx)))
+            .on_action(cx.listener(|this, _: &SyncBySound, _, cx| this.sync_selected(cx)))
+    }
+
+    /// Line the other selected clips up with the clicked one by their
+    /// sound (`analysis_sync_audio`, after FilmCraft's Synchronize). The
+    /// decode takes seconds, so it runs off the UI thread; the moves land
+    /// as one undo step.
+    fn sync_selected(&mut self, cx: &mut Context<Self>) {
+        let Some(reference) = self.selected.clone() else {
+            return;
+        };
+        let others: Vec<String> = self
+            .selection()
+            .into_iter()
+            .filter(|id| *id != reference)
+            .collect();
+        if others.is_empty() {
+            return;
+        }
+        let state = Arc::clone(&self.state);
+        self.audio_tools.syncing = true;
+        self.status = Some("Listening to the clips…".into());
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let never = std::sync::atomic::AtomicBool::new(false);
+                    analysis_commands::analysis_sync_audio(&state, reference, others, &never)
+                })
+                .await;
+            let _ = this.update(cx, |editor, cx| {
+                editor.audio_tools.syncing = false;
+                editor.refresh(cx);
+                match result {
+                    Ok(synced) => {
+                        editor.status = Some(
+                            match synced.as_slice() {
+                                [one] => format!(
+                                    "Synced by sound: moved {:+.2} s",
+                                    one.shift as f64 / 1e6
+                                ),
+                                many => format!("Synced {} clips by sound", many.len()),
+                            }
+                            .into(),
+                        );
+                        cx.notify();
+                    }
+                    Err(error) => editor.report(Err(error), cx),
+                }
+            });
+        })
+        .detach();
     }
 
     /// Duck the selected music clip under the speech on the other lanes. The

@@ -439,3 +439,85 @@ impl CatalogArgs {
         ))
     }
 }
+
+/// Find media that moved. Without options, list the files that are missing.
+/// `--folder` searches a folder (and below) for every missing file by name;
+/// `--material` with `--file` points one at a file, and the folder move
+/// that implies is tried on every other missing file. A candidate must be
+/// the same recording (picture, sound, size, length) unless `--force`.
+#[derive(Debug, Clone, Default, Args, Deserialize, JsonSchema)]
+pub struct RelinkArgs {
+    /// Search this folder for the missing files.
+    #[arg(long)]
+    pub folder: Option<PathBuf>,
+    /// The material to relink (an id from `info`), with `--file`.
+    #[arg(long, requires = "file")]
+    pub material: Option<String>,
+    /// The file to point `--material` at.
+    #[arg(long, requires = "material")]
+    pub file: Option<PathBuf>,
+    /// Accept a file that does not look like the original.
+    #[arg(long)]
+    #[serde(default)]
+    pub force: bool,
+}
+
+impl Operation for RelinkArgs {
+    const NAME: &'static str = "relink";
+    fn run(self, session: &mut Session, _: &Ctx) -> CliResult<Outcome> {
+        use chukcut_engine::modules::media::commands as media_commands;
+        let report = match (self.folder, self.material, self.file) {
+            (Some(folder), None, None) => pollster::block_on(media_commands::media_relink_folder(
+                session.state.clone(),
+                absolute(&folder),
+            ))?,
+            (None, Some(material), Some(file)) => {
+                pollster::block_on(media_commands::media_relink(
+                    session.state.clone(),
+                    material,
+                    absolute(&file).to_string_lossy().into_owned(),
+                    self.force,
+                ))?
+            }
+            (None, None, None) => {
+                let gone = media_commands::media_missing(&session.state)?;
+                let lines: Vec<String> = gone
+                    .iter()
+                    .map(|m| format!("{} {} ({})", m.material_id, m.path, m.kind))
+                    .collect();
+                return Ok(Outcome::read(
+                    if lines.is_empty() {
+                        "every media file is on disk".to_string()
+                    } else {
+                        format!("{} file(s) not on disk:\n{}", lines.len(), lines.join("\n"))
+                    },
+                    json!({"not_on_disk": gone}),
+                ));
+            }
+            _ => {
+                return Err(CliError::usage(
+                    "give --folder, or --material with --file, not both",
+                ))
+            }
+        };
+        let mut text = format!(
+            "relinked {} file(s), {} still not on disk",
+            report.relinked.len(),
+            report.still_missing
+        );
+        for r in &report.refused {
+            text.push_str(&format!(
+                "\nnot used: {} for {} ({})",
+                r.candidate,
+                r.wanted,
+                r.reasons.join("; ")
+            ));
+        }
+        let data = json!(report);
+        Ok(if report.relinked.is_empty() {
+            Outcome::read(text, data)
+        } else {
+            Outcome::changed(text, data)
+        })
+    }
+}

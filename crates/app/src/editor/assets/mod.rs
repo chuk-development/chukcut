@@ -147,6 +147,13 @@ pub(crate) struct AssetPanel {
     pub(crate) library: library_panel::LibraryPanel,
     /// Project templates and their preview tiles.
     templates: Entity<super::templates::Gallery>,
+    /// Files of the project not on disk, as of `missing_checked` (a
+    /// generation); asked off the UI thread, see `media.rs`.
+    missing: Vec<chukcut_engine::modules::media::relink::Missing>,
+    missing_checked: Option<u64>,
+    missing_pending: bool,
+    /// A folder search for the missing files is running.
+    relinking: bool,
     _search_changed: Subscription,
     _template_chosen: Subscription,
 }
@@ -170,6 +177,10 @@ impl AssetPanel {
             cloud: super::cloud::CloudPanel::new(window, cx),
             library,
             templates,
+            missing: Vec::new(),
+            missing_checked: None,
+            missing_pending: false,
+            relinking: false,
             _search_changed: subscription,
             _template_chosen: template_chosen,
         }

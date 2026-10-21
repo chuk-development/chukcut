@@ -1,5 +1,6 @@
 //! The audio tools in the inspector: the effect sections of the Audio tab
-//! (Equalizer, Parametric EQ, Compressor, Reverb, Echo, Pitch), the Voice
+//! (Equalizer, Parametric EQ, Compressor, Reverb, Echo, Pitch, then the
+//! clean-up and character effects ported from FilmCraft), the Voice
 //! changer grid, and the Speed tab's "Change audio pitch" switch.
 //!
 //! Every change is an `audiofx_*` engine command on the clip that is heard,
@@ -24,13 +25,24 @@ use super::controls::*;
 use super::*;
 
 /// The effect sections, in the order the Audio tab shows them.
-const SECTIONS: [(&str, &str); 6] = [
+const SECTIONS: [(&str, &str); 17] = [
     (fx_catalog::EQ3, "Equalizer"),
     (fx_catalog::EQ5, "Parametric EQ"),
     (fx_catalog::COMPRESSOR, "Compressor"),
     (fx_catalog::REVERB, "Reverb"),
     (fx_catalog::DELAY, "Echo"),
     (fx_catalog::PITCH, "Pitch"),
+    (fx_catalog::HIGH_PASS, "High-pass filter"),
+    (fx_catalog::LOW_PASS, "Low-pass filter"),
+    (fx_catalog::DEHUM, "Remove hum"),
+    (fx_catalog::DEESSER, "De-esser"),
+    (fx_catalog::GATE, "Noise gate"),
+    (fx_catalog::LIMITER, "Limiter"),
+    (fx_catalog::CHORUS, "Chorus"),
+    (fx_catalog::FLANGER, "Flanger"),
+    (fx_catalog::PHASER, "Phaser"),
+    (fx_catalog::DISTORTION, "Distortion"),
+    (fx_catalog::STEREO_WIDTH, "Stereo width"),
 ];
 
 struct ParamSlider {
@@ -78,6 +90,8 @@ fn readout(spec: &ParamSpec, value: f32) -> String {
         "%" => format!("{:.0} %", value * 100.0),
         "x" => format!("{value:.1}:1"),
         "Q" => format!("{value:.2}"),
+        // A count (harmonics, stages) or a choice by index (a curve).
+        "n" => format!("{value:.0}"),
         _ => format!("{value:.2}"),
     }
 }

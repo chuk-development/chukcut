@@ -9,6 +9,10 @@ use gpui::component::button::{Button, ButtonVariants as _};
 use gpui::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui::component::{Icon, Sizable as _};
 
+use chukcut_engine::modules::interchange::commands as interchange_commands;
+use chukcut_engine::modules::interchange::markers::MarkerFormat;
+use chukcut_engine::modules::interchange::Format;
+
 use super::*;
 use crate::ui::{icons, Badge, IconSrc};
 
@@ -81,6 +85,8 @@ impl Editor {
             .dropdown_caret(true)
             .dropdown_menu(move |menu, _, _| {
                 let save_as = editor.clone();
+                let (otio, fcpxml, edl) = (editor.clone(), editor.clone(), editor.clone());
+                let (chapters, notes) = (editor.clone(), editor.clone());
                 menu.action_context(focus.clone())
                     .min_w(px(220.0))
                     // As an action, so the menu shows its Ctrl+N; the shell
@@ -95,6 +101,40 @@ impl Editor {
                     .separator()
                     .menu("Import media…", Box::new(Import))
                     .menu("Export…", Box::new(Export))
+                    // The cut for another editor (modules::interchange).
+                    .item(PopupMenuItem::new("Export timeline as OTIO…").on_click(
+                        move |_, _, cx| {
+                            let _ = otio.update(cx, |e, cx| e.export_interchange(Format::Otio, cx));
+                        },
+                    ))
+                    .item(
+                        PopupMenuItem::new("Export timeline as Final Cut XML…").on_click(
+                            move |_, _, cx| {
+                                let _ = fcpxml
+                                    .update(cx, |e, cx| e.export_interchange(Format::Fcpxml, cx));
+                            },
+                        ),
+                    )
+                    .item(PopupMenuItem::new("Export timeline as EDL…").on_click(
+                        move |_, _, cx| {
+                            let _ = edl.update(cx, |e, cx| e.export_interchange(Format::Edl, cx));
+                        },
+                    ))
+                    .item(
+                        PopupMenuItem::new("Export markers as YouTube chapters…").on_click(
+                            move |_, _, cx| {
+                                let _ = chapters.update(cx, |e, cx| {
+                                    e.export_markers(MarkerFormat::Chapters, cx)
+                                });
+                            },
+                        ),
+                    )
+                    .item(
+                        PopupMenuItem::new("Export markers as CSV…").on_click(move |_, _, cx| {
+                            let _ =
+                                notes.update(cx, |e, cx| e.export_markers(MarkerFormat::Csv, cx));
+                        }),
+                    )
                     .separator()
                     .menu("Settings…", Box::new(OpenSettings))
                     .menu("Keyboard shortcuts", Box::new(ShowShortcuts))
@@ -224,6 +264,92 @@ impl Editor {
                 return;
             };
             let _ = this.update(cx, |editor, cx| editor.save_to(Some(path), cx));
+        })
+        .detach();
+    }
+
+    /// Write the timeline for DaVinci Resolve, Final Cut Pro, Premiere or
+    /// any editor that reads an EDL, and say what did not go across.
+    pub(super) fn export_interchange(&mut self, format: Format, cx: &mut Context<Self>) {
+        let mut request = FileRequest::save(
+            "Export timeline",
+            Filter::Interchange,
+            files::suggested_name(&self.project.name, format.extension()),
+        );
+        if let Some(dir) = files::project_dir(self.state.project_path.read().as_deref()) {
+            request = request.starting_in(dir);
+        }
+        let picked = files::choose_one(request, cx);
+        cx.spawn(async move |this, cx| {
+            let Some(path) = picked.await else {
+                return;
+            };
+            let _ = this.update(
+                cx,
+                |editor, cx| match interchange_commands::interchange_export(
+                    &editor.state,
+                    &path,
+                    Some(format),
+                ) {
+                    Ok(done) => {
+                        let mut text =
+                            format!("Wrote {} clips to {}", done.clips, done.path.display());
+                        if !done.warnings.is_empty() {
+                            text.push_str(". Not carried: ");
+                            text.push_str(&done.warnings.join(" "));
+                        }
+                        editor.status = Some(text.into());
+                        cx.notify();
+                    }
+                    Err(error) => editor.report(Err(error), cx),
+                },
+            );
+        })
+        .detach();
+    }
+
+    /// Write the markers as YouTube chapters or as a spreadsheet.
+    pub(super) fn export_markers(&mut self, format: MarkerFormat, cx: &mut Context<Self>) {
+        let stem = match format {
+            MarkerFormat::Chapters => format!("{} chapters", self.project.name),
+            MarkerFormat::Csv => format!("{} markers", self.project.name),
+        };
+        let mut request = FileRequest::save(
+            "Export markers",
+            Filter::Markers,
+            files::suggested_name(&stem, format.extension()),
+        );
+        if let Some(dir) = files::project_dir(self.state.project_path.read().as_deref()) {
+            request = request.starting_in(dir);
+        }
+        let picked = files::choose_one(request, cx);
+        cx.spawn(async move |this, cx| {
+            let Some(path) = picked.await else {
+                return;
+            };
+            let _ =
+                this.update(
+                    cx,
+                    |editor, cx| match interchange_commands::interchange_export_markers(
+                        &editor.state,
+                        &path,
+                        Some(format),
+                    ) {
+                        Ok(done) => {
+                            let mut text = format!(
+                                "Wrote {} markers to {}",
+                                done.markers,
+                                done.path.display()
+                            );
+                            if let Some(first) = done.warnings.first() {
+                                text.push_str(&format!(". Note: {first}"));
+                            }
+                            editor.status = Some(text.into());
+                            cx.notify();
+                        }
+                        Err(error) => editor.report(Err(error), cx),
+                    },
+                );
         })
         .detach();
     }

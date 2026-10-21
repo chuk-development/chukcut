@@ -203,6 +203,28 @@ chukcut-cli info reel.chukcut --json | jq '.data.tracks[0].clips[].id'
 Lists warnings (for example, missing media) and errors (an inconsistent
 document). Exit code 4 when there are errors.
 
+#### `sync PROJECT REFERENCE CLIP…`
+
+Lines the clips up with the reference clip by their sound (GCC-PHAT
+cross-correlation at 8 kHz over the first ten minutes of each, after
+FilmCraft's Synchronize): each clip moves so that what it heard plays when
+the reference heard it; linked clips move along. Refused when the match is
+not clear (confidence under 8 or a second peak nearly as high), when a clip
+would overlap another or start before 0, and for clips with a speed change.
+Reports each clip's `shift` and `confidence`. One undo step.
+
+#### `relink PROJECT [--folder DIR | --material ID --file PATH [--force]]`
+
+Without options, lists the media files that are not on disk (`not_on_disk`,
+with material ids). `--folder` searches a folder and its subfolders for every
+missing file by name. `--material` with `--file` points one material at a
+file; the folder move this implies (`/old/disk/trip/a.mp4` →
+`/new/disk/trip/a.mp4`) is tried on every other missing file. A candidate is
+used only when it is the same recording — picture, sound, size, length
+within 1 % — unless `--force`; refused candidates come back in `refused`
+with the reasons. One undo step (`modules::media::relink`, after FilmCraft's
+Link Media).
+
 #### `configure PROJECT`
 
 `--name`, `--width`, `--height`, `--fps`, `--background COLOUR`. One undo
@@ -1755,6 +1777,24 @@ export in the queue and the queue keeps running when the dialog is closed.
 
 Writes the frame at a time as a PNG at the full canvas size. It uses the export
 compositor, so it shows the same pixels as the export.
+
+#### `export-markers PROJECT OUTPUT [--format csv|chapters]`
+
+Writes the markers as a CSV spreadsheet (`.csv`: timeline, name, timecode,
+seconds, colour; free text that a spreadsheet would run as a formula gets a
+leading `'`) or as a chapter list for a YouTube description (`.txt`, `0:00
+Intro` lines, a chapter at 0:00 always). `warnings` says when YouTube would
+not show the chapters (fewer than three, or one shorter than ten seconds).
+
+#### `export-timeline PROJECT OUTPUT [--format otio|fcpxml|edl]`
+
+Writes the active timeline for another editor: OpenTimelineIO (`.otio`,
+every track), FCPXML 1.10 (`.fcpxml`, the main lane as the storyline and
+the other tracks as connected clips) or a CMX 3600 EDL (`.edl`, the main
+lane and two sound tracks). The format follows the extension unless given.
+The cut, speeds, dissolves and markers go across; the result lists in
+`warnings` what did not (looks, titles, compound clips, …). The module is
+`modules::interchange`; its layout follows FilmCraft's writers.
 
 ### Machine learning
 
