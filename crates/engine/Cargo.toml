@@ -155,7 +155,7 @@ ureq = "2.12"
 # Model downloads are verified against a pinned SHA-256.
 sha2 = "0.10"
 # `secrets.toml` and `accounts.toml`.
-toml = "0.8"
+toml = "1.1"
 # ElevenLabs sends speech with timestamps as base64 inside JSON. Already in
 # the tree through wgpu and ureq; this only names it.
 base64 = "0.22"
