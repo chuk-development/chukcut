@@ -50,6 +50,10 @@ What was taken:
 - **Marker export** (`crates/engine/src/modules/interchange/markers.rs`):
   the CSV writer (quoting and the formula guard) after
   `crates/engine/src/marker_export.rs`.
+- **Relinking moved media** (`crates/engine/src/modules/media/relink.rs`):
+  the folder index, the prefix remap (`derive_remap`, `apply_remap`) and
+  the check of a candidate before it replaces the original, adapted from
+  `crates/engine/src/relink.rs`.
 
 ## Codec patents
 

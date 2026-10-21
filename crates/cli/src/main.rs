@@ -90,6 +90,8 @@ enum Command {
     Info(On<InfoArgs>),
     /// Check the project for missing media and inconsistencies.
     Validate(On<ValidateArgs>),
+    /// Find media that moved: list what is missing, search a folder, or point one file.
+    Relink(On<RelinkArgs>),
     /// Change the project's name, canvas size, frame rate or background.
     Configure(On<ConfigureArgs>),
     /// Add media files to the project, optionally appending them to the timeline.
@@ -701,6 +703,7 @@ fn dispatch(command: Command, dry: bool, ctx: &Ctx) -> CliResult<(&'static str, 
         Command::RenderFrame(o) => on(o, dry, ctx),
         Command::ExportTimeline(o) => on(o, dry, ctx),
         Command::ExportMarkers(o) => on(o, dry, ctx),
+        Command::Relink(o) => on(o, dry, ctx),
         Command::Template(TemplateCommand::List(args)) => Ok(("template_list", args.run()?, false)),
         Command::Template(TemplateCommand::Apply(o)) if o.args.into => {
             let into: On<TemplateApplyIntoArgs> = On {

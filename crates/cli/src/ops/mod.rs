@@ -330,6 +330,7 @@ operations!(
     render::RenderFrameArgs,
     render::ExportTimelineArgs,
     render::ExportMarkersArgs,
+    project::RelinkArgs,
     template::TemplateApplyIntoArgs,
     template::TemplateSaveArgs,
     template::TemplateReplaceArgs,

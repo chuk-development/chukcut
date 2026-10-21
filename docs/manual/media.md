@@ -45,8 +45,22 @@ deleted, or on a drive that is not mounted):
 - The player shows a dark red picture for it.
 - The export refuses to start and names the missing files.
 
-Put the file back at its path, and the clip works again. To use another
-file, select the clip and use **Replace media…** in its right-click menu.
+Put the file back at its path, and the clip works again. Or let chukcut
+find it: when files are missing, the **Media** tab shows a yellow bar
+("3 files are missing") with **Find in folder…**. Choose a folder; chukcut
+looks in it and in all folders below it for files with the same names.
+It uses a file only when it is the same recording: picture and sound, size
+in pixels and length must match. The status line says how many files it
+relinked and which file it did not use, and why. The relink is one step
+that you can undo.
+
+From the command line, `chukcut-cli relink project.chukcut` lists the
+missing files, `--folder DIR` searches a folder, and `--material ID --file
+PATH` points one file. When you point one file of a moved folder, the other
+missing files of that folder follow.
+
+To use another file, select the clip and use **Replace media…** in its
+right-click menu.
 
 Removing a file from the project is an edit that you can undo. The clips
 that used it stay, as offline clips. The file on the disk is not touched.

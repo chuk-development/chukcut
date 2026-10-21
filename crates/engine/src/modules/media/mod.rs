@@ -44,6 +44,7 @@ pub mod hdr;
 pub mod hwdecode;
 pub mod probe;
 pub mod provider;
+pub mod relink;
 pub mod thumbnails;
 
 pub mod waveform;

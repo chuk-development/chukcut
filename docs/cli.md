@@ -197,6 +197,18 @@ chukcut-cli info reel.chukcut --json | jq '.data.tracks[0].clips[].id'
 Lists warnings (for example, missing media) and errors (an inconsistent
 document). Exit code 4 when there are errors.
 
+#### `relink PROJECT [--folder DIR | --material ID --file PATH [--force]]`
+
+Without options, lists the media files that are not on disk (`not_on_disk`,
+with material ids). `--folder` searches a folder and its subfolders for every
+missing file by name. `--material` with `--file` points one material at a
+file; the folder move this implies (`/old/disk/trip/a.mp4` →
+`/new/disk/trip/a.mp4`) is tried on every other missing file. A candidate is
+used only when it is the same recording — picture, sound, size, length
+within 1 % — unless `--force`; refused candidates come back in `refused`
+with the reasons. One undo step (`modules::media::relink`, after FilmCraft's
+Link Media).
+
 #### `configure PROJECT`
 
 `--name`, `--width`, `--height`, `--fps`, `--background COLOUR`. One undo
