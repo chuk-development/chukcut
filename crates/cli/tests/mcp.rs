@@ -169,6 +169,11 @@ fn an_mcp_session_edits_undoes_and_looks() {
         ("estimate", json!(["project"])),
         ("export_queue", json!(["project"])),
         ("export", json!(["project", "output"])),
+        // The FilmCraft ports.
+        ("export_timeline", json!(["project", "output"])),
+        ("export_markers", json!(["project", "output"])),
+        ("sync", json!(["project", "reference", "clips"])),
+        ("relink", json!(["project"])),
     ] {
         let tool = tools
             .iter()
@@ -662,4 +667,95 @@ fn a_cancelled_export_stops_and_answers_nothing() {
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
     assert!(!out.exists(), "the partial export was deleted");
+}
+
+/// The commands ported from FilmCraft are in the catalog and run through
+/// `command_run`: timeline and marker export, relink, sync by sound.
+#[test]
+fn the_filmcraft_ports_run_through_the_catalog() {
+    require_ffmpeg!();
+    let dir = common::scratch("mcp-ports");
+    let (card, bars) = common::media(&dir);
+    let project = dir.join("ports.chukcut");
+    let p = project.to_str().unwrap();
+    let mut client = Client::start(&dir);
+    client.request(
+        "initialize",
+        json!({"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}}),
+    );
+
+    let catalog = client.ok("command_list", json!({}));
+    let entry = |id: &str| {
+        catalog
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == id)
+            .unwrap_or_else(|| panic!("{id} is in the catalog"))
+            .clone()
+    };
+    for (id, group) in [
+        ("export_timeline", "render"),
+        ("export_markers", "render"),
+        ("relink", "project"),
+        ("sync", "analysis"),
+    ] {
+        let e = entry(id);
+        assert_eq!(e["group"], group, "{id}");
+        assert_eq!(e["needsProject"], true, "{id}");
+        assert_eq!(e["params"]["type"], "object", "{id}");
+    }
+
+    client.ok(
+        "new_project",
+        json!({"project": p, "width": 640, "height": 360}),
+    );
+    client.ok(
+        "media_import",
+        json!({"paths": [card, bars], "append": true}),
+    );
+    for (at, label) in [(0, "Intro"), (2, "Middle")] {
+        client.ok(
+            "command_run",
+            json!({"id": "marker_add", "params": {"at": at, "label": label}}),
+        );
+    }
+
+    let otio = dir.join("cut.otio");
+    let written = client.ok(
+        "command_run",
+        json!({"id": "export_timeline", "params": {"output": otio}}),
+    );
+    assert_eq!(written["clips"], 2, "{written}");
+    let text = std::fs::read_to_string(&otio).unwrap();
+    assert!(text.contains("OTIO_SCHEMA"), "{text}");
+    let edl = dir.join("cut.txt");
+    let written = client.ok(
+        "command_run",
+        json!({"id": "export_timeline", "params": {"output": edl, "format": "edl"}}),
+    );
+    // The extension follows the format.
+    let path = written["path"].as_str().unwrap();
+    assert!(path.ends_with("cut.edl"), "{written}");
+    assert!(std::fs::read_to_string(path).unwrap().contains("TITLE:"));
+
+    let csv = dir.join("markers.csv");
+    let written = client.ok(
+        "command_run",
+        json!({"id": "export_markers", "params": {"output": csv}}),
+    );
+    assert_eq!(written["markers"], 2, "{written}");
+    assert!(std::fs::read_to_string(&csv).unwrap().contains("Middle"));
+
+    let relink = client.ok("command_run", json!({"id": "relink"}));
+    assert_eq!(relink["not_on_disk"], json!([]), "{relink}");
+
+    // Sync is reached: a reference that is no clip is the command's own
+    // refusal, not "there is no operation".
+    let refused = client.call(
+        "command_run",
+        json!({"id": "sync", "params": {"reference": "9:9", "clips": ["1:0"]}}),
+    );
+    assert_eq!(refused["isError"], true, "{refused}");
+    assert!(!text_of_err(&refused).contains("no operation"), "{refused}");
 }

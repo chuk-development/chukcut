@@ -16,6 +16,38 @@ when it opens them.
   AppImageUpdate (`.zsync` next to each). Release files are named
   `chukcut-<version>-linux-<arch>.<ext>` (decision 0037).
 
+### Audio
+
+- Eleven audio effects ported from FilmCraft: high-pass, low-pass, Remove
+  hum, De-esser, Noise gate, Limiter, Chorus, Flanger, Phaser, Distortion
+  and Stereo width, in the new groups "repair" and "character".
+- Sync by sound: clips move to line up with a reference clip by what they
+  heard (`chukcut-cli sync`).
+
+### Export
+
+- Timeline export for other editors: OpenTimelineIO, FCPXML 1.10 and CMX
+  3600 EDL, with a report of what could not go across
+  (`chukcut-cli export-timeline`).
+- Marker export as a CSV sheet or as YouTube chapters
+  (`chukcut-cli export-markers`).
+
+### Media
+
+- Relink media that moved: search a folder, or point one file and let its
+  folder move fix the others (`chukcut-cli relink`).
+
+### CLI and MCP
+
+- The MCP server is redesigned after FilmCraft's: ten core tools
+  (`command_list`, `command_run`, `command_batch`, `doc_inspect`, ...) over
+  one command catalog instead of one tool per operation; `--op-tools` keeps
+  the old shape. The catalog lists the new commands above too.
+- `chukcut --control` opens a control socket, and `chukcut-cli mcp --bridge`
+  drives the running app through it: edits land in the app's undo history,
+  and `ui_*` tools click, type and take screenshots.
+- `chukcut-cli` is a library as well as a binary; the app links it.
+
 ## [0.1.0] - 2026-10-03
 
 The first version. It covers the work from the first commit (2026-07-25) to

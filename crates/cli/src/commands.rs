@@ -291,6 +291,29 @@ mod tests {
     }
 
     #[test]
+    fn the_filmcraft_ports_are_commands() {
+        let list = list(None, false, true);
+        for (id, group) in [
+            ("export_timeline", "render"),
+            ("export_markers", "render"),
+            ("relink", "project"),
+            ("sync", "analysis"),
+        ] {
+            let e = list
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|e| e["id"] == id)
+                .unwrap_or_else(|| panic!("{id} is in the catalog"));
+            assert_eq!(e["group"], group, "{id}");
+            assert_eq!(e["needsProject"], true, "{id}");
+        }
+        // Their arguments are checked like every command's.
+        let message = unknown_argument("export_timeline", &json!({"fromat": "edl"})).unwrap();
+        assert!(message.contains("format"), "{message}");
+    }
+
+    #[test]
     fn without_a_project_only_the_projectless_commands_are_enabled() {
         let enabled = list(None, true, false);
         let ids: Vec<&str> = enabled
