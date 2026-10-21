@@ -18,6 +18,8 @@ pub(crate) enum Filter {
     Luts,
     /// PNG stills (Save frame).
     Png,
+    /// Timelines for other editors: `.otio`, `.fcpxml`, `.edl`.
+    Interchange,
     /// Everything.
     Any,
 }
@@ -42,6 +44,7 @@ impl Filter {
             Filter::Subtitles => vec!["srt", "vtt"],
             Filter::Luts => vec!["cube"],
             Filter::Png => vec!["png"],
+            Filter::Interchange => vec!["otio", "fcpxml", "edl"],
             Filter::Any => Vec::new(),
         }
     }
@@ -54,6 +57,7 @@ impl Filter {
             Filter::Subtitles => "Subtitles (.srt, .vtt)",
             Filter::Luts => "LUTs (.cube)",
             Filter::Png => "PNG images",
+            Filter::Interchange => "Timelines (.otio, .fcpxml, .edl)",
             Filter::Any => "All files",
         }
     }

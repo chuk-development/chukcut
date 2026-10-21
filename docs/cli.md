@@ -1750,6 +1750,16 @@ export in the queue and the queue keeps running when the dialog is closed.
 Writes the frame at a time as a PNG at the full canvas size. It uses the export
 compositor, so it shows the same pixels as the export.
 
+#### `export-timeline PROJECT OUTPUT [--format otio|fcpxml|edl]`
+
+Writes the active timeline for another editor: OpenTimelineIO (`.otio`,
+every track), FCPXML 1.10 (`.fcpxml`, the main lane as the storyline and
+the other tracks as connected clips) or a CMX 3600 EDL (`.edl`, the main
+lane and two sound tracks). The format follows the extension unless given.
+The cut, speeds, dissolves and markers go across; the result lists in
+`warnings` what did not (looks, titles, compound clips, …). The module is
+`modules::interchange`; its layout follows FilmCraft's writers.
+
 ### Machine learning
 
 #### `ml ACTION [ITEM]`

@@ -209,3 +209,8 @@ ash = "0.38"
 # on Windows `lifecycle::exit` takes another way out, so nothing there needs it.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[dev-dependencies]
+# The interchange tests parse the FCPXML they write. Already in the tree
+# through the font stack; this only names it for the tests.
+roxmltree = "0.21"

@@ -135,7 +135,32 @@ Not in the export dialog: use the player's **⋯** button (**Player
 options**) › **Save frame as image…**. It writes the frame at the playhead
 as a PNG at the canvas size.
 
+## Send the timeline to another editor
+
+**Menu** › **Export timeline as OTIO…**, **Export timeline as Final Cut
+XML…** or **Export timeline as EDL…** write the cut, not a video: which
+part of which file sits where, on which track, with its speed, the
+dissolves at the cuts and the markers. Open the file in the other editor
+and point it at the same media files.
+
+| Format | For | What it holds |
+|---|---|---|
+| OpenTimelineIO (`.otio`) | DaVinci Resolve, Premiere (OTIO plug-in), Kdenlive | every video and audio track |
+| Final Cut XML (`.fcpxml`, version 1.10) | Final Cut Pro, DaVinci Resolve | the main lane as the storyline, the other tracks as connected clips |
+| CMX 3600 EDL (`.edl`) | every editor, online and colour facilities | the main lane and the first two audio tracks |
+
+Looks, effects, titles, captions, stickers, keyframes and compound clips do
+not go across. The status line names what was left out. Export the
+captions as `.srt` for the other editor (see
+[Text and captions](text-and-captions.md)). Before you export, use **Put
+clips back** on a compound clip so its clips go across.
+
+The EDL starts at 01:00:00:00. A timeline at 29.97 or 59.94 fps uses
+drop-frame timecode. The file layouts follow FilmCraft's interchange
+writers.
+
 ## From the command line
 
-`chukcut-cli export` and `chukcut-cli export-queue`. See
+`chukcut-cli export`, `chukcut-cli export-queue` and `chukcut-cli
+export-timeline cut.otio` (or `.fcpxml`, `.edl`). See
 [`docs/cli.md`](../cli.md).

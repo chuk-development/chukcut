@@ -10,6 +10,8 @@ use chukcut_engine::modules::export::presets::{AudioCodec, Container, Quality, V
 use chukcut_engine::modules::export::{
     ColorMatrix, ColorRange, ExportOverrides, ExportProgress, ExportRequest, ExportStage,
 };
+use chukcut_engine::modules::interchange::commands as interchange_commands;
+use chukcut_engine::modules::interchange::Format as InterchangeFormat;
 use chukcut_engine::shell::Channel;
 use clap::Args;
 use schemars::JsonSchema;
@@ -337,6 +339,47 @@ impl Operation for RenderFrameArgs {
         Ok(Outcome::read(
             format!("rendered {:.3} s to {}", seconds(at), path.display()),
             json!({"path": path, "at": seconds(at)}),
+        ))
+    }
+}
+
+/// Write the timeline for another editor: OpenTimelineIO (DaVinci Resolve,
+/// Premiere through its plug-in), FCPXML (Final Cut Pro, Resolve) or a CMX
+/// 3600 EDL. The cut goes across; looks, effects and titles stay, and the
+/// result lists what was left out.
+#[derive(Debug, Clone, Default, Args, Deserialize, JsonSchema)]
+pub struct ExportTimelineArgs {
+    /// The file to write. The format follows its extension unless given.
+    pub output: PathBuf,
+    /// otio, fcpxml or edl.
+    #[arg(long)]
+    pub format: Option<String>,
+}
+
+impl Operation for ExportTimelineArgs {
+    const NAME: &'static str = "export_timeline";
+    fn run(self, session: &mut Session, _: &Ctx) -> CliResult<Outcome> {
+        let names: Vec<&str> = interchange_commands::interchange_formats()
+            .iter()
+            .map(|(_, extension, _)| *extension)
+            .collect();
+        let format = self
+            .format
+            .as_deref()
+            .map(|f| enum_named::<InterchangeFormat>("timeline format", f, &names))
+            .transpose()?;
+        let done = interchange_commands::interchange_export(
+            &session.state,
+            &absolute(&self.output),
+            format,
+        )?;
+        let mut text = format!("wrote {} clip(s) to {}", done.clips, done.path.display());
+        for warning in &done.warnings {
+            text.push_str(&format!("\nnot carried: {warning}"));
+        }
+        Ok(Outcome::read(
+            text,
+            json!({"path": done.path, "format": done.format, "clips": done.clips, "warnings": done.warnings}),
         ))
     }
 }

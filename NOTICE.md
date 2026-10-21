@@ -42,6 +42,11 @@ What was taken:
   `modulation.rs` ChorusFlanger and Phaser, `special.rs` Distortion,
   `util.rs` delay line and all-pass), rewritten for offline whole-buffer
   processing.
+- **Timeline interchange** (`crates/engine/src/modules/interchange/`): the
+  structure of FilmCraft's `crates/interchange` (a format-neutral pass, one
+  writer per format, a report of what was left out), and the element sets
+  of its OpenTimelineIO, CMX 3600 EDL and FCPXML writers. The writers
+  themselves are chukcut's own code over chukcut's document.
 
 ## Codec patents
 
