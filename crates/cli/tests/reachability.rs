@@ -32,7 +32,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ("export::export_queue_move", "reorders the app's queue panel; the CLI's queue lives for one call"),
     ("export::export_queue_clear_finished", "tidies the app's queue panel"),
     ("export::export_queue_wait_idle", "export_queue follows its jobs through export_queue_subscribe"),
-    ("export::export_cancel", "cancels a running export of this process; the CLI exports in the foreground"),
     ("export::cancel_all_exports", "the app's quit path"),
     ("export::export_shutdown", "the app's quit path: stops exports and keeps the queue file for the next start"),
     ("export::export_queue_busy", "the app's quit guard"),
@@ -127,7 +126,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ("library::library_set_settings", "only chooses where font preview tiles come from (a privacy choice in the app); catalog library_settings shows it"),
     // The app's session, crash recovery and start screen.
     ("project::project_get", "the app's copy of the open document; a Session holds its own"),
-    ("project::project_path", "the app's title bar; a Session knows its file"),
     ("project::project_close", "the app's close path; a CLI process ends instead"),
     ("project::project_recovery_claim", "crash recovery of the app's working copy, which the CLI never writes"),
     ("project::project_recovery_pending", "crash recovery of the app's working copy"),

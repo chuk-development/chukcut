@@ -243,13 +243,27 @@ impl Operation for ExportArgs {
 
         let (tx, rx) = mpsc::channel::<ExportProgress>();
         let channel = Channel::new(move |p| tx.send(p).is_ok());
-        export_commands::export_start(&session.state, request, channel)
+        let job = export_commands::export_start(&session.state, request, channel)
             .map_err(CliError::render)?;
 
+        let mut cancel_sent = false;
         let finished = loop {
-            let progress = rx
-                .recv()
-                .map_err(|_| CliError::render("the export stopped without saying why"))?;
+            // Polled rather than blocked on, so a cancelled MCP request
+            // (`notifications/cancelled`) stops the encode within a tenth of
+            // a second; the job then deletes its partial file.
+            let progress = match rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                Ok(progress) => progress,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    if ctx.cancelled() && !cancel_sent {
+                        cancel_sent = true;
+                        let _ = export_commands::export_cancel(job.clone());
+                    }
+                    continue;
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(CliError::render("the export stopped without saying why"))
+                }
+            };
             if progress.stage.is_terminal() {
                 break progress;
             }

@@ -7,44 +7,34 @@
 //! one open project with one undo history; `mcp` serves the same operations
 //! to an MCP client over stdio. `docs/cli.md` is the manual.
 
-mod error;
-mod mcp;
-mod ops;
-mod output;
-mod select;
-mod session;
-mod values;
-
-use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
 use clap::{Args, Parser, Subcommand};
-use serde_json::{json, Value};
 
-use error::{CliError, CliResult};
-use ops::analysis::*;
-use ops::audio::*;
-use ops::audiofx::*;
-use ops::cloud::*;
-use ops::delivery::*;
-use ops::enhance::*;
-use ops::frame::*;
-use ops::layout::*;
-use ops::look::*;
-use ops::markers::*;
-use ops::mask::*;
-use ops::ml::*;
-use ops::motion::*;
-use ops::project::*;
-use ops::render::*;
-use ops::sequence::*;
-use ops::template::*;
-use ops::text::*;
-use ops::timeline::*;
-use ops::{Ctx, Operation, Outcome};
-use session::Session;
+use chukcut_cli::error::{self, CliError, CliResult};
+use chukcut_cli::ops::analysis::*;
+use chukcut_cli::ops::audio::*;
+use chukcut_cli::ops::audiofx::*;
+use chukcut_cli::ops::cloud::*;
+use chukcut_cli::ops::delivery::*;
+use chukcut_cli::ops::enhance::*;
+use chukcut_cli::ops::frame::*;
+use chukcut_cli::ops::layout::*;
+use chukcut_cli::ops::look::*;
+use chukcut_cli::ops::markers::*;
+use chukcut_cli::ops::mask::*;
+use chukcut_cli::ops::ml::*;
+use chukcut_cli::ops::motion::*;
+use chukcut_cli::ops::project::*;
+use chukcut_cli::ops::render::*;
+use chukcut_cli::ops::sequence::*;
+use chukcut_cli::ops::template::*;
+use chukcut_cli::ops::text::*;
+use chukcut_cli::ops::timeline::*;
+use chukcut_cli::ops::{self, Ctx, Outcome};
+use chukcut_cli::{batch_ops, mcp, on, output, read_input, run_batch, On};
 
 #[derive(Parser)]
 #[command(
@@ -71,15 +61,6 @@ struct Cli {
     verbose: u8,
     #[command(subcommand)]
     command: Command,
-}
-
-/// An operation and the project it applies to.
-#[derive(Args)]
-struct On<T: Args> {
-    /// The project file (.chukcut).
-    project: PathBuf,
-    #[command(flatten)]
-    args: T,
 }
 
 #[derive(Subcommand)]
@@ -248,8 +229,9 @@ enum Command {
     Catalog(CatalogArgs),
     /// Machine learning: models, runtime packs, status and speed of the ML worker.
     Ml(MlArgs),
-    /// Serve every operation to an MCP client over stdio.
-    Mcp,
+    /// Serve every operation to an MCP client over stdio: headless on project
+    /// files, or with --bridge on the running app (`chukcut --control`).
+    Mcp(McpArgs),
 }
 
 #[derive(Subcommand)]
@@ -452,6 +434,21 @@ enum TemplateCommand {
 }
 
 #[derive(Args)]
+struct McpArgs {
+    /// Drive the running app through its control socket instead of project
+    /// files. Without a path, the newest running `chukcut --control` is used.
+    #[arg(long, value_name = "SOCKET", num_args = 0..=1, default_missing_value = "")]
+    bridge: Option<PathBuf>,
+    /// Headless: the project a tool call that names none works on.
+    #[arg(long, value_name = "PROJECT", conflicts_with = "bridge")]
+    project: Option<PathBuf>,
+    /// Also list every operation as a tool of its own (`split`, `grade`, …),
+    /// as the first version of the server did. They are accepted either way.
+    #[arg(long)]
+    op_tools: bool,
+}
+
+#[derive(Args)]
 struct BatchArgs {
     /// The project file. Created when the first operation is `new`.
     project: PathBuf,
@@ -520,8 +517,15 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> u8 {
     let printer = output::Printer::new(cli.json);
 
-    if let Command::Mcp = cli.command {
-        return match mcp::serve() {
+    if let Command::Mcp(args) = cli.command {
+        let options = mcp::Options {
+            project: args.project,
+            bridge: args
+                .bridge
+                .map(|p| (!p.as_os_str().is_empty()).then_some(p)),
+            op_tools: args.op_tools,
+        };
+        return match mcp::serve(options) {
             Ok(()) => 0,
             Err(error) => {
                 eprintln!("chukcut-cli mcp: {error}");
@@ -566,21 +570,6 @@ fn usage_error(error: clap::Error) -> ExitCode {
     }
     let _ = error.print();
     ExitCode::from(error::ErrorKind::Usage.exit_code())
-}
-
-/// Open, run, save.
-fn on<T: Args + Operation>(
-    on: On<T>,
-    dry_run: bool,
-    ctx: &Ctx,
-) -> CliResult<(&'static str, Outcome, bool)> {
-    let mut session = Session::open(&on.project)?;
-    let outcome = on.args.run(&mut session, ctx)?;
-    let saved = outcome.mutated && !dry_run;
-    if saved {
-        session.save()?;
-    }
-    Ok((T::NAME, outcome, saved))
 }
 
 fn dispatch(command: Command, dry: bool, ctx: &Ctx) -> CliResult<(&'static str, Outcome, bool)> {
@@ -733,92 +722,6 @@ fn dispatch(command: Command, dry: bool, ctx: &Ctx) -> CliResult<(&'static str, 
             let (outcome, saved) = run_batch(&args.project, ops, dry, ctx)?;
             Ok(("batch", outcome, saved))
         }
-        Command::Mcp => unreachable!("handled before dispatch"),
+        Command::Mcp(_) => unreachable!("handled before dispatch"),
     }
-}
-
-fn read_input(file: &Path) -> CliResult<String> {
-    if file == Path::new("-") {
-        let mut raw = String::new();
-        std::io::stdin()
-            .read_to_string(&mut raw)
-            .map_err(|e| CliError::usage(format!("cannot read stdin: {e}")))?;
-        Ok(raw)
-    } else {
-        std::fs::read_to_string(file)
-            .map_err(|e| CliError::usage(format!("cannot read {}: {e}", file.display())))
-    }
-}
-
-/// A batch file is a JSON list of operations, or an object with an `ops`
-/// list. Each operation is an object with an `op` name and its arguments.
-pub fn batch_ops(raw: &str) -> CliResult<Vec<Value>> {
-    let value: Value = serde_json::from_str(raw)
-        .map_err(|e| CliError::usage(format!("the batch is not JSON: {e}")))?;
-    let list = match value {
-        Value::Array(list) => list,
-        Value::Object(mut map) => match map.remove("ops") {
-            Some(Value::Array(list)) => list,
-            _ => return Err(CliError::usage("a batch object needs an \"ops\" list")),
-        },
-        _ => return Err(CliError::usage("a batch is a list of operations")),
-    };
-    Ok(list)
-}
-
-/// Run `ops` against the project at `path` as one session, all or nothing:
-/// the project is saved once, at the end, and only when every operation
-/// succeeded. A first operation `new` creates the project.
-pub fn run_batch(path: &Path, ops: Vec<Value>, dry: bool, ctx: &Ctx) -> CliResult<(Outcome, bool)> {
-    let mut ops = ops.into_iter().enumerate().peekable();
-    let mut results = Vec::new();
-    let mut mutated = false;
-    let first_is_new = ops
-        .peek()
-        .is_some_and(|(_, op)| op.get("op").and_then(Value::as_str) == Some("new"));
-    let mut session = if first_is_new {
-        let (_, op) = ops.next().expect("peeked");
-        let args: NewArgs = serde_json::from_value(strip_op(op))
-            .map_err(|e| CliError::usage(format!("operation 0 (new): {e}")))?;
-        let (session, outcome) = args.create(path)?;
-        results.push(json!({"op": "new", "message": outcome.message, "data": outcome.data}));
-        mutated = true;
-        session
-    } else {
-        Session::open(path)?
-    };
-    for (index, op) in ops {
-        let name = op
-            .get("op")
-            .and_then(Value::as_str)
-            .ok_or_else(|| CliError::usage(format!("operation {index} has no \"op\" name")))?
-            .to_string();
-        let outcome = ops::run_named(&name, strip_op(op), &mut session, ctx)
-            .map_err(|e| e.context(format!("operation {index} ({name})")))?;
-        mutated |= outcome.mutated;
-        results.push(json!({"op": name, "message": outcome.message, "data": outcome.data}));
-    }
-    let saved = mutated && !dry;
-    if saved {
-        session.save()?;
-    }
-    let count = results.len();
-    Ok((
-        Outcome {
-            message: format!(
-                "ran {count} operation(s){}",
-                if saved { "; saved" } else { "" }
-            ),
-            data: json!(results),
-            mutated,
-        },
-        saved,
-    ))
-}
-
-fn strip_op(mut op: Value) -> Value {
-    if let Some(map) = op.as_object_mut() {
-        map.remove("op");
-    }
-    op
 }

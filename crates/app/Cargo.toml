@@ -16,6 +16,10 @@ path = "src/main.rs"
 # `nvcc` the engine's build script also builds the CUDA helper beside the
 # app, which transcribes on an NVIDIA GPU (decision 0036).
 chukcut-engine = { path = "../engine", features = ["local-whisper"] }
+# The operations and the control socket (`chukcut --control`) that
+# `chukcut-cli mcp --bridge` drives this window through: the same code the
+# CLI runs, so the app answers exactly what the CLI would.
+chukcut-cli = { path = "../cli" }
 
 # GPUI (Zed's UI toolkit) plus GPUI Component's widgets, themes and the Lucide
 # icon set, as one pinned bundle: `gpui-kit` re-exports the matching `gpui`
@@ -32,6 +36,10 @@ serde_json = "1"
 # The answer channel of the built-in file browser; the same crate GPUI's
 # own file prompts answer on.
 futures-channel = "0.3"
+# The control socket's screenshot: the window's X11 id (the version GPUI
+# implements `HasWindowHandle` with), and the PNG's base64.
+raw-window-handle = "0.6"
+base64 = "0.22"
 
 [dev-dependencies]
 # The patched GPUI renderer's import (`vendor/README.md`), driven without a
