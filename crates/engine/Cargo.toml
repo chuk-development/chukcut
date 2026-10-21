@@ -118,7 +118,7 @@ shaderc = "0.10"
 # the GLSL. Written for Godot's WebGPU driver; bus factor one, but it has *no*
 # runtime dependencies at all, so vendoring or forking it later is contained.
 # See docs/research/rust-crate-survey.md §6b.
-spirv-webgpu-transform = "0.1.6"
+spirv-webgpu-transform = "0.1.7"
 # Step [4]. Pinned to exactly what wgpu 30 links: a second naga in the graph
 # would compile and would then hand `wgpu::ShaderSource::Wgsl` a module built
 # by a different IR. Check `cargo tree -d` after any wgpu bump.

@@ -158,7 +158,9 @@ pub fn compile_with(
     }
     let spirv = to_spirv(&rewritten.source, stage, name)?;
 
-    let mut corrections: Option<spirv_webgpu_transform::CorrectionMap> = None;
+    // 0.1.7 takes the map itself instead of an `Option` it fills in; an
+    // empty map is the old `None`.
+    let mut corrections = spirv_webgpu_transform::CorrectionMap::default();
     let split =
         spirv_webgpu_transform::combimgsampsplitter(&spirv, &mut corrections).map_err(|_| {
             ShaderError::Split {
