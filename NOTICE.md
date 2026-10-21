@@ -50,6 +50,9 @@ What was taken:
 - **Marker export** (`crates/engine/src/modules/interchange/markers.rs`):
   the CSV writer (quoting and the formula guard) after
   `crates/engine/src/marker_export.rs`.
+- **Sync by sound** (`crates/engine/src/modules/analysis/sync.rs`): the
+  GCC-PHAT-β cross-correlation, the valid-lag window and the confidence and
+  distinctness figures, adapted from `crates/audio-dsp/src/sync.rs`.
 - **Relinking moved media** (`crates/engine/src/modules/media/relink.rs`):
   the folder index, the prefix remap (`derive_remap`, `apply_remap`) and
   the check of a candidate before it replaces the original, adapted from

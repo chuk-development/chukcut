@@ -36,3 +36,4 @@ pub mod reframe;
 pub mod scenes;
 pub mod stabilise;
 pub mod store;
+pub mod sync;

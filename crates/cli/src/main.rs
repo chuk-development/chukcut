@@ -211,6 +211,8 @@ enum Command {
     Reframe(On<ReframeArgs>),
     /// Show the scene changes, beats and stabilisation a clip carries.
     Analysis(On<AnalysisArgs>),
+    /// Line clips up with a reference clip by their sound.
+    Sync(On<SyncArgs>),
     /// Cloud features: caption translation, text to speech, stock media.
     #[command(subcommand)]
     Cloud(CloudCommand),
@@ -703,6 +705,7 @@ fn dispatch(command: Command, dry: bool, ctx: &Ctx) -> CliResult<(&'static str, 
         Command::RenderFrame(o) => on(o, dry, ctx),
         Command::ExportTimeline(o) => on(o, dry, ctx),
         Command::ExportMarkers(o) => on(o, dry, ctx),
+        Command::Sync(o) => on(o, dry, ctx),
         Command::Relink(o) => on(o, dry, ctx),
         Command::Template(TemplateCommand::List(args)) => Ok(("template_list", args.run()?, false)),
         Command::Template(TemplateCommand::Apply(o)) if o.args.into => {

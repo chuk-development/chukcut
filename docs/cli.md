@@ -197,6 +197,16 @@ chukcut-cli info reel.chukcut --json | jq '.data.tracks[0].clips[].id'
 Lists warnings (for example, missing media) and errors (an inconsistent
 document). Exit code 4 when there are errors.
 
+#### `sync PROJECT REFERENCE CLIP…`
+
+Lines the clips up with the reference clip by their sound (GCC-PHAT
+cross-correlation at 8 kHz over the first ten minutes of each, after
+FilmCraft's Synchronize): each clip moves so that what it heard plays when
+the reference heard it; linked clips move along. Refused when the match is
+not clear (confidence under 8 or a second peak nearly as high), when a clip
+would overlap another or start before 0, and for clips with a speed change.
+Reports each clip's `shift` and `confidence`. One undo step.
+
 #### `relink PROJECT [--folder DIR | --material ID --file PATH [--force]]`
 
 Without options, lists the media files that are not on disk (`not_on_disk`,

@@ -86,7 +86,8 @@ Right-click a clip:
    reframe**, **Reframe project to 9:16** (or to 16:9). **Cancel analysis**
    shows while an analysis runs.
 7. **Duck under speech**, **Remove ducking** (sound clips on an audio lane;
-   see [Audio](audio.md#ducking))
+   see [Audio](audio.md#ducking)), **Sync by sound to this clip** (two or
+   more clips with sound selected; see [Audio](audio.md#sync-by-sound))
 8. **Select all**
 
 **Freeze frame** cuts the clip at the playhead and puts a 3 s still of that

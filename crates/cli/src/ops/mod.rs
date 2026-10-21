@@ -321,6 +321,7 @@ operations!(
     analysis::BeatsSnapArgs,
     analysis::ReframeArgs,
     analysis::AnalysisArgs,
+    analysis::SyncArgs,
     cloud::TranslateCaptionsArgs,
     cloud::TtsArgs,
     cloud::StockKindsArgs,

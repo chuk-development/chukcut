@@ -537,3 +537,56 @@ mod tests {
         assert!(crop_value("lots").is_err());
     }
 }
+
+/// Line clips up with a reference clip by their sound: a separate recorder
+/// and the camera's own microphone, two cameras of one event. Each clip
+/// moves so that what it heard plays when the reference heard it; linked
+/// clips move along. Refused when the match is not clear. One undo step.
+#[derive(Debug, Clone, Default, Args, Deserialize, JsonSchema)]
+pub struct SyncArgs {
+    /// The clip that stays where it is: id, id prefix or `lane:index`.
+    pub reference: String,
+    /// The clips to move.
+    #[arg(required = true)]
+    pub clips: Vec<String>,
+}
+
+impl Operation for SyncArgs {
+    const NAME: &'static str = "sync";
+    fn run(self, session: &mut Session, ctx: &Ctx) -> CliResult<Outcome> {
+        static NEVER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        let reference = session.with(|p| select::clip(p, &self.reference))?;
+        let mut clips = Vec::new();
+        for c in &self.clips {
+            clips.push(session.with(|p| select::clip(p, c))?);
+        }
+        ctx.progress("Listening", None);
+        let synced = chukcut_engine::modules::analysis::commands::analysis_sync_audio(
+            &session.state,
+            reference.clone(),
+            clips,
+            &NEVER,
+        )?;
+        let lines: Vec<String> = synced
+            .iter()
+            .map(|s| {
+                format!(
+                    "{} moved {:+.3} s (confidence {:.0})",
+                    s.segment_id,
+                    seconds(s.shift),
+                    s.confidence
+                )
+            })
+            .collect();
+        Ok(Outcome::changed(
+            format!(
+                "synced {} clip(s) to {reference}\n{}",
+                synced.len(),
+                lines.join("\n")
+            ),
+            json!({"reference": reference, "synced": synced.iter().map(|s| json!({
+                "clip": s.segment_id, "shift": seconds(s.shift), "shift_us": s.shift, "confidence": s.confidence,
+            })).collect::<Vec<_>>()}),
+        ))
+    }
+}

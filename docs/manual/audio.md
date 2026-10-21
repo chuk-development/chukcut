@@ -105,6 +105,25 @@ These clean-up and character effects come from FilmCraft's audio library.
 The preview plays a cached render of the effects. The export renders the
 same sound.
 
+## Sync by sound
+
+You filmed with a camera and recorded the voice on a separate recorder, or
+filmed one moment with two cameras. chukcut can put the clips in sync by
+listening to them:
+
+1. Select the clips (`Ctrl` + click).
+2. Right-click the clip that must stay where it is, and choose **Sync by
+   sound to this clip**.
+
+The other clips move so that their sound plays at the same moment as the
+sound of that clip. Linked clips move with them. It is one step that you
+can undo. chukcut refuses when the sounds have no clear match (for example
+music, or steady noise), when a clip would move onto another clip or before
+the start, and when a clip has a speed change. It listens to the first ten
+minutes of each clip. The method comes from FilmCraft.
+
+From the command line: `chukcut-cli sync project.chukcut REFERENCE CLIP…`.
+
 ## Beats
 
 Tick **Beats**. chukcut finds the tempo and marks every beat on the clip
