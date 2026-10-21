@@ -7,9 +7,12 @@
 //! and in the export — no effect is ever started cold at a seek point.
 
 pub mod biquad;
+pub mod character;
 pub mod delay;
 pub mod dynamics;
+pub mod modulation;
 pub mod pitch;
+pub mod repair;
 pub mod reverb;
 pub mod voice;
 
@@ -144,6 +147,96 @@ pub fn apply(buffer: &mut [f32], channels: usize, rate: u32, effect: &AudioEffec
         catalog::VOICE_ROBOT => voice::robot(buffer, channels, rate, get("intensity")),
         catalog::VOICE_TELEPHONE => voice::telephone(buffer, channels, rate, get("intensity")),
         catalog::VOICE_MEGAPHONE => voice::megaphone(buffer, channels, rate, get("intensity")),
+        catalog::HIGH_PASS => {
+            repair::high_pass(buffer, channels, rate, get("freq"), get("steep") >= 0.5)
+        }
+        catalog::LOW_PASS => {
+            repair::low_pass(buffer, channels, rate, get("freq"), get("steep") >= 0.5)
+        }
+        catalog::DEHUM => repair::dehum(
+            buffer,
+            channels,
+            rate,
+            repair::DeHumParams {
+                sixty_hz: get("sixty") >= 0.5,
+                harmonics: get("harmonics").round() as usize,
+                q: get("q"),
+                amount: get("amount"),
+            },
+        ),
+        catalog::DEESSER => repair::deess(
+            buffer,
+            channels,
+            rate,
+            repair::DeEsserParams {
+                freq_hz: get("freq"),
+                threshold_db: get("threshold"),
+                reduction_db: get("reduction"),
+            },
+        ),
+        catalog::GATE => dynamics::gate(
+            buffer,
+            channels,
+            rate,
+            dynamics::GateParams {
+                threshold_db: get("threshold"),
+                ratio: get("ratio"),
+                range_db: get("range"),
+                attack_ms: get("attack"),
+                hold_ms: get("hold"),
+                release_ms: get("release"),
+            },
+        ),
+        catalog::LIMITER => dynamics::limit(
+            buffer,
+            channels,
+            rate,
+            dynamics::LimiterParams {
+                input_db: get("input"),
+                ceiling_db: get("ceiling"),
+                release_ms: get("release"),
+            },
+        ),
+        catalog::CHORUS | catalog::FLANGER => {
+            let p = modulation::ChorusParams {
+                speed_hz: get("speed"),
+                width: get("width"),
+                intensity: get("intensity"),
+                mix: get("mix"),
+            };
+            if desc.id == catalog::CHORUS {
+                modulation::chorus(buffer, channels, rate, p)
+            } else {
+                modulation::flanger(buffer, channels, rate, p)
+            }
+        }
+        catalog::PHASER => modulation::phaser(
+            buffer,
+            channels,
+            rate,
+            modulation::PhaserParams {
+                stages: get("stages").round() as usize,
+                rate_hz: get("rate"),
+                depth: get("depth"),
+                upper_hz: get("upper"),
+                feedback: get("feedback"),
+                mix: get("mix"),
+            },
+        ),
+        catalog::DISTORTION => character::distortion(
+            buffer,
+            channels,
+            rate,
+            character::DistortionParams {
+                drive_db: get("drive"),
+                curve: get("curve").round() as usize,
+                asymmetry: get("asymmetry"),
+                tone_hz: get("tone"),
+                output_db: get("output"),
+                mix: get("mix"),
+            },
+        ),
+        catalog::STEREO_WIDTH => character::stereo_width(buffer, channels, get("width")),
         _ => {}
     }
 }

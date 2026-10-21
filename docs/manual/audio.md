@@ -73,6 +73,35 @@ Presets: **None**, **Deep**, **Chipmunk**, **Robot**, **Telephone**,
 - **Echo**: **Time**, **Feedback**, **Mix**, **Tone**.
 - **Pitch**: in semitones. **Keep voice character** keeps a voice natural.
 
+Clean-up effects:
+
+- **High-pass filter**: removes everything below **Frequency** (rumble,
+  wind, handling noise). **Steep** cuts 24 dB per octave instead of 12.
+- **Low-pass filter**: removes everything above **Frequency** (hiss), or
+  makes a sound muffled.
+- **Remove hum**: removes mains hum. Turn on **60 Hz mains** in the
+  Americas; 50 Hz is the default. **Harmonics** (1 to 10), **Narrowness**,
+  **Amount**.
+- **De-esser**: turns down sharp "s" and "sh" sounds. **Frequency**,
+  **Threshold**, **Max reduction**.
+- **Noise gate**: turns down the sound under **Threshold**, for example
+  the noise between words. **Ratio**, **Range** (how far down), **Attack**,
+  **Hold**, **Release**.
+- **Limiter**: **Boost** makes the sound louder; no peak goes over
+  **Ceiling**. **Release**.
+
+Character effects:
+
+- **Chorus** and **Flanger**: **Speed**, **Depth**, **Feedback**, **Mix**.
+- **Phaser**: **Stages**, **Speed**, **Depth**, **Top frequency**,
+  **Feedback**, **Mix**.
+- **Distortion**: **Drive**, **Curve** (0 soft, 1 hard, 2 tube, 3 fold),
+  **Asymmetry**, **Tone**, **Output**, **Mix**.
+- **Stereo width**: 0 % is mono, 100 % unchanged, 200 % twice as wide.
+  A mono clip does not change.
+
+These clean-up and character effects come from FilmCraft's audio library.
+
 The preview plays a cached render of the effects. The export renders the
 same sound.
 

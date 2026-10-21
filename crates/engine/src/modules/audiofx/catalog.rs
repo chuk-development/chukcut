@@ -19,6 +19,10 @@ pub enum Group {
     Space,
     /// Pitch and the voice changer presets.
     Voice,
+    /// Clean-up: filters, hum and sibilance removal, the gate, the limiter.
+    Repair,
+    /// Chorus, flanger, phaser, distortion, stereo width.
+    Character,
 }
 
 /// One numeric parameter.
@@ -115,6 +119,18 @@ pub const VOICE_CHIPMUNK: &str = "voice_chipmunk";
 pub const VOICE_ROBOT: &str = "voice_robot";
 pub const VOICE_TELEPHONE: &str = "voice_telephone";
 pub const VOICE_MEGAPHONE: &str = "voice_megaphone";
+// The kinds below were ported from FilmCraft's audio DSP library (NOTICE.md).
+pub const HIGH_PASS: &str = "high_pass";
+pub const LOW_PASS: &str = "low_pass";
+pub const DEHUM: &str = "dehum";
+pub const DEESSER: &str = "deesser";
+pub const GATE: &str = "gate";
+pub const LIMITER: &str = "limiter";
+pub const CHORUS: &str = "chorus";
+pub const FLANGER: &str = "flanger";
+pub const PHASER: &str = "phaser";
+pub const DISTORTION: &str = "distortion";
+pub const STEREO_WIDTH: &str = "stereo_width";
 
 /// The voice changer presets, in the order the inspector shows them.
 pub const VOICE_PRESETS: [&str; 5] = [
@@ -243,6 +259,133 @@ static CATALOG: &[EffectDescriptor] = &[
         group: Group::Voice,
         description: "A narrow, honky, distorted loudhailer.",
         params: &[INTENSITY],
+    },
+    EffectDescriptor {
+        id: HIGH_PASS,
+        label: "High-pass filter",
+        group: Group::Repair,
+        description: "Cuts everything below the frequency: rumble, wind, handling noise.",
+        params: &[
+            log("freq", "Frequency", 20.0, 2_000.0, 80.0, "Hz"),
+            p("steep", "Steep (24 dB per octave)", 0.0, 1.0, 0.0, ""),
+        ],
+    },
+    EffectDescriptor {
+        id: LOW_PASS,
+        label: "Low-pass filter",
+        group: Group::Repair,
+        description: "Cuts everything above the frequency: hiss, or a muffled, next-room sound.",
+        params: &[
+            log("freq", "Frequency", 200.0, 20_000.0, 8_000.0, "Hz"),
+            p("steep", "Steep (24 dB per octave)", 0.0, 1.0, 0.0, ""),
+        ],
+    },
+    EffectDescriptor {
+        id: DEHUM,
+        label: "Remove hum",
+        group: Group::Repair,
+        description: "Notches out mains hum at 50 or 60 Hz and its harmonics.",
+        params: &[
+            p("sixty", "60 Hz mains (Americas)", 0.0, 1.0, 0.0, ""),
+            p("harmonics", "Harmonics", 1.0, 10.0, 5.0, "n"),
+            log("q", "Narrowness", 5.0, 100.0, 30.0, "Q"),
+            p("amount", "Amount", 0.0, 1.0, 1.0, "%"),
+        ],
+    },
+    EffectDescriptor {
+        id: DEESSER,
+        label: "De-esser",
+        group: Group::Repair,
+        description: "Turns down sharp \"s\" and \"sh\" sounds in a voice.",
+        params: &[
+            log("freq", "Frequency", 2_000.0, 12_000.0, 6_000.0, "Hz"),
+            p("threshold", "Threshold", -40.0, 0.0, -12.0, "dB"),
+            p("reduction", "Max reduction", 0.0, 24.0, 8.0, "dB"),
+        ],
+    },
+    EffectDescriptor {
+        id: GATE,
+        label: "Noise gate",
+        group: Group::Repair,
+        description: "Turns down everything under the threshold: noise between words, room hiss.",
+        params: &[
+            p("threshold", "Threshold", -90.0, 0.0, -45.0, "dB"),
+            log("ratio", "Ratio", 1.0, 100.0, 10.0, "x"),
+            p("range", "Range", 0.0, 90.0, 40.0, "dB"),
+            log("attack", "Attack", 0.1, 100.0, 1.0, "ms"),
+            p("hold", "Hold", 0.0, 2_000.0, 80.0, "ms"),
+            log("release", "Release", 1.0, 3_000.0, 150.0, "ms"),
+        ],
+    },
+    EffectDescriptor {
+        id: LIMITER,
+        label: "Limiter",
+        group: Group::Repair,
+        description: "Makes the sound louder and stops every peak at the ceiling, with 5 ms look-ahead.",
+        params: &[
+            p("input", "Boost", 0.0, 24.0, 0.0, "dB"),
+            p("ceiling", "Ceiling", -24.0, 0.0, -1.0, "dB"),
+            log("release", "Release", 1.0, 1_000.0, 60.0, "ms"),
+        ],
+    },
+    EffectDescriptor {
+        id: CHORUS,
+        label: "Chorus",
+        group: Group::Character,
+        description: "Three drifting copies of the sound: one voice becomes a small ensemble.",
+        params: &[
+            log("speed", "Speed", 0.05, 10.0, 0.8, "Hz"),
+            p("width", "Depth", 0.0, 1.0, 0.5, "%"),
+            p("intensity", "Feedback", 0.0, 1.0, 0.3, "%"),
+            p("mix", "Mix", 0.0, 1.0, 0.5, "%"),
+        ],
+    },
+    EffectDescriptor {
+        id: FLANGER,
+        label: "Flanger",
+        group: Group::Character,
+        description: "A short sweeping delay with feedback: the jet-plane whoosh.",
+        params: &[
+            log("speed", "Speed", 0.05, 10.0, 0.4, "Hz"),
+            p("width", "Depth", 0.0, 1.0, 0.7, "%"),
+            p("intensity", "Feedback", 0.0, 1.0, 0.5, "%"),
+            p("mix", "Mix", 0.0, 1.0, 0.5, "%"),
+        ],
+    },
+    EffectDescriptor {
+        id: PHASER,
+        label: "Phaser",
+        group: Group::Character,
+        description: "Moving notches from a swept all-pass chain.",
+        params: &[
+            p("stages", "Stages", 2.0, 12.0, 4.0, "n"),
+            log("rate", "Speed", 0.01, 10.0, 0.5, "Hz"),
+            p("depth", "Depth", 0.0, 1.0, 0.7, "%"),
+            log("upper", "Top frequency", 100.0, 20_000.0, 2_500.0, "Hz"),
+            p("feedback", "Feedback", -1.0, 1.0, 0.0, "%"),
+            p("mix", "Mix", 0.0, 1.0, 0.5, "%"),
+        ],
+    },
+    EffectDescriptor {
+        id: DISTORTION,
+        label: "Distortion",
+        group: Group::Character,
+        description: "Drives the sound into a curve: warm, crunchy or broken.",
+        params: &[
+            p("drive", "Drive", 0.0, 48.0, 12.0, "dB"),
+            p("curve", "Curve (soft, hard, tube, fold)", 0.0, 3.0, 0.0, "n"),
+            p("asymmetry", "Asymmetry", -1.0, 1.0, 0.0, "%"),
+            log("tone", "Tone", 500.0, 20_000.0, 20_000.0, "Hz"),
+            p("output", "Output", -48.0, 12.0, -6.0, "dB"),
+            p("mix", "Mix", 0.0, 1.0, 1.0, "%"),
+        ],
+    },
+    EffectDescriptor {
+        id: STEREO_WIDTH,
+        label: "Stereo width",
+        group: Group::Character,
+        description: "Narrows a stereo sound towards mono or widens it. A mono clip is left alone.",
+        params: &[p("width", "Width", 0.0, 2.0, 1.0, "%")],
     },
 ];
 

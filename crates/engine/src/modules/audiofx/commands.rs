@@ -451,7 +451,7 @@ mod tests {
         }
         assert!(audiofx_get(&state, "s".into()).unwrap().fx.is_identity());
         assert!(audiofx_set_param(&state, "s".into(), "nope".into(), "low".into(), 1.0).is_err());
-        assert!(audiofx_add(&state, "s".into(), "flanger".into()).is_err());
+        assert!(audiofx_add(&state, "s".into(), "warp_drive".into()).is_err());
     }
 
     #[test]

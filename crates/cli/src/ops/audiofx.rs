@@ -84,8 +84,9 @@ fn set_params(
 }
 
 /// Add an audio effect to a clip's sound: eq3, eq5, compressor, reverb,
-/// delay, pitch or a voice preset (`catalog audio` lists them with their
-/// parameters). Parameters not given keep their defaults.
+/// delay, pitch, high_pass, low_pass, dehum, deesser, gate, limiter, chorus,
+/// flanger, phaser, distortion, stereo_width or a voice preset (`catalog
+/// audio` lists them with their parameters). Parameters not given keep their defaults.
 #[derive(Debug, Clone, Default, Args, Deserialize, JsonSchema)]
 pub struct AudioEffectAddArgs {
     /// The clip: id, id prefix or `lane:index`. A video clip's sound is its

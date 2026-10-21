@@ -123,6 +123,13 @@ impl Coefficients {
         )
     }
 
+    /// A narrow cut at `freq`, `q` wide, that leaves the rest untouched. What
+    /// the hum remover stacks at the mains frequency and its harmonics.
+    pub fn notch(rate: f64, freq: f64, q: f64) -> Self {
+        let (cos, _, alpha) = Self::omega(rate, freq, q);
+        Self::normalised(1.0, -2.0 * cos, 1.0, 1.0 + alpha, -2.0 * cos, 1.0 - alpha)
+    }
+
     /// The filter's gain at `freq`, in dB. What the tests compare a measured
     /// response against.
     pub fn magnitude_db(&self, rate: f64, freq: f64) -> f64 {
@@ -154,6 +161,12 @@ impl Biquad {
             c,
             z: vec![[0.0; 2]; channels.max(1)],
         }
+    }
+
+    /// Change the coefficients and keep the state, for a filter whose setting
+    /// moves while it runs (the de-esser's shelf).
+    pub fn set_coefficients(&mut self, c: Coefficients) {
+        self.c = c;
     }
 
     pub fn is_identity(&self) -> bool {

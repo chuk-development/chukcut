@@ -23,6 +23,26 @@ is a map, not a substitute for those texts.
 
 `cargo tree` enumerates the complete set.
 
+## FilmCraft (storytold/filmcraft), Apache-2.0
+
+Copyright (c) 2026 ArtCraft Team and the FilmCraft contributors. FilmCraft is
+licensed under the Apache License, Version 2.0 or the MIT License, at the
+user's option (<https://github.com/storytold/filmcraft>). chukcut takes it
+under the Apache License 2.0, which is compatible with the GPL-3.0; the
+FilmCraft names and logos are not used. Files copied or closely adapted
+from FilmCraft keep its copyright line at their top. Our changes to them are
+under the GPL-3.0.
+
+What was taken:
+
+- **Audio effects** (`crates/engine/src/modules/audiofx/dsp/repair.rs`,
+  `modulation.rs`, `character.rs`, the gate and limiter in `dynamics.rs`):
+  adapted from `crates/audio-dsp/src/effects/` (`restoration.rs` DeHum,
+  `essential.rs` DeEsser and StereoWidth, `dynamics.rs` Gate and Limiter,
+  `modulation.rs` ChorusFlanger and Phaser, `special.rs` Distortion,
+  `util.rs` delay line and all-pass), rewritten for offline whole-buffer
+  processing.
+
 ## Codec patents
 
 **This is separate from the software licence, and no software licence disposes

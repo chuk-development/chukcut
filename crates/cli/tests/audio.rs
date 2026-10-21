@@ -92,7 +92,7 @@ fn an_audio_effect_stack_from_separate_invocations() {
     let listed = ok(&dir, &["audio-effect", "list", p, "1:0"]);
     assert_eq!(listed["effects"].as_array().unwrap().len(), 2);
 
-    let refused = run(&dir, &["audio-effect", "add", p, "1:0", "flanger"]);
+    let refused = run(&dir, &["audio-effect", "add", p, "1:0", "warp_drive"]);
     assert_ne!(refused.code, 0);
 }
 
