@@ -1,5 +1,8 @@
 version: 2
 updates:
+  # One weekly PR for every semver-compatible Rust update. Major bumps
+  # (0.x minor steps count as major) still come one PR per crate, because
+  # each usually needs code changes.
   - package-ecosystem: cargo
     directory: /
     schedule:
@@ -9,8 +12,11 @@ updates:
       rust-minor:
         update-types: [minor, patch]
 
-
+  # All workflow action bumps in one monthly PR.
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: monthly
+    groups:
+      github-actions:
+        patterns: ["*"]
