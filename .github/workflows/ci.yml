@@ -32,7 +32,7 @@ jobs:
     name: Packaging files
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Tools
         run: |
           sudo apt-get update
@@ -51,7 +51,7 @@ jobs:
     name: Lint and test
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # The debug test build of the whole workspace (wgpu, GPUI, whisper.cpp,
       # fourteen engine integration-test binaries) needs more room than the
@@ -130,7 +130,7 @@ jobs:
     name: Release build
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: System dependencies
         run: |
