@@ -329,6 +329,7 @@ operations!(
     render::ExportArgs,
     render::RenderFrameArgs,
     render::ExportTimelineArgs,
+    render::ExportMarkersArgs,
     template::TemplateApplyIntoArgs,
     template::TemplateSaveArgs,
     template::TemplateReplaceArgs,

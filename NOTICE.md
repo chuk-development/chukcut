@@ -47,6 +47,9 @@ What was taken:
   writer per format, a report of what was left out), and the element sets
   of its OpenTimelineIO, CMX 3600 EDL and FCPXML writers. The writers
   themselves are chukcut's own code over chukcut's document.
+- **Marker export** (`crates/engine/src/modules/interchange/markers.rs`):
+  the CSV writer (quoting and the formula guard) after
+  `crates/engine/src/marker_export.rs`.
 
 ## Codec patents
 

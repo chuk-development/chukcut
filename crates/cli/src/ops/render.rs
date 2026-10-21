@@ -11,6 +11,7 @@ use chukcut_engine::modules::export::{
     ColorMatrix, ColorRange, ExportOverrides, ExportProgress, ExportRequest, ExportStage,
 };
 use chukcut_engine::modules::interchange::commands as interchange_commands;
+use chukcut_engine::modules::interchange::markers::MarkerFormat;
 use chukcut_engine::modules::interchange::Format as InterchangeFormat;
 use chukcut_engine::shell::Channel;
 use clap::Args;
@@ -380,6 +381,47 @@ impl Operation for ExportTimelineArgs {
         Ok(Outcome::read(
             text,
             json!({"path": done.path, "format": done.format, "clips": done.clips, "warnings": done.warnings}),
+        ))
+    }
+}
+
+/// Write the timeline's markers as a spreadsheet (`.csv`: name, timecode,
+/// seconds, colour) or as a chapter list for a YouTube description
+/// (`.txt`: `0:00 Intro` lines). The result warns where YouTube would refuse
+/// the chapters (fewer than three, one shorter than ten seconds).
+#[derive(Debug, Clone, Default, Args, Deserialize, JsonSchema)]
+pub struct ExportMarkersArgs {
+    /// The file to write. The format follows its extension unless given.
+    pub output: PathBuf,
+    /// csv or chapters.
+    #[arg(long)]
+    pub format: Option<String>,
+}
+
+impl Operation for ExportMarkersArgs {
+    const NAME: &'static str = "export_markers";
+    fn run(self, session: &mut Session, _: &Ctx) -> CliResult<Outcome> {
+        let format = self
+            .format
+            .as_deref()
+            .map(|f| enum_named::<MarkerFormat>("marker format", f, &["csv", "chapters"]))
+            .transpose()?;
+        let done = interchange_commands::interchange_export_markers(
+            &session.state,
+            &absolute(&self.output),
+            format,
+        )?;
+        let mut text = format!(
+            "wrote {} marker(s) to {}",
+            done.markers,
+            done.path.display()
+        );
+        for warning in &done.warnings {
+            text.push_str(&format!("\nwarning: {warning}"));
+        }
+        Ok(Outcome::read(
+            text,
+            json!({"path": done.path, "format": done.format, "markers": done.markers, "warnings": done.warnings}),
         ))
     }
 }

@@ -26,6 +26,7 @@
 pub mod commands;
 pub mod edl;
 pub mod fcpxml;
+pub mod markers;
 pub mod otio;
 pub mod timeline;
 

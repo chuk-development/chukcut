@@ -1750,6 +1750,14 @@ export in the queue and the queue keeps running when the dialog is closed.
 Writes the frame at a time as a PNG at the full canvas size. It uses the export
 compositor, so it shows the same pixels as the export.
 
+#### `export-markers PROJECT OUTPUT [--format csv|chapters]`
+
+Writes the markers as a CSV spreadsheet (`.csv`: timeline, name, timecode,
+seconds, colour; free text that a spreadsheet would run as a formula gets a
+leading `'`) or as a chapter list for a YouTube description (`.txt`, `0:00
+Intro` lines, a chapter at 0:00 always). `warnings` says when YouTube would
+not show the chapters (fewer than three, or one shorter than ten seconds).
+
 #### `export-timeline PROJECT OUTPUT [--format otio|fcpxml|edl]`
 
 Writes the active timeline for another editor: OpenTimelineIO (`.otio`,

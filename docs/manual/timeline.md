@@ -136,6 +136,14 @@ select it. Drag its edge to change its length. See
   `Alt+X` clears them.
 - `Ctrl+L` loops playback between in and out.
 - The export can render only the part from in to out.
+- **Menu** › **Export markers as YouTube chapters…** writes a `.txt` file
+  with one line per marker (`0:00 Intro`, `1:35 Setup`), which you paste
+  into the video's description. The marker's name is the chapter's name.
+  There is always a chapter at 0:00. The status line warns when YouTube
+  would not show the chapters: it needs at least three, each at least 10
+  seconds long.
+- **Menu** › **Export markers as CSV…** writes a spreadsheet of the markers
+  (name, timecode, seconds, colour), for review notes.
 
 ## Text on the timeline
 

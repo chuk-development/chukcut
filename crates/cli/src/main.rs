@@ -233,6 +233,8 @@ enum Command {
     RenderFrame(On<RenderFrameArgs>),
     /// Write the timeline for another editor: OTIO, FCPXML or EDL.
     ExportTimeline(On<ExportTimelineArgs>),
+    /// Write the markers as a CSV spreadsheet or a YouTube chapter list.
+    ExportMarkers(On<ExportMarkersArgs>),
     /// Project templates: list, make a project from one, save one, fill slots.
     #[command(subcommand)]
     Template(TemplateCommand),
@@ -698,6 +700,7 @@ fn dispatch(command: Command, dry: bool, ctx: &Ctx) -> CliResult<(&'static str, 
         Command::ExportQueue(o) => on(o, dry, ctx),
         Command::RenderFrame(o) => on(o, dry, ctx),
         Command::ExportTimeline(o) => on(o, dry, ctx),
+        Command::ExportMarkers(o) => on(o, dry, ctx),
         Command::Template(TemplateCommand::List(args)) => Ok(("template_list", args.run()?, false)),
         Command::Template(TemplateCommand::Apply(o)) if o.args.into => {
             let into: On<TemplateApplyIntoArgs> = On {

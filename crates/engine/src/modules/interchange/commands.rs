@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use serde::Serialize;
 
+use super::markers::{self, MarkerFormat};
 use super::{edl, fcpxml, otio, timeline, Format, Report};
 use crate::state::AppState;
 
@@ -75,6 +76,56 @@ pub fn interchange_export(
     })
 }
 
+/// What a marker export wrote.
+#[derive(Debug, Clone, Serialize)]
+pub struct MarkerExport {
+    pub path: PathBuf,
+    pub format: MarkerFormat,
+    pub markers: usize,
+    pub warnings: Vec<String>,
+}
+
+/// Write the active timeline's markers: as a spreadsheet (`.csv`), or as a
+/// chapter list for a YouTube description (`.txt`). The format follows the
+/// extension unless given.
+pub fn interchange_export_markers(
+    state: &Arc<AppState>,
+    path: &Path,
+    format: Option<MarkerFormat>,
+) -> Result<MarkerExport, String> {
+    let format = format
+        .or_else(
+            || match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
+                "csv" => Some(MarkerFormat::Csv),
+                "txt" => Some(MarkerFormat::Chapters),
+                _ => None,
+            },
+        )
+        .ok_or_else(|| {
+            format!(
+                "{} is not a .csv or .txt file; name the format",
+                path.display()
+            )
+        })?;
+    let path = path.with_extension(format.extension());
+    let mut report = Report::default();
+    let t = state.with_project(|p| timeline::collect(p, &mut Report::default()))?;
+    if t.markers.is_empty() {
+        return Err("the timeline has no markers; press M to add one at the playhead".into());
+    }
+    let text = match format {
+        MarkerFormat::Csv => markers::csv(&t.name, &t.markers, t.rate),
+        MarkerFormat::Chapters => markers::chapters(&t.markers, t.duration, &mut report),
+    };
+    std::fs::write(&path, text).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    Ok(MarkerExport {
+        path,
+        format,
+        markers: t.markers.len(),
+        warnings: report.warnings,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -105,5 +156,28 @@ mod tests {
         *state.project.write() = Some(empty);
         let err = render(&state, Format::Otio).unwrap_err();
         assert!(err.contains("no clips"));
+    }
+
+    #[test]
+    fn markers_go_out_as_a_spreadsheet_or_as_chapters() {
+        let state = AppState::new();
+        *state.project.write() = Some(project());
+        let dir = std::env::temp_dir().join(format!("chukcut-markers-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let csv = interchange_export_markers(&state, &dir.join("notes.csv"), None).unwrap();
+        assert_eq!(csv.markers, 1);
+        let text = std::fs::read_to_string(&csv.path).unwrap();
+        assert!(text.contains("\"drop\",\"00:00:06:00\""), "{text}");
+        let chapters =
+            interchange_export_markers(&state, &dir.join("yt"), Some(MarkerFormat::Chapters))
+                .unwrap();
+        assert_eq!(chapters.path, dir.join("yt.txt"));
+        assert_eq!(
+            std::fs::read_to_string(&chapters.path).unwrap(),
+            "0:00 Intro\n0:06 drop\n"
+        );
+        // Two chapters, the last 2 s long: YouTube would refuse, and says so.
+        assert_eq!(chapters.warnings.len(), 3, "{:?}", chapters.warnings);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
