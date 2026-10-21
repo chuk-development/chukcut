@@ -38,39 +38,37 @@ impl Printer {
             fraction: -1.0,
             at: Instant::now() - Duration::from_secs(1),
         });
-        Ctx {
-            progress: Box::new(move |label: &str, fraction: Option<f32>| {
-                let mut last = last.lock().unwrap_or_else(|e| e.into_inner());
-                let f = fraction.unwrap_or(-1.0);
-                // A new stage always prints; within a stage, at most four
-                // updates a second and only when the number moved.
-                let new_stage = label.split(' ').next() != last.label.split(' ').next();
-                if !new_stage
-                    && (last.at.elapsed() < Duration::from_millis(250)
-                        || (f - last.fraction).abs() < 0.01)
-                {
-                    return;
-                }
-                last.label = label.to_string();
-                last.fraction = f;
-                last.at = Instant::now();
-                let mut err = std::io::stderr().lock();
-                if json {
-                    let _ = writeln!(err, "{}", json!({"progress": fraction, "label": label}));
-                } else if terminal {
-                    let percent = fraction
-                        .map(|f| format!("{:>3.0}% ", f * 100.0))
-                        .unwrap_or_default();
-                    let _ = write!(err, "\r\x1b[2K{percent}{label}");
-                    let _ = err.flush();
-                } else {
-                    let percent = fraction
-                        .map(|f| format!(" ({:.0}%)", f * 100.0))
-                        .unwrap_or_default();
-                    let _ = writeln!(err, "{label}{percent}");
-                }
-            }),
-        }
+        Ctx::with_progress(Box::new(move |label: &str, fraction: Option<f32>| {
+            let mut last = last.lock().unwrap_or_else(|e| e.into_inner());
+            let f = fraction.unwrap_or(-1.0);
+            // A new stage always prints; within a stage, at most four
+            // updates a second and only when the number moved.
+            let new_stage = label.split(' ').next() != last.label.split(' ').next();
+            if !new_stage
+                && (last.at.elapsed() < Duration::from_millis(250)
+                    || (f - last.fraction).abs() < 0.01)
+            {
+                return;
+            }
+            last.label = label.to_string();
+            last.fraction = f;
+            last.at = Instant::now();
+            let mut err = std::io::stderr().lock();
+            if json {
+                let _ = writeln!(err, "{}", json!({"progress": fraction, "label": label}));
+            } else if terminal {
+                let percent = fraction
+                    .map(|f| format!("{:>3.0}% ", f * 100.0))
+                    .unwrap_or_default();
+                let _ = write!(err, "\r\x1b[2K{percent}{label}");
+                let _ = err.flush();
+            } else {
+                let percent = fraction
+                    .map(|f| format!(" ({:.0}%)", f * 100.0))
+                    .unwrap_or_default();
+                let _ = writeln!(err, "{label}{percent}");
+            }
+        }))
     }
 
     fn end_progress_line(&self) {

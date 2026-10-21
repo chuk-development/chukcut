@@ -6,8 +6,14 @@ functions as the app. A project that the CLI writes is a project that the app
 opens, and the reverse.
 
 `chukcut-cli mcp` gives the same operations to an MCP client, for example
-Claude Code. DaVinci Resolve 21.1 made its scripting API a Studio-only (paid)
-feature. In chukcut, scripting is free and part of the build.
+Claude Code, on project files or on the running app (`chukcut --control`,
+`chukcut-cli mcp --bridge`). DaVinci Resolve 21.1 made its scripting API a
+Studio-only (paid) feature. In chukcut, scripting is free and part of the
+build.
+
+Credits: the MCP server's design is deliberately taken from
+[storytold/FilmCraft](https://github.com/storytold/filmcraft) (Apache-2.0).
+See [The MCP server](#the-mcp-server) and [`NOTICE.md`](../NOTICE.md).
 
 - [Build](#build)
 - [How it works](#how-it-works)
@@ -1881,13 +1887,32 @@ JSON Schema (see below).
 
 `chukcut-cli mcp` is an MCP server on stdio (newline-delimited JSON-RPC 2.0).
 It supports the protocol versions 2025-11-25, 2025-06-18, 2025-03-26 and
-2024-11-05. When a client asks for a different version, the server answers
-with 2025-11-25.
+2024-11-05 through `initialize`, and 2026-07-28 per request (see
+[Conventions](#conventions)). When a client asks for another version, the
+server answers with 2025-11-25.
+
+**Credits.** The design of this MCP server and of the app's control socket is
+deliberately taken from [FilmCraft](https://github.com/storytold/filmcraft)'s
+(Apache-2.0): its core tools, its live-app bridge, its conventions and its
+tests. [`NOTICE.md`](../NOTICE.md) says what was taken;
+[`research/mcp-filmcraft-comparison.md`](research/mcp-filmcraft-comparison.md)
+compares the two.
+
+It has two modes:
+
+| Mode | Command | What it edits |
+|---|---|---|
+| Headless (default) | `chukcut-cli mcp` or `chukcut-cli mcp --project p.chukcut` | project files on disk, no window |
+| Bridge | `chukcut-cli mcp --bridge [SOCKET]` | the project open in the running app, started as `chukcut --control` |
+
+`--op-tools` also lists every operation as a tool of its own (`split`,
+`grade`, …), as the first version of the server did.
 
 ### Add it to Claude Code
 
 ```bash
-claude mcp add chukcut -- chukcut-cli mcp
+claude mcp add chukcut -- chukcut-cli mcp                 # headless
+claude mcp add chukcut-app -- chukcut-cli mcp --bridge    # the running app
 ```
 
 Give the full path when `chukcut-cli` is not on your `PATH`:
@@ -1897,61 +1922,92 @@ claude mcp add chukcut -- /home/you/.local/bin/chukcut-cli mcp
 ```
 
 `--scope user` makes it available in all your projects. Other MCP clients use
-the same command: the program `chukcut-cli` with the argument `mcp`.
+the same command: the program `chukcut-cli` with the arguments `mcp` or
+`mcp --bridge`. The repository's `.mcp.json` registers both modes against
+`target/release/chukcut-cli` for Claude Code sessions in this repository.
 
 ### Tools
 
-Each operation above is a tool with the same name and a JSON Schema made from
-the same argument struct that the CLI parses. A tool schema cannot be
-different from what the tool accepts. Each tool (except `catalog`) also takes
-`project`, the absolute path of the `.chukcut` file; `template_list` and
-`template_delete` do not.
+The tools are few; the commands are many. Every operation in
+[Commands](#commands) is a **command** with an id (its batch name: `split`,
+`grade`, `title_add`), found with `command_list` and run with `command_run`.
 
-The server adds four tools:
+| Tool | Modes | |
+|---|---|---|
+| `command_list` | both | every command: `id`, `label`, `group`, `params` (JSON Schema), `readOnly`, `openWorld`, `needsProject`, `enabled`. `filter` (id or label, any case), `enabled_only` |
+| `command_run` | both | run `{id, params}`, for example `{"id": "split", "params": {"at": 2.5}}`. Edits are undoable: `{"id": "undo"}` |
+| `command_batch` | both | run `{steps: [{id, params}], stop_on_error}` in order, each its own undo step → `{completed, failed, results: [{ok, result \| error}]}`; `isError` when a step failed. `atomic: true` (headless) runs the steps all or nothing and saves once; a first step `new_project` makes the file |
+| `doc_inspect` | both | `project_inspect` and `sequence_inspect` in one answer |
+| `project_inspect` | both | name, path, canvas, fps, imported media with ids, timelines and compound clips, issues, undo state |
+| `sequence_inspect` | both | the open timeline: lanes, clips with `ref` and `id`, markers, duration; in the app also `playhead` and `selection` |
+| `media_import` | both | `paths` (absolute), `append` |
+| `render_frame` | both | the picture at `seconds` (default 0 headless, the playhead in the app) as a PNG image, longest side `max_side` (default 960, 0 = full canvas). Read-only; writes no file. With `output` it writes the full-size PNG there instead |
+| `render_preview` | both | the same as `render_frame` |
+| `new_project` | headless | makes a project file (`project`, `width`, `height`, `fps`, `name`, `force`) and makes it the current project |
+| `ui_inspect` | bridge | playhead, playing, selection, project file, unsaved changes, window size, status line |
+| `ui_screenshot` | bridge | the chukcut window as a PNG (`max_side`, default 1600). X11 with ImageMagick's `import` |
+| `ui_key` | bridge | press a key: `space`, `s`, `ctrl-z`, or FilmCraft's spelling `Ctrl+Z`, `Shift+Delete` (`Cmd` is Ctrl) |
+| `ui_type` | bridge | type text into the focused field |
+| `ui_click` | bridge | click at `x`, `y` in window points; `button`, `count` (2 = double click), `modifiers` |
+| `ui_drag` | bridge | press, move and release from `from` to `to` (`{x, y}`), `steps`, `modifiers` |
+| `ui_control` | bridge | call any [control socket](#the-control-socket) method |
 
-| Tool | |
-|---|---|
-| `new_project` | makes a project file (`width`, `height`, `fps`, `name`, `force`) |
-| `view_frame` | renders the frame at `at` and returns it as a PNG image in the result; writes no file |
-| `batch` | runs `ops` (a list as in a batch file) all or nothing |
-| `catalog` | lists effects, transitions and so on (`kind`); needs no project |
+Headless, every tool takes an optional `project`, the absolute path of the
+`.chukcut` file. The last project named (or `--project`) is used when a call
+names none, so an agent names it once. In bridge mode there is no `project`:
+the app's open project is the target, and `new_project` is refused.
+
+A typical loop: `doc_inspect` → ids → `command_run` → `render_frame` (or
+`ui_screenshot`) → look at the result → `command_run {"id": "undo"}` if it is
+wrong.
+
+The operation names also work as tools in `tools/call` (`split` with its
+arguments), listed or not, so clients written for the first version keep
+working; so do `view_frame` (now `render_frame`) and `batch` (now
+`command_batch` with `atomic`).
 
 Tool results have a text block with `{"message": …, "data": …}`. For clients
-on 2025-06-18 or later, the same object is also in `structuredContent`. A
-refused edit is a tool result with `isError: true` and the engine's message;
-an unknown tool or a malformed request is a JSON-RPC error.
+on 2025-06-18 or later, the same object is also in `structuredContent`.
+`render_frame`, `render_preview` and `ui_screenshot` add an image block.
 
-Read-only tools have `readOnlyHint`: `info`, `template_list`,
-`template_slots`, `validate`, `captions_list`,
-`silence_detect`, `loudness`, `catalog`, `view_frame`, `marker_list`,
-`analysis`, `stock_kinds`, `stock_search`, `presets`, `estimate`,
-`face_landmarks` and `body_landmarks` (which write only the landmark
-cache).
+### Conventions
 
-Tools that send data to a service outside this machine have
-`openWorldHint`: `captions_transcribe`, `translate_captions`, `tts`,
-`stock_kinds`, `stock_search`, `stock_download`, `sound`, `fal`, `sticker`,
-`music`, `sfx`, `title_font`, `catalog` (the library and `voices` kinds),
-and `ml`, `remove_background`, `select_object`, `apply_to`, `frame_blend`,
-`smooth_slow_mo`, `speed_effect`, `remove_object`, `enhance_quality`, `isolate_voice`,
-`face_landmarks`, `retouch`, `follow_face`, `body_landmarks` and
-`follow_body`, which download a model or ONNX Runtime on first use (they
-send nothing about the project).
+The server follows FilmCraft's conventions, so an agent that has driven one
+of these editors can drive the other.
 
-### Resources
-
-| URI | |
-|---|---|
-| `chukcut://project?path=/abs/path.chukcut` | the `info` summary, JSON |
-| `chukcut://frame?path=/abs/path.chukcut&at=2.5` | the frame at `at`, PNG |
-
-`resources/list` lists the projects that the connection opened.
-`resources/templates/list` gives the two templates. Percent-encode the path.
+- **Titles and annotations.** Every tool has a `title` and the four MCP hints
+  (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`). A
+  client can let the read-only tools (lists, inspects, renders) run without
+  asking. In `command_list`, `readOnly` marks the read-only commands and
+  `openWorld` the ones that talk to a service outside this machine or
+  download a model on first use.
+- **Strict arguments.** An unknown tool argument is a JSON-RPC `-32602`
+  error that names it and the accepted ones (`unknown argument "filtr" for
+  command_list; expected: enabled_only, filter`). An unknown tool is `-32602`
+  too. `command_run.params` goes to the command unchanged; a wrong name there
+  is the command's own error.
+- **Errors.** A refused edit is a tool result with `isError: true` and the
+  engine's message; the file keeps its last good state. A line that is not
+  JSON gets a `-32700` parse error (id `null`) and the server goes on. A
+  request that hits a bug answers `internal error: …` and the session stays
+  usable.
+- **Resources.** `chukcut://document` (as `doc_inspect`) and
+  `chukcut://commands` (as `command_list`), both `application/json`; and, per
+  open project, `chukcut://project?path=/abs/path.chukcut` (the `info`
+  summary) and `chukcut://frame?path=…&at=2.5` (PNG). `resources/templates/list`
+  gives the last two as templates. Percent-encode the path.
+- **MCP 2026-07-28.** A client that names the revision per request
+  (`_meta["io.modelcontextprotocol/protocolVersion"]`, as current Claude Code
+  does) can ask `server/discover`, and gets `resultType: "complete"` on every
+  result, plus `ttlMs` and `cacheScope: "private"` on `tools/list`,
+  `resources/list` (10 minutes) and `resources/read` (0: the document changes
+  with every edit). A session that negotiated an older revision through
+  `initialize` gets the old shape.
 
 ### Sessions, saving and undo
 
-- The server keeps each project open for the life of the connection. `undo`
-  and `redo` work across tool calls.
+- Headless, the server keeps each project open for the life of the
+  connection. `undo` and `redo` work across tool calls.
 - Each successful edit is saved to the file at once. When an agent stops in
   the middle of a task, the project is consistent.
 - When an edit fails, the server discards what it changed in memory. The file
@@ -1959,11 +2015,21 @@ send nothing about the project).
 - When the file changes on disk (for example, you edit it in the app), the
   server reads it again before the next call. The undo history then starts
   again.
-- The server does one request at a time. A long export blocks the connection
-  until it is done. When the request has a `progressToken`, the server sends
-  `notifications/progress` during the export, the transcription, the tracking,
-  the sound analysis, the picture analysis (scenes, stabilise, reframe), the
-  beat detection and a stock download.
+- In bridge mode, edits go into the app's own undo history and appear on
+  screen at once. Nothing is saved: the title bar shows unsaved changes, and
+  you save in the app.
+
+### Progress and cancellation
+
+- When a `tools/call` has `_meta.progressToken`, the server sends
+  `notifications/progress` during the export, the transcription, the
+  tracking, the sound analysis, the picture analysis (scenes, stabilise,
+  reframe), the beat detection and a stock download, in bridge mode too.
+- `ping` is answered while a long command runs.
+- `notifications/cancelled` for the running request stops an export within
+  a tenth of a second (the partial file is deleted) and the server sends no
+  response, as the MCP cancellation utility asks. Other long commands run to
+  their end; their result is dropped.
 
 ### Example session
 
@@ -1974,10 +2040,70 @@ What a client sends, one line each:
 {"jsonrpc":"2.0","method":"notifications/initialized"}
 {"jsonrpc":"2.0","id":2,"method":"tools/list"}
 {"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"new_project","arguments":{"project":"/home/me/reel.chukcut"}}}
-{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"import","arguments":{"project":"/home/me/reel.chukcut","files":["/home/me/take1.mp4"],"append":true}}}
-{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"split","arguments":{"project":"/home/me/reel.chukcut","at":2}}}
-{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"view_frame","arguments":{"project":"/home/me/reel.chukcut","at":2.5}}}
+{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"media_import","arguments":{"paths":["/home/me/take1.mp4"],"append":true}}}
+{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"command_run","arguments":{"id":"split","params":{"at":2}}}}
+{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"render_frame","arguments":{"seconds":2.5}}}
 ```
+
+### The control socket
+
+`chukcut --control` opens a Unix socket at
+`$XDG_RUNTIME_DIR/chukcut/control-<pid>.sock` (mode 0600, in a 0700 folder;
+the path is printed on stderr). `--control=PATH` puts it elsewhere;
+`CHUKCUT_CONTROL=1` or `CHUKCUT_CONTROL=PATH` does the same from the
+environment. `chukcut-cli mcp --bridge` without a path connects to the newest
+running app's socket, at every connect, so the agent can start before the app
+and the app can restart.
+
+One JSON request per line, one reply per line:
+
+```json
+{"id": 1, "method": "engine.execute", "params": {"command": "split", "params": {"at": 2}}}
+{"id": 1, "ok": true, "result": {"message": "split at 2.000 s; 1 new clip(s)", "data": {}, "changed": true}}
+{"id": 2, "ok": false, "error": "nothing to split: …"}
+```
+
+A long command sends `{"id": 1, "progress": 0.4, "label": "Encoding frame …"}`
+lines before its reply. Only requests are read: a line that is not a JSON
+object with a string `method`, or a line over 4 MiB, gets one error reply and
+the connection is closed. At most 16 connections are served at once. Commands
+run one at a time.
+
+| Method | Params | |
+|---|---|---|
+| `ping` | | `{}` |
+| `app.info` | | app, version, protocol, pid, project path, whether a project is open |
+| `engine.commands` | `filter`, `enabled_only` | the command catalog, as `command_list` |
+| `engine.execute` | `command`, `params` | run a command on the app's project → `{message, data, changed}` |
+| `engine.cancel` | `request` | stop the running `engine.execute` with that request id (send it on another connection) |
+| `doc.inspect`, `project.inspect`, `sequence.inspect` | | as the MCP tools; the sequence has the playhead and selection |
+| `frame.render` | `seconds`, `max_side` | `{png (base64), at, at_us}`; default: the playhead |
+| `ui.inspect` | | playhead (`playhead`, `playhead_us`), `playing`, `selection` (primary), `selected` (all), `project`, `name`, `unsaved`, `status`, `duration`, `window` (`width`, `height`, `scale`) |
+| `ui.seek` | `seconds` or `time_us` | move the playhead |
+| `ui.select` | `clip` (id or unique prefix; empty clears) | select one clip |
+| `ui.playback` | `action`: `play`, `pause`, `toggle` | |
+| `ui.key` | `key` | as `ui_key` |
+| `ui.type` | `text` | |
+| `ui.click`, `ui.move` | `x`, `y`, `button`, `count`, `modifiers` | synthetic pointer input in window points |
+| `ui.drag` | `from`, `to`, `steps`, `modifiers` | |
+| `ui.screenshot` | `max_side` | `{png (base64), width, height}`; X11 and ImageMagick |
+
+A minimal client:
+
+```python
+import json, os, socket, glob
+path = max(glob.glob(os.environ["XDG_RUNTIME_DIR"] + "/chukcut/control-*.sock"), key=os.path.getmtime)
+s = socket.socket(socket.AF_UNIX); s.connect(path); f = s.makefile("rw")
+def call(method, **params):
+    f.write(json.dumps({"id": 1, "method": method, "params": params}) + "\n"); f.flush()
+    while "ok" not in (reply := json.loads(f.readline())): pass   # skip progress lines
+    return reply
+print(call("engine.execute", command="info"))
+```
+
+The `ui.*` methods need the editor: on the start screen they time out after
+10 seconds with a message that says so. `engine.*` methods on the start
+screen answer that no project is open.
 
 ## Recipes
 
@@ -2018,13 +2144,18 @@ ffprobe -v error -count_frames -show_entries stream=nb_read_frames out.mp4
 
 - **Export and render need a GPU.** The compositor runs on Vulkan. On a machine
   without a GPU, install Mesa's lavapipe (software Vulkan). Without any
-  Vulkan driver, `export`, `render-frame` and `view_frame` fail with exit
+  Vulkan driver, `export`, `render-frame` and `render_frame` fail with exit
   code 5.
-- **No cancel.** Ctrl+C stops the process; an export that stops early leaves
-  a partial file. The same is true for `export-queue`: the queue lives in
-  the process, so the exports not yet run are not run.
+- **Cancel only over MCP.** On the command line, Ctrl+C stops the process; an
+  export that stops early leaves a partial file. The same is true for
+  `export-queue`: the queue lives in the process, so the exports not yet run
+  are not run. Over MCP, `notifications/cancelled` stops an export cleanly.
 - **Undo history lives only in one session** (one command, one batch, one MCP
-  connection). The project file does not store it.
+  connection). The project file does not store it. In bridge mode the history
+  is the app's.
+- **The bridge has no element ids.** FilmCraft's `ui_elements` lists every
+  clickable element with a stable id; GPUI has no tree to list, so `ui_click`
+  takes window coordinates. `ui_screenshot` needs X11 and ImageMagick.
 - **Cloud features need an account** that you set up in the app. The CLI
   cannot add accounts or keys. Without an account, a cloud command fails with
   exit code 1.
@@ -2050,9 +2181,16 @@ ffprobe -v error -count_frames -show_entries stream=nb_read_frames out.mp4
 - An operation builds its edit with the engine's command functions
   (`modules/*/commands.rs`) and the gesture builders in
   `modules/timeline/gesture.rs`. It does not change a `Project` directly.
+- The crate is a library and a binary. `src/mcp.rs` is the MCP server,
+  `src/commands.rs` the command catalog (`command_list`), `src/inspect.rs`
+  the inspect answers, `src/control.rs` the app's control socket (the app
+  links the library to serve it) and `src/bridge.rs` its client. A new MCP
+  tool gets a `title` and all four hints; `mcp::tests` checks every listed
+  tool.
 - Tests: `cargo test -p chukcut-cli`. `tests/flow.rs` runs the binary on
   generated media and checks the export with ffprobe. `tests/mcp.rs` drives a
-  full MCP session over a pipe. `tests/coverage.rs` checks the later
+  full MCP session over a pipe, in both tool shapes. `tests/control.rs` serves
+  a project on a real control socket and drives it with `mcp --bridge`. `tests/coverage.rs` checks the later
   operations (markers to cloud) in the saved project file. Its cloud test
   uses an OpenAI-compatible stand-in server on 127.0.0.1, so no request leaves
   the machine.

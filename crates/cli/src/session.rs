@@ -78,6 +78,27 @@ impl Session {
         })
     }
 
+    /// A session over a state someone else owns: the running app's, behind
+    /// its control socket. Nothing here saves it — the app keeps its own
+    /// unsaved-changes state and saves when the person says so; the edits
+    /// land in the app's undo history like the person's own.
+    pub fn attach(state: Arc<AppState>) -> CliResult<Self> {
+        if state.project.read().is_none() {
+            return Err(CliError::project(
+                "the app has no project open (it shows the start screen); open or create one first",
+            ));
+        }
+        let path = project_commands::project_path(&state)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("Untitled.chukcut"));
+        Ok(Self {
+            state,
+            path,
+            dirty: false,
+            disk_mtime: None,
+        })
+    }
+
     /// A copy of the open document.
     pub fn project(&self) -> Project {
         self.state

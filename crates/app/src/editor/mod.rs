@@ -62,6 +62,7 @@ mod assets;
 mod audio_tools;
 mod captions;
 mod cloud;
+mod control;
 mod export;
 mod files;
 mod font_picker;
@@ -318,6 +319,7 @@ impl Editor {
         changed |= self.poll_landmarks();
         changed |= self.poll_voiceover(cx);
         changed |= self.poll_prepare(cx);
+        changed |= self.poll_control(cx);
         if let Some(frame) = self.player.take(self.clock.position()) {
             if let Some(crate::player::Picture::Image(old)) = self.frame.replace(frame.picture) {
                 // A frame is uploaded into the window's atlas when drawn; drop

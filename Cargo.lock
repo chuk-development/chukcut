@@ -1010,12 +1010,15 @@ name = "chukcut"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
+ "chukcut-cli",
  "chukcut-engine",
  "futures-channel",
  "gpui-kit",
  "gpui-pre-wgpu",
  "image",
  "parking_lot",
+ "raw-window-handle",
  "serde_json",
  "tracing",
 ]

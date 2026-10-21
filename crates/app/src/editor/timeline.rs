@@ -770,7 +770,7 @@ impl Editor {
         self.set_selection(vec![segment_id.to_string()], Some(segment_id.to_string()));
     }
 
-    fn clear_selection(&mut self) {
+    pub(crate) fn clear_selection(&mut self) {
         self.set_selection(Vec::new(), None);
     }
 

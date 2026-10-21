@@ -509,6 +509,34 @@ pub async fn export_snapshot(
     .map_err(|error| format!("the snapshot thread panicked: {error}"))?
 }
 
+/// The frame at `time` as PNG bytes, its longest side at most `max_side`
+/// pixels (`0`: the full canvas). Nothing is written to disk.
+///
+/// The picture an agent looks at to check an edit: the MCP server's
+/// `render_frame` and `render_preview`, headless and against the running
+/// app. Rendered fresh through the export compositor, like
+/// [`export_snapshot`], so it shows what an export would contain, not the
+/// preview panel's quality rung.
+pub async fn export_preview_png(
+    state: &Arc<AppState>,
+    time: i64,
+    max_side: u32,
+) -> Result<Vec<u8>, String> {
+    let project = state
+        .project
+        .read()
+        .clone()
+        .ok_or("no project is open, so there is no frame to show")?;
+    project.render_check()?;
+    crate::shell::spawn_blocking(move || {
+        let compositor = compositor()?;
+        let sources = crate::modules::media::MediaSourceProvider::from_project(&project);
+        super::snapshot::preview_png(&project, time, max_side, &compositor, &sources)
+    })
+    .await
+    .map_err(|error| format!("the preview thread panicked: {error}"))?
+}
+
 /// Ask a running export to stop.
 ///
 /// Succeeds even when the job has already finished — closing the dialog on the

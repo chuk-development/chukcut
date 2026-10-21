@@ -117,6 +117,7 @@ take before it starts.
 
 - `chukcut-cli`: every edit from a shell or a script, also the AI tools
 - `chukcut-cli mcp`: the same operations as an MCP server, so an AI agent such as Claude Code can edit a project
+- `chukcut --control` with `chukcut-cli mcp --bridge`: the agent edits the project open in the window, looks at the picture and works the UI
 - Batch files with undo, JSON output and exit codes. See [`docs/cli.md`](docs/cli.md)
 
 ### Your own accounts (optional)
@@ -401,14 +402,22 @@ on the timeline without a Vulkan device.
 
 ## Credits
 
-The release pipeline (`.github/workflows/release.yml`: a push to the
-`release` branch leaves a draft release with checksums, generated notes and
-AppImages that update themselves) is taken over on purpose from
-[FilmCraft](https://github.com/storytold/filmcraft) and its shared
-[craft-common-actions](https://github.com/storytold/craft-common-actions),
-because they do it better than we did. Thank you, FilmCraft team. Details and
-licence: [`NOTICE.md`](NOTICE.md),
-[decision 0037](docs/decisions/0037-release-workflow-from-filmcraft.md).
+Several parts of chukcut are taken over on purpose from
+[FilmCraft](https://github.com/storytold/filmcraft) (Apache-2.0), because they
+do it better than we did. Thank you, FilmCraft team.
+
+- The release pipeline (`.github/workflows/release.yml`: a push to the
+  `release` branch leaves a draft release with checksums, generated notes and
+  AppImages that update themselves), with FilmCraft's shared
+  [craft-common-actions](https://github.com/storytold/craft-common-actions)
+  as the model ([decision 0037](docs/decisions/0037-release-workflow-from-filmcraft.md)).
+- The design of the MCP server and the app's control socket: its tools, its
+  bridge to the running app and its conventions.
+- Feature ports: eleven audio effects, timeline export as OpenTimelineIO,
+  FCPXML and CMX 3600 EDL, marker export, relinking moved media and sync by
+  sound.
+
+Details and licence: [`NOTICE.md`](NOTICE.md).
 
 ## Licence
 

@@ -34,6 +34,9 @@ pub mod template;
 pub mod text;
 pub mod timeline;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 
@@ -75,17 +78,31 @@ pub type ProgressFn = Box<dyn Fn(&str, Option<f32>) + Send + Sync>;
 /// How a long operation reports where it is.
 pub struct Ctx {
     pub progress: ProgressFn,
+    /// Set when the caller no longer wants the result: an MCP client sent
+    /// `notifications/cancelled`. An operation that can stop early (an
+    /// export) checks it; the others run to their end and the caller drops
+    /// what they answer.
+    pub cancel: Arc<AtomicBool>,
 }
 
 impl Ctx {
     pub fn quiet() -> Self {
+        Self::with_progress(Box::new(|_, _| {}))
+    }
+
+    pub fn with_progress(progress: ProgressFn) -> Self {
         Self {
-            progress: Box::new(|_, _| {}),
+            progress,
+            cancel: Arc::new(AtomicBool::new(false)),
         }
     }
 
     pub fn progress(&self, label: &str, fraction: Option<f32>) {
         (self.progress)(label, fraction)
+    }
+
+    pub fn cancelled(&self) -> bool {
+        self.cancel.load(Ordering::Acquire)
     }
 }
 
@@ -142,22 +159,40 @@ fn parse<T: DeserializeOwned + schemars::JsonSchema>(name: &str, args: Value) ->
         Value::Null => json!({}),
         other => other,
     };
-    // Serde ignores a field it does not know, so a misspelt argument (`point`
-    // for `points`) made an operation run without it and answer as if
-    // nothing was asked. `deny_unknown_fields` does not work with the
-    // flattened argument groups, so the names are checked against the
-    // schema the MCP server publishes.
-    if let (Value::Object(map), Some(known)) = (&args, known_arguments::<T>()) {
-        if let Some(key) = map.keys().find(|k| !known.contains(k.as_str())) {
-            let mut names: Vec<&str> = known.iter().map(String::as_str).collect();
-            names.sort_unstable();
-            return Err(CliError::usage(format!(
-                "{name}: unknown argument {key:?}; the arguments are: {}",
-                names.join(", ")
-            )));
-        }
+    if let Some(message) = unknown::<T>(name, &args) {
+        return Err(CliError::usage(message));
     }
     serde_json::from_value(args).map_err(|e| CliError::usage(format!("{name}: {e}")))
+}
+
+/// The first argument in `args` that `T` does not take, as a message that
+/// names it and the ones `T` does take.
+///
+/// Serde ignores a field it does not know, so a misspelt argument (`point`
+/// for `points`) made an operation run without it and answer as if nothing
+/// was asked. `deny_unknown_fields` does not work with the flattened
+/// argument groups, so the names are checked against the schema the MCP
+/// server publishes.
+fn unknown<T: schemars::JsonSchema>(name: &str, args: &Value) -> Option<String> {
+    let (Value::Object(map), Some(known)) = (args, known_arguments::<T>()) else {
+        return None;
+    };
+    let key = map.keys().find(|k| !known.contains(k.as_str()))?;
+    let mut names: Vec<&str> = known.iter().map(String::as_str).collect();
+    names.sort_unstable();
+    Some(format!(
+        "{name}: unknown argument {key:?}; the arguments are: {}",
+        names.join(", ")
+    ))
+}
+
+/// The module an operation's argument struct lives in, from its type name
+/// (`chukcut_cli::ops::timeline::SplitArgs` is `timeline`): the group
+/// `command_list` shows it under.
+fn module_of(type_name: &'static str) -> &'static str {
+    let mut parts = type_name.rsplit("::");
+    parts.next();
+    parts.next().unwrap_or("ops")
 }
 
 /// The argument names `T` accepts, from its JSON schema; `None` when the
@@ -232,6 +267,22 @@ macro_rules! operations {
         /// Every operation on a project, as an MCP tool.
         pub fn tools() -> Vec<ToolSpec> {
             vec![$(tool::<$ty>()),*]
+        }
+
+        /// Every operation's name with the module it lives in.
+        pub fn groups() -> Vec<(&'static str, &'static str)> {
+            vec![$((<$ty as Operation>::NAME, module_of(std::any::type_name::<$ty>()))),*]
+        }
+
+        /// The first argument of `args` the operation `name` does not take,
+        /// as a message; `None` when all are known or `name` is no operation.
+        pub fn unknown_argument(name: &str, args: &Value) -> Option<String> {
+            $(
+                if name == <$ty as Operation>::NAME {
+                    return unknown::<$ty>(name, args);
+                }
+            )*
+            None
         }
     };
 }

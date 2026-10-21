@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "chukcut": {
+      "command": "target/release/chukcut-cli",
+      "args": ["mcp", "--bridge"]
+    },
+    "chukcut-headless": {
+      "command": "target/release/chukcut-cli",
+      "args": ["mcp"]
+    }
+  }
+}

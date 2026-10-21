@@ -51,6 +51,11 @@ pub fn startup(state: &Arc<AppState>) -> (Startup, Option<RecoveryInfo>) {
     // screen the app starts on: stderr is not where a user looks.
     let mut notice = None;
     for argument in std::env::args().skip(1) {
+        // `--control[=SOCKET]` opens the control socket (`crate::control`);
+        // it is not a file to open.
+        if argument.starts_with("--control") {
+            continue;
+        }
         let path = PathBuf::from(&argument);
         if path.extension().is_some_and(|e| e == "chukcut") && !opened {
             // Absolute, so Details and Save show and use the real place
@@ -121,6 +126,12 @@ struct ShellHandle {
 }
 
 impl Global for ShellHandle {}
+
+/// The editor window, for the control socket's `ui.*` requests, which need
+/// it to send keys and clicks or to find the window to capture.
+pub(crate) fn window_handle(cx: &App) -> Option<AnyWindowHandle> {
+    cx.try_global::<ShellHandle>().map(|h| h.window)
+}
 
 /// Quit, by way of the unsaved-changes guard. Bound to the app-wide Quit
 /// action in `main.rs`.

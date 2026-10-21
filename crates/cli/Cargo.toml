@@ -10,6 +10,12 @@ readme = "../../README.md"
 publish = false
 edition = "2021"
 
+# The library is the operations, the MCP server and the control socket; the
+# app links it to serve `chukcut --control` (src/control.rs).
+[lib]
+name = "chukcut_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "chukcut-cli"
 path = "src/main.rs"

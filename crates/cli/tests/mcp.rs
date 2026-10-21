@@ -18,8 +18,13 @@ struct Client {
 
 impl Client {
     fn start(dir: &std::path::Path) -> Self {
+        Self::start_with(dir, &[])
+    }
+
+    fn start_with(dir: &std::path::Path, args: &[&str]) -> Self {
         let mut child = common::cli(dir)
             .arg("mcp")
+            .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -88,6 +93,8 @@ impl Drop for Client {
     }
 }
 
+/// The first design's session: one tool per operation (`--op-tools`), every
+/// call naming its project.
 #[test]
 fn an_mcp_session_edits_undoes_and_looks() {
     require_ffmpeg!();
@@ -95,7 +102,7 @@ fn an_mcp_session_edits_undoes_and_looks() {
     let (card, _) = common::media(&dir);
     let project = dir.join("agent.chukcut");
     let p = project.to_str().unwrap();
-    let mut client = Client::start(&dir);
+    let mut client = Client::start_with(&dir, &["--op-tools"]);
 
     let (init, _) = client.request(
         "initialize",
@@ -124,9 +131,8 @@ fn an_mcp_session_edits_undoes_and_looks() {
         "render_frame",
         "undo",
         "redo",
-        "view_frame",
-        "batch",
         "catalog",
+        "command_run",
     ] {
         assert!(names.contains(&expected), "{expected} is offered");
     }
@@ -255,8 +261,12 @@ fn an_mcp_session_edits_undoes_and_looks() {
 
     // Resources: the summary of every project this connection opened.
     let (resources, _) = client.request("resources/list", json!({}));
-    let uri = resources["result"]["resources"][0]["uri"]
-        .as_str()
+    let uri = resources["result"]["resources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|r| r["uri"].as_str())
+        .find(|u| u.starts_with("chukcut://project?path="))
         .unwrap()
         .to_string();
     let (read, _) = client.request("resources/read", json!({"uri": uri}));
@@ -313,4 +323,343 @@ fn an_unknown_protocol_version_gets_the_newest() {
     assert_eq!(init["result"]["protocolVersion"], "2025-11-25");
     let (missing, _) = client.request("no/such/method", json!({}));
     assert_eq!(missing["error"]["code"], -32601);
+}
+
+fn text_of(result: &Value) -> Value {
+    serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap()
+}
+
+/// The width and height a PNG's header says.
+fn png_size(base64_png: &str) -> (u32, u32) {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(base64_png)
+        .unwrap();
+    assert_eq!(&bytes[1..4], b"PNG");
+    let be = |i: usize| u32::from_be_bytes(bytes[i..i + 4].try_into().unwrap());
+    (be(16), be(20))
+}
+
+/// FilmCraft's shape, the default: a few tools, the command catalog behind
+/// them, strict arguments, the current project remembered between calls.
+#[test]
+fn the_core_tools_drive_a_project_through_the_catalog() {
+    let dir = common::scratch("mcp-core");
+    let project = dir.join("core.chukcut");
+    let p = project.to_str().unwrap();
+    let mut client = Client::start(&dir);
+    let (init, _) = client.request(
+        "initialize",
+        json!({"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}}),
+    );
+    assert!(init["result"]["capabilities"]["resources"].is_object());
+    assert!(init["result"]["instructions"]
+        .as_str()
+        .unwrap()
+        .contains("command_list"));
+    client.send(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+
+    // Few tools, every one titled and annotated; no op tools, no ui tools.
+    let (listed, _) = client.request("tools/list", json!({}));
+    let tools = listed["result"]["tools"].as_array().unwrap();
+    let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+    assert!(tools.len() < 20, "{names:?}");
+    for want in [
+        "command_list",
+        "command_run",
+        "command_batch",
+        "doc_inspect",
+        "render_preview",
+        "project_inspect",
+        "sequence_inspect",
+        "media_import",
+        "render_frame",
+        "new_project",
+    ] {
+        assert!(names.contains(&want), "{want} is listed");
+    }
+    assert!(!names.contains(&"split") && !names.contains(&"ui_click"));
+    for tool in tools {
+        assert!(tool["title"].is_string(), "{}", tool["name"]);
+        for hint in [
+            "readOnlyHint",
+            "destructiveHint",
+            "idempotentHint",
+            "openWorldHint",
+        ] {
+            assert!(
+                tool["annotations"][hint].is_boolean(),
+                "{} {hint}",
+                tool["name"]
+            );
+        }
+    }
+    let hint = |name: &str, h: &str| {
+        tools.iter().find(|t| t["name"] == name).unwrap()["annotations"][h].clone()
+    };
+    assert_eq!(hint("command_list", "readOnlyHint"), true);
+    assert_eq!(hint("command_run", "readOnlyHint"), false);
+    assert_eq!(hint("command_run", "destructiveHint"), true);
+
+    // The catalog.
+    let found = client.ok("command_list", json!({"filter": "SPLIT"}));
+    let split = found
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == "split")
+        .expect("split is a command");
+    assert_eq!(split["group"], "timeline");
+    assert_eq!(split["params"]["type"], "object");
+    // Nothing is open yet: only the commands that need no project can run.
+    let enabled = client.ok("command_list", json!({"enabled_only": true}));
+    assert!(enabled
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|c| c["needsProject"] == false));
+
+    // Strict arguments: a protocol error naming the bad one and the good ones.
+    let (bad, _) = client.request(
+        "tools/call",
+        json!({"name": "command_list", "arguments": {"filtr": "x"}}),
+    );
+    assert_eq!(bad["error"]["code"], -32602, "{bad}");
+    let message = bad["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("\"filtr\"") && message.contains("enabled_only"),
+        "{message}"
+    );
+    let (bad, _) = client.request(
+        "tools/call",
+        json!({"name": "doc_inspect", "arguments": {"verbose": true}}),
+    );
+    assert_eq!(bad["error"]["code"], -32602, "{bad}");
+    // A call before any project is named says how to name one.
+    let none = client.call("doc_inspect", json!({}));
+    assert_eq!(none["isError"], true);
+    assert!(text_of_err(&none).contains("project"), "{none}");
+
+    // A line that is not JSON: a parse error, and the server goes on.
+    writeln!(client.stdin, "{{\"jsonrpc\": \"2.0\", \"id\": 99, BROKEN").unwrap();
+    client.stdin.flush().unwrap();
+    let mut line = String::new();
+    client.stdout.read_line(&mut line).unwrap();
+    let parse: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(parse["error"]["code"], -32700, "{parse}");
+    assert!(parse["id"].is_null());
+    let (pong, _) = client.request("ping", json!({}));
+    assert_eq!(pong["result"], json!({}));
+
+    // Name the project once; later calls use it.
+    client.ok(
+        "new_project",
+        json!({"project": p, "width": 640, "height": 360}),
+    );
+    let added = client.ok(
+        "command_run",
+        json!({"id": "title_add", "params": {"text": "One", "at": 0, "duration": 2}}),
+    );
+    assert!(added.is_object(), "{added}");
+    let doc = client.ok("doc_inspect", json!({}));
+    assert_eq!(doc["project"]["canvas"]["width"], 640);
+    assert!(!doc["project"]["timelines"].as_array().unwrap().is_empty());
+    let lanes = doc["sequence"]["tracks"].as_array().unwrap();
+    assert!(lanes
+        .iter()
+        .any(|t| t["kind"] == "text" && t["clips"].as_array().unwrap().len() == 1));
+    // Saved at once.
+    let on_disk = common::ok(&dir, &["info", p]);
+    assert!(on_disk["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|t| t["clips"].as_array().unwrap().len() == 1));
+
+    // A command's own parameters are checked by the command: a tool error.
+    let wrong = client.call(
+        "command_run",
+        json!({"id": "title_add", "params": {"txt": "x"}}),
+    );
+    assert_eq!(wrong["isError"], true, "{wrong}");
+    assert!(text_of_err(&wrong).contains("txt"), "{wrong}");
+    let unknown = client.call("command_run", json!({"id": "teleport"}));
+    assert_eq!(unknown["isError"], true);
+
+    // A batch: each step its own undo step; it stops at the first failure
+    // and reports both.
+    let result = client.call(
+        "command_batch",
+        json!({"steps": [
+            {"id": "title_add", "params": {"text": "Two", "at": 3, "duration": 1}},
+            {"id": "no_such_command"},
+            {"id": "title_add", "params": {"text": "Three", "at": 5, "duration": 1}},
+        ]}),
+    );
+    assert_eq!(result["isError"], true, "{result}");
+    let batch = text_of(&result)["data"].clone();
+    assert_eq!(batch["completed"], 1, "{batch}");
+    assert_eq!(batch["failed"], 1, "{batch}");
+    assert_eq!(batch["results"].as_array().unwrap().len(), 2, "{batch}");
+    // Undo takes back the batch's one good step.
+    let undone = client.ok("command_run", json!({"id": "undo"}));
+    assert!(undone["undone"].is_string(), "{undone}");
+    // All or nothing: a failing step leaves the file as it was.
+    let before = std::fs::read(&project).unwrap();
+    let atomic = client.call(
+        "command_batch",
+        json!({"atomic": true, "steps": [
+            {"id": "title_add", "params": {"text": "Four", "at": 6, "duration": 1}},
+            {"id": "split", "params": {"at": 999}},
+        ]}),
+    );
+    assert_eq!(atomic["isError"], true, "{atomic}");
+    assert_eq!(std::fs::read(&project).unwrap(), before);
+
+    // Resources: the document and the catalog.
+    let (resources, _) = client.request("resources/list", json!({}));
+    let uris: Vec<&str> = resources["result"]["resources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|r| r["uri"].as_str())
+        .collect();
+    assert_eq!(&uris[..2], ["chukcut://document", "chukcut://commands"]);
+    let (read, _) = client.request("resources/read", json!({"uri": "chukcut://document"}));
+    assert_eq!(
+        read["result"]["contents"][0]["mimeType"],
+        "application/json"
+    );
+    let doc: Value =
+        serde_json::from_str(read["result"]["contents"][0]["text"].as_str().unwrap()).unwrap();
+    assert!(
+        doc["project"].is_object() && doc["sequence"].is_object(),
+        "{doc}"
+    );
+    let (read, _) = client.request("resources/read", json!({"uri": "chukcut://commands"}));
+    assert!(read["result"]["contents"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("\"split\""));
+    let (missing, _) = client.request("resources/read", json!({"uri": "chukcut://nope"}));
+    assert!(missing["error"]["code"].is_i64(), "{missing}");
+
+    // A frame, small, when this machine can render one.
+    let frame = client.call("render_frame", json!({"seconds": 0.5, "max_side": 64}));
+    if frame["isError"] == true {
+        eprintln!("skipping the frame check: {}", text_of_err(&frame));
+    } else {
+        let image = &frame["content"][1];
+        assert_eq!(image["type"], "image");
+        let (w, h) = png_size(image["data"].as_str().unwrap());
+        assert_eq!((w, h), (64, 36));
+        let preview = client.call("render_preview", json!({"max_side": 32}));
+        assert_eq!(preview["content"][1]["type"], "image");
+    }
+}
+
+fn text_of_err(result: &Value) -> String {
+    result["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// MCP 2026-07-28 clients (current Claude Code) negotiate per request and
+/// need `resultType`, `ttlMs` and `cacheScope` on list and read results;
+/// sessions that negotiated an older revision get the old shape.
+#[test]
+fn per_request_clients_get_result_type_and_cache_hints() {
+    let dir = common::scratch("mcp-2026");
+    let mut client = Client::start(&dir);
+    let meta = json!({
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": {"name": "t", "version": "1"},
+        "io.modelcontextprotocol/clientCapabilities": {},
+    });
+    let (found, _) = client.request("server/discover", json!({"_meta": meta}));
+    assert!(found["result"]["supportedVersions"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("2026-07-28")));
+    for method in ["tools/list", "resources/list"] {
+        let (r, _) = client.request(method, json!({"_meta": meta}));
+        assert_eq!(r["result"]["resultType"], "complete", "{method}: {r}");
+        assert!(r["result"]["ttlMs"].is_u64(), "{method}: {r}");
+        assert_eq!(r["result"]["cacheScope"], "private", "{method}: {r}");
+    }
+    let (old, _) = client.request("tools/list", json!({}));
+    assert!(old["result"].get("resultType").is_none() && old["result"].get("ttlMs").is_none());
+}
+
+/// A long export reports progress, `ping` is answered while it runs, and
+/// `notifications/cancelled` stops it: no response, no file.
+#[test]
+fn a_cancelled_export_stops_and_answers_nothing() {
+    require_ffmpeg!();
+    let dir = common::scratch("mcp-cancel");
+    let (card, _) = common::media(&dir);
+    let project = dir.join("long.chukcut");
+    let p = project.to_str().unwrap();
+    let mut client = Client::start(&dir);
+    client.request(
+        "initialize",
+        json!({"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}}),
+    );
+    client.ok(
+        "new_project",
+        json!({"project": p, "width": 640, "height": 360}),
+    );
+    // A minute of picture, so the export outlasts the cancel.
+    let files: Vec<&std::path::Path> = std::iter::repeat_n(card.as_path(), 15).collect();
+    client.ok("media_import", json!({"paths": files, "append": true}));
+    let out = dir.join("long.mp4");
+    let id = 4242;
+    client.send(json!({
+        "jsonrpc": "2.0", "id": id, "method": "tools/call",
+        "params": {
+            "name": "command_run",
+            "arguments": {"id": "export", "params": {"output": out, "crf": 35}},
+            "_meta": {"progressToken": "x"},
+        },
+    }));
+    let mut pinged = false;
+    loop {
+        let mut line = String::new();
+        assert!(client.stdout.read_line(&mut line).unwrap() > 0);
+        let m: Value = serde_json::from_str(&line).unwrap();
+        if m["id"] == id {
+            // Finished (or failed: no GPU) before it could be cancelled.
+            eprintln!("skipping the cancel check: the export answered first: {m}");
+            return;
+        }
+        if m["id"] == 77 {
+            pinged = true;
+        }
+        if m["method"] == "notifications/progress" && m["params"]["progress"].as_f64() > Some(0.0) {
+            if !pinged {
+                client.send(json!({"jsonrpc": "2.0", "id": 77, "method": "ping"}));
+                continue;
+            }
+            break;
+        }
+    }
+    assert!(pinged, "ping was answered during the export");
+    client.send(json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": id, "reason": "test"}}));
+    // The next request is answered after the cancelled one ended, and the
+    // cancelled one is never answered.
+    let (after, seen) = client.request(
+        "tools/call",
+        json!({"name": "project_inspect", "arguments": {}}),
+    );
+    assert!(after.get("result").is_some(), "{after}");
+    assert!(
+        seen.iter().all(|m| m["id"] != id),
+        "a cancelled request gets no response: {seen:?}"
+    );
+    let t0 = std::time::Instant::now();
+    while out.exists() && t0.elapsed() < std::time::Duration::from_secs(10) {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(!out.exists(), "the partial export was deleted");
 }

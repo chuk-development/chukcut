@@ -58,6 +58,41 @@ pub fn snapshot_png(
     encode_png(rgba, size.0, size.1)
 }
 
+/// The size a preview renders at: the snapshot size, scaled down so its
+/// longest side is at most `max_side`, never up, and even on both sides.
+/// `0` means no limit.
+///
+/// A preview is what an agent looks at to check an edit (the MCP server's
+/// `render_frame`). A 4K canvas sent whole is megabytes of base64 for a
+/// picture judged at a glance, so it is rendered small in the first place
+/// rather than rendered large and shrunk.
+pub fn preview_size(project: &Project, max_side: u32) -> (u32, u32) {
+    let (w, h) = snapshot_size(project);
+    let longest = w.max(h);
+    if max_side == 0 || longest <= max_side {
+        return (w, h);
+    }
+    let scale = max_side as f64 / longest as f64;
+    let even = |v: u32| ((v as f64 * scale).round() as u32).max(2) & !1;
+    (even(w), even(h))
+}
+
+/// Render the frame at `time` at [`preview_size`] and encode it as PNG.
+pub fn preview_png(
+    project: &Project,
+    time: Micros,
+    max_side: u32,
+    compositor: &Compositor,
+    sources: &dyn SourceProvider,
+) -> Result<Vec<u8>, String> {
+    let time = clamp_time(project, time)?;
+    let size = preview_size(project, max_side);
+    let rgba = compositor
+        .render_frame(project, time, size, sources)
+        .map_err(|e| format!("rendering the frame failed: {e}"))?;
+    encode_png(rgba, size.0, size.1)
+}
+
 /// Tightly packed RGBA8 to PNG bytes.
 pub fn encode_png(rgba: Vec<u8>, width: u32, height: u32) -> Result<Vec<u8>, String> {
     let image = image::RgbaImage::from_raw(width, height, rgba)
@@ -119,6 +154,18 @@ mod tests {
         assert_eq!(snapshot_size(&project(1920, 1080)), (1920, 1080));
         // An odd canvas loses its half pixel, exactly as an export would.
         assert_eq!(snapshot_size(&project(1081, 607)), (1080, 606));
+    }
+
+    #[test]
+    fn a_preview_fits_its_longest_side_and_never_grows() {
+        assert_eq!(preview_size(&project(1920, 1080), 960), (960, 540));
+        assert_eq!(preview_size(&project(1080, 1920), 960), (540, 960));
+        // Smaller than the limit, or no limit: the snapshot size.
+        assert_eq!(preview_size(&project(640, 360), 960), (640, 360));
+        assert_eq!(preview_size(&project(3840, 2160), 0), (3840, 2160));
+        // Both sides stay even, and a tiny limit still has pixels.
+        assert_eq!(preview_size(&project(1000, 333), 101), (100, 34));
+        assert_eq!(preview_size(&project(1920, 1080), 1), (2, 2));
     }
 
     #[test]

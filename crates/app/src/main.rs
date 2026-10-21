@@ -4,8 +4,10 @@
 //! chukcut                      the start screen
 //! chukcut project.chukcut      open a project
 //! chukcut a.mp4 b.mov …        new project with these files on the timeline
+//! chukcut --control …          also open the control socket for agents
 //! ```
 
+mod control;
 mod editor;
 mod edits;
 mod player;
@@ -37,6 +39,9 @@ fn main() {
     // Before the window: claims crash recovery, then opens or creates what
     // the command line names. See `editor/shell.rs`.
     let (startup, recovery) = editor::startup(&state);
+    // `chukcut --control`: serve this project to `chukcut-cli mcp --bridge`
+    // and scripts over a local socket (`control.rs`).
+    control::start(&state);
 
     application()
         // The whole Lucide catalog, not only the component defaults: the
