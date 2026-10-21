@@ -16,50 +16,62 @@ GitHub Actions workflow, `.github/workflows/release.yml`, described next.
 
 ## The release workflow
 
-`.github/workflows/release.yml` runs only when someone starts it: on GitHub,
-**Actions › Release › Run workflow**, or from a shell with
-`gh workflow run release.yml -f version=0.2.0 -f draft_release=true`.
+`.github/workflows/release.yml` is FilmCraft's release pipeline, taken over
+on purpose and credited ([decision 0037](../docs/decisions/0037-release-workflow-from-filmcraft.md),
+`NOTICE.md`). A release goes like this:
+
+```bash
+packaging/set-version.sh 0.2.0          # the five Cargo.toml files and Cargo.lock
+git commit -am "Release 0.2.0" && git push origin master
+git push origin master:release          # starts the Release workflow
+```
+
+The workflow builds every target, installs and runs the Linux packages, and
+leaves a **draft** release `v0.2.0` with every file, one `SHA256SUMS.txt`
+and GitHub's generated notes. A person reads it and presses Publish; that
+creates the tag. The workflow never publishes and never pushes a tag. A
+version with a pre-release part (`0.2.0-rc.1`) makes a pre-release draft. A
+version that is already a published release fails the first job, in seconds.
+If a draft for the same version exists, its files are replaced.
+
+A test run: **Actions › Release › Run workflow**, or
+`gh workflow run release.yml -f version=0.2.0-rc.1 -f draft_release=true`.
 
 | Input | Default | Effect |
 |---|---|---|
-| `version` | empty | The version in file names and package metadata. Empty: the version in `crates/app/Cargo.toml`. A leading `v` is dropped. |
-| `deb` | on | `.deb` for amd64 and arm64 |
-| `appimage_x86_64` | on | AppImage for x86_64 |
-| `appimage_aarch64` | on | AppImage for aarch64, built on the `ubuntu-24.04-arm` runner |
-| `macos_dmg` | on | universal `.dmg` (experimental) |
-| `windows_zip` | on | portable `.zip` (experimental) |
-| `windows_installer` | on | Inno Setup installer `.exe` (experimental) |
-| `draft_release` | off | With a `version`: attach every result to a **draft** release `v<version>` |
+| `version` | empty | Override for a test run; `packaging/set-version.sh` applies it to the checkout, so the binaries report it too. Empty: `crates/app/Cargo.toml`. Must be semver (`1.2.3`, `1.2.3-rc.1`) |
+| `macos` | on | universal `.dmg` (experimental) |
+| `windows` | on | portable `.zip` and Inno Setup installer (experimental) |
+| `draft_release` | off | Leave a draft release (a push to `release` always does) |
 
-Every result is a workflow artifact on the run's page (kept 90 days, the
-repository default). The draft release is never published by the workflow:
-a person reads it and presses Publish. If a draft for the same tag exists,
-its files are replaced; a published release is never touched.
+Both Linux jobs must pass, or there is no draft. Release files, one naming
+scheme, also on the run's page as `release-*` artifacts:
 
-| Artifact | Job | Contents |
+| File | Job | |
 |---|---|---|
-| `chukcut-linux-x86_64` | Linux x86_64 (ubuntu-24.04) | `chukcut_<v>_amd64.deb`, `chukcut-<v>-x86_64.AppImage`, `.sha256` files |
-| `chukcut-linux-aarch64` | Linux aarch64 (ubuntu-24.04-arm) | `chukcut_<v>_arm64.deb`, `chukcut-<v>-aarch64.AppImage`, `.sha256` files |
-| `chukcut-macos-arm64`, `chukcut-macos-x86_64` | macOS per architecture | `chukcut-<v>-<arch>-macos.app.tar.gz` (input to the next row) |
-| `chukcut-macos-universal` | macOS universal | `chukcut-<v>-universal-macos.dmg` |
-| `chukcut-windows-x86_64-zip` | Windows | `chukcut-<v>-x86_64-windows.zip` |
-| `chukcut-windows-x86_64-setup` | Windows | `chukcut-<v>-x86_64-windows-setup.exe` |
+| `chukcut-<v>-linux-x86_64.AppImage`, `.AppImage.zsync` | Linux x86_64 (ubuntu-24.04) | FFmpeg bundled; the `.zsync` serves delta updates |
+| `chukcut-<v>-linux-aarch64.AppImage`, `.AppImage.zsync` | Linux aarch64 (ubuntu-24.04-arm) | the same for ARM |
+| `chukcut-<v>-linux-<arch>.deb` | Linux | system FFmpeg, Ubuntu 24.04 family (the script's local name is `chukcut_<v>_<debarch>.deb`) |
+| `chukcut-<v>-linux-<arch>.tar.xz` | Linux | system FFmpeg, Ubuntu 24.04 family |
+| `chukcut-<v>-macos-universal.dmg` | macOS (experimental) | |
+| `chukcut-<v>-windows-x86_64.zip`, `-setup.exe` | Windows (experimental) | |
+| `SHA256SUMS.txt` | Draft release | checksums of all of the above |
 
 The Linux jobs test what they built before they upload it. The `.deb` is
 installed with `apt` (which resolves its Depends line), `chukcut-cli
 --version` and `chukcut-cli ml status` must run, and the worker must be in
-`/usr/libexec/chukcut/`. The AppImage runs `--cli --version` and `--cli ml
-status`, and the editor must still be running after ten seconds on a virtual
-X display with lavapipe.
+`/usr/libexec/chukcut/`. The AppImage must carry its update information and
+have its `.zsync`, run `--cli --version` and `--cli ml status`, and the editor
+must still be running after ten seconds on a virtual X display with lavapipe.
 
 **macOS and Windows are experimental.** Their jobs are `continue-on-error`,
-so a red macOS or Windows job does not fail the run. Today they stop at the
-compile of the engine: `docs/decisions/0033-release-builds.md` lists what
-blocks them. The jobs stay in place so that they produce a build once the
-code allows it. Nothing is signed: macOS builds are signed ad hoc (Gatekeeper
-asks the user to allow them; notarisation needs a paid Developer ID), and the
-Windows installer triggers SmartScreen until a code-signing certificate signs
-it. Signing needs secrets the workflow does not have yet.
+so a red macOS or Windows job does not stop the draft; their files are
+attached when they exist. Today they stop at the compile of the engine:
+`docs/decisions/0033-release-builds.md` lists what blocks them. Nothing is
+signed: macOS builds are signed ad hoc (Gatekeeper asks the user to allow
+them; notarisation needs a paid Developer ID), and the Windows installer
+triggers SmartScreen until a code-signing certificate signs it. FilmCraft's
+workflow shows how signing slots in once there are certificates.
 
 ## `packaging/linux/`
 
@@ -97,7 +109,7 @@ CI runs these three checks in the `packaging` job.
 
 `packaging/tarball.sh` builds the three release binaries (or takes the ones
 in `target/release` with `--no-build`, and stops if one is missing) and
-writes `target/dist/chukcut-<version>-x86_64-linux.tar.xz`:
+writes `target/dist/chukcut-<version>-<arch>-linux.tar.xz` (`--version` overrides the version):
 
 ```
 chukcut-<version>-x86_64-linux/
@@ -213,7 +225,9 @@ desktop, MIME and icon caches.
 ## The AppImage
 
 `packaging/appimage/build-appimage.sh [--no-build] [--version V]` writes
-`target/dist/chukcut-<version>-<arch>.AppImage` (x86_64 or aarch64). It
+`target/dist/chukcut-<version>-linux-<arch>.AppImage` (x86_64 or aarch64),
+with update information for AppImageUpdate and, when `zsyncmake` (the
+`zsync` package) is installed, the `.AppImage.zsync` beside it. It
 downloads linuxdeploy, appimagetool and the type 2 runtime at pinned
 versions into `target/appimage-tools/` (or takes `LINUXDEPLOY`,
 `APPIMAGETOOL`, `APPIMAGE_RUNTIME`) and needs no FUSE.

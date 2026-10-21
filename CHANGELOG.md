@@ -8,6 +8,14 @@ when it opens them.
 
 ## [Unreleased]
 
+### Packaging
+
+- Releases come from FilmCraft's release pipeline, taken over on purpose and
+  credited: a push to the `release` branch leaves a draft release with
+  `SHA256SUMS.txt` and generated notes. AppImages update themselves through
+  AppImageUpdate (`.zsync` next to each). Release files are named
+  `chukcut-<version>-linux-<arch>.<ext>` (decision 0037).
+
 ## [0.1.0] - 2026-10-03
 
 The first version. It covers the work from the first commit (2026-07-25) to

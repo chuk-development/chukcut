@@ -23,6 +23,17 @@ is a map, not a substitute for those texts.
 
 `cargo tree` enumerates the complete set.
 
+## Build and release tooling taken from other projects
+
+| Project | Licence | What we took |
+|---|---|---|
+| [FilmCraft](https://github.com/storytold/filmcraft) and its shared workflows [craft-common-actions](https://github.com/storytold/craft-common-actions), by the ArtCraft Team and the FilmCraft contributors | FilmCraft: MIT OR Apache-2.0, used under Apache-2.0 (text in [`.github/LICENSE-APACHE-2.0.txt`](.github/LICENSE-APACHE-2.0.txt)). craft-common-actions carries no licence file; its workflow was rewritten, not copied | The release pipeline, deliberately and with thanks: `.github/workflows/release.yml`, `.github/actions/resolve-version`, `.github/actions/draft-release`, the AppImage update information in `packaging/appimage/build-appimage.sh`. Each file says what was changed. [Decision 0037](docs/decisions/0037-release-workflow-from-filmcraft.md) lists what was taken and what was left out on purpose (their craft-fonts embedding) |
+
+FilmCraft's NOTICE: "FilmCraft. Copyright (c) 2026 ArtCraft Team and the
+FilmCraft contributors. Licensed under the MIT License or the Apache License,
+Version 2.0, at your option." The ArtCraft and FilmCraft names and logos are
+their trademarks; none of their brand assets are in this repository.
+
 ## Codec patents
 
 **This is separate from the software licence, and no software licence disposes

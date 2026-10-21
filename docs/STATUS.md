@@ -464,6 +464,24 @@ for a clip in the Details tab.
 
 ## Release builds (2026-10-04, `agent/release`)
 
+**Update 2026-10-21: the pipeline is FilmCraft's now** (decision 0037,
+credited in `NOTICE.md` and the README). A push to the `release` branch
+builds, tests the Linux packages and leaves a draft release with
+`SHA256SUMS.txt` and generated notes; `workflow_dispatch` is a test run.
+`packaging/set-version.sh` bumps every crate and `Cargo.lock`. Release files
+are `chukcut-<v>-linux-<arch>.{AppImage,AppImage.zsync,deb,tar.xz}`; the
+AppImage carries `gh-releases-zsync` update information. Their craft-fonts
+embedding (~23 MB of fonts per binary) was left out on purpose. Not run on
+GitHub yet: checked with actionlint 1.7.12 and shellcheck, and the
+appimagetool `-u` + zsync call on a dummy AppDir. Trap: appimagetool writes
+the `.zsync` into its working directory, not next to the output path. And
+again: **running a test AppImage on the workstation lets AppImageLauncher
+move it into `~/Applications` and add a menu entry**; set
+`APPIMAGELAUNCHER_DISABLE=1`.
+
+The text below describes the 2026-10-04 state; trigger, inputs and file names
+changed as above.
+
 `.github/workflows/release.yml`, started by hand only (Actions › Release ›
 Run workflow): a version, one checkbox per target, and "draft release" (off).
 Every result is a workflow artifact; with a version and the checkbox, also a

@@ -4,8 +4,9 @@
 #
 #   packaging/tarball.sh              build release, then pack
 #   packaging/tarball.sh --no-build   pack the binaries already in target/release
+#   packaging/tarball.sh --version 0.2.0   name the tarball after this version
 #
-# Writes target/dist/chukcut-<version>-x86_64-linux.tar.xz. What is inside,
+# Writes target/dist/chukcut-<version>-<arch>-linux.tar.xz. What is inside,
 # and why FFmpeg and the NVIDIA libraries are not: packaging/README.md.
 set -euo pipefail
 
@@ -13,13 +14,18 @@ root="$(cd -- "$(dirname -- "$0")/.." >/dev/null && pwd)"
 cd "$root"
 
 build=1
-case "${1:-}" in
-    --no-build) build=0 ;;
-    "") ;;
-    *) echo "tarball.sh: unknown option '$1'" >&2; exit 2 ;;
-esac
+version=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --no-build) build=0 ;;
+        --version) version="$2"; shift ;;
+        *) echo "tarball.sh: unknown option '$1'" >&2; exit 2 ;;
+    esac
+    shift
+done
 
-version="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/app/Cargo.toml | head -1)"
+[ -n "$version" ] || version="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/app/Cargo.toml | head -1)"
+version="${version#v}"
 arch="$(uname -m)"
 name="chukcut-$version-$arch-linux"
 dist="$root/target/dist"

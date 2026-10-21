@@ -6,7 +6,9 @@
 #   packaging/appimage/build-appimage.sh --no-build         pack the binaries in target/release
 #   packaging/appimage/build-appimage.sh --version 0.2.0    name the file after this version
 #
-# Writes target/dist/chukcut-<version>-<arch>.AppImage. linuxdeploy copies
+# Writes target/dist/chukcut-<version>-linux-<arch>.AppImage, and next to it
+# the .AppImage.zsync for delta updates when zsyncmake (the zsync package) is
+# installed. linuxdeploy copies
 # every library the three binaries need into the AppDir, except the ones in
 # its own exclude list and in EXCLUDE below; appimagetool packs the AppDir.
 # Both are AppImages themselves, downloaded at pinned versions into
@@ -192,9 +194,25 @@ fi
     fi
 } >"$appdir/BUILD-INFO.txt"
 
-out="$dist/chukcut-$version-$arch.AppImage"
-rm -f "$out"
-ARCH="$arch" VERSION="$version" "$appimagetool" --no-appstream --runtime-file "$runtime" "$appdir" "$out" >/dev/null
+out="$dist/chukcut-$version-linux-$arch.AppImage"
+# A .zsync left by an earlier run would hide a missing zsyncmake and describe
+# another file.
+rm -f "$out" "$out.zsync"
+# Update information, taken from storytold/filmcraft's packaging/linux/
+# package.sh (Apache-2.0; docs/decisions/0037). AppImageUpdate,
+# AppImageLauncher and Gear Lever read it from the file and fetch only the
+# blocks that changed, through the .zsync published next to each AppImage on
+# GitHub Releases. `latest` is the newest published release that is not a
+# pre-release. A fork's builds point at its own releases through
+# GITHUB_REPOSITORY, which Actions sets.
+repo="${GITHUB_REPOSITORY:-chuk-development/chukcut}"
+update_info="gh-releases-zsync|${repo%%/*}|${repo#*/}|latest|chukcut-*-linux-$arch.AppImage.zsync"
+# appimagetool writes the .zsync into its working directory, hence the cd.
+(cd "$dist" && ARCH="$arch" VERSION="$version" "$appimagetool" --no-appstream \
+    --runtime-file "$runtime" -u "$update_info" "$appdir" "$out" >/dev/null)
 chmod +x "$out"
 (cd "$dist" && sha256sum "$(basename "$out")" >"$(basename "$out").sha256")
+if [ ! -s "$out.zsync" ]; then
+    echo "build-appimage.sh: zsyncmake not found, so no $(basename "$out").zsync; delta updates need it" >&2
+fi
 echo "$out"
