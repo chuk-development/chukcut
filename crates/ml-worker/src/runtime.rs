@@ -15,11 +15,12 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
+use ort::environment::Environment;
 use ort::ep::{self, ExecutionProvider as _};
-use ort::session::builder::GraphOptimizationLevel;
+use ort::session::builder::{GraphOptimizationLevel, SessionBuilder};
 use ort::session::Session;
 
 use crate::accel::{self, Acceleration, EngineBuild, EngineTarget, Precision};
@@ -61,6 +62,20 @@ pub struct Loaded {
 /// request to send a progress message that names the wait and lets the
 /// engine extend the request's deadline (`Reply::Progress::hold_secs`).
 type Notice = Box<dyn Fn(&str, u32) + Send>;
+/// The process's one ONNX Runtime environment. ort 2.0.0-rc.14 hands it out
+/// from `EnvironmentBuilder::build` and wants it for every session builder;
+/// it only keeps a weak reference itself, so the worker holds it here for
+/// its whole life. ONNX Runtime allows one per process.
+static ENVIRONMENT: OnceLock<Environment> = OnceLock::new();
+
+/// A session builder on the worker's environment.
+fn session_builder() -> ort::Result<SessionBuilder> {
+    let env = ENVIRONMENT
+        .get()
+        .ok_or_else(|| ort::Error::new("the ONNX Runtime environment is not set up"))?;
+    Session::builder(env)
+}
+
 static BUILD_NOTICE: Mutex<Option<Notice>> = Mutex::new(None);
 
 /// Set (or clear) the build notice; see [`BUILD_NOTICE`].
@@ -254,18 +269,28 @@ impl Runtime {
                 preload(&dirs, TENSORRT_PRELOAD);
             }
         }
-        let committed = ort::init_from(&lib)
-            .map_err(|e| {
-                (
-                    ErrorKind::RuntimeMissing,
-                    format!("could not load {}: {e}", lib.display()),
-                )
-            })?
-            .with_name("chukcut-ml-worker")
-            .with_telemetry(false)
-            .commit();
-        if !committed {
+        if ENVIRONMENT.get().is_some() {
             eprintln!("chukcut-ml-worker: an ONNX Runtime environment already existed");
+        } else {
+            let env = ort::init_from(&lib)
+                .map_err(|e| {
+                    (
+                        ErrorKind::RuntimeMissing,
+                        format!("could not load {}: {e}", lib.display()),
+                    )
+                })?
+                .with_name("chukcut-ml-worker")
+                .with_telemetry(false)
+                .build()
+                .map_err(|e| {
+                    (
+                        ErrorKind::RuntimeMissing,
+                        format!("could not start {}: {e}", lib.display()),
+                    )
+                })?;
+            // `load` runs once per worker, on its one thread; nothing else
+            // can have filled the cell in between.
+            let _ = ENVIRONMENT.set(env);
         }
         let info = ort::info();
         // The build info string of Microsoft's builds names no version
@@ -292,12 +317,12 @@ impl Runtime {
         let candidates: [(&'static str, bool, ep::ExecutionProviderDispatch); 2] = [
             (
                 "CUDA",
-                ep::CUDA::default().is_available().unwrap_or(false),
+                ep::CUDA::is_available().unwrap_or(false),
                 ep::CUDA::default().build().error_on_failure(),
             ),
             (
                 "OpenVINO",
-                ep::OpenVINO::default().is_available().unwrap_or(false),
+                ep::OpenVINO::is_available().unwrap_or(false),
                 ep::OpenVINO::default().build().error_on_failure(),
             ),
         ];
@@ -309,7 +334,7 @@ impl Runtime {
                 ));
                 continue;
             }
-            match Session::builder()
+            match session_builder()
                 .and_then(|b| b.with_execution_providers([provider]).map_err(Into::into))
             {
                 // The CUDA provider registers without cuDNN and fails on the
@@ -337,10 +362,10 @@ impl Runtime {
             Some("not installed (`ml install tensorrt`)".to_string())
         } else if !cuda_works {
             Some("needs the CUDA provider, which does not work here".to_string())
-        } else if !ep::TensorRT::default().is_available().unwrap_or(false) {
+        } else if !ep::TensorRT::is_available().unwrap_or(false) {
             Some("this ONNX Runtime build does not include it".to_string())
         } else {
-            match Session::builder().and_then(|b| {
+            match session_builder().and_then(|b| {
                 b.with_execution_providers([ep::TensorRT::default().build().error_on_failure()])
                     .map_err(Into::into)
             }) {
@@ -644,7 +669,7 @@ fn build_tensorrt(
             .with_profile_opt_shapes(list(|p| &p.opt))
             .with_profile_max_shapes(list(|p| &p.max));
     }
-    let mut builder = Session::builder()
+    let mut builder = session_builder()
         .map_err(|e| e.to_string())?
         .with_optimization_level(GraphOptimizationLevel::Level3)
         .map_err(|e| e.to_string())?
@@ -680,7 +705,7 @@ fn tune(
 
 fn build(provider: &str, model: &Path, tuning: accel::Tuning) -> Result<Session, String> {
     let started = Instant::now();
-    let mut builder = Session::builder()
+    let mut builder = session_builder()
         .map_err(|e| e.to_string())?
         .with_optimization_level(GraphOptimizationLevel::Level3)
         .map_err(|e| e.to_string())?
