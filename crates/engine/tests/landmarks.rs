@@ -43,7 +43,7 @@ fn media_dir() -> PathBuf {
 fn sha256(path: &Path) -> Option<String> {
     use sha2::{Digest as _, Sha256};
     let bytes = std::fs::read(path).ok()?;
-    Some(format!("{:x}", Sha256::digest(&bytes)))
+    Some(hex::encode(Sha256::digest(&bytes)))
 }
 
 /// The portrait, downloaded once (neutral User-Agent, pinned digest), and

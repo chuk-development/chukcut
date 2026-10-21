@@ -84,7 +84,7 @@ pub fn prompt_hash(prompt: &ObjectPrompt) -> String {
         hasher.update(q(p.y).to_le_bytes());
         hasher.update([p.keep as u8]);
     }
-    format!("{:x}", hasher.finalize())[..12].to_string()
+    hex::encode(hasher.finalize())[..12].to_string()
 }
 
 /// The part of a matte directory's name that says what made it, without the

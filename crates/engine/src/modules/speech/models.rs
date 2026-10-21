@@ -203,7 +203,7 @@ pub fn download_verified(
             }
         }
         file.sync_all().map_err(|e| e.to_string())?;
-        let digest = format!("{:x}", hasher.finalize());
+        let digest = hex::encode(hasher.finalize());
         if !digest.eq_ignore_ascii_case(sha256) {
             return Err(format!(
                 "the downloaded model is damaged (checksum {digest}, expected {sha256}); try again"
@@ -246,7 +246,7 @@ mod tests {
     }
 
     fn sha(bytes: &[u8]) -> String {
-        format!("{:x}", Sha256::digest(bytes))
+        hex::encode(Sha256::digest(bytes))
     }
 
     #[test]

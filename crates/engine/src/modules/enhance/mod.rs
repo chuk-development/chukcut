@@ -340,7 +340,7 @@ impl Chain {
             h.update(u.version.as_bytes());
             h.update(u.scale.to_le_bytes());
         }
-        format!("{:x}", h.finalize())[..12].to_string()
+        hex::encode(h.finalize())[..12].to_string()
     }
 
     /// The size a frame of a `width × height` source is decoded at for this

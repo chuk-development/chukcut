@@ -186,7 +186,7 @@ fn copy_exact(reader: impl Read, expected: u64, part: &Path) -> Result<String, S
         ));
     }
     file.sync_all().map_err(|e| e.to_string())?;
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(hex::encode(hasher.finalize()))
 }
 
 fn unzip_member(
@@ -474,7 +474,7 @@ pub fn unpack_runtime(
         // Whatever follows the tar's end (gzip padding) is part of the file
         // the checksum covers.
         io::copy(&mut tee, &mut io::sink()).map_err(|e| e.to_string())?;
-        let digest = format!("{:x}", tee.hasher.clone().finalize());
+        let digest = hex::encode(tee.hasher.clone().finalize());
         if !digest.eq_ignore_ascii_case(pack.sha256) {
             return Err(format!(
                 "the download is damaged (checksum {digest}, expected {}); try again",
@@ -580,7 +580,7 @@ mod tests {
     }
 
     fn pack_for(bytes: &[u8]) -> RuntimePack {
-        let sha = format!("{:x}", Sha256::digest(bytes));
+        let sha = hex::encode(Sha256::digest(bytes));
         RuntimePack {
             sha256: Box::leak(sha.into_boxed_str()),
             bytes: bytes.len() as u64,
@@ -664,7 +664,7 @@ mod tests {
             kind,
             archive_bytes: 1,
             member,
-            member_sha256: Box::leak(format!("{:x}", Sha256::digest(data)).into_boxed_str()),
+            member_sha256: Box::leak(hex::encode(Sha256::digest(data)).into_boxed_str()),
         }
     }
 
