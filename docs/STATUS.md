@@ -39,7 +39,9 @@ works on the code.
   source shader, the same on every decode path (decision 0034). No HDR
   export.
 - **CLI and MCP:** every command-layer function is reachable
-  (`crates/cli/tests/reachability.rs`).
+  (`crates/cli/tests/reachability.rs`). The MCP server follows FilmCraft's
+  design (core tools plus a command catalog) and can drive the running app
+  (`chukcut --control`, `chukcut-cli mcp --bridge`).
 
 **Rough, in short** (details in the sections below and in `docs/QA.md`):
 AMD and Intel/hybrid laptops are not checked regularly; OpenVINO untested;
@@ -55,7 +57,7 @@ denoiser.
 **Before you change code:** read "Traps that have already cost time" and
 the CLAUDE.md non-negotiables. Judge performance from a release build only.
 
-**Newest sections first:** Whisper on the GPU, The diagnostic log, Robustness, Colour in and out, Crop keyframes and temporal denoise, Release builds, The crash after the export, QA pass 3, UX gaps, Body landmarks, Polish pass 3, CI, Colour AI, QA pass 2, Flaky
+**Newest sections first:** The MCP server after FilmCraft, Whisper on the GPU, The diagnostic log, Robustness, Colour in and out, Crop keyframes and temporal denoise, Release builds, The crash after the export, QA pass 3, UX gaps, Body landmarks, Polish pass 3, CI, Colour AI, QA pass 2, Flaky
 tests, Frame blending, Timelines and compound clips. The ML sections are at
 the end of the file ("The ML worker" and its sub-sections).
 
@@ -90,6 +92,39 @@ forgets). Previously 2026-07-27: the preview stopped copying its frames — the
 JPEG encoder now reads a surface the compositor drew into, 2.7–2.9× on a whole
 frame; and earlier the same day, the attempt that went the other way round and
 the `vkDeviceWaitIdle` crash it found.
+
+## The MCP server after FilmCraft (2026-10-21, `agent/mcp`)
+
+The MCP server was redesigned after FilmCraft's (storytold/filmcraft,
+Apache-2.0), on purpose and with credit: `docs/research/mcp-filmcraft-comparison.md`
+compares the two, NOTICE.md lists what was taken.
+
+- **Shape.** Ten core tools (`command_list`, `command_run`, `command_batch`,
+  `doc_inspect`, `project_inspect`, `sequence_inspect`, `media_import`,
+  `render_frame`, `render_preview`, `new_project`) instead of ~150; the
+  operations are the command catalog (`crates/cli/src/commands.rs`). The old
+  per-operation tools: `--op-tools`, and accepted by name always.
+- **Bridge.** `chukcut --control` opens a Unix socket
+  (`$XDG_RUNTIME_DIR/chukcut/control-<pid>.sock`, 0600) served by
+  `chukcut_cli::control`; the CLI crate is now a library too, and the app
+  links it. Operations run in the app process on the app's `AppState`, so
+  edits land in the app's undo history; the editor's tick redraws when the
+  socket says the document changed and drains the `ui.*` queue
+  (`crates/app/src/editor/control.rs`). `chukcut-cli mcp --bridge` is the
+  client.
+- **New engine command:** `export::commands::export_preview_png(state, time,
+  max_side)`, a frame rendered small through the export compositor, in
+  memory. `render_frame` uses it headless and in the app.
+- **Conventions taken over:** titles and all four hints on every tool,
+  `-32602` for an unknown argument, MCP 2026-07-28 cache hints,
+  `notifications/cancelled` (an export stops; the request gets no response),
+  `ping` answered during a long command (a reader thread).
+- **Trap: a key or a click dispatched inside the editor's update re-enters
+  the editor.** The `ui.*` handlers that touch the window run through
+  `cx.defer` after the tick's update, never inside it.
+- **Not done:** `ui_elements` (GPUI has no element tree to list), window
+  screenshots on Wayland (`import` needs X11), cancel for commands other
+  than export.
 
 ## Whisper on the GPU (2026-10-09, `worktree-agent-a04e288338de8e558`)
 

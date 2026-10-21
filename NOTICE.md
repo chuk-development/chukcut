@@ -23,6 +23,45 @@ is a map, not a substitute for those texts.
 
 `cargo tree` enumerates the complete set.
 
+## FilmCraft (MCP server and control socket design)
+
+The design of chukcut's MCP server and of the app's control socket is
+deliberately taken from **FilmCraft** (https://github.com/storytold/filmcraft),
+a Rust video editor:
+
+> FilmCraft. Copyright (c) 2026 ArtCraft Team and the FilmCraft contributors.
+> Licensed under the MIT License or the Apache License, Version 2.0, at your
+> option.
+
+chukcut uses it under the **Apache License, Version 2.0**
+(https://www.apache.org/licenses/LICENSE-2.0), which is compatible with
+GPL-3.0. What was taken, from FilmCraft's `crates/automation` (`server.rs`,
+`bridge.rs`, `long_job.rs`), `apps/filmcraft/src/control_server.rs`,
+`docs/agents.md` and `docs/control-protocol.md`:
+
+- the tool set and names: `command_list`, `command_run`, `command_batch`,
+  `doc_inspect`, `render_preview`, `project_inspect`, `sequence_inspect`,
+  `media_import`, `render_frame`, and the live-app tools `ui_inspect`,
+  `ui_click`, `ui_drag`, `ui_key`, `ui_type`, `ui_screenshot`, `ui_control`;
+- the two modes, headless and `--bridge` to the running app, and the
+  `.mcp.json` that registers both;
+- the conventions: a title and all four annotation hints on every tool,
+  unknown arguments as JSON-RPC `-32602` naming the accepted ones, `-32700`
+  for a line that is not JSON, the `document` and `commands` resources, the
+  MCP 2026-07-28 cache hints, progress and cancellation of a long export with
+  no response to a cancelled request;
+- the control channel: one JSON request per line and one reply per line,
+  only well-formed requests read, a 4 MiB line cap and 16 connections, the
+  `engine.*` / `ui.*` method split;
+- the shape of the tests that check all of the above.
+
+These chukcut files are adapted from FilmCraft and carry its copyright notice
+and a statement of the changes: `crates/cli/src/mcp.rs`,
+`crates/cli/src/control.rs`, `crates/cli/src/bridge.rs`. The code was
+rewritten for chukcut (no rmcp or tokio, chukcut's operations, a Unix socket);
+no FilmCraft file is copied verbatim. FilmCraft's own NOTICE has no further
+attribution requirements for these parts.
+
 ## Codec patents
 
 **This is separate from the software licence, and no software licence disposes

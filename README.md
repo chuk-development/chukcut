@@ -117,6 +117,7 @@ take before it starts.
 
 - `chukcut-cli`: every edit from a shell or a script, also the AI tools
 - `chukcut-cli mcp`: the same operations as an MCP server, so an AI agent such as Claude Code can edit a project
+- `chukcut --control` with `chukcut-cli mcp --bridge`: the agent edits the project open in the window, looks at the picture and works the UI
 - Batch files with undo, JSON output and exit codes. See [`docs/cli.md`](docs/cli.md)
 
 ### Your own accounts (optional)
@@ -390,6 +391,13 @@ picture.
 - [`docs/research/`](docs/research/): investigations, also the ones that concluded "no"
 - [`packaging/README.md`](packaging/README.md): install routes and what each one bundles
 - [`CLAUDE.md`](CLAUDE.md): the working agreement, for humans and agents
+
+## Credits
+
+The design of chukcut's MCP server and control socket is deliberately taken
+from [storytold/FilmCraft](https://github.com/storytold/filmcraft)
+(Apache-2.0): its tools, its bridge to the running app and its conventions.
+See [`NOTICE.md`](NOTICE.md).
 
 ## Contributing
 

@@ -54,8 +54,9 @@ answer in JSON, with exit codes for scripts.
 ## The MCP server
 
 `chukcut-cli mcp` gives the same operations to an MCP client, for example an
-AI agent. The agent can edit a project and look at a frame
-(`view_frame` returns a PNG).
+AI agent. The agent finds every command with `command_list`, runs one with
+`command_run`, reads the clips with `doc_inspect` and looks at the picture
+with `render_frame` (a PNG in the answer).
 
 For Claude Code:
 
@@ -66,8 +67,29 @@ claude mcp add chukcut -- chukcut-cli mcp
 Other MCP clients use the same command: the program `chukcut-cli` with the
 argument `mcp`.
 
+### Let the agent work in the open window
+
+Start the app with the control socket, and the server in bridge mode:
+
+```bash
+chukcut --control my.chukcut
+claude mcp add chukcut-app -- chukcut-cli mcp --bridge
+```
+
+The agent's edits then appear in the window at once and go into the app's
+undo history: Ctrl+Z takes them back like your own. Nothing is saved until
+you save. The agent can also read the playhead and the selection, press
+keys, click, and take a screenshot of the window (X11 only).
+
+The control socket is off unless you start the app with `--control`. Only
+your user can connect to it.
+
+The design of the MCP server is taken from FilmCraft
+(storytold/filmcraft, Apache-2.0). [`docs/cli.md`](../cli.md#the-mcp-server)
+has every tool and the control socket's methods.
+
 ## Limits
 
-Export, `render-frame` and `view_frame` need a Vulkan device, like the app.
+Export, `render-frame` and `render_frame` need a Vulkan device, like the app.
 The AI commands need `chukcut-ml-worker` next to `chukcut-cli` or on your
 `PATH`.
