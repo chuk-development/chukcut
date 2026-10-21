@@ -1,6 +1,9 @@
 # 0033 — Release builds: a manual workflow, Linux packages that work, macOS and Windows as experiments
 
-Date: 2026-10-04. Status: accepted (release agent).
+Date: 2026-10-04. Status: accepted (release agent); the trigger, naming and
+draft-release part superseded by [0037](0037-release-workflow-from-filmcraft.md)
+(2026-10-21), which took over FilmCraft's release pipeline. The Linux
+packaging and the macOS and Windows findings below still hold.
 
 ## What was decided
 

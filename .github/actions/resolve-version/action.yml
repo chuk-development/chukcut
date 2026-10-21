@@ -1,0 +1,67 @@
+# Adapted from storytold/craft-common-actions (actions/resolve-version) for the
+# FilmCraft release pipeline, deliberately taken over and credited in
+# NOTICE.md and docs/decisions/0037-release-workflow-from-filmcraft.md.
+# Changes: the version comes from crates/app/Cargo.toml (chukcut has no
+# [workspace.package] version), the inputs reach the shell through the
+# environment instead of ${{ }} inside the script, and a version that is
+# already a published release fails here, before an hour of builds, instead of
+# at the end.
+name: "Resolve version"
+description: "Resolve, validate and output the release version, date and pre-release flag"
+
+inputs:
+  input-version:
+    description: "Version override, e.g. 0.2.0-rc.1 (empty: crates/app/Cargo.toml)"
+    required: false
+    default: ""
+  check-published:
+    description: "Fail when v<version> is already a published release"
+    required: false
+    default: "false"
+  github-token:
+    description: "Token for the published-release check"
+    required: false
+    default: ""
+
+outputs:
+  version:
+    description: "Semantic version without a leading v"
+    value: ${{ steps.resolve.outputs.version }}
+  date:
+    description: "Build date, YYYY-MM-DD (UTC)"
+    value: ${{ steps.resolve.outputs.date }}
+  prerelease:
+    description: "true when the version has a pre-release part (1.2.3-rc.1)"
+    value: ${{ steps.resolve.outputs.prerelease }}
+
+runs:
+  using: "composite"
+  steps:
+    - id: resolve
+      name: Resolve version
+      shell: bash
+      env:
+        INPUT_VERSION: ${{ inputs.input-version }}
+        CHECK_PUBLISHED: ${{ inputs.check-published }}
+        GH_TOKEN: ${{ inputs.github-token }}
+        GH_REPO: ${{ github.repository }}
+      run: |
+        v="${INPUT_VERSION#v}"
+        [ -n "$v" ] || v="$(packaging/set-version.sh)"
+        if ! printf '%s' "$v" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'; then
+          echo "::error::'$v' is not a version like 1.2.3 or 1.2.3-rc.1"
+          exit 1
+        fi
+        case "$v" in *-*) pre=true ;; *) pre=false ;; esac
+        if [ "$CHECK_PUBLISHED" = true ]; then
+          if draft="$(gh release view "v$v" --json isDraft --jq .isDraft 2>/dev/null)" && [ "$draft" != true ]; then
+            echo "::error::release v$v is published already. Bump the version (packaging/set-version.sh) before pushing to the release branch."
+            exit 1
+          fi
+        fi
+        {
+          echo "version=$v"
+          echo "date=$(date -u +%Y-%m-%d)"
+          echo "prerelease=$pre"
+        } >>"$GITHUB_OUTPUT"
+        echo "### chukcut v$v (\`${GITHUB_SHA::9}\`)" >>"$GITHUB_STEP_SUMMARY"

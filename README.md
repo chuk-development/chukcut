@@ -167,14 +167,15 @@ load; `CHUKCUT_DECODE=software|auto|vaapi|cuda` and
 
 ## Install
 
-Release builds come from the Release workflow on GitHub (started by hand;
-[`packaging/README.md`](packaging/README.md)). Download them from a
-release, or from the run's artifacts.
+Release builds come from the Release workflow on GitHub (a push to the
+`release` branch; [`packaging/README.md`](packaging/README.md)). Download
+them from a release, check them against its `SHA256SUMS.txt`, or take them
+from the run's artifacts.
 
 ### The .deb (Ubuntu 24.04, Mint 22; amd64 and arm64)
 
 ```bash
-sudo apt install ./chukcut_<version>_amd64.deb
+sudo apt install ./chukcut-<version>-linux-x86_64.deb
 ```
 
 apt installs the FFmpeg, ALSA and X11 libraries it needs from the
@@ -186,16 +187,17 @@ library packages exist.
 ### The AppImage (x86_64 and aarch64)
 
 ```bash
-chmod +x chukcut-<version>-x86_64.AppImage
-./chukcut-<version>-x86_64.AppImage                 # the editor
-./chukcut-<version>-x86_64.AppImage --cli --help    # the command line
+chmod +x chukcut-<version>-linux-x86_64.AppImage
+./chukcut-<version>-linux-x86_64.AppImage                 # the editor
+./chukcut-<version>-linux-x86_64.AppImage --cli --help    # the command line
 ```
 
 FFmpeg and the libraries it links are inside. The system must supply glibc
 2.39 or newer (Ubuntu 24.04, Debian 13, Fedora 40 and later), the Vulkan
 driver, and libva with libdrm (hardware decode loads the system's VAAPI
 driver). Without FUSE, add `--appimage-extract-and-run`. A symlink named
-`chukcut-cli` to the AppImage starts the command line.
+`chukcut-cli` to the AppImage starts the command line. AppImageUpdate and
+Gear Lever update it to the newest release, downloading only what changed.
 
 macOS and Windows builds are experimental and do not build yet
 ([decision 0033](docs/decisions/0033-release-builds.md)).
@@ -396,6 +398,17 @@ picture.
 Yes, please. [`CONTRIBUTING.md`](CONTRIBUTING.md) has the workflow. You do not
 need a GPU: tests that need one skip with a printed reason. Thus you can work
 on the timeline without a Vulkan device.
+
+## Credits
+
+The release pipeline (`.github/workflows/release.yml`: a push to the
+`release` branch leaves a draft release with checksums, generated notes and
+AppImages that update themselves) is taken over on purpose from
+[FilmCraft](https://github.com/storytold/filmcraft) and its shared
+[craft-common-actions](https://github.com/storytold/craft-common-actions),
+because they do it better than we did. Thank you, FilmCraft team. Details and
+licence: [`NOTICE.md`](NOTICE.md),
+[decision 0037](docs/decisions/0037-release-workflow-from-filmcraft.md).
 
 ## Licence
 

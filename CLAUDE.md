@@ -190,9 +190,11 @@ cargo check --workspace -j 4     # -j 4: full parallelism can OOM on 32 GB
 cargo run --release -p chukcut-engine --bin chukcut-bench -- --all
 
 # Packages (target/dist/). The Release workflow on GitHub runs the same
-# scripts, started by hand only; packaging/README.md.
+# scripts on a push to the `release` branch and leaves a draft release
+# (FilmCraft's pipeline, decision 0037); packaging/README.md.
+packaging/set-version.sh 0.2.0                     # bump every crate before a release
 packaging/deb/build-deb.sh --no-build              # chukcut_<v>_<arch>.deb
-packaging/appimage/build-appimage.sh --no-build    # chukcut-<v>-<arch>.AppImage, FFmpeg bundled
+packaging/appimage/build-appimage.sh --no-build    # chukcut-<v>-linux-<arch>.AppImage (+ .zsync), FFmpeg bundled
 ```
 
 ## Things that will bite you
