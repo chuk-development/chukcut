@@ -1071,7 +1071,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml_ng",
- "sha2 0.11.0",
+ "sha2 0.11.1",
  "shaderc",
  "signalsmith-stretch",
  "skrifa 0.48.0",
@@ -4580,7 +4580,7 @@ version = "0.16.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ca93e534d1142d1d0dcca6d25fe302508a5dfb40b302802904577725ea0b695b"
 dependencies = [
- "sha2 0.11.0",
+ "sha2 0.11.1",
 ]
 
 [[package]]
@@ -5716,9 +5716,9 @@ dependencies = [
 
 [[package]]
 name = "ort"
-version = "2.0.0-rc.13"
+version = "2.0.0-rc.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4336a1e2b38848325241c72889086886004e589b7c74f335e60a8e8db5138a0b"
+checksum = "08ca9287c05aace7e95250104a00d54b7da0fc9ac5f25efa424b80827d2e25eb"
 dependencies = [
  "libloading 0.9.0",
  "ndarray",
@@ -5729,9 +5729,9 @@ dependencies = [
 
 [[package]]
 name = "ort-sys"
-version = "2.0.0-rc.13"
+version = "2.0.0-rc.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf211e3776eea6aec988552fa118dd746d70e1b1e5e244058d1c98015f3e5872"
+checksum = "4af4763e553f916650b0bfe4b8d217d61c28607f6117e48b8ab5584d1138f22f"
 
 [[package]]
 name = "parking"
@@ -6798,7 +6798,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42ffa149f6aa81b58a5b3011d01a857c4ed12c7a732d2c51947a4c7c692185f0"
 dependencies = [
  "globset",
- "sha2 0.11.0",
+ "sha2 0.11.1",
  "walkdir",
 ]
 
@@ -7011,9 +7011,9 @@ dependencies = [
 
 [[package]]
 name = "schemars"
-version = "1.2.2"
+version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "687274d293b6cdc6e73e0fee520bf2049650090d7164f87672d212a3c530cf4a"
+checksum = "ab508826f74a77ca9d5aba6ff19b522583ee3eaf28a19384ff3d0e5835fadf6e"
 dependencies = [
  "dyn-clone",
  "indexmap",
@@ -7025,9 +7025,9 @@ dependencies = [
 
 [[package]]
 name = "schemars_derive"
-version = "1.2.2"
+version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d98c67716b46af2f0b8cf752abc930f6f9aecfbf671ecfb531db8a31dbe4e2ba"
+checksum = "e1c3a92094fa7d61aa124645844facb6b554dfc797136d0f5fd1f890e2bffc69"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -7291,9 +7291,9 @@ dependencies = [
 
 [[package]]
 name = "sha2"
-version = "0.11.0"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "446ba717509524cb3f22f17ecc096f10f4822d76ab5c0b9822c5f9c284e825f4"
+checksum = "47d7069beb7d6ac7b9acd1039986e73443f24234f41074da099d6f994ac9ad19"
 dependencies = [
  "cfg-if",
  "cpufeatures 0.3.0",
@@ -7535,9 +7535,9 @@ dependencies = [
 
 [[package]]
 name = "spirv-webgpu-transform"
-version = "0.1.6"
+version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2174c2bc5e954db6122d4f993e8abe49cc98e5a7ffaddaf73184fc62fc70699"
+checksum = "85ad0efbe758660a93af3ebd634c997d00b71acf4dc195ba928e35a6ffaaeccf"
 
 [[package]]
 name = "stable_deref_trait"
