@@ -205,7 +205,7 @@ wgpu-hal = { version = "30.0.0", features = ["vulkan"] }
 # NVML (`libnvidia-ml.so.1`) for the resource sampler's GPU fields, opened at
 # run time so no machine needs the NVIDIA driver to start (`modules::diag`).
 # Already in the tree through wgpu; this only names it.
-libloading = "0.8"
+libloading = "0.9"
 ash = "0.38"
 
 # `_exit` for `lifecycle::exit`, and the DMA-BUF code above. Every Unix has it;
