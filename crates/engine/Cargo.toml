@@ -151,7 +151,7 @@ vello = { version = "0.11", default-features = false, features = ["wgpu"] }
 # request runs on a `shell::spawn_blocking` thread anyway. Rustls with bundled
 # roots, so nothing depends on the system's OpenSSL. See
 # docs/research/integrations.md §7.1.
-ureq = "2.12"
+ureq = "3.4"
 # Model downloads are verified against a pinned SHA-256.
 sha2 = "0.11"
 # Hex for those digests: sha2 0.11 returns a `hybrid_array::Array`, which has
