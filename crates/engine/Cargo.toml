@@ -68,7 +68,7 @@ wgpu = "30.0.0"
 bytemuck = "1.25.2"
 futures = "0.3.33"
 pollster = "1.0.1"
-parley = { version = "0.11.0", features = ["complex-scripts"] }
+parley = { version = "0.12.0", features = ["complex-scripts"] }
 
 # --- talking-head audio tools (modules/silence, loudness, denoise) ----------
 #
