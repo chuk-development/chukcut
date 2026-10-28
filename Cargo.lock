@@ -1061,7 +1061,7 @@ dependencies = [
  "jpeg-encoder",
  "kurbo 0.13.1",
  "libc",
- "libloading 0.8.9",
+ "libloading 0.9.0",
  "mlua",
  "naga 30.0.1",
  "nnnoiseless",
